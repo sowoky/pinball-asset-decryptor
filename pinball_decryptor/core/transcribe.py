@@ -766,6 +766,41 @@ def _looks_like_out_of_memory(exc):
 _OOM_RETRY_WAITS = (1.5, 4.0)
 
 
+def _load_audio(abs_path):
+    """Decode a PCM WAV to the 16 kHz mono float32 array Whisper takes.
+
+    faster-whisper's own loader goes through PyAV, and PyAV 15 dropped the
+    ``metadata_errors`` argument faster-whisper 1.2.1 still passes, so on a
+    fresh install every clip failed with ``open() got an unexpected keyword
+    argument 'metadata_errors'``.  Every clip this module sees is an
+    extracted PCM WAV, so read it directly; anything ``wave`` cannot open
+    (float or compressed WAV) falls back to the path and PyAV.
+    """
+    import wave
+    try:
+        import numpy as np
+        with wave.open(abs_path, "rb") as w:
+            rate, chans, width = (w.getframerate(), w.getnchannels(),
+                                  w.getsampwidth())
+            raw = w.readframes(w.getnframes())
+    except Exception:
+        return abs_path
+    if width == 2:
+        a = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    elif width == 1:
+        a = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif width == 4:
+        a = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+    else:
+        return abs_path
+    if chans > 1:
+        a = a[: len(a) - len(a) % chans].reshape(-1, chans).mean(axis=1)
+    if rate != 16000 and len(a) > 1:
+        n = max(1, int(round(len(a) * 16000 / rate)))
+        a = np.interp(np.linspace(0, len(a) - 1, n), np.arange(len(a)), a)
+    return a.astype(np.float32)
+
+
 def _transcribe_one(model, rel, abs_path, music_min_seconds, oom_retries=2):
     """Transcribe one WAV with VAD and classify it as speech / music /
     non-speech.  Returns ``(rel, kind, text, errored)`` where ``errored`` is
@@ -785,7 +820,7 @@ def _transcribe_one(model, rel, abs_path, music_min_seconds, oom_retries=2):
     for attempt in range(oom_retries + 1):
         try:
             segments, info = model.transcribe(
-                abs_path,
+                _load_audio(abs_path),
                 language="en",
                 vad_filter=True,
                 vad_parameters={"min_silence_duration_ms": 250},
