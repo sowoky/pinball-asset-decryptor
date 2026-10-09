@@ -653,8 +653,8 @@ class ExtractPipeline(BasePipeline):
                       f"audio decode.", "warning")
             return 0
         if dcs_decode.find_dcs_explorer() is None:
-            self._log("  DCSExplorer not available (bundled Windows binary; on "
-                      "macOS/Linux put it on PATH) — skipping DCS audio "
+            self._log("  DCSExplorer not available (bundled for Windows and "
+                      "macOS; on Linux put it on PATH) — skipping DCS audio "
                       "decode.", "warning")
             return 0
         self._check_cancel()

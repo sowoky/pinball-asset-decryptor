@@ -91,7 +91,7 @@ Declared at [manufacturer.py:54](../../pinball_decryptor/plugins/williams/manufa
 - **ffmpeg** (`where="host"`, probe `ffmpeg -version`) — encodes DMD frame PNGs into MP4 videos. Required by both the static animation/browse render and the capture per-clip render. Install hints for winget/brew/apt.
 - **faster-whisper** (`where="host"`, probe `python:faster_whisper` — an in-process import check) — drives the Auto-transcribe checkbox. The ~75 MB `tiny.en` model downloads on first transcribe run and is cached in the user's HF cache.
 - **libpinmame** — *intentionally not listed* as a prereq. The GUI renders missing prereqs in red, and libpinmame is only needed for the optional capture path; the capture pipeline surfaces its own clean install hint when invoked without it ([manufacturer.py:73](../../pinball_decryptor/plugins/williams/manufacturer.py#L73), [pinmame_capture.py:1590](../../pinball_decryptor/plugins/williams/pinmame_capture.py#L1590)).
-- **DCSExplorer** — bundled (Windows binary in `vendor/`) or found on PATH; not surfaced as a host prereq ([dcs_decode.py:78](../../pinball_decryptor/plugins/williams/dcs_decode.py#L78)).
+- **DCSExplorer** — bundled in `vendor/` (`DCSExplorer.exe` for Windows, a universal macOS `DCSExplorer` built by `tools/dcsexplorer_macos/build.sh`) or found on PATH; not surfaced as a host prereq ([dcs_decode.py:78](../../pinball_decryptor/plugins/williams/dcs_decode.py#L78)).
 
 ### Phase labels
 
@@ -251,7 +251,7 @@ Williams is registered **second-to-last** in the plugin load order, before `dp` 
 - **Capture timing/overhead.** First-run NVRAM priming adds a ~20 s throwaway boot; the real capture defaults to 180 s; Start acceptance is detected heuristically by mechanism-solenoid firings; ctypes display/audio callbacks must never throw (they'd corrupt the C stack).
 - **Switch matrix is per-game.** Trough/shooter/eject/launch numbers differ wildly per title and are sourced from PinMAME's per-game sim source via `wpc_profiles.py`. A wrong seed wedges the ROM in ball-search. Cabinet keys must be driven via the keyboard `IsKeyPressed` layer, not raw switch sets, because WPC re-polls them each tick.
 - **Beta / actively tuned.** The capture pipeline + per-game scripts are still being tuned per title; the static path is the stable half ([manufacturer.py:25](../../pinball_decryptor/plugins/williams/manufacturer.py#L25)).
-- **Platform constraints.** The DCSExplorer binary is bundled only for Windows (other platforms must have it on PATH); libpinmame discovery covers Windows/macOS/Linux but the lib must be installed separately.
+- **Platform constraints.** DCSExplorer is bundled for Windows and macOS (Linux must have it on PATH); libpinmame discovery covers Windows/macOS/Linux but the lib must be installed separately.
 - **Unimplemented WPC encodings** are skipped (tallied in `scenes.json`/`scan_summary.txt`), not fatal — a game can extract partially.
 
 ## Key files

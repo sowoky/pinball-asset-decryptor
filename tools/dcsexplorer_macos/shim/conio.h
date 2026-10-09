@@ -1,0 +1,3 @@
+#pragma once
+inline int _kbhit() { return 0; }
+inline int _getch() { return 0; }

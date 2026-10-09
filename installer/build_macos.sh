@@ -105,6 +105,8 @@ pyinstaller \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/jjp/crypto.py:pinball_decryptor/plugins/jjp" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/jjp/crypto_v3.py:pinball_decryptor/plugins/jjp" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/jjp/filelist.py:pinball_decryptor/plugins/jjp" \
+    `# the macOS DCSExplorer (tools/dcsexplorer_macos/build.sh) for Williams + CGC DCS audio` \
+    --add-binary "$ROOT_DIR/pinball_decryptor/plugins/williams/vendor/DCSExplorer:pinball_decryptor/plugins/williams/vendor" \
     --hidden-import "Crypto" \
     --hidden-import "Crypto.Cipher" \
     --hidden-import "Crypto.Cipher.AES" \

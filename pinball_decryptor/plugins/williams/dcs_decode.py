@@ -12,9 +12,10 @@ line, or a sound effect — addressable by the numeric command the
 WPC game board would send to the sound board.  Extracting every
 track gives you the game's music and SFX as separate assets.
 
-The DCSExplorer Windows binary is bundled in ``vendor/``; on other
-platforms (or to override the bundled copy) it is also looked up on
-PATH.
+DCSExplorer is bundled in ``vendor/``: ``DCSExplorer.exe`` for Windows
+and a universal macOS ``DCSExplorer`` built by
+``tools/dcsexplorer_macos/build.sh``.  Linux (or an override) finds it
+on PATH.
 
 Pre-DCS games (Funhouse, Fish Tales, White Water, T2, Addams Family
 — the ~1990-1992 YM2151-based WPC sound board) are NOT DCS.  Their
@@ -86,8 +87,8 @@ def find_dcs_explorer() -> Optional[str]:
     if _dcs_explorer_path is not None:
         return _dcs_explorer_path or None
 
-    # 1. Bundled copy.  We only ship the Windows binary, so on other
-    # platforms this path simply won't exist and we fall through.
+    # 1. Bundled copy: the .exe on Windows, the macOS build elsewhere.  On
+    # Linux this path simply won't exist and we fall through.
     bundled = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "vendor",
         "DCSExplorer.exe" if sys.platform == "win32" else "DCSExplorer")
