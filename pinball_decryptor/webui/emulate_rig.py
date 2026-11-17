@@ -25,23 +25,34 @@ import os
 from ..core import runtime
 from pinball_decryptor.webui import runtime_prompt as _runtime_ui  # noqa: F401  (re-exported)
 from .emulate_core import (  # noqa: F401  (re-exported)
-    MULTI_IMAGE_NOTE, _ADVANCING_HINT, _CARD_COPY_RE, _COPY_EXPLAIN,
+    colima_resource_args, colima_start_argv, mac_pacer_env,
+    FIRST_SET_NOTE, FIRST_SET_WORDS, MULTI_IMAGE_NOTE, _ADVANCING_HINT, _BOX_EXPLAIN, _CARD_COPY_RE, _COPY_EXPLAIN,
+    box_build_line,
     _CREATE_FLAGS as CREATE_FLAGS, _MODES_EXPLAIN, _MULTIBOOT_PROBE_S,
     _NEEDS_WSL_RESTART, _OVERRIDE_EXPLAIN, _WSL_BOOT_TEXT, _WSL_BOOT_TICKS,
     DOCKER_URL, assets_fingerprint, cache_boot_text, card_copy_progress,
     docker_cli, docker_engine, docker_state, engine_setup_plan, human_size,
     kill_cmd, load_cmd, multiboot_cmd, overrides_dir, overrides_reason,
-    override_base_card, parse_cache_list, parse_multiboot, parse_status,
-    playfield_launch, preview_modes_reason, rig_available, rig_cmd,
-    rig_cmd_root, rig_dir, setup_fix_steps, setup_fixable, setup_notice,
+    linux_root_head, restart_cmd, savestates_possible,
+    override_base_card, parse_cache_list, parse_cache_meta, parse_multiboot,
+    parse_spike3, cache_last_used, cache_unused, CACHE_UNUSED_DAYS,
+    parse_status,
+    playfield_launch, preview_modes_reason, renderer_text, rig_available,
+    spike3_cmd, spike3_check_cmd, spike3_setup_cmd, spike3_launch_cmd, spike3_stop_cmd, spike3_load_cmd, spike3_slots_cmd, spike3_keyfile,
+    spike3_rig_present, parse_s3check,
+    rig_cmd, rig_cmd_root, rig_dir, setup_fix_steps, setup_fixable,
+    setup_notice,
     setup_ok, setup_report, setup_report_darwin, setup_settled, setup_state,
-    slot_up_cmd, state_text, watch_cmd, which_tool, windows_python, wsl_home,
+    slot_up_cmd, state_text, status_cmd, watch_cmd, which_tool,
+    windows_python, wsl_home,
 )
 from .emulate_core import _wsl_path as wsl_path  # noqa: F401
 
-#: Wall-clock cap handed to ``watch.sh``.  A forgotten window must not be
-#: able to burn a core all night; the rig enforces it, this only chooses it.
-BACKSTOP_MIN = 120
+#: Wall-clock cap handed to ``watch.sh``: 0 is none.  A run started here
+#: goes on until it is stopped or its window is closed (PAD-585: David does
+#: not want the emulator stopping itself after so many minutes).  Runs
+#: started by hand or by a rig job keep ``watch.sh``'s own default cap.
+BACKSTOP_MIN = 0
 
 #: Status poll period.  Each poll is one ``wsl.exe`` round trip, so this is
 #: slow enough to cost nothing and fast enough to feel live.
@@ -120,6 +131,42 @@ POWER_TIP = (
     "yet, and the home machines carry no mains check at all. When the card "
     "you picked is one of those, it says so under this row.")
 
+EDITION_TIP = (
+    "Which model the machine is: Premium, LE, on some titles SLE, and the "
+    "named editions a game has a title of its own for (Godzilla 70th "
+    "Anniversary, Elvira's Blood Red Kiss LE...). One Premium/LE card runs "
+    "all of them, and the machine tells the game which one it is with a "
+    "model code on its CPU board. This sets that code.\n\n"
+    "The game names the machine by it in the service menu (BATMAN SLE) and "
+    "goes by it for its Pro or Premium/LE check, the LE number and a title's "
+    "own feature here and there. The boot screen is part of the card's game "
+    "program, so it stays the same.\n\nThe list is what the picked "
+    "card's own game program takes, read off the card. A Pro card runs as a "
+    "Pro whatever the board says, so it has nothing to pick. The first "
+    "choice is the model the card was built as, which is how the emulator "
+    "has always run. Takes effect at the next Start.")
+
+
+def edition_own_label(built):
+    """The Edition row's first choice: the model the card was built as."""
+    return "%s (the card's own)" % built if built else "The card's own"
+
+
+def edition_note(editions, built):
+    """The line under the machine row once the card has been read, or "":
+    nothing while the probe runs, and nothing on a card with choices (the
+    list says it)."""
+    if editions is None or editions.get("choices"):
+        return ""
+    if built == "Pro":
+        return ("This card is a Pro build: it runs as a Pro whatever the "
+                "machine says. Pick its Premium/LE card to choose an edition.")
+    if built:
+        return ("This card's game program runs one model only (%s), so there "
+                "is no edition to pick." % built)
+    return ""
+
+
 #: The cost, spelled out beside the section it belongs to.
 #:
 #: IT WAS A CHECKBOX UNTIL 2026-08-10, and David removed it: "remove the
@@ -134,7 +181,7 @@ STATES_TIP = (
     "to that exact moment later - including in a future session, or "
     "after replacing assets, to compare how a mode looks.\n\n"
     "The cost:\n"
-    "• each slot stores roughly 50-150 MB on the WSL disk "
+    "• each slot stores roughly 50-150 MB on the emulator's disk "
     "(snapshots compress ~20x; a save briefly needs ~1.5 GB free "
     "while it packs)\n"
     "• saving freezes the game and its sound for a few seconds "

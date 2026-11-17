@@ -11,6 +11,7 @@ GPG verification, etc.).
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -50,6 +51,12 @@ class CommandExecutor:
 
     def stream(self, bash_cmd, timeout=600):
         raise NotImplementedError
+
+    def run_root(self, bash_cmd, timeout=120):
+        """:meth:`run`, for a command that needs ROOT (a loop device).  WSL
+        runs every command as root already; native Linux overrides this to
+        ask for it (PAD-1172)."""
+        return self.run(bash_cmd, timeout=timeout)
 
     def popen_binary(self, bash_cmd):
         """Start *bash_cmd* and return a Popen with a **binary** stdout pipe.
@@ -240,7 +247,9 @@ class NativeExecutor(CommandExecutor):
     before the command runs - which is how every card write on a Linux desktop
     failed at the loop-device probe (PAD-314, Ales). What needs no root (debugfs on
     the user's own image, the mode payload's installer, a compile) now runs as the
-    user; what does (a loop mount) fails with its own permission error."""
+    user. What does (a card grow's ``losetup``) goes through :meth:`run_root`,
+    which asks for root with the desktop's own password dialog (pkexec) when
+    sudo would want a password (PAD-1172)."""
     _sudo_ok = None                     # None = not asked yet (class-wide: one ask a run)
 
     def _prefix(self):
@@ -250,12 +259,24 @@ class NativeExecutor(CommandExecutor):
             NativeExecutor._sudo_ok = _passwordless_sudo()
         return ["sudo", "bash", "-c"] if NativeExecutor._sudo_ok else ["bash", "-c"]
 
+    @staticmethod
+    def _env():
+        """The process environment with /usr/sbin and /sbin on the end of PATH:
+        Debian keeps e2fsprogs there and leaves both off a user's PATH, so the
+        user's own shell said "Missing tool: debugfs" with debugfs installed
+        (PAD-571; sudo's secure_path already has them)."""
+        env = os.environ.copy()
+        env["PATH"] = os.pathsep.join(
+            (env.get("PATH", ""), "/usr/sbin", "/sbin"))
+        return env
+
     def run(self, bash_cmd, timeout=120):
         full_cmd = [*self._prefix(), bash_cmd]
         try:
             result = subprocess.run(
                 full_cmd, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=timeout,
+                env=self._env(),
             )
         except subprocess.TimeoutExpired as e:
             raise CommandError(bash_cmd, -1, f"Timed out after {timeout}s") from e
@@ -269,6 +290,7 @@ class NativeExecutor(CommandExecutor):
         proc = subprocess.Popen(
             full_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
+            env=self._env(),
         )
         with self._lock:
             self._current_proc = proc
@@ -294,7 +316,7 @@ class NativeExecutor(CommandExecutor):
 
     def popen_binary(self, bash_cmd):
         return subprocess.Popen([*self._prefix(), bash_cmd],
-                                stdout=subprocess.PIPE)
+                                stdout=subprocess.PIPE, env=self._env())
 
     def to_exec_path(self, host_path):
         return host_path
@@ -302,16 +324,126 @@ class NativeExecutor(CommandExecutor):
     def check_available(self):
         return True, "Native Linux"
 
+    # -- root, for the few steps that need it (PAD-1172) -----------------
+    #: what :meth:`run_root` says when it has no way to become root
+    NO_ROOT = ("this needs root (to attach the card image as a disk) and "
+               "there is no way to ask for it here: install polkit's pkexec "
+               "(package 'polkitd' / 'policykit-1' / 'polkit') so the app can "
+               "show your desktop's password prompt, or start the app as root")
+
+    def root_route(self):
+        """How :meth:`run_root` becomes root: ``"root"`` (the app is),
+        ``"sudo"`` (sudo asks no password), ``"pkexec"`` (the desktop's own
+        password prompt, polkit), or ``None`` (no way)."""
+        if hasattr(os, "getuid") and os.getuid() == 0:
+            return "root"
+        if NativeExecutor._sudo_ok is None:
+            NativeExecutor._sudo_ok = _passwordless_sudo()
+        if NativeExecutor._sudo_ok:
+            return "sudo"
+        return "pkexec" if shutil.which("pkexec") else None
+
+    def run_root(self, bash_cmd, timeout=120):
+        """:meth:`run` as ROOT.  A Linux desktop asks sudo for a password, and a
+        GUI has no terminal to give it on, so :meth:`run` stays the user there
+        (PAD-314) - and a card grow's ``losetup`` then failed with
+        "Permission denied" (PAD-1172, Brombomb).  This asks through pkexec
+        instead: one password dialog for the one script that needs it."""
+        route = self.root_route()
+        if route in ("root", "sudo"):
+            return self.run(bash_cmd, timeout=timeout)
+        if route is None:
+            raise CommandError(bash_cmd, 1, self.NO_ROOT)
+        from .elevated_flash import _pkexec_declined, _pkexec_explained
+        # pkexec hands bash a clean root environment (its PATH has /usr/sbin);
+        # no internal text agent: a GUI has no terminal for it to ask on
+        proc = subprocess.Popen(
+            [shutil.which("pkexec"), "--disable-internal-agent",
+             "bash", "-c", bash_cmd],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
+            errors="replace")
+        with self._lock:
+            self._current_proc = proc
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            proc.kill()
+            proc.communicate()
+            raise CommandError(bash_cmd, -1,
+                               f"Timed out after {timeout}s") from e
+        finally:
+            with self._lock:
+                self._current_proc = None
+        rc = proc.returncode
+        if rc in (126, 127):
+            text = (err or "") + (out or "")
+            if _pkexec_declined(rc, text):
+                raise CommandError(bash_cmd, rc,
+                                   "the password prompt for root was "
+                                   "canceled or refused")
+            if "authentication agent" in text.lower() or "pkexec" in text.lower():
+                raise CommandError(bash_cmd, rc, _pkexec_explained(text))
+        if rc != 0:
+            raise CommandError(bash_cmd, rc,
+                               ((err or "") + (out or "")).strip())
+        return out
+
+
+def bundled_e2fsprogs_dir():
+    """The folder of e2fsprogs tools (debugfs, e2fsck, dumpe2fs, mke2fs) the
+    macOS app ships inside itself, or None when this run has none.
+
+    A Mac has no e2fsprogs, and "brew install e2fsprogs" left a Mac without
+    Homebrew at the same "Missing tool: debugfs" pop-up after PAD-571 taught
+    the app where Homebrew keeps it (PAD-573).  installer/build_mac_e2fsprogs.sh
+    builds them and build_macos.sh puts them in the bundle's ``e2fsprogs``
+    folder.  ``PAD_E2FSPROGS_DIR`` names such a folder outside a bundle: the
+    macOS CI run tests the built tools through it, with no Homebrew copy."""
+    d = os.environ.get("PAD_E2FSPROGS_DIR")
+    if d:
+        return d if os.path.isfile(os.path.join(d, "debugfs")) else None
+    if not getattr(sys, "frozen", False):
+        return None
+    contents = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))
+    for base in (getattr(sys, "_MEIPASS", ""),
+                 os.path.join(contents, "Frameworks"),
+                 os.path.join(contents, "Resources")):
+        d = os.path.join(base, "e2fsprogs")
+        if base and os.path.isfile(os.path.join(d, "debugfs")):
+            return d
+    return None
+
+
+def _dq(s):
+    """*s* made safe inside a bash double-quoted string."""
+    return re.sub(r'(["\\$`])', r"\\\1", s)
+
 
 class MacExecutor(CommandExecutor):
     _EXTRA_PATH = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin"
+    # Homebrew's e2fsprogs is keg-only: debugfs, e2fsck and dumpe2fs live in
+    # its own sbin, which no PATH names, so a Mac with e2fsprogs installed
+    # still answered "Missing tool: debugfs" on a CGC extract (PAD-571).
+    # Appended, not prepended: macOS has none of these tools of its own, and
+    # the keg also ships an fsck that must not shadow the system's.
+    _SBIN_PATH = ("/opt/homebrew/opt/e2fsprogs/sbin:"
+                  "/usr/local/opt/e2fsprogs/sbin:/opt/local/sbin")
+
+    def _tail_path(self):
+        """What goes on the END of PATH: the app's own e2fsprogs (PAD-573)
+        ahead of Homebrew's and MacPorts' copies."""
+        own = bundled_e2fsprogs_dir()
+        return f"{own}:{self._SBIN_PATH}" if own else self._SBIN_PATH
 
     def _wrap(self, bash_cmd):
-        return f'export PATH="{self._EXTRA_PATH}:$PATH" && {bash_cmd}'
+        return (f'export PATH="{self._EXTRA_PATH}:$PATH:'
+                f'{_dq(self._tail_path())}" && {bash_cmd}')
 
     def _env(self):
         env = os.environ.copy()
-        env["PATH"] = self._EXTRA_PATH + os.pathsep + env.get("PATH", "")
+        env["PATH"] = os.pathsep.join(
+            (self._EXTRA_PATH, env.get("PATH", ""), self._tail_path()))
         return env
 
     def run(self, bash_cmd, timeout=120):

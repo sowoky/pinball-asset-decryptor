@@ -225,7 +225,7 @@ class PartitionsTab(TabService):
         self._close_card()
         try:
             from ...plugins.stern.explorer import CardImage
-            card = CardImage(path)
+            card = CardImage(path, logical=True)
         except Exception as e:                   # noqa: BLE001
             self.log("Could not open %s: %s" % (path, e), "error")
             compat.messagebox.showerror(
@@ -891,7 +891,7 @@ class PartitionsTab(TabService):
         from ...plugins.stern.explorer import CardImage
         part = self._part_index if part is None else part
         image_path = image_path or self._image_path
-        with CardImage(image_path) as c:
+        with CardImage(image_path, logical=True) as c:
             if kind == "file":
                 n = c.extract_file(part, path, dest, progress=file_prog)
                 return "Extracted %s (%s)." % (os.path.basename(dest),
@@ -947,7 +947,7 @@ class PartitionsTab(TabService):
                     tree_prog=_tree_prog, file_prog=_file_prog,
                     chunk_prog=lambda _w, _s: _check(), top_name=top_name)
             except _Cancelled:
-                msg = "Extract cancelled — partial files may remain."
+                msg = "Extract canceled — partial files may remain."
             except Exception as e:               # noqa: BLE001
                 msg = "Extract failed: %s" % e
             state["done"] = msg
@@ -1050,7 +1050,7 @@ class PartitionsTab(TabService):
         def _work():
             try:
                 from ...plugins.stern.explorer import CardImage
-                with CardImage(image_path) as c:
+                with CardImage(image_path, logical=True) as c:
                     n, refreshed = c.replace_file(
                         part, path, src, allow_resize=True,
                         log=lambda m, lvl="info": state["log"].append(

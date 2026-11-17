@@ -14,6 +14,7 @@ import { useNs } from "../core/store.js";
 import { LookRow } from "../core/look.js";
 import { ColorBar, barOpenAtStart, rememberBarOpen } from "./color_pane.js";
 import { OriginalsWindow } from "./originals.js";
+import { testCol } from "../core/testtick.js";
 
 export const css = true;
 
@@ -28,12 +29,16 @@ const SHOW_TIP = "Narrow the list by what you've already done to it. Changed = t
 const GROUP_TIP = "Group the images under the scene / animation they belong to (in play order), so a whole animation can be reviewed — or bulk-replaced via right-click — as one unit.";
 const FONTS_TIP = "Preview any game font (type your own text, rendered from the real glyphs) and import a desktop font into it — letters are auto-fitted into the space each character has. Stern Spike 2.";
 const MORE_TIP = "More: Export CSV, Clear replacements…, Save / load settings";
+const CSAVE_TIP = "Save a copy of every picture with a color profile attached (green palette), with that profile baked in, into a folder you pick. To save others, select them, right-click and save them. The project and the card are not changed.";
 const CSV_TIP = "Save every row of the list as a spreadsheet (CSV), exactly as it reads here.";
 const FOLDER_TIP = "Pick a folder of your own files and each one becomes the replacement for the slot with the same name — for a whole set you reworked outside the app, like every clip made black and white. The file type and capital letters don't have to match (Intro.mp4 is used for Intro.mov and converted to suit it), and subfolders are fine. Nothing changes until you confirm, and every file left out is named in the log.\n\nKeep the extract's own files where they are: files dropped into the project folder only count under the card's exact name.";
 const ORIGINALS_TIP = "Find the files your replacements were made from in a folder of your own, by how they look: the names don't matter.\n\nFor picks that are copies off a card, like the ones \"Transfer Mods to New Version\" takes from an extract of a built card: those pictures were already squeezed into the card's format once by the Write that built that card. With your own files picked instead, the next Write converts from them. Nothing changes until you press Use.";
+const SAME_TIP = "Compare every replacement on this tab with the game's own picture it replaces, pixel for pixel, and clear the ones that are the same picture, “Correct its colors for the machine” on or not. A file saved again (other bytes, same pixels) counts as the same. You see how many first and nothing is cleared until you say yes; your own files are untouched.";
 const CLEAR_TIP = "Drop every replacement picked on this tab in one go — for starting a project over without clearing 48 rows one at a time. It only drops the picks: your own files are untouched, and a slot already built into the project folder keeps the bytes it has (use “Revert all changes…” on the Write tab for those). To clear only some, select the rows — click, then Shift-click or Ctrl-click — and right-click the selection.";
-const KEEP_TIP = "Off: the replacement is scaled to the original picture's size, which squeezes a longer name. On: it keeps its own width and height, and the build grows the scene to fit it. The game draws it from the same top-left corner, so a wider picture reaches further right. Needs an image build (not a direct SD write). A picture nothing in its scene draws by size is fitted instead, and the log says so.";
-const REP_TIP = "Click to choose a replacement for this image (double-click the row does the same).";
+// PAD-534: the scene(s) a picture is in, and how the game turns it there
+const SCENES_TIP = "Where the game draws this picture. The picture here is the file as it is stored; a scene can draw it turned or mirrored, as the Scenes tab shows.";
+const KEEP_TIP = "Off: the replacement is scaled to the original picture's size, which squeezes a longer name. On: it keeps its own width and height, and shows in the original's place and size, fitted and centered, so a bigger picture keeps its extra detail where the scene zooms in; make it bigger or smaller on the Scenes tab. Needs an image build (not a direct SD write). A picture nothing in its scene draws by size is fitted instead, and the log says so.";
+const REP_TIP = "Click to choose a replacement for this image (double-click the row does the same), or drop an image file on the row.";
 // PAD-312: the chosen-files color profile, baked into this picture as it is staged
 const COLOR_TIP = "Green: a color profile is attached to this file. The Color profile tab's individual files profile is baked into it when you build. Red: no color profile is attached; it goes on the card as it is. Blue lock: the game's own picture, never touched (tick Unlock extracted images to give it a palette too). Click a palette to attach or detach it. Select several pictures (Shift-click or Ctrl-click) and pick a profile in the Colors bar to give it to all of them.";
 // PAD-368: the profile a file has, for its tooltips (null where the Color column is not offered);
@@ -288,6 +293,8 @@ export default function ImagesTab() {
   // so a profile is picked from the Saved profiles list with each picture's Color switch
   // in view.  It opens on Files the first time: the profile that column attaches.
   const colorNs = useNs("color");
+  // a display of shades of one color (Stern SAM's DMD) has no Colors bar
+  const colorsOn = !!colorNs.has_project && !s.shades_only;
   const [colors, setColorsState] = useState(() => barOpenAtStart("images"));
   const setColors = (v) => { setColorsState(v); rememberBarOpen(v, "images"); };
   // PAD-463: a name under Preview colors opens the bar on that profile
@@ -345,6 +352,14 @@ export default function ImagesTab() {
     setSel(next);
     setCur(id);
     call("images.select", id);
+  };
+
+  // PAD-838: an image file dropped on a row from the desktop is its replacement
+  const onFileDrop = (e) => {
+    const row = slotAt(s, e);
+    if (!row) return;
+    selectOnly(row.r);
+    call("images.choose", row.r);
   };
 
   const onActivate = (e) => {
@@ -540,7 +555,10 @@ export default function ImagesTab() {
         }}>${row.p}</button>`;
     },
   };
-  const columns = [thumbCol, nameCol, grouped && countCol, resCol, fmtCol, srcCol, keepCol && keepColDef, colorCol && colorColDef, repCol].filter(Boolean);
+  // PAD-1279: TEST puts the picture on the test card
+  const testColDef = testCol({ ns: "images", tags: s.test_tags, full: s.test_full,
+    keyOf: (e) => { const row = typeof e === "number" ? slotAt(s, e) : null; return row && row.r != null ? row.r : null; } });
+  const columns = [thumbCol, nameCol, grouped && countCol, resCol, fmtCol, srcCol, keepCol && keepColDef, colorCol && colorColDef, s.test_on && testColDef, repCol].filter(Boolean);
 
   // the dragged widths (never below the Tk tree's minwidths); the last
   // column always takes what is left
@@ -623,37 +641,45 @@ export default function ImagesTab() {
     const n = await call("images.compare_open", rels);
     if (!n) return;
     setCmpActive(null);
-    if (look.offered && colorNs.has_project && !colors) setColors(true);
+    if (look.offered && colorsOn && !colors) setColors(true);
   }
   const compareRels = () => {
     const pics = picked();
     return pics.length ? pics : prevRel ? [prevRel] : [];
   };
-  const bar = colorNs.has_project ? html`<${ColorBar} host="images" startMode="assets" open=${colors} setOpen=${setColors}
+  const bar = colorsOn ? html`<${ColorBar} host="images" startMode="assets" open=${colors} setOpen=${setColors}
     file=${colorFile} />` : null;
   if (cmpOpen) {
     return html`<div class="cpd-shell"><${CompareView} cmp=${cmp} byRel=${byRel} cs=${colorNs} look=${look}
       active=${activeTile ? activeTile.id : null} setActive=${setCmpActive}
-      onOpenColors=${colorNs.has_project ? openColors : undefined} unlock=${s.color_unlock} running=${running} />${bar}</div>`;
+      onOpenColors=${colorsOn ? openColors : undefined} unlock=${s.color_unlock} running=${running} />${bar}</div>`;
   }
   const views = look.offered ? look.views || {} : {};
   const keys = look.offered && look.on ? look.keys || {} : {};
   return html`<div class="cpd-shell"><div class="page img-page">
     <${PageHead} title="Images" sub=${INTRO}>
       ${status ? html`<${Chip} kind=${s.changed ? "acc" : ""}>${status.trim()}<//>` : null}
+      ${s.csave ? html`<${Chip} kind="acc">${s.csave.text}<//>
+        <${Button} kind="ghost" icon="x" onClick=${() => call("images.colour_save_cancel")}>Cancel save<//>` : null}
+      ${s.same ? html`<${Chip} kind="acc">${s.same.text}<//>
+        <${Button} kind="ghost" icon="x" onClick=${() => call("images.clear_same_cancel")}>Cancel<//>` : null}
       ${s.scanning
         ? html`<${Button} icon="x" onClick=${() => call("images.cancel_scan")}>Cancel scan<//>`
         : html`<${Button} icon="refresh" onClick=${() => call("images.scan")}>Scan<//>`}
-      <${Button} icon="folder" onClick=${() => call("images.from_folder")} disabled=${running} title=${FOLDER_TIP}>Replace from folder…<//>
+      <${Button} drop icon="folder" onClick=${() => call("images.from_folder")} disabled=${running} title=${FOLDER_TIP}>Replace from folder…<//>
       <${Button} icon="search" onClick=${() => call("images.originals_open")} disabled=${running} title=${ORIGINALS_TIP}>Find originals…<//>
       <${Button} icon="compare" cls="img-cmp-open" onClick=${() => openCompare(compareRels())} disabled=${!compareRels().length}
         title=${COMPARE_TIP}>Compare<//>
-      <${Button} kind="ghost" icon="text" onClick=${() => call("images.open_fonts")} title=${FONTS_TIP}>Fonts…<//>
-      <${Button} kind="ghost" icon="more" label="More" title=${MORE_TIP}
+      ${s.shades_only ? null : html`<${Button} kind="ghost" icon="text" onClick=${() => call("images.open_fonts")} title=${FONTS_TIP}>Fonts…<//>`}
+      <${Button} kind="ghost" icon="more" label="More" title=${colorCol ? MORE_TIP.replace("Export CSV, ", "Export CSV, Save pictures with their color profiles…, ") : MORE_TIP}
         onClick=${(e) => openMenu(e.currentTarget, [
           { label: "Export CSV", icon: "download", title: CSV_TIP, onClick: () => call("images.export_csv") },
+          colorCol ? { label: "Save pictures with their color profiles…", icon: "download", title: CSAVE_TIP,
+            onClick: () => call("images.colour_save") } : null,
           { label: "Clear replacements…", icon: "trash", title: CLEAR_TIP, disabled: !s.can_clear,
             onClick: () => call("images.clear_all") },
+          { label: "Clear replacements identical to the original…", icon: "trash", title: SAME_TIP,
+            disabled: !s.can_clear || !!s.same, onClick: () => call("images.clear_same") },
           { sep: true },
           { label: "Save settings to a file…", icon: "download", title: "Which file replaces which slot, and this tab's ticks and options, in one small file to keep or to send. The pictures themselves are not in it.",
             onClick: () => call("images.settings_save") },
@@ -674,7 +700,7 @@ export default function ImagesTab() {
         <span class="img-seg" ...${tip(SHOW_TIP)}>
           <${Seg} value=${s.show || "All"} options=${s.shows || []} onChange=${(v) => call("images.set_show", v)} />
         </span>
-        <${Check} checked=${!!s.grouped} onChange=${(v) => call("images.set_grouped", v)} label="Group by scene" title=${GROUP_TIP} />
+        ${s.shades_only ? null : html`<${Check} checked=${!!s.grouped} onChange=${(v) => call("images.set_grouped", v)} label="Group by scene" title=${GROUP_TIP} />`}
         <span class="sp"></span>
         ${s.color_unlock && s.color_unlock.offered ? html`<span class="img-unlock">
           <span class="eyebrow">Advanced</span>
@@ -685,10 +711,11 @@ export default function ImagesTab() {
       <${Table} cls="img-tbl" columns=${columns} rows=${view} rowKey=${idOf} selected=${cur}
         onSelect=${onSelect} onActivate=${onActivate} onContext=${onContext} rowClass=${rowClass}
         sort=${s.sort} onSort=${(k) => call("images.sort", k)} empty=${tableEmpty} rowHeight=${36}
-        resizable widths=${widths} onResize=${onResize} />
+        resizable widths=${widths} onResize=${onResize}
+        fileDropOk=${(e) => typeof e === "number"} onFileDrop=${onFileDrop} />
       <div class=${cx("ft img-prev", look.offered && "img-looks")}>
         ${look.offered ? html`<div class="img-lk"><${LookRow} look=${look} ns="images" note=${false}
-          onOpen=${colorNs.has_project ? openColors : undefined} /></div>` : null}
+          onOpen=${colorsOn ? openColors : undefined} /></div>` : null}
         <div class="row img-panehd img-oh">
           <span class="eyebrow nw">${p.hdr_main || "Original"}</span>
           ${prevRel ? html`<span class="mono small muted ellip" title=${prevRel}>— ${base(prevRel)}</span>` : null}
@@ -699,10 +726,13 @@ export default function ImagesTab() {
           ${p.rep_name ? html`<span class="mono small ellip img-repname" ...${tip(p.color
             ? { head: p.rep, lines: [{ profile: p.color.on ? p.color.name : "None" }] } : p.rep)}>— ${p.rep_name}</span>` : null}
           <span class="grow"></span>
-          ${prevRel ? html`<${Button} size="sm" onClick=${() => call("images.choose", prevRel)}>Choose…<//>` : null}
+          ${prevRel ? html`<${Button} drop size="sm" onClick=${() => call("images.choose", prevRel)}>Choose…<//>` : null}
           ${prevRel && p.clearable ? html`<${Button} size="sm" kind="ghost" onClick=${() => call("images.clear_one", prevRel)}>Clear replacement<//>` : null}
         </div>
-        ${p.hdr_note ? html`<div class="small img-shared img-on">${p.hdr_note}</div>` : null}
+        ${p.hdr_note || p.scenes ? html`<div class="small img-on">
+          ${p.hdr_note ? html`<div class="img-shared">${p.hdr_note}</div>` : null}
+          ${p.scenes ? html`<div class="muted img-scenes" ...${tip(SCENES_TIP)}>${p.scenes}</div>` : null}
+        </div>` : null}
         ${p.keep || p.color ? html`<div class="img-rk img-opts">
           ${p.keep ? html`<div class="img-keeprow">
             <${Check} checked=${!!p.keep.on} onChange=${(v) => call("images.set_keep", prevRel, v)}

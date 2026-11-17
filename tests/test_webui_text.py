@@ -15,7 +15,7 @@ import pytest
 from tests.webui_harness import web_app
 
 MFRS = ["stern", "jjp", "spooky", "pb", "williams", "cgc", "dp", "ap", "bof",
-        "data_east", "sega"]
+        "data_east", "sega", "capcom"]
 
 
 # ---------------------------------------------------------------- helpers
@@ -127,7 +127,7 @@ def test_rules_scene_menu_and_filters():
 
 
 # ------------------------------------------------------ per manufacturer
-def test_the_tab_is_shown_only_for_stern_spike2(tmp_path):
+def test_the_tab_is_shown_only_for_stern_spike2_and_spike1(tmp_path):
     with web_app(tmp_path) as w:
         keys = {m.key for m in w.window.manufacturers}
         for mfr in MFRS:
@@ -145,7 +145,8 @@ def test_the_tab_is_shown_only_for_stern_spike2(tmp_path):
             assert w.window.text_status_var.get() == ""
         if "stern" in keys:
             w.call("ui.pick_manufacturer", "stern")
-            for era, shown in (("spike1", False), ("whitestar", False),
+            # PAD-869: Spike 1's DMD text is the game program's, edited here
+            for era, shown in (("spike1", True), ("whitestar", False),
                                ("spike2", True)):
                 w.call("ui.set_era", era)
                 w.drain()
@@ -183,6 +184,20 @@ def test_scan_lists_rows_and_the_filters_narrow_them(tmp_path):
         assert len(st["view"]) == 3
         assert w.window.text_status_var.get() == \
             "6 string(s), 0 edited  (3 shown)"
+        # PAD-1261: a scene picked earlier hides the game's own lines from
+        # a search; the status says how many more match under All.
+        w.call("text.set_scene", "Game program")
+        assert w.state("text")["view"] == []
+        assert w.window.text_status_var.get() == \
+            "6 string(s), 0 edited  (0 shown)  3 more matches with " \
+            "Scene: All scenes"
+        w.call("ui.set", "text", "search", "rodan")
+        w.call("text.set_show", "Changed")
+        assert w.window.text_status_var.get() == \
+            "6 string(s), 0 edited  (0 shown)  1 more match with " \
+            "Show: All and Scene: All scenes"
+        w.call("text.set_show", "All")
+        w.call("text.set_scene", "All scenes")
         w.call("ui.set", "text", "search", "")
         w.call("text.set_scene", "Game program")
         assert [w.state("text")["rows"][i]["o"]
@@ -206,7 +221,7 @@ def test_scan_cancel_and_no_folder(tmp_path):
         assert not st["scanning"]
         w.call("text.cancel_scan")
         assert w.state("text")["empty"] == \
-            "Scan cancelled — click Scan to try again."
+            "Scan canceled — click Scan to try again."
 
 
 def test_cancelling_a_rescan_says_so_over_the_emptied_list(tmp_path):
@@ -221,7 +236,7 @@ def test_cancelling_a_rescan_says_so_over_the_emptied_list(tmp_path):
         st = w.state("text")
         assert st["view"] == [] and not st["scanning"]
         assert st["total"] == 6                 # the rows are still held
-        assert st["empty"] == "Scan cancelled — click Scan to try again."
+        assert st["empty"] == "Scan canceled — click Scan to try again."
         w.call("text.set_show", "Changed")
         w.call("text.set_show", "All")
         st = w.state("text")
@@ -660,7 +675,7 @@ def test_scenes_recolour_move_and_preview(tmp_path):
         # a line with no recorded layout says why it can't be recoloured
         w.call("text_scenes.select", "/g/scene2")
         assert w.call("text_scenes.color_start", "BALL ONE") is None
-        assert w.asked[-1]["title"] == "Text colour"
+        assert w.asked[-1]["title"] == "Text color"
         assert w.state("text_scenes")["canvas_msg"] == \
             "no preview for this scene"
         w.call("text_scenes.close")

@@ -36,7 +36,7 @@ from pinball_decryptor.webui.multiboot_core import (
     host_path, inject_commands, inspect_commands, list_title,
     loaded_media_dir, media_fingerprint, media_specs_changed,
     eta_text, menu_summary, parse_anim_frames, parse_inspect, parse_plan,
-    parse_progress, parse_refusal,
+    parse_failed_checks, failure_why, parse_progress, parse_refusal,
     parse_selector_path, plan_commands, prepare_commands, preview_box,
     selector_card,
     preview_fingerprint, preview_prepare_args, preview_snapshot_args,
@@ -160,6 +160,7 @@ def test_two_image_form_builds_plan_build_verify(monkeypatch, tmp_path):
     assert build[build.index("--layout") + 1] == "auto"
     assert build[build.index("--titles") + 1] == "IMG 0;IMG 1"
     assert build[build.index("--timeout") + 1] == "15"
+    assert build[build.index("--back-hold") + 1] == "3"          # PAD-1309: the default hold
     assert build[build.index("--default") + 1] == "0"
     assert build[build.index("--volume") + 1] == "50"
     assert "--bypass-validation" in build          # on by default (David; item 98 made it safe)
@@ -973,7 +974,7 @@ def test_suggest_title_splits_the_card_name():
     assert suggest_title("card.img") == ("card", "")
 
 
-def test_capability_is_spike2_jjp_and_bof_only(manufacturers_by_key):
+def test_capability_is_spike2_jjp_bof_dp_and_spooky_only(manufacturers_by_key):
     """Multi-boot is Stern's Spike 2 era, Jersey Jack (item 118: the same
     tab with a JJP backend behind it) and Barrels of Fun (PAD-342: a BOF
     backend) - and nobody else."""
@@ -991,8 +992,10 @@ def test_capability_is_spike2_jjp_and_bof_only(manufacturers_by_key):
         stern.set_era("spike2")
     assert manufacturers_by_key["jjp"].capabilities.multiboot is True
     assert manufacturers_by_key["bof"].capabilities.multiboot is True
+    assert manufacturers_by_key["dp"].capabilities.multiboot is True      # PAD-853
+    assert manufacturers_by_key["spooky"].capabilities.multiboot is True  # PAD-980
     for key, mfr in manufacturers_by_key.items():
-        if key not in ("stern", "jjp", "bof"):
+        if key not in ("stern", "jjp", "bof", "dp", "spooky"):
             assert getattr(mfr.capabilities, "multiboot", False) is False, key
 
 
@@ -1531,6 +1534,46 @@ def test_parse_inspect_finds_the_report_and_the_refusal():
     assert parse_refusal("all fine") == ""
 
 
+def test_a_failed_verify_is_named_by_its_failed_checks():
+    """PAD-1336: a verify prints a row per check and no refusal line, so the
+    failed build said only "see the tool output".  The rows that FAILED are
+    the reason, in each verify tool's own spelling."""
+    def row(label, good, detail=""):          # mkmulticard verify_card's check()
+        return "%-58s %s%s" % (label, "OK" if good else "FAIL",
+                               ("  " + detail) if detail else "")
+    passed = "\n".join([row("MBR entries", True),
+                        row("e2fsck -fn p3 (4 s)", True),
+                        "    NOTE image 0: this tree carries 4 .sidx packages",
+                        "VERIFY /mnt/c/x/Godzilla 3.multi.raw PASS"])
+    assert parse_failed_checks(passed) == ""
+    one = passed.replace("PASS", "FAIL") + "\n" + row(
+        "image 1 /dev/mmcblk0p7:img1 content: 900 of 900 files re-hashed", False,
+        "differ: ['godzilla_le/game']")
+    assert parse_failed_checks(one) == (
+        "the check that failed: image 1 /dev/mmcblk0p7:img1 content: 900 of 900 "
+        "files re-hashed (differ: godzilla_le/game)")
+    # five paths are the first and 'and others': the line is one line
+    modes = parse_failed_checks(row("image 1 /dev/mmcblk0p7:img1 file mode/owner", False,
+                                    repr(["godzilla_le/a.png", "godzilla_le/b.png"])))
+    assert modes == ("the check that failed: image 1 /dev/mmcblk0p7:img1 file mode/owner "
+                     "(godzilla_le/a.png and others)")
+    many = one + "\n" + "\n".join(row("EBR for p%d @1" % n, False) for n in (5, 6, 7))
+    got = parse_failed_checks(many)
+    assert got.startswith("4 checks failed: image 1 ") and \
+        got.endswith("; EBR for p5 @1; EBR for p6 @1; and 1 more in the tool output"), got
+    long = parse_failed_checks(row("e2fsck -fn p7 (9 s)", False, "x" * 500))
+    assert long.endswith("x\u2026)") and len(long) < 220
+    # mkjjpmulti and mks3multi spell a failed check their own way
+    assert parse_failed_checks("ok: a\nFAIL: p3 md5 - got abc\n"
+                               "verify: FAIL (2 check(s), 1 failed)") == \
+        "the check that failed: p3 md5 (got abc)"
+    assert parse_failed_checks("verify: FAILED (image 1, menu x)") == \
+        "the check that failed: image 1, menu x"
+    # a refusal line, when there is one, is still THE reason
+    assert failure_why(one + "\nrefused: not a multi card") == "not a multi card"
+    assert failure_why(one).startswith("the check that failed:")
+
+
 def test_media_specs_come_back_as_the_specs_that_made_them(monkeypatch,
                                                            tmp_path):
     """art_source / anim_source round-trip: what a load puts in the row
@@ -1872,7 +1915,7 @@ def test_a_half_written_state_costs_the_tab_its_state_not_the_startup():
                             "default": 2, "bypass": False})
     assert menu.pop("compact") is False
     assert menu == {"move": "auto", "confirm": "auto", "volume": 50,
-                    "timeout": 15, "default": 2,
+                    "timeout": 15, "back_hold": 3, "default": 2,
                     "machine_volume": True,
                     # PAD-135: a state written before the field existed
                     # described a menu that said SELECT GAME CODE
@@ -1890,6 +1933,10 @@ def test_a_half_written_state_costs_the_tab_its_state_not_the_startup():
                     "show_footer": True, "footer": "",
                     # ...and PAD-307: one from before the SETTINGS card offers it
                     "settings_tile": True,
+                    # ...and PAD-1279: one from before the test pictures has none
+                    "tests": [],
+                    # ...and PAD-495: one from before editions has its menu
+                    "editions": False,
                     "theme": "midnight", "colors": {}}
     assert "bypass" not in menu_from_state(None)     # always on: not a setting
     assert menu_from_state({"volume": 900})["volume"] == 100
@@ -2320,14 +2367,14 @@ def test_the_theme_rides_every_command_line_and_the_preview_conf(tmp_path):
     assert lines[-15] == "theme=custom"
     assert lines[-1] == "color_countdown=00ff00"
     assert validate_form(form, sources=False) == []
-    form.colors["frame_hl"] = "not a colour"
+    form.colors["frame_hl"] = "not a color"
     errs = validate_form(form, sources=False)
-    assert any("card frame, highlighted colour must be six hex" in e
+    assert any("card frame, highlighted color must be six hex" in e
                for e in errs)
     assert "frame_hl=" not in " ".join(multiboot_core.theme_args(form))
     assert "color_frame_hl" not in write_preview_conf(form)
     form.colors = {"nosuch": "ffffff"}
-    assert any("not a colour the menu has" in e
+    assert any("not a color the menu has" in e
                for e in validate_form(form, sources=False))
     form = _form(tmp_path, 2, theme="nosuch")
     assert any("not one the selector has" in e
@@ -3450,6 +3497,129 @@ def test_own_scores_come_back_off_the_card_and_are_a_menu_change(tmp_path):
     assert menu == ["high scores"] and not rebuild
 
 
+# ---- PAD-1194: high scores apart from settings ----------------------------------------------
+def test_hiscores_ride_on_build_inject_and_update(tmp_path):
+    """One high-score group per GAME, only once some image's scores do not
+    follow its settings - then every game names one, so the selector can hand
+    each table on - and always spelled out on a Stern card, so a split taken
+    off is taken off the card too."""
+    mb = multiboot_core
+    form = _form(tmp_path, 3)
+    card = str(tmp_path / "card.raw")
+    # nothing split: all '' (the card PAD-226 wrote)
+    form.images[1].own_scores = "heisei"
+    assert build_args(form)[build_args(form).index("--hiscores") + 1] == ";;"
+    # pb_lawww's card: image 0 everything of its own, 1 and 2 own settings + the shared table
+    form.images[0].own_scores = "original"
+    form.images[1].hiscores = mb.SHARED_SCORES
+    form.images[2].own_scores = "orchestral"
+    form.images[2].hiscores = mb.SHARED_SCORES
+    for argv in (build_args(form), inject_args(form, card), mb.update_args(form, card)):
+        assert argv[argv.index("--hiscores") + 1] == "original;shared;shared"
+    # an image that shares everything plays into the shared table too
+    form.images[2].own_scores = ""
+    form.images[2].hiscores = ""
+    assert build_args(form)[build_args(form).index("--hiscores") + 1] == "original;shared;shared"
+    # shared settings, a table of its own
+    form.images[2].hiscores = "mine"
+    assert build_args(form)[build_args(form).index("--hiscores") + 1] == "original;shared;mine"
+    # a name the card would refuse never reaches the tool
+    form.images[2].hiscores = "../x"
+    assert build_args(form)[build_args(form).index("--hiscores") + 1] == "original;shared;"
+
+
+def test_the_two_ticks_make_the_names():
+    mb = multiboot_core
+    rows = [mb.ImageRow("a", title="Original"), mb.ImageRow("b", title="Heisei")]
+    mb.set_row_scores(rows[0], True, True, [rows[1]])
+    assert (rows[0].own_scores, rows[0].hiscores) == ("original", "")
+    mb.set_row_scores(rows[1], True, False, [rows[0]])
+    assert (rows[1].own_scores, rows[1].hiscores) == ("heisei", "shared")
+    assert mb.row_own_settings(rows[1]) and not mb.row_own_hiscores(rows[1])
+    # a store name is kept once given; the scores tick alone flips the group
+    rows[1].title = "Heisei V2"
+    mb.set_row_scores(rows[1], True, True, [rows[0]])
+    assert (rows[1].own_scores, rows[1].hiscores) == ("heisei", "")
+    # shared settings, its own table: a name of its own, never one another row holds
+    rows[1].own_scores = ""
+    rows[1].title = "Original"
+    mb.set_row_scores(rows[1], False, True, [rows[0]])
+    assert rows[1].own_scores == "" and rows[1].hiscores == "original-2"
+    assert mb.scores_split(rows[1]) and not mb.scores_split(rows[0])
+    mb.set_row_scores(rows[1], False, False, [rows[0]])
+    assert (rows[1].own_scores, rows[1].hiscores) == ("", "")
+
+
+def test_share_with_puts_images_in_one_store_or_table():
+    """PAD-1196 (pb_lawww): 'Share with' joins another image's store or
+    table by its name, 'No other image' keeps the name while nobody else
+    holds it and makes a new one when it leaves a group, and calling it
+    again with the same choices changes nothing (the dialog writes through)."""
+    mb = multiboot_core
+    a, b, c = (mb.ImageRow(x, title=t) for x, t in
+               (("a", "Heisei orch 3"), ("b", "Heisei bw 3"), ("c", "Original")))
+    rows = [a, b, c]
+    others = lambda r: [x for x in rows if x is not r]
+    mb.set_row_scores(a, True, True, others(a), settings_with=mb.NEW_GROUP,
+                      scores_with=mb.NEW_GROUP)
+    assert (a.own_scores, a.hiscores) == ("heisei-orch-3", "")
+    # b joins a's settings store, and a table called 'heisei'
+    mb.set_row_scores(b, True, True, others(b), settings_with="heisei-orch-3",
+                      scores_with="heisei")
+    assert (b.own_scores, b.hiscores) == ("heisei-orch-3", "heisei")
+    mb.set_row_scores(a, True, True, others(a), settings_with="heisei-orch-3",
+                      scores_with="heisei")
+    assert (a.own_scores, a.hiscores) == ("heisei-orch-3", "heisei")
+    assert mb.share_choice_of(rows, b, "settings") == "heisei-orch-3"
+    assert mb.share_choice_of(rows, b, "scores") == "heisei"
+    assert mb.share_choice_of(rows, c, "settings") == mb.NEW_GROUP
+    labels = {o["value"]: o["label"] for o in mb.share_choices(rows, c, "scores")}
+    assert labels == {mb.NEW_GROUP: "No other image", "heisei": "Heisei orch 3, Heisei bw 3"}
+    # the same call again (a title typed) changes nothing
+    b.title = "Heisei b/w 3 ball"
+    for _ in range(2):
+        mb.set_row_scores(b, True, True, others(b), settings_with="heisei-orch-3",
+                          scores_with="heisei")
+        assert (b.own_scores, b.hiscores) == ("heisei-orch-3", "heisei")
+    # b leaves a's store: a new one of its own, kept on the next call
+    mb.set_row_scores(b, True, True, others(b), settings_with=mb.NEW_GROUP,
+                      scores_with="heisei")
+    new = b.own_scores
+    assert new not in ("heisei-orch-3", "heisei", "")
+    mb.set_row_scores(b, True, True, others(b), settings_with=mb.NEW_GROUP,
+                      scores_with="heisei")
+    assert b.own_scores == new and b.hiscores == "heisei"
+    # a alone again in its store keeps its name
+    assert mb.share_choice_of(rows, a, "settings") == mb.NEW_GROUP
+    mb.set_row_scores(a, True, True, others(a), settings_with=mb.NEW_GROUP,
+                      scores_with="heisei")
+    assert a.own_scores == "heisei-orch-3"
+    # a table joined with shared settings, and the split it makes
+    mb.set_row_scores(c, False, True, others(c), scores_with="heisei")
+    assert (c.own_scores, c.hiscores) == ("", "heisei") and mb.scores_split(c)
+    # a name the card would refuse is never taken
+    mb.set_row_scores(c, True, True, others(c), settings_with="../x", scores_with="../y")
+    assert c.own_scores not in ("../x", "") and c.hiscores == "heisei"
+
+
+def test_hiscores_come_back_off_the_card_and_are_a_menu_change(tmp_path):
+    mb = multiboot_core
+    rows, _warn = mb.rows_from_inspect({"images": [
+        {"device": "/dev/mmcblk0p3", "title": "A", "own_scores": "original", "hiscores": "original"},
+        {"device": "/dev/mmcblk0p7:img1", "title": "B", "own_scores": "heisei", "hiscores": "shared"},
+        {"device": "/dev/mmcblk0p7:img2", "title": "C", "hiscores": "shared"},
+        {"device": "/dev/mmcblk0p7:img3", "title": "D", "hiscores": "mine"},
+    ]})
+    assert [r.hiscores for r in rows] == ["", "shared", "", "mine"]
+    assert [mb.row_own_hiscores(r) for r in rows] == [True, False, False, True]
+    before = _form(tmp_path, 2)
+    after = _form(tmp_path, 2)
+    before.images[1].own_scores = after.images[1].own_scores = "b"
+    after.images[1].hiscores = mb.SHARED_SCORES
+    menu, rebuild = mb.diff_forms(before, after)
+    assert menu == ["high scores"] and not rebuild
+
+
 def test_a_store_name_is_the_title_made_unique():
     f = multiboot_core.scores_name_for
     assert f("TMNT 1987!") == "tmnt-1987"
@@ -3475,3 +3645,27 @@ def test_the_plan_says_which_images_run_custom_modes():
     assert [r.modes for r in rows] == ["1 mode file, 0 code modes", ""]
     assert multiboot_core.modes_line(rows[1]) == "" and "runs custom modes (1 mode file" in \
         multiboot_core.modes_line(rows[0])
+
+
+def test_default_output_is_the_projects_with_one_open(tmp_path):
+    """PAD-1385: with a project open the card is the PROJECT'S - two projects
+    starting from the same stock card no longer share one default file."""
+    primary = _images(tmp_path, 1)[0]
+    a = tmp_path / "Godzilla two"
+    b = tmp_path / "Godzilla three"
+    got_a = default_output_path(primary, project=str(a))
+    got_b = default_output_path(primary, project=str(b))
+    assert os.path.normpath(got_a) == os.path.normpath(
+        str(a / "multi" / "Godzilla two.multi.raw"))
+    assert os.path.normpath(got_b) == os.path.normpath(
+        str(b / "multi" / "Godzilla three.multi.raw"))
+    # a trailing separator still names the project
+    assert default_output_path(primary, project=str(a) + os.sep) == got_a
+    # no project: beside the primary, as before
+    assert default_output_path(primary, project="") == default_output_path(primary)
+    # a JJP ISO is named for the project too; a BOF update keeps the name
+    # its machine's updater looks for, in the project's folder
+    assert default_output_path(primary, "jjp", project=str(a)).endswith(
+        os.path.join("multi", "Godzilla two.multi.iso"))
+    assert os.path.normpath(default_output_path("D:/x/lab.fun", "bof", project=str(a))) \
+        == os.path.normpath(str(a / "multi" / "lab.fun"))

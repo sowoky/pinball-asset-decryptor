@@ -38,7 +38,9 @@ the audio, so a build whose layout differs enough to shift the mapping rejects
 its own names instead of shipping mislabels.
 """
 
+import collections
 import random
+import re
 import struct
 
 from .elf import parse_elf
@@ -65,6 +67,35 @@ def _is_music_entry(name):
     music-length guard below exists for the opposite case, where an *event*
     name would otherwise land on a shared song master."""
     return name.strip().upper().startswith(("MUSIC:", "SONG:"))
+
+_KIND = re.compile(r"\s*([A-Za-z][A-Za-z ]*?)\s*:")
+
+
+def _entry_kind(name):
+    """The kind a menu name gives its sound (``SPEECH``, ``SOUND``, ``MUSIC``,
+    ``VO``, ``FX``...), the words before its colon; ``""`` without one."""
+    m = _KIND.match(name)
+    return m.group(1).upper() if m else ""
+
+
+def _placeholder_sids(entries):
+    """Sids that menu entries of more than one kind share: ``{sid}``.
+
+    The small 10-entry Sound Test (PAD-823: Mandalorian, Foo Fighters, Venom,
+    TMNT, D&D ...) is a template every title fills in, two speech lines, two
+    sounds, two songs and the speakers.  A title that never wired an entry
+    leaves its node on a placeholder sound, the same one for each: Foo Fighters
+    Pro 1.04 plays sid 0x44 (half a second) for all six, SPEECH, SOUND and
+    MUSIC alike, and Mandalorian Pro 1.45 sid 0xfb for both speech lines and
+    both sounds.  One recording can't be a speech line and a sound and a song,
+    so no name describes it.  Entries of ONE kind sharing a sid are real
+    (Iron Maiden's three "SPEECH: SUPER JACKPOT"); no full-size menu of the
+    library shares one across kinds.  *entries* = ``[(sid, name)]``."""
+    kinds = collections.defaultdict(set)
+    for sid, name in entries:
+        kinds[sid].add(_entry_kind(name))
+    return {sid for sid, k in kinds.items() if len(k) > 1}
+
 
 # Ceiling for a node id (an index into the sound-id list block, so bounded by
 # the block's length) — guards the walk over the {group_ptr, node_id} array.
@@ -285,6 +316,9 @@ def locate_menu_sids(raw):
     sid the entry plays.  Multi-element lists are routing/prefix sequences: the
     speaker-test prompts carry three, the first two selecting the output.
 
+    An entry the title left on a placeholder sound is left out
+    (:func:`_placeholder_sids`).
+
     Returns ``[]`` when the menu or the indirection can't be read."""
     t = _walk_menu_table(raw)
     if t is None:
@@ -304,7 +338,8 @@ def locate_menu_sids(raw):
         lst = lists[li]
         if lst:
             out.append((lst[-1], name))
-    return out
+    parked = _placeholder_sids(out)
+    return [(sid, name) for sid, name in out if sid not in parked]
 
 
 def _find_resolver(emu, fw=None):
@@ -417,6 +452,11 @@ _MUSIC_MIN_SECONDS = 20.0
 
 _OP11 = b"\x0b\x00\x00\x00"
 
+#: An op11 marker with its parameter byte, which :data:`_OP11` reads as 0 only (PAD-635: Led
+#: Zeppelin Pro 1.22 names 10 records, all requested, only behind ``0b 00 01 00`` /
+#: ``0b 00 04 00``; the byte is the record's band layout, PAD-636).
+_OP11_ANY = re.compile(rb"\x0b\x00.\x00", re.S)
+
 
 def _primary_idx(desc, key0_to_idx):
     """The extraction record a descriptor owns, or ``None``.
@@ -427,11 +467,99 @@ def _primary_idx(desc, key0_to_idx):
     or after offset 9 is the entry's own primary asset.  (Checking only the two
     fixed offsets 10 and 28, as v0.61.x did, silently lost a third of the
     coverage and pushed the rest onto a broad scan that matched references to
-    shared music masters.)"""
-    p = desc.find(_OP11, 9)
-    if p < 0 or p + 8 > len(desc):
+    shared music masters.)  The marker's parameter byte is read whatever it is:
+    a first marker behind ``0b 00 04 00`` read as none took the NEXT
+    descriptor's record (PAD-636: Led Zeppelin Pro 1.22 gave two records their
+    neighbours' Sound Test names)."""
+    m = _OP11_ANY.search(desc, 9)
+    if m is None or m.start() + 8 > len(desc):
         return None
-    return key0_to_idx.get(_u32(desc, p + 4))
+    return key0_to_idx.get(_u32(desc, m.start() + 4))
+
+
+def _part_idxs(desc, key0_to_idx, extent=None):
+    """Every extraction record a descriptor plays, the first marker's first: a multi-part
+    entry names each part with an op11 marker of its own, whatever its parameter byte
+    (PAD-635: on Godzilla Pro 1.16, 6 records are only ever a later part, so the primary
+    alone called them unplayed). Only the markers in its first *extent* bytes are its own:
+    the resolver's window runs on into the next descriptor (PAD-636)."""
+    out = []
+    end = len(desc) if extent is None else min(len(desc), int(extent))
+    for m in _OP11_ANY.finditer(desc, 9):
+        p = m.start()
+        if p + 8 > end:
+            break
+        i = key0_to_idx.get(_u32(desc, p + 4))
+        if i is not None and i not in out:
+            out.append(i)
+    return out
+
+
+# --------------------------------------------------------------------------
+# Sound-bank songs (PAD-820)
+#
+# A music title's Sound Test plays its songs by sids of their bank's category
+# (``cat << 16 | n``), and the game's resolver, with that bank loaded, hands back
+# the song's descriptor inside the bank.  ``n`` is NOT the record: Deadpool Pro
+# 1.16's DISCO MULTIBALL is 0x100003 and plays record 4 of image-sc16.bin.  A
+# song can be several records in turn (an intro, then the body: 9 of Deadpool's
+# 24), each named by an op11 marker of the descriptor, and the lengths of those
+# records add up exactly to the length the descriptor declares (bytes 3..5, in
+# 1/4000 s) -- which is the check every name has to pass.
+
+#: The descriptor's declared length: a 24-bit count at byte 3, in 1/4000 s
+#: (``engine._DESC_DUR_OFF`` / ``_DESC_DUR_RATE``).
+_DESC_DUR_OFF = 3
+_DESC_DUR_RATE = 4000.0
+#: How far a song's records may miss its declared length, per record, seconds.
+#: Deadpool's 24 land within 0.01 s.
+_BANK_PART_SLACK = 0.05
+
+
+def bank_menu_sids(raw):
+    """``[(sid, name)]`` of the Sound Test entries a sound bank plays (sid of a
+    category above 0), in menu order; ``[]`` without a menu."""
+    return [(sid, name) for sid, name in locate_menu_sids(raw) if sid >> 16]
+
+
+def declared_seconds(desc):
+    """The length a descriptor declares it plays for, in seconds."""
+    return (_u32(desc, _DESC_DUR_OFF) & 0xFFFFFF) / _DESC_DUR_RATE
+
+
+def song_parts(desc, key0_to_idx, seconds_by_idx):
+    """The records a song's descriptor plays, in order, or ``[]`` when they do
+    not add up to the length it declares.  Markers are taken while the sum is
+    short of it, so a window that runs on into the next descriptor stops at
+    this one's end (PAD-636)."""
+    want = declared_seconds(desc)
+    parts, total = [], 0.0
+    for idx in _part_idxs(desc, key0_to_idx):
+        parts.append(idx)
+        total += seconds_by_idx.get(idx, 0.0)
+        if abs(total - want) <= _BANK_PART_SLACK * len(parts):
+            return parts
+        if total > want:
+            break
+    return []
+
+
+def bank_name_map(resolve, entries, key0_to_idx, seconds_by_idx):
+    """``{record: name}`` for one bank: each Sound Test entry of *entries*
+    ``[(sid, name)]`` whose descriptor ``resolve(sid)`` (de-whitened bytes, or
+    None) plays records of this bank adding up to its declared length.  A song
+    of several records names each ``"<name> (k of n)"``; where two entries name
+    one record, the earlier in the menu wins, as on cat-0."""
+    out = {}
+    for sid, name in entries:
+        desc = resolve(sid)
+        if not desc or desc[0] != 5:
+            continue
+        parts = song_parts(desc, key0_to_idx, seconds_by_idx)
+        for k, idx in enumerate(parts):
+            out.setdefault(idx, name if len(parts) == 1
+                           else "%s (%d of %d)" % (name, k + 1, len(parts)))
+    return out
 
 
 def _select_names(entries, seconds_by_idx):

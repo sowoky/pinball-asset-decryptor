@@ -59,7 +59,17 @@ PUBLIC_KEYS = (
 
 #: The preview features this version of the app has, by id, with the name people see.
 FEATURES = {
+    # Stern Spike 3 (Pi-4 secure-boot era): decrypt a secure SD image or a
+    # .spk package and extract its assets.  Behind a code while it is new.
+    "spike3": "Stern Spike 3",
+}
+#: Features that WERE previews and are now in every copy, switched on with no code
+#: (the mode maker, PAD-763). :func:`enabled` answers yes for them; a code that names
+#: one says it is no longer needed. The Visual Pinball tab (PAD-802) joined them in
+#: PAD-1136.
+RELEASED = {
     "modes": "Mode maker",
+    "vpx": "Visual Pinball",
 }
 
 _NAME_MAX = 64
@@ -196,6 +206,12 @@ def check(text, today=None, public_keys=None):
     """:func:`decode`, and also: not expired, and it unlocks something this version of
     the app has. Returns the :class:`Grant`; raises :class:`PreviewCodeError`."""
     grant = decode(text, public_keys)
+    if not grant.known_features():
+        done = [RELEASED[f] for f in grant.features if f in RELEASED]
+        if done:
+            raise PreviewCodeError(
+                "That preview code is for the %s, which is in every copy of the app now. "
+                "No code is needed." % ", ".join(done))
     if grant.expired(today):
         raise PreviewCodeError(
             "That preview code for %s ended on %s. Ask for a new one."
@@ -214,7 +230,10 @@ def describe(grant, today=None):
     ended = grant.expired(today)
     for f in grant.features:
         label = FEATURES.get(f)
-        if label is None:
+        if f in RELEASED:
+            out.append("%s: in every copy of the app now, this code is no longer needed "
+                       "(code for %s)" % (RELEASED[f], grant.name))
+        elif label is None:
             out.append("%s: not in this version of the app (code for %s)" % (f, grant.name))
         elif ended:
             out.append("%s: expired on %s (code for %s)"
@@ -234,8 +253,8 @@ _load_ms = 0.0
 
 def enabled(feature):
     """Is preview *feature* switched on in this run? Off until :func:`load` found a code
-    for it that checked out and had not expired."""
-    return feature in _active
+    for it that checked out and had not expired; always on once it is :data:`RELEASED`."""
+    return feature in RELEASED or feature in _active
 
 
 def active_features():

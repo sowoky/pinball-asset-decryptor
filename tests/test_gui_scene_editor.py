@@ -3,7 +3,7 @@ side panel make (webui/text_scenes_tree.py, ``text_scenes.tree_*``).
 
 A scene the project has a tree for (``scene_tree.json``) is drawn from that tree and edited in
 place: pick an element, drag it (a glass move turned into the node's own units), resize it from
-a corner (about its middle), tint it, hide it, re-layer it, add a line of text, undo, put it
+a corner (its top-left stays put, PAD-557), tint it, hide it, re-layer it, add a line of text, undo, put it
 back.  Every edit lands in ``scene_edits.json``, is drawn at once, and is listed on the Write
 tab as a pending change.
 """
@@ -97,6 +97,9 @@ def test_undo_and_redo_take_back_every_kind_of_edit(tmp_path):
         start = _ops(folder)
 
         assert w.call("text_scenes.tree_select", art)
+        # about its middle (PAD-557): from the top-left, Draw 1:1 folds into the 40 % (both
+        # keep that corner) and the two cancel out, so there would be no step to undo apart
+        assert w.call("text_scenes.tree_resize_from", "middle")
         assert w.call("text_scenes.tree_set_scale", art, 40)
         s40 = _ops(folder)
         assert w.call("text_scenes.tree_one_to_one", art)
@@ -173,15 +176,18 @@ def test_the_editor_draws_the_tree_and_edits_it(tmp_path):
         assert _ops(folder) == [{"op": "move", "node": art["id"], "dx": 30.0, "dy": -10.0}]
         p = _tv(w)["props"]
         assert (p["x"], p["y"]) == (x0 + 30, y0 - 10)
+        # PAD-1211: the box as it is goes along, unrounded (what a drag snaps by)
+        bx = p["box"]
+        assert len(bx) == 4 and abs(bx[0] - p["x"]) <= 0.5 and abs(bx[2] - p["w"]) <= 0.5
 
-        # a corner drag to 150 %: about the middle, so the middle stays put
-        mid = (p["x"] + p["w"] / 2.0, p["y"] + p["h"] / 2.0)
+        # to 150 %: Resize from Top-left (PAD-557), so X and Y stay put
+        tl = (p["x"], p["y"])
         assert w.call("text_scenes.tree_scale", art["id"], 1.5)
         p = _tv(w)["props"]
         assert p["scale"] == 150
-        assert abs(p["x"] + p["w"] / 2.0 - mid[0]) <= 1 and abs(p["y"] + p["h"] / 2.0 - mid[1]) <= 1
+        assert abs(p["x"] - tl[0]) <= 1 and abs(p["y"] - tl[1]) <= 1
 
-        # width and height apart: a stretch, about the middle too
+        # width and height apart: a stretch, from the top-left too
         assert w.call("text_scenes.tree_set_size", art["id"], 300, None)
         p = _tv(w)["props"]
         assert (p["scale"], p["scale_y"]) == (300, 150)
@@ -626,8 +632,8 @@ def test_an_exact_size_in_pixels(tmp_path):
 def test_a_kept_size_pick_whose_file_is_gone_boxes_the_picture_drawn(tmp_path):
     """DragonRR (PAD-332): a Write puts a kept-size pick over the project's own file at its
     own size.  With the pick's source file gone (moved, renamed) the preview draws that
-    project file, so its box is that size too, not the stock picture's (which sat up and
-    left of the art)."""
+    project file, at that size.  PAD-865: in the original's place and size, so its box is
+    the stock one, the picture inside it at half the scale."""
     from PIL import Image
     from pinball_decryptor.core import staged_changes
     folder = tmp_path / "proj"
@@ -653,11 +659,11 @@ def test_a_kept_size_pick_whose_file_is_gone_boxes_the_picture_drawn(tmp_path):
         tv = _tv(w)
         p = tv["props"]
         assert (p["pic"]["w"], p["pic"]["h"]) == grown
-        assert abs(p["w"] - w0 * 2) <= 1.5 and abs(p["h"] - h0 * 2) <= 1.5
-        assert p["pic"]["sx"] == sx
+        assert abs(p["w"] - w0) <= 1.5 and abs(p["h"] - h0) <= 1.5
+        assert abs(p["pic"]["sx"] - sx / 2) <= 0.1
         pts = next(h for h in tv["hits"] if h["id"] == art)["pts"]
         xs = [q[0] for q in pts]
-        assert abs((max(xs) - min(xs)) - w0 * 2) <= 1.5
+        assert abs((max(xs) - min(xs)) - w0) <= 1.5
         w.call("text_scenes.close")
 
 
@@ -665,7 +671,7 @@ def test_a_built_own_size_picture_with_no_pick_keeps_its_size(tmp_path):
     """DragonRR (PAD-337): picking another picture saved the picks without the ones already
     built at their own size, so they lost their keep marks and were drawn squeezed back to the
     stock size.  A Write keeps a project file's own size with no pick at all, so the preview
-    does too: the box and the picture drawn are the file's size."""
+    does too: the picture is the file's size, shown in the original's box (PAD-865)."""
     import numpy as np
     from PIL import Image
     from pinball_decryptor.core import staged_changes
@@ -688,7 +694,7 @@ def test_a_built_own_size_picture_with_no_pick_keeps_its_size(tmp_path):
         w.call("text_scenes.tree_moment", "f:%d" % _tv(w)["frame"])
         p = _tv(w)["props"]
         assert (p["pic"]["w"], p["pic"]["h"]) == grown
-        assert abs(p["w"] - w0 * 2) <= 1.5 and abs(p["h"] - h0 * 2) <= 1.5
+        assert abs(p["w"] - w0) <= 1.5 and abs(p["h"] - h0) <= 1.5
         w.call("text_scenes.close")
     sizes = scene_render.picture_sizes(str(folder))
     img = scene_render._picture(str(folder), rel, {}, {}, sizes)
@@ -702,8 +708,9 @@ def test_a_built_own_size_picture_with_no_pick_keeps_its_size(tmp_path):
 def test_a_pictures_own_size_and_scale_and_draw_it_1_to_1(tmp_path):
     """DragonRR (PAD-277): Stern ships Credits_Text at 1044 x 264 and lets the game shrink it,
     which leaves jagged edges.  The panel shows a picture's own size and the scale it is drawn
-    at; a picture made at the size it shows (kept at its own size on the Images tab) is then
-    drawn pixel for pixel with Draw 1:1, its top-left corner where it was."""
+    at; a picture made at the size it shows (kept at its own size on the Images tab) shows in
+    the original's box (PAD-865), so near pixel for pixel already, and exactly with Draw 1:1,
+    its top-left corner where it was."""
     from PIL import Image
     from pinball_decryptor.core import staged_changes
     folder = tmp_path / "proj"
@@ -730,7 +737,8 @@ def test_a_pictures_own_size_and_scale_and_draw_it_1_to_1(tmp_path):
         w.call("text_scenes.tree_moment", "f:%d" % _tv(w)["frame"])
         p = _tv(w)["props"]
         assert (p["pic"]["w"], p["pic"]["h"]) == Image.open(str(small)).size
-        assert p["pic"]["sx"] == s0 and p["w"] < stock[0] * s0 / 100.0 / 2
+        assert 90 <= p["pic"]["sx"] <= 115 and p["pic"]["sx"] != 100
+        x0, y0 = p["x"], p["y"]
         assert w.call("text_scenes.tree_one_to_one", art)
         p = _tv(w)["props"]
         assert p["pic"]["sx"] == 100 and p["pic"]["sy"] == 100
@@ -1406,6 +1414,90 @@ def test_several_picked_at_once_move_and_hide_together(tmp_path):
         assert not any(h["id"] in (art, title) for h in _tv(w)["hits"])
         assert w.call("text_scenes.tree_visible_many", [art, title], True)
         assert _ops(folder) == []
+        w.call("text_scenes.close")
+
+
+def test_the_in_game_mark_warns_on_the_first_hide_until_dont_ask_again(tmp_path):
+    """PAD-535 (DragonRR: "no real indication items have deleted status"): the mark at every
+    Layers row's end (a green tick, a red stop sign) sets the row, or every selected row, in
+    the game or hidden in it.  A hide asks first, until "Don't ask again" (kept in
+    settings.json); putting one back never asks."""
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _seed(folder)
+    with web_app(tmp_path, mfr="stern") as w:
+        _open(w, folder)
+        tv = _tv(w)
+        art = next(h for h in tv["hits"] if h["name"] == "Art")["id"]
+        title = next(h for h in tv["hits"] if h["name"] == "Title")["id"]
+        hidden = lambda: {l["id"] for l in _tv(w)["layers"] if l["hidden"]}  # noqa: E731
+
+        w.answers.append("cancel")
+        assert not w.call("text_scenes.tree_game_mark", [art], False)
+        assert w.asked[-1]["title"] == "Hide in the game" and '"Art"' in w.asked[-1]["message"]
+        assert "Nothing is lost" in w.asked[-1]["detail"]
+        assert [b["id"] for b in w.asked[-1]["buttons"]] == ["yes", "always", "cancel"]
+        assert hidden() == set() and _ops(folder) == []
+
+        w.answers.append("yes")
+        assert w.call("text_scenes.tree_game_mark", [art], False)
+        assert hidden() == {art}
+        n = len(w.asked)
+        assert w.call("text_scenes.tree_game_mark", [art], True)      # back: no question
+        assert len(w.asked) == n and hidden() == set()
+
+        # a plain yes asks again next time; several selected rows go together, one undo step
+        w.answers.append("always")
+        assert w.call("text_scenes.tree_game_mark", [art, title], False)
+        assert "these 2 layers" in w.asked[-1]["message"]
+        assert hidden() == {art, title}
+        assert w.app._settings.get("scenes_hide_warned") is True
+        assert w.call("text_scenes.tree_undo")
+        assert hidden() == set()
+        n = len(w.asked)
+        assert w.call("text_scenes.tree_game_mark", [title], False)    # never asked again
+        assert len(w.asked) == n and hidden() == {title}
+        w.call("text_scenes.close")
+
+
+def test_a_layer_an_earlier_write_hid_on_the_card_shows_hidden_and_comes_back(tmp_path):
+    """PAD-535 round 2 (DragonRR: "the two text lines under Ebirah are greyed out ... I can't
+    undelete or unhide them"): a project extracted from a card an earlier Write hid a layer on
+    has that hide in the game's own scene (never-shown keyframes), not in its edits.  Layers
+    still marks it hidden in the game, and a click puts it back: an edit of its own that the
+    preview and the next Write both show."""
+    from pinball_decryptor.plugins.stern import scene_edit, scene_eval, scene_tree
+    from pinball_decryptor.webui.text_scenes_tree import _walk_man
+    from tests.test_stern_scene_tree import scene
+    sc = scene_tree.parse(scene())
+    title = next(n["id"] for n, _p, _d in _walk_man(scene_eval.manifest(sc, {}))
+                 if n["name"] == "Title")
+    assert scene_edit.apply_scene(sc, [{"op": "visible", "node": title, "on": False}])[0] == 1
+    written = scene_tree.serialize(sc)                   # the card that Write made
+    folder = tmp_path / "proj"
+    folder.mkdir()
+    _seed(folder, written)                               # ...extracted again
+    with web_app(tmp_path, mfr="stern") as w:
+        _open(w, folder)
+        lay = lambda: {l["name"]: l for l in _tv(w)["layers"]}  # noqa: E731
+        assert lay()["Title"]["hidden"] and lay()["Title"]["baked"]
+        assert not lay()["Art"]["hidden"] and not lay()["Art"]["baked"]
+        assert _tv(w)["hidden_names"] == ["Title"] and _ops(folder) == []
+        assert not any(h["id"] == title for h in _tv(w)["hits"])
+
+        assert w.call("text_scenes.tree_game_mark", [title], True)     # put back: no question
+        assert _ops(folder) == [{"op": "visible", "node": title, "on": True}]
+        assert not lay()["Title"]["hidden"] and _tv(w)["hidden_names"] == []
+        assert any(h["id"] == title for h in _tv(w)["hits"])            # drawn in the preview
+        back = scene_tree.parse(written)                                # and by the next Write
+        scene_edit.apply_scene(back, _ops(folder))
+        assert scene_edit._tree_index(back)[title][0].keyframes == [(1, 1)]
+
+        w.answers.append("yes")
+        assert w.call("text_scenes.tree_game_mark", [title], False)    # hidden again
+        assert _ops(folder) == [] and lay()["Title"]["hidden"]
+        assert w.call("text_scenes.tree_undo")
+        assert not lay()["Title"]["hidden"]
         w.call("text_scenes.close")
 
 

@@ -47,6 +47,13 @@ switches. The board reads 64 KB at a time, replies from a writer thread,
 runs at real-time priority, and `spkshim.so` makes a write that would get
 EAGAIN wait for room instead of failing.
 
+**A Visual Pinball table** (PAD-952): the board also keeps `vpxhw.state` and
+`vpxsw.input` in the rig folder for the kit's PAD.Controller
+(tools/spike2_emu/vpx/spkbridge.py); once the controller writes
+`vpxball.off` the table owns the balls and the board's ball model stands
+aside. Halloween and Ultraman play behind marty02's Halloween MM Edition
+(docs/plans/vpx_other_platforms.md).
+
 ## Why this is small
 
 Every one of these is a native x86-64 Linux program (Unity with the Mono
@@ -246,6 +253,51 @@ The game's log is `$SPK_RIG/player.log` (Unity's log, or Godot's stdout),
 the board's `$SPK_RIG/warden.log`, the no-op'd shell calls
 `$SPK_RIG/shell.log`, the volume keeper's `$SPK_RIG/spkvol.log`.
 
+## On a Mac (docker/, PAD-953)
+
+macOS has none of what the rig is made of (Linux namespaces, bind mounts,
+x86-64 Linux programs), so there it runs in a container:
+`docker/spkbox.sh` is what the app's `rig_cmd` calls on darwin
+(`emulate_spooky_core.in_box`). The image (`docker/Dockerfile`) is
+PAD-Runtime's packages on Ubuntu 24.04, built and run as **linux/amd64**
+everywhere: the games and the downloaded Python 2.7 are Intel programs, and
+an Apple-silicon engine translates them (Docker Desktop: Rosetta; colima
+registers an amd64 handler at start).
+
+* The box starts idle (`entrypoint.sh`: Xvfb 2400x1080, openbox, x11vnc,
+  PulseAudio) and every script, watch.sh included, is a `docker exec` as
+  root - watch.sh returns at attract and leaves the game running, so the
+  box cannot be its container. Stop and Cancel remove the box.
+* The game draws as a VISIBLE run on the box's screen; the virtual playfield
+  (`spkbox.sh playfield`) runs in the box beside it (openbox places the
+  playfield left, everything else right). The tab opens
+  `vnc://:pinball@localhost:5901` in Screen Sharing (5901, so the Spike 2
+  box's 5900 can be up too).
+* Sound: the rig plays to `$PAD_PULSE_SOCK` (WSLg's PulseServer unless set);
+  the box's null sink is served raw on loopback 45998 and `spkbox.sh` plays
+  it on the Mac with ffplay.
+* Mounted: the app folder at `/pad/app` read only (the rig, proc_emu,
+  ap_emu, spike2_emu's pfweb, the Spooky plugin's games.py for the .pkg
+  keys - copied under `~/Library/Application Support/pinball_decryptor/
+  spooky_box` when the app is outside home, since colima shares only home),
+  the update file's folder at `/pad/files` read only, and a named volume
+  `pad-spooky-var` at `/var/tmp` (builds, the games' Python, settings).
+* Volume / Mute (PAD-1177): the box keeps its own copy of the tab's
+  `audio_ctl.json` at `/tmp/pad_ctl/audio_ctl.json`, which the volume keeper
+  (`spkvol.py`) and the playfield window share. `spkbox.sh`'s `ctl_sync`
+  carries it both ways through one `docker exec -i ... boxctl.py` (the Spike
+  2 box's, `tools/spike2_emu/docker/boxctl.py`): the tab's slider in, the
+  window's Volume / Mute out to the tab's file. The tab's folder used to be
+  mounted read only at `/pad/ctl`, so the window's Volume and Mute failed to
+  write and changed nothing.
+* The DMD games (pinHeck) are not boxed: their window runs on a Python of
+  the computer's own, which the frozen Mac app lacks; the tab says so.
+
+Proven on Docker Desktop (amd64) on Windows, 2026-11-02: Alice Cooper to
+attract and played (Start, launch, slings), Beetlejuice to attract on
+llvmpipe, playfield window beside the game, coin sounds as PCM on the port.
+`tests/test_spkbox.py` holds the launcher's contract.
+
 ## What is open
 
 * **The P-ROC games are not in the app.** Rick and Morty and Alice Cooper
@@ -265,8 +317,10 @@ the board's `$SPK_RIG/warden.log`, the no-op'd shell calls
   hidden Xvfb alike (`run_game.sh` picks it whenever WSL offers it). Beetlejuice's
   attract measured 52-65 fps hidden at 1920x1080 and 66-80 fps in the
   1280x720 desktop window, ~170% CPU (2026-09-30, an AMD Radeon iGPU);
-  Mesa's llvmpipe (the old default, and the fallback where WSL has no GPU;
-  `SPK_GL=llvmpipe` forces it) managed 5.5-7.8 fps on ~500% CPU. All seven
+  Mesa's llvmpipe (the old default, and the fallback where WSL has no GPU
+  or its d3d12 refuses a GL context - a start that died on "glx: failed to
+  create drisw screen" runs again on it, PAD-917; `SPK_GL=llvmpipe` forces
+  it) managed 5.5-7.8 fps on ~500% CPU. All seven
   on d3d12, hidden at 1920x1080 (PAD-321, 2026-10-02): Beetlejuice 55-60
   fps in play, Scooby-Doo 105-120, Looney Tunes 240+ (127% CPU); Texas
   Chainsaw, Evil Dead, Halloween and Ultraman hold themselves at 30 fps

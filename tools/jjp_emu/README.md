@@ -76,6 +76,9 @@ usbipd attach --wsl --hardware-id 0529:0001
 `usbipd` needs a WSL session **already running** or it fails with "There is no
 WSL 2 distribution running". Then:
 
+(A key that lives in **another PC** is attached over the network instead; see
+"The key on another PC" below. The panel does it at Start.)
+
 ```
 wsl -u root -- bash tools/jjp_emu/jail.sh       # overlay + bind mounts
 wsl -u root -- bash tools/jjp_emu/dongle.sh     # register key, start daemons
@@ -114,6 +117,42 @@ wsl -u root -- bash tools/jjp_emu/unjail.sh     # tear the jail down
 ```
 
 `padpath.sh` owns every path. Nothing else may hard-code one.
+
+## The key on another PC (USB/IP, PAD-529)
+
+The key can stay plugged into one always-on PC (the *key server*) that shares
+it over the LAN: usbipd-win there (`usbipd bind --busid <N>`; it persists
+across reboots but not a move to another USB port) or Linux `usbipd` with the
+key bound (`usbip bind -b <N>`). Either listens on TCP 3240, and USB/IP hands
+the device to **whoever reaches that port**, so open it to trusted LAN
+clients or a VPN only.
+
+On the PC that runs the game, Emulate > Security key > *On another PC* takes
+the server and the key's **bus ID** (all JJP keys are `0529:0001`, so with
+several on a hub the bus ID is the only thing that picks one). Start runs
+`usbip attach -r <server> -b <bus id>` inside WSL with the static client
+usbipd-win ships in `C:\Program Files\usbipd-win\WSL\usbip` (usbipd-win
+itself is a server only and cannot pull a remote device); the key lands on
+WSL's vhci-hcd and everything after it - `dongle.sh`, the daemons, the game -
+is unchanged. Stop hands it back. The Extract tab's dongle decrypt uses the
+same setting. The logic is
+[`remote_key.py`](../../pinball_decryptor/plugins/jjp/remote_key.py): every
+user (extract, emulator) holds a lease under `/mnt/wsl/pad-remotekey`, and
+the port is detached only when the last lease goes, so an extract retry or
+cleanup never pulls the key out from under a running game; a key that was
+already attached when we came is never detached by us.
+
+`usbip_standin.py` here is a stand-in key server for proving that path with
+no key: it speaks USB/IP and exports fake `0529:0001` devices (no licence on
+them) that enumerate in WSL's sysfs exactly like the real one.
+
+```
+wsl -d Ubuntu -- python3 tools/jjp_emu/usbip_standin.py --port 3241 --bus 1-4 --bus 1-5
+# then Security key: server 127.0.0.1:3241, bus ID 1-4
+```
+
+Untested with a real key over a real LAN: the licence daemon's session over
+USB/IP latency is the one part only a real key can prove. Prefer a wired link.
 
 ## The image is never written to
 
@@ -443,6 +482,22 @@ cfg line is `bash /lib/live/mount/medium/jjp/pad_install.sh` and no exec bit is
 needed on a FAT copy; and a global `sync()` under WSL2 waits on the virtiofs
 Windows drives and never came back, so the tool only ever `syncfs`es the one
 mount it wrote (`sync -f`). Booting the result in the emulator is item 117.
+
+## Hidden runs and custom modes (PAD-1335)
+
+`PAD_HIDDEN=1` runs the game on a private Xvfb instead of a desktop Xephyr
+window. It opens no switch matrix but still refreshes the device dump. Press
+switches with `jjppoke.py <name>` (`--list <text>` finds names). Audio is muted
+unless `PAD_AUDIO=1`.
+
+`JJP_MODS_SO=/var/tmp/jjpmodes.so` (built by `buildmods.sh`) with
+`JJP_MODS_DIR=<mode folder>` loads custom modes into the game without patching
+it; a mode install ISO written by `mkjjpmodes.py` loads them through its own
+`rungame.sh` hook. Writing modes: `MODES.md` (PAD-1337). `jjpmodelist.py`
+lists the game's own live modes. See `docs/plans/jjp_custom_modes.md`.
+
+The rig's scripts only count and kill `game` processes rooted in the JJP jail
+(`jjp_rig_pids`): a Spike 2 rig slot's process has the same name.
 
 ## See also
 

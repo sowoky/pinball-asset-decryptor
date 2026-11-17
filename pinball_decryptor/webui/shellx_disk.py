@@ -17,6 +17,7 @@ import os
 import sys
 import threading
 
+from ..core import space_keeper
 from . import compat
 from .rpc import rpc
 from .shellx_common import fmt_binary as _fmt
@@ -38,20 +39,36 @@ INTRO = ("The tools stage their work in WSL (Chicago Gaming, Dutch Pinball, "
          "(Stern, plus render/ffmpeg scratch); the Emulate tabs keep the "
          "games they unpacked, their last runs and their own Python in WSL; "
          "and the Spike 2 emulator keeps whole cards cached on its own disk. "
-         "None of them shrinks on its own — clean up here.")
+         "The app keeps all of it in check by itself (below); this window is "
+         "for seeing where the space went, or for freeing more now.")
 TREE_NOTE = ("Select rows to remove, or use “Clean all”. Finished runs clean "
              "up after themselves, so the staging rows here are from crashed "
-             "or cancelled runs. The emulators' files and cached cards are "
-             "different: they are meant to be there, and deleting one costs "
-             "time on the next Start (the game is unpacked again, the "
-             "emulator's Python installed again). An emulator whose game is "
-             "running is left alone; saved settings and high scores are never "
-             "listed.")
+             "or canceled runs, or from runs still going. The emulators' files "
+             "and cached cards are different: they are meant to be there, and "
+             "deleting one costs time on the next Start (the game is unpacked "
+             "again, the emulator's Python installed again). An emulator whose "
+             "game is running is left alone; saved settings and high scores "
+             "are never listed.")
+#: PAD-613: what the automatic clean-up (core/space_keeper.py) does - the
+#: numbers are its own, so the sentence cannot drift from the code.
+AUTO_NOTE = (
+    "Leftovers from crashed or canceled runs go once nothing has used them "
+    "for a day. An emulator's unpacked game, and a cached Spike 2 card, go "
+    "after %d days unplayed — and the least recently played go first "
+    "whenever the app's Linux has under %d GB of room left. Nothing in use "
+    "is touched, nor settings, high scores or save states."
+    % (space_keeper.UNUSED_SECS // 86400,
+       space_keeper.FLOOR_BYTES // 1024 ** 3))
 RESIZE_NOTE = ("Set how large the WSL virtual disk may grow. Increase it when "
                "an extract needs more room than WSL has (the biggest titles "
                "can need 20+ GiB); the disk only uses real space as it fills. "
                "Shrinking is allowed down to what's already in use. No "
                "Administrator needed.")
+#: PAD-819: users with a small C: asked whether WSL can use another drive.
+MOVE_NOTE = ("Everything the app keeps in WSL lives in virtual-disk files on "
+             "a Windows drive, normally C:. Move them to a roomier drive; "
+             "WSL is shut down while they move, and the app finds them there "
+             "from then on. No Administrator needed.")
 RECLAIM_NOTE = ("Deleting WSL staging frees space inside WSL but doesn't "
                 "return it to Windows. Compact the virtual disk to hand it "
                 "back.")
@@ -86,6 +103,72 @@ class DiskMixin:
         self.set(disk=None)
 
     # ------------------------------------------------------------------
+    # the automatic clean-up (PAD-613): shortly after start, then every
+    # CHECK_EVERY_SECS; space_keeper decides whether anything is due
+    # ------------------------------------------------------------------
+    def _keeper_tick(self):
+        try:
+            self.ctx.loop.after(space_keeper.CHECK_EVERY_SECS * 1000,
+                                self._keeper_tick)
+        except Exception:                               # noqa: BLE001
+            pass
+        self.start_disk_badge_check()
+
+    def _keeper_run(self, force=False, wsl=None):
+        """Worker thread: one automatic clean-up; True when it removed
+        anything."""
+        if space_keeper.disabled():
+            return False
+        helpers = None
+        try:
+            from .emu_cache import keeper_cards
+            helpers = keeper_cards()
+        except Exception:                               # noqa: BLE001
+            pass
+        try:
+            rec = space_keeper.tidy(force=force, cards=helpers, wsl=wsl)
+        except Exception:                               # noqa: BLE001
+            log.exception("automatic disk clean-up")
+            return False
+        if self._disk is not None:
+            text = space_keeper.summary()
+            self.ctx.loop.post(lambda: self._disk_view(auto_summary=text))
+        return bool(rec and rec.get("count"))
+
+    @rpc
+    def disk_tidy_now(self):
+        """The window's "Clean up now": the automatic clean-up, run at once
+        whatever its schedule says - the same rules, nothing more."""
+        d = self._disk
+        if d is None or d["busy"]:
+            return False
+        self._disk_busy(True, "Cleaning up…")
+        wsl = bool(d["wsl_ok"])
+
+        def _worker():
+            self._keeper_run(force=True, wsl=wsl)
+            self.ctx.loop.post(self._disk_after_tidy)
+
+        threading.Thread(target=_worker, name="pad-shellx-disktidy",
+                         daemon=True).start()
+        return True
+
+    @rpc
+    def disk_set_auto(self, on):
+        """The "Clean up automatically" box (on by default): off stops the
+        scheduled runs on this PC; Clean up now still works."""
+        space_keeper.set_auto(bool(on))
+        self._disk_view(auto_on=space_keeper.auto_enabled(),
+                        auto_summary=space_keeper.summary())
+        return space_keeper.auto_enabled()
+
+    def _disk_after_tidy(self):
+        if self._disk is None:
+            return
+        self._disk["busy"] = False
+        self.disk_refresh()
+
+    # ------------------------------------------------------------------
     # the gear's amber badge (MainWindow._start_disk_badge_check)
     # ------------------------------------------------------------------
     def start_disk_badge_check(self):
@@ -93,6 +176,7 @@ class DiskMixin:
             return
 
         def _worker():
+            self._keeper_run()
             count, total = 0, 0
             try:
                 from ..core import host_temp
@@ -142,9 +226,14 @@ class DiskMixin:
             "wsl_ok": False,
             "wsl_msg": "", "usage": {LOC_WSL: None, LOC_HOST: None,
                                      LOC_EMU: None},
-            "vhdx": None,
+            "vhdx": None, "place": [],
             "view": {"intro": INTRO, "tree_note": TREE_NOTE,
+                     "auto_note": AUTO_NOTE,
+                     "auto_summary": space_keeper.summary(),
+                     "can_tidy": False,
+                     "auto_on": space_keeper.auto_enabled(),
                      "resize_note": RESIZE_NOTE, "reclaim_note": RECLAIM_NOTE,
+                     "move_note": MOVE_NOTE, "move_where": "",
                      "bars": [
                          {"key": LOC_WSL, "text": "Checking WSL…",
                           "pct": None},
@@ -156,7 +245,7 @@ class DiskMixin:
                           "pct": None}],
                      "rows": [], "status": "", "busy": False,
                      "can_clean_all": False, "can_reclaim": False,
-                     "can_resize": False}}
+                     "can_resize": False, "can_move": False}}
         self.set(disk=self._disk_state())
         self.disk_refresh()
         return self._disk_state()
@@ -173,7 +262,9 @@ class DiskMixin:
                           and d["vhdx"].get("path"))
         kw["can_reclaim"] = reclaim_ok
         kw["can_resize"] = bool(not busy and d["wsl_ok"])
+        kw["can_move"] = bool(not busy and d["wsl_ok"] and d["place"])
         kw["can_clean_all"] = bool(not busy and d["entries"])
+        kw["can_tidy"] = bool(not busy and not space_keeper.disabled())
         self._disk_view(**kw)
 
     @rpc
@@ -209,6 +300,8 @@ class DiskMixin:
                     data["wsl_usage"] = wsl_disk.usage()
                     data["wsl_entries"] = wsl_disk.scan_staging()
                     data["vhdx"] = wsl_disk.vhdx_info()
+                    from ..core import wsl_place
+                    data["place"] = wsl_place.items()
                 except Exception as e:                  # noqa: BLE001
                     data["wsl_ok"] = False
                     data["wsl_msg"] = str(e)
@@ -346,6 +439,7 @@ class DiskMixin:
         d["live"] = {(e["location"], e["path"]) for e in entries
                      if e.get("live")}
         d["vhdx"] = data.get("vhdx")
+        d["place"] = data.get("place") or []
         staging = [e for e in entries if e["location"] in (LOC_WSL, LOC_HOST)]
         rigs = [e for e in entries if e["location"] == LOC_RIG]
         cached = [e for e in entries if e["location"] == LOC_EMU]
@@ -367,7 +461,8 @@ class DiskMixin:
         status = ("Found " + " and ".join(parts) + ".") if parts else \
             "No leftover staging and no cached cards."
         self._disk_view(bars=self._bar_texts(), rows=self._disk_rows(),
-                        reclaim_note=self._reclaim_text())
+                        reclaim_note=self._reclaim_text(),
+                        move_where=self._move_where())
         self._disk_busy(False, status)
 
     # ------------------------------------------------------------------
@@ -485,12 +580,28 @@ class DiskMixin:
         self._adjust_usage(d["usage"][LOC_WSL], wsl_freed)
         self._adjust_usage(d["usage"][LOC_HOST], host_freed)
         self._adjust_usage(d["usage"][LOC_EMU], emu_freed)
+        # PAD-739: space freed inside WSL stays inside the WSL disk file on
+        # Windows until that file is compacted - a user who deleted 120 GB of
+        # cached cards saw "Freed" and no change on his drive.  Cards cached
+        # on the distro's own disk count towards what Reclaim gives back.
+        from .emu_cache import on_distro_disk
+        inside = wsl_freed + (emu_freed if on_distro_disk(
+            d["usage"][LOC_EMU]) else 0)
         if d["vhdx"] and d["vhdx"].get("reclaimable") is not None:
-            d["vhdx"]["reclaimable"] += wsl_freed
+            d["vhdx"]["reclaimable"] += inside
         self._disk_view(bars=self._bar_texts(), rows=self._disk_rows(),
                         reclaim_note=self._reclaim_text())
-        self._disk_busy(False, "Freed %s."
-                        % _fmt(wsl_freed + host_freed + emu_freed))
+        total = wsl_freed + host_freed + emu_freed
+        if inside and inside >= total:
+            msg = ("Freed %s inside WSL: Windows gets it back with Reclaim "
+                   "space to Windows below." % _fmt(total))
+        elif inside:
+            msg = ("Freed %s (%s inside WSL: Windows gets that back with "
+                   "Reclaim space to Windows below)." % (_fmt(total),
+                                                         _fmt(inside)))
+        else:
+            msg = "Freed %s." % _fmt(total)
+        self._disk_busy(False, msg)
 
     # ------------------------------------------------------------------
     # reclaim (compact the .vhdx)
@@ -513,8 +624,11 @@ class DiskMixin:
                 "Reclaim space to Windows",
                 "This will shut down WSL and compact its virtual disk so freed "
                 "space is returned to Windows.\n\n• Any other WSL work will be "
-                "stopped.\n• It can take a few minutes.\n\nMake sure no "
-                "extract or build is running, then continue?"):
+                "stopped, and the app holds WSL off until it is done.\n• It "
+                "can take a few minutes.\n• Close Docker Desktop and any "
+                "Linux terminal windows first: they start WSL again and keep "
+                "its disk in use.\n\nMake sure no extract or build is "
+                "running, then continue?"):
             return False
         self._disk_busy(True, "Reclaiming…")
 
@@ -631,6 +745,121 @@ class DiskMixin:
         _mb().showinfo("Resized", "WSL disk is now %s (%s free)." % (
             _fmt((usage or {}).get("total")),
             _fmt((usage or {}).get("free"))))
+        if self._disk is not None:
+            self._disk["busy"] = False
+            self.disk_refresh()
+
+    # ------------------------------------------------------------------
+    # move to another drive (PAD-819)
+    # ------------------------------------------------------------------
+    def _move_where(self, paths=True):
+        """Where each disk is now, a line apiece (and its file under it)."""
+        from ..core import wsl_place
+        d = self._disk
+        if not d["wsl_ok"]:
+            return ""
+        return "\n".join(
+            "%s  %s  (%s)%s" % (
+                wsl_place.drive_of(i["path"]) or "?",
+                i["label"][0].upper() + i["label"][1:], _fmt(i["size"]),
+                "\n      " + i["path"] if paths else "")
+            for i in d["place"])
+
+    @rpc
+    def disk_move_prepare(self):
+        """Move to another drive…: the checks before the drive prompt, and
+        the drives it offers (or None when it cannot go ahead)."""
+        from ..core import wsl_place
+        d = self._disk
+        if d is None or d["busy"]:
+            return None
+        if not d["wsl_ok"] or not d["place"]:
+            _mb().showinfo("WSL not available",
+                           "There's no WSL disk to move.")
+            return None
+        ok, msg = wsl_place.move_supported()
+        if not ok:
+            _mb().showwarning("Move not available", msg)
+            return None
+        opts = []
+        for dv in wsl_place.drives():
+            _moving, _root, problem = wsl_place.plan(
+                dv["letter"], d["place"], [dv])
+            name = dv["letter"] + (" " + dv["label"] if dv["label"] else "")
+            opts.append({
+                "letter": dv["letter"],
+                "text": "%s  —  %s free of %s" % (
+                    name, _fmt(dv["free"]), _fmt(dv["total"])),
+                "ok": not problem, "why": problem})
+        if not any(o["ok"] for o in opts):
+            _mb().showinfo(
+                "No other drive",
+                "There's no other drive WSL's disks (%s) can move to:\n\n%s"
+                % (_fmt(sum(i["size"] for i in d["place"])),
+                   "\n".join(o["why"] for o in opts)))
+            return None
+        pick = next((o["letter"] for o in opts if o["ok"]), None)
+        return {"drives": opts, "pick": pick,
+                "where": self._move_where(paths=False)}
+
+    @rpc
+    def disk_move(self, letter):
+        from ..core import wsl_place
+        d = self._disk
+        if d is None or d["busy"]:
+            return False
+        moving, dest_root, problem = wsl_place.plan(letter, d["place"])
+        if problem:
+            _mb().showwarning("Can't move there", problem)
+            return False
+        size = sum(i["size"] for i in moving)
+        # the card store stays off a hard disk (PAD-966): say so, and why
+        kept = wsl_place.stays(letter, d["place"])
+        stay = "".join(
+            "\n• %s stays on %s: %s." % (
+                i["label"], wsl_place.drive_of(i["path"]),
+                wsl_place.SLOW_WHY % letter) for i in kept)
+        if not _mb().askyesno(
+                "Move to another drive",
+                "Move %s (%s) to %s?\n\n%s\n\n• WSL will be shut down, and "
+                "the app holds it off until the move is done: close any "
+                "running extract, build or emulator first.\n• Copying %s "
+                "can take a while.\n• Close Docker Desktop and any Linux "
+                "terminal windows first: they start WSL again and keep its "
+                "disk in use.%s\n\nContinue?" % (
+                    " and ".join(i["label"] for i in moving), _fmt(size),
+                    letter, "\n".join("%s  →  %s" % (
+                        i["path"], wsl_place.target_of(i, dest_root))
+                        for i in moving), _fmt(size), stay)):
+            return False
+        self._disk_busy(True, "Moving…")
+        place = list(d["place"])
+
+        def _worker():
+            try:
+                done = wsl_place.move(letter, progress=self._disk_progress,
+                                      all_items=place)
+                self.ctx.loop.post(self._disk_after_move, letter, done, None)
+            except Exception as e:                      # noqa: BLE001
+                log.exception("moving WSL's disks to %s", letter)
+                self.ctx.loop.post(self._disk_after_move, letter, [], str(e))
+
+        threading.Thread(target=_worker, name="pad-shellx-move",
+                         daemon=True).start()
+        return True
+
+    def _disk_after_move(self, letter, done, err):
+        if self._disk is None:
+            return
+        if err:
+            self._disk_busy(False, "")
+            _mb().showerror("Move failed", err)
+        else:
+            _mb().showinfo(
+                "Moved",
+                "Moved to %s:\n\n%s\n\nThe app uses them there from now on."
+                % (letter, "\n".join("%s  →  %s" % (lbl, path)
+                                     for lbl, path in done)))
         if self._disk is not None:
             self._disk["busy"] = False
             self.disk_refresh()

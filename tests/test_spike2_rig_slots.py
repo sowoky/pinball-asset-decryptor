@@ -254,6 +254,25 @@ rm -rf "$t"
     assert out.splitlines() == ["slot=1", "slot=2", "slot=3", "full rc=1"]
 
 
+def test_a_board_this_account_cannot_write_is_named_not_every_slot_in_use():
+    """PAD-803: a board a root run made could take no lock from the plain
+    user, and riglock said "every slot 1..5 is in use" under a table of five
+    free slots. It says the board is the problem, and how to fix it."""
+    rc, out, err = _sh(_BOARD + r'''
+mkdir -p "$PAD_BOARD" && chmod 555 "$PAD_BOARD"
+# root writes any board, and Git Bash's chmod does not stop a write on NTFS
+[ -w "$PAD_BOARD" ] && { echo writable; chmod 755 "$PAD_BOARD"; rm -rf "$t"; exit 0; }
+L take --any PAD-VPX foo_fighters__le for Visual Pinball; echo "rc=$?"
+L use 2 PAD-VPX foo_fighters__le; echo "rc=$?"
+chmod 755 "$PAD_BOARD"; rm -rf "$t"
+''')
+    if out.strip() == "writable":
+        pytest.skip("this account can write a 555 directory (root, or NTFS)")
+    assert out.splitlines() == ["rc=1", "rc=1"], (out, err)
+    assert "in use" not in err, err
+    assert err.count("cannot write the board at ") == 2 and "chown" in err, err
+
+
 def test_a_held_slot_cannot_be_taken_and_only_its_holder_releases_it():
     rc, out, err = _sh(_BOARD + r'''
 L take --slot 2 item/48 godzilla run 2>/dev/null
@@ -535,7 +554,12 @@ echo "gone=$(pad_slot_of $a)"
 def test_pad_pids_sees_only_its_own_slot():
     rc, out, err = _sh(r'''
 . "$R/padslot.sh"
-cp "$(command -v sleep)" /tmp/pss.$$ && S=/tmp/pss.$$
+# a script, not a renamed copy of sleep: a shebang script's comm is its own
+# file name, while uutils' multicall sleep (Ubuntu 26.04) refuses a new name
+S=/tmp/pss.$$
+printf '#!/bin/sh
+sleep "$1"
+' > "$S" && chmod +x "$S"
 env PAD_SLOT=1 "$S" 30 & a=$!
 env PAD_SLOT=2 "$S" 30 & b=$!
 "$S" 30 & c=$!
@@ -550,6 +574,35 @@ kill -0 $a && kill -0 $c && ! kill -0 $b 2>/dev/null && echo "only slot 2 died"
 kill $a $c; rm -f "$S"
 ''')
     assert "ok1" in out and "only slot 2 died" in out, out + err
+
+
+@needs_proc
+def test_a_sweeps_card_copier_is_no_rigs_run_script():
+    """PAD-632: rigbatch's stager runs `cardmount.sh <card> --cache-now` with
+    no PAD_SLOT; read as rig 0's run script it put "1 running" and only "Stop
+    emulator" on the main rig with nothing running there."""
+    rc, out, err = _sh(r'''
+. "$R/padslot.sh"
+d=$(mktemp -d)
+printf 'sleep 30\n' > "$d/cardmount.sh"; cp "$d/cardmount.sh" "$d/watch.sh"
+env -u PAD_SLOT bash "$d/cardmount.sh" /x/card.raw --cache-now & c=$!
+env -u PAD_SLOT bash "$d/cardmount.sh" /x/card.raw & m=$!
+env -u PAD_SLOT bash "$d/watch.sh" 0 & w=$!
+sleep 0.3
+got=$(PAD_SLOT=0 pad_run_script_pids | sort -n | tr '\n' ' ')
+want=$(printf '%s\n' "$m" "$w" | sort -n | tr '\n' ' ')
+[ "$got" = "$want" ] && echo ok
+echo "got=$got want=$want copier=$c"
+kill $c $m $w; rm -rf "$d"
+''')
+    assert "ok" in out.splitlines(), out + err
+
+
+def test_status_and_stop_ask_the_one_run_script_list():
+    assert "SCRIPT=$(pad_run_script_pids |" in _src("alive.sh")
+    k = _src("killgame.sh")
+    assert "_rs=$(pad_run_script_pids)" in k
+    assert "(watch|runbridge|nbrun|run_game|cardmount)" not in k
 
 
 def test_a_save_state_load_keeps_a_rigs_overlay_root():
@@ -720,3 +773,146 @@ def test_rigbatch_boots_staged_copies_and_reuses_them():
     staged = out.split("--- staged")[1].split("--- again")[0].split()
     assert staged == ["a.raw", "a.raw.src", "b.raw", "b.raw.src", "c.raw", "c.raw.src"]
     assert out.split("--- again")[1].strip() == "3"
+
+
+# PAD-649: the rigs join as they free, every job is capped, the batch runs at 4x
+# --------------------------------------------------------------------------
+
+_JOIN = r"""
+t=$(mktemp -d) || exit 1
+mkdir -p "$t/rig" "$t/home" "$t/board"
+cp "$R"/padpath.sh "$R"/padslot.sh "$R"/riglock.sh "$R"/rigbatch.sh "$t/rig/"
+printf '#!/bin/bash\necho 0\n' > "$t/rig/alive.sh"
+printf '#!/bin/bash\n:\n' > "$t/rig/killgame.sh"
+cat > "$t/job.sh" <<'JOB'
+#!/bin/bash
+echo "$PAD_SLOT $1" >> "$JOBLOG"
+sleep 1
+echo "VERDICT $1 pass"
+JOB
+for k in 1 2 3 4 5 6 7 8 9 10; do echo "b$k|/cards/b$k.raw|"; done > "$t/l.list"
+export PAD_HOME="$t/home" PAD_BOARD="$t/board" PAD_SLOTS_MAX=2 JOBLOG="$t/jobs.txt"
+export PAD_RIGBATCH_ASSUME_MOUNTED=1 PAD_RIGBATCH_GROW_S=1
+# both rigs are somebody else's when the batch starts
+bash "$t/rig/riglock.sh" take --slot 1 OTHER busy > /dev/null 2>&1
+bash "$t/rig/riglock.sh" take --slot 2 OTHER busy > /dev/null 2>&1
+bash "$t/rig/rigbatch.sh" -n 2 --who PAD-9 --out "$t/out" "$t/l.list" -- bash "$t/job.sh" > "$t/stdout" 2>&1 &
+bp=$!
+sleep 2.5
+echo "waiting=$(grep -c 'no rig is free; waiting' "$t/out/progress.txt")"
+bash "$t/rig/riglock.sh" release 1 OTHER > /dev/null 2>&1     # one frees: the batch starts on it
+sleep 3
+echo "ahead=$(cat "$t/out/ahead")"
+bash "$t/rig/riglock.sh" release 2 OTHER > /dev/null 2>&1     # the other frees: it joins
+wait "$bp"; echo "rc=$?"
+echo "ahead=$(cat "$t/out/ahead")"
+echo "--- rigs used"; cut -d' ' -f1 "$t/jobs.txt" | sort -u | tr '\n' ' '; echo
+echo "--- progress"; grep -E "joins|given back|ALL DONE" "$t/out/progress.txt" | sed 's/^[0-9:]* //'
+echo "--- locks left"; ls "$t/board"
+rm -rf "$t"
+"""
+
+
+@needs_proc
+def test_rigbatch_waits_for_a_rig_and_takes_more_as_they_free():
+    """PAD-649: -n is a ceiling. With every rig held the batch waits (saying so), starts on the first rig that
+    frees, takes the second when it frees while builds are still queued, and gives each rig back the moment its
+    worker finds the queue empty. The card copier's lead follows the rig count (two per rig)."""
+    rc, out, err = _sh(_JOIN, {"PAD_HOME": "/nonexistent"}, timeout=120)
+    assert "waiting=1" in out, out + err
+    assert out.count("ahead=2\n") == 1 and out.count("ahead=4\n") == 1
+    assert "rc=0" in out
+    assert out.split("--- rigs used")[1].split("--- progress")[0].split() == ["1", "2"]
+    prog = out.split("--- progress")[1].split("--- locks left")[0]
+    assert re.search(r"rig 2 joins \(\d+ builds still queued\)", prog), prog
+    assert "rig 1  given back (the queue is empty)" in prog and "rig 2  given back (the queue is empty)" in prog
+    assert "ALL DONE: 10/10 pass" in prog and "on 2 rig(s)" in prog
+    assert out.split("--- locks left")[1].strip() == ""
+
+
+_CAP = r"""
+t=$(mktemp -d) || exit 1
+mkdir -p "$t/rig" "$t/home" "$t/board"
+cp "$R"/padpath.sh "$R"/padslot.sh "$R"/riglock.sh "$R"/rigbatch.sh "$t/rig/"
+printf '#!/bin/bash\necho 0\n' > "$t/rig/alive.sh"
+printf '#!/bin/bash\n:\n' > "$t/rig/killgame.sh"
+cat > "$t/job.sh" <<'JOB'
+#!/bin/bash
+case "$1" in slow*) sleep 31.7 & wait ;; esac
+echo "VERDICT $1 pass"
+JOB
+printf 'a|/cards/a.raw|\nslow|/cards/s.raw|\nslow2|/cards/s2.raw|PAD_JOB_CAP=1\nb|/cards/b.raw|\n' > "$t/l.list"
+export PAD_HOME="$t/home" PAD_BOARD="$t/board" PAD_SLOTS_MAX=3 JOBLOG="$t/jobs.txt"
+export PAD_RIGBATCH_ASSUME_MOUNTED=1
+t0=$(date +%s)
+bash "$t/rig/rigbatch.sh" -n 1 --job-cap 3 --who PAD-9 --out "$t/out" "$t/l.list" -- bash "$t/job.sh" > "$t/stdout" 2>&1
+echo "rc=$?"
+echo "took=$(( $(date +%s) - t0 ))"
+echo "--- results"; cut -f1,3,5 "$t/out/results.tsv" | sort
+echo "--- sleepers left: $(pgrep -fc '^sleep 31[.]7$' || true)"
+rm -rf "$t"
+"""
+
+
+@needs_proc
+def test_rigbatch_caps_every_job():
+    """PAD-649: a job with no VERDICT by --job-cap (or its line's own PAD_JOB_CAP) is stopped with everything it
+    started, and the build fails saying so - PAD-645's failing builds took 10-17 minutes each in a wait for a line
+    that never came."""
+    rc, out, err = _sh(_CAP, {"PAD_HOME": "/nonexistent"}, timeout=120)
+    assert "rc=1" in out, out + err
+    took = int(re.search(r"took=(\d+)", out).group(1))
+    assert took < 25, out
+    res = out.split("--- results")[1].split("--- sleepers")[0].strip().splitlines()
+    assert res[0].split("\t")[:2] == ["a", "pass"] and res[1].split("\t")[:2] == ["b", "pass"]
+    assert res[2].split("\t")[1] == "fail" and "no verdict in 3s - the job was stopped (--job-cap)" in res[2]
+    assert res[3].split("\t")[1] == "fail" and "no verdict in 1s - the job was stopped (--job-cap)" in res[3]
+    assert "sleepers left: 0" in out
+
+
+def test_rigbatch_runs_at_4x_by_default_and_the_copier_follows_it():
+    rb = open(os.path.join(RIG, "rigbatch.sh"), encoding="utf-8").read()
+    assert "SPEED=4 FPS=15 CAP=600 WAIT=1" in rb
+    assert '1|1.0|"") SPEED="" ;;' in rb                       # --speed 1 asks nothing of the shim
+    assert "--job-cap) CAP=$2; shift 2 ;;" in rb and "--no-wait) WAIT=0; shift ;;" in rb
+    assert 'setsid env ${STAGE:+' in rb                          # a job is a session the cap can stop whole
+    assert 'echo $(( 2 * ${#SLOTS[@]} )) > "$OUT/ahead"' in rb
+    cs = open(os.path.join(RIG, "cardstage.sh"), encoding="utf-8").read()
+    assert "COPY_LOCK=/mnt/wsl/pad-cardstage-copy.lock" in cs     # one lock for every distro
+    assert "COPY_LOCK=/tmp/pad-cardstage-copy.lock" in cs         # plain Linux, the tests
+    assert cs.count('-ge "$(ahead)" ]; do') == 2 and '"$AHEAD" ]; do' not in cs
+
+
+def test_rigjob_keeps_the_games_time_and_leaves_the_rig_clean():
+    """rigjob.sh: the library a sweep job is written on. Its model-the-game waits are pad_gsleep (shorter by
+    rigbatch's --speed), a deadline for a log line is in game seconds, every wait ends when the run dies, and a
+    job that ends without a verdict still stops the rig and says so."""
+    rj = open(os.path.join(RIG, "rigjob.sh"), encoding="utf-8").read()
+    assert 'job_sleep() { pad_gsleep "${1:?job_sleep <game seconds>}"; }' in rj
+    assert "printf \"%d\", t + s / k + 1" in rj                 # job_wait_log's deadline, game seconds / speed
+    for f in ("job_wait_attract", "job_wait_log", "job_start_game"):
+        body = rj[rj.index(f + "() {"):]
+        body = body[:body.index("\n}\n")]
+        assert "job_dead" in body, f
+    assert "trap job_cleanup EXIT" in rj and "the job ended without a verdict" in rj
+    assert 'python3 "$RIG/plunge.py" game' in rj               # a game is on when the ball was launched
+    sc = open(os.path.join(RIG, "startcheck.sh"), encoding="utf-8").read()
+    assert '. "$(dirname "$0")/rigjob.sh"' in sc and "job_start_game || job_fail" in sc
+
+
+def test_a_card_copy_is_on_the_board_while_it_runs():
+    """PAD-649: the copier's wait loop writes copy-<label>.json beside the rigs' locks every 2 s and removes it at
+    the end (stall included); cardstage.sh writes a "queued" one before it takes the copy lock and clears it after;
+    rigbatch names the card's label in the waiting rig's lock note and sweeps its own records at the end."""
+    cm = open(os.path.join(RIG, "cardmount.sh"), encoding="utf-8").read()
+    w = cm[cm.index("cache_wait() {"):cm.index("cache_pick() {")]
+    assert 'copy_board_write "$label" "$img" copying "$done" "$total"' in w
+    assert w.count('copy_board_clear "$label"') == 2
+    assert 'if [ "$MODE" = "--board-copy" ]; then' in cm and 'copy_board_write "$LABEL" "$IMG" queued 0' in cm
+    cs = open(os.path.join(RIG, "cardstage.sh"), encoding="utf-8").read()
+    blk = cs[cs.index('if [ "$STAGE" = cache ]; then'):cs.index("# THIS batch's own folder")]
+    assert blk.index('--board-copy queued') < blk.index("got=$( copy_lock") < blk.index('--board-copy clear')
+    rb = open(os.path.join(RIG, "rigbatch.sh"), encoding="utf-8").read()
+    assert 'note "$slot" "rigbatch $key (waiting for its card: $lbl)"' in rb
+    assert 'PAD_LABEL="$WHO" setsid bash "$RIG/cardstage.sh" "$OUT" cache' in rb
+    assert '"$(pad_board_dir)"/copy-*.json' in rb

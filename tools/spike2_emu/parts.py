@@ -295,7 +295,15 @@ def _cat(path, offset, name):
     Split out of rootfs_file() so multiboot() can read a second file out of a
     rootfs it has ALREADY identified - identify() is two or three debugfs
     listings, and asking it once per file is how a "few hundred milliseconds"
-    probe turns into a second."""
+    probe turns into a second.
+
+    A file the card carries as a LINK (/etc/init.d/game_monitor on a card that has been on a
+    machine, PAD-742) is read where the link leads: debugfs's cat does not follow it."""
+    try:
+        from mkmulticard import resolve_link_path
+        name = resolve_link_path(name, lambda p: _readlink(path, offset, p))
+    except Exception:       # noqa: BLE001 - a loop, no debugfs: read the name as given
+        pass
     try:
         r = subprocess.run(["debugfs", "-R", "cat %s" % name,
                             "%s?offset=%d" % (path, offset)],
@@ -306,6 +314,22 @@ def _cat(path, offset, name):
     if r.returncode != 0 or not r.stdout:
         return None
     return r.stdout.decode("utf-8", "replace")
+
+
+def _readlink(path, offset, name):
+    """The target of the link `name` in the ext4 at `offset`, or None when it is no link."""
+    ref = "%s?offset=%d" % (path, offset)
+    r = subprocess.run(["debugfs", "-R", 'stat "%s"' % name, ref], stdout=subprocess.PIPE,
+                       stderr=subprocess.DEVNULL, timeout=60)
+    txt = r.stdout.decode("utf-8", "replace")
+    if not re.search(r"Type:\s+symlink", txt):
+        return None
+    m = re.search(r'Fast link dest: "([^"]*)"', txt)
+    if m:
+        return m.group(1)
+    r = subprocess.run(["debugfs", "-R", 'cat "%s"' % name, ref], stdout=subprocess.PIPE,
+                       stderr=subprocess.DEVNULL, timeout=60)
+    return r.stdout.decode("utf-8", "replace") or None
 
 
 def rootfs_file(path, name):
@@ -371,17 +395,35 @@ def identify(path):
 
     linux = [(idx, start) for idx, ptype, start, _c in parts
              if ptype in LINUX_TYPES]
+    listed = []
     for idx, start in linux:
         names = _ls(path, start * SECTOR)
         if names is None:
             guessed = True
             continue
+        listed.append((start * SECTOR, names))
+    # THE GAMES PARTITION IS THE ONE THAT HOLDS A GAME, asked first and by the
+    # strict rule (/spk AND a title directory with a `game` in it). PAD-659: a
+    # card whose OS partition also carried /spk had that OS called "games" by
+    # the looser rules below, so the emulator mounted p2, found no game in it
+    # ("mounted, but no directory in it holds a game ELF") and the boot-menu
+    # check read the same p2 as the rootfs. None of the 60 factory cards has
+    # /spk on p2, so the old answers there are unchanged.
+    for off, _names in listed:
+        if _title_dirs(path, off):
+            out["games"] = off
+            break
+    for off, names in listed:
+        if off == out.get("games"):
+            continue
         # A rootfs is an OS: it has the directories a chroot needs. A games
         # partition has the package tree and the title directories instead.
-        if {"lib", "usr"} <= names and "spk" not in names:
-            out.setdefault("rootfs", start * SECTOR)
+        # /spk beside /lib and /usr no longer disqualifies it once the games
+        # partition has been found on its own (above).
+        if {"lib", "usr"} <= names and ("spk" not in names or "games" in out):
+            out.setdefault("rootfs", off)
         elif "spk" in names or not ({"lib", "usr", "etc"} & names):
-            out.setdefault("games", start * SECTOR)
+            out.setdefault("games", off)
 
     if guessed or ("rootfs" not in out and linux):
         # Order is the fallback and nothing more: p2 rootfs, p3 games is what
@@ -438,6 +480,23 @@ def images_conf_count(text):
     return n
 
 
+def images_conf_testcard(text):
+    """Is this images.conf a PAD TEST CARD's (PAD-1279)? mkmulticard.py writes
+    `testcard=on` for one, and conf.c reads the key the same way as every other:
+    trimmed, comments dropped, split at the first '='. A test card names ONE
+    image (the stock tree it was made from, which it never boots) and the
+    selector stays in its TEST CARD menu until power-off, so the image count
+    alone would call it "no menu"."""
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        key, sep, val = s.partition("=")
+        if sep and key.strip() == "testcard":
+            return val.strip().lower() in ("on", "1", "yes", "true")
+    return False
+
+
 def multiboot(path):
     """Does this card boot into a MENU? ``(state, why, images)`` where state
     is 'yes', 'no' or 'unknown' - the one definition, asked by the rig
@@ -481,7 +540,11 @@ def multiboot(path):
         return ("no", "no %s in the rootfs" % SELECTOR_BIN, 0)
     if "codeselect" not in names:
         return ("no", "no %s in the rootfs" % SELECTOR_BIN, 0)
-    n = images_conf_count(_cat(path, off, SELECTOR_CONF))
+    conf = _cat(path, off, SELECTOR_CONF)
+    n = images_conf_count(conf)
+    if images_conf_testcard(conf):
+        # PAD-1279: the menu IS the card - it boots no game at all
+        return ("yes", "a PAD test card: the selector's TEST CARD menu, no game", n)
     if n >= 2:
         return ("yes", "selector installed, %d images in images.conf" % n, n)
     if n == 0:
@@ -489,6 +552,98 @@ def multiboot(path):
                 % SELECTOR_CONF, 0)
     return ("no", "the selector is installed but %s names only one games tree"
             % SELECTOR_CONF, 1)
+
+
+#: The on-disk magic a LUKS header starts with - the 6 bytes "LUKS" + 0xBA 0xBE,
+#: then a 2-byte big-endian version (1 or 2). This is the public LUKS format
+#: signature, read ONLY to recognise that a partition is an encrypted container
+#: this rig cannot mount - the same kind of magic-byte check that tells ext4
+#: from FAT. Nothing here reads a key or a keyslot.
+LUKS_MAGIC = b"LUKS\xba\xbe"
+#: The FAT boot partition of a Stern Spike 3 card is labelled SPIKE3 (a Spike 2
+#: card's is not). BS_VolLab sits at offset 43 of a FAT12/16 boot sector and 71
+#: of a FAT32 one; both are checked.
+SPIKE3_FAT_LABEL = b"SPIKE3"
+
+
+def _luks_version(path, start_lba):
+    """The LUKS version at partition `start_lba` (1 or 2), or 0 if it is not a
+    LUKS header. Reads only the 8-byte magic+version at the partition start."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(start_lba * SECTOR)
+            head = f.read(8)
+    except OSError:
+        return 0
+    if head[:6] != LUKS_MAGIC:
+        return 0
+    return struct.unpack_from(">H", head, 6)[0]
+
+
+def _fat_label(path, start_lba):
+    """The volume label in the FAT boot sector at `start_lba`, stripped, or ""."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(start_lba * SECTOR)
+            boot = f.read(512)
+    except OSError:
+        return b""
+    if len(boot) < 512:
+        return b""
+    # FAT32 carries a 0x29 extended boot signature at 66 with the label at 71;
+    # FAT12/16 carry it at 38 with the label at 43. Try whichever signature is
+    # present rather than guessing the FAT width from the BPB.
+    for sig_off, lab_off in ((66, 71), (38, 43)):
+        if boot[sig_off] == 0x29:
+            return boot[lab_off:lab_off + 11].rstrip(b" \x00")
+    return b""
+
+
+def spike3(path):
+    """Is this a Stern **Spike 3** card image? ``(is_spike3, why)``.
+
+    Spike 3 (Raspberry Pi CM4 generation: Star Wars 2025, Pokemon, Walking Dead
+    Remastered) encrypts every data partition as a LUKS2 / AES-XTS volume whose
+    key lives in the machine's CM4 OTP fuses, not on the card - so these images
+    cannot be mounted or extracted from the image alone, and fuse2fs refuses
+    the "games" partition as not-ext4. This recognises one up front, before a
+    60 GB copy, from two independent signals read off the original image:
+
+      * a data (type 0x83) partition, primary or logical, that begins with the
+        LUKS magic - the signal that actually matters, since it is what stops
+        the mount; and
+      * the FAT boot partition labelled SPIKE3, which a Spike 2 card's is not.
+
+    Either alone is enough. A Spike 2 card has plain-ext4 data partitions (no
+    LUKS magic) and no SPIKE3 label, so it is never mistaken for one.
+    """
+    try:
+        parts = table(path) + [(i, t, s, c)
+                               for i, t, s, c, _e in logical(path)]
+    except SystemExit:                        # no MBR: not a card we know
+        return (False, "")
+    except OSError as exc:
+        return (False, "cannot read %s: %s" % (path, exc))
+
+    luks = [idx for idx, ptype, start, _c in parts
+            if ptype in LINUX_TYPES and _luks_version(path, start) >= 1]
+    label = ""
+    for _idx, ptype, start, _c in parts:
+        if ptype in FAT_TYPES:
+            label = _fat_label(path, start)
+            break
+
+    if luks:
+        why = "partition%s %s %s LUKS-encrypted" % (
+            "s" if len(luks) > 1 else "",
+            ", ".join("p%d" % i for i in luks),
+            "are" if len(luks) > 1 else "is")
+        if label == SPIKE3_FAT_LABEL:
+            why += " and the boot partition is labelled SPIKE3"
+        return (True, why)
+    if label == SPIKE3_FAT_LABEL:
+        return (True, "the boot partition is labelled SPIKE3")
+    return (False, "")
 
 
 def _ordinal(n):
@@ -500,7 +655,7 @@ def _ordinal(n):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("image")
-    for flag in ("rootfs", "games", "fat", "list-games", "multiboot"):
+    for flag in ("rootfs", "games", "fat", "list-games", "multiboot", "spike3", "testcard"):
         ap.add_argument("--" + flag, action="store_true")
     ap.add_argument("--part", type=int, metavar="N",
                     help="byte offset of partition N (kernel numbering)")
@@ -520,6 +675,33 @@ def main():
         state, why, _n = multiboot(a.image)
         print("multiboot: %s - %s" % (state, why))
         return {"yes": 0, "no": 1}.get(state, 2)
+
+    # ★ PAD-1279 - "IS THIS A PAD TEST CARD": the selector installed and its
+    # images.conf says testcard=on. One line; exit 0 = yes, 1 = no / cannot tell.
+    if a.testcard:
+        yes = False
+        try:
+            found = identify(a.image) if os.path.exists(a.image) else {}
+        except (SystemExit, OSError):
+            found = {}
+        if "rootfs" in found:
+            yes = images_conf_testcard(_cat(a.image, found["rootfs"], SELECTOR_CONF))
+        print("testcard: %s" % ("yes" if yes else "no"))
+        return 0 if yes else 1
+
+    # ★ "IS THIS A SPIKE 3 CARD" - asked above the existence check for the same
+    # reason as --multiboot: a missing file is an answer (no, exit 1), not a
+    # crash. One line on stdout; exit 0 = yes (a card PAD cannot mount),
+    # 1 = no / cannot tell. Reads only the MBR and a few partition magics, so it
+    # is cheap enough to run on every card pick, BEFORE the 60 GB cache copy.
+    if a.spike3:
+        if not os.path.exists(a.image):
+            print("spike3: no - no such image: %s" % a.image)
+            return 1
+        is3, why = spike3(a.image)
+        print("spike3: %s%s" % ("yes" if is3 else "no",
+                                " - " + why if why else ""))
+        return 0 if is3 else 1
 
     if not os.path.exists(a.image):
         raise SystemExit("no such image: %s" % a.image)

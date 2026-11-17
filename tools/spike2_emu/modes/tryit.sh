@@ -8,7 +8,7 @@
 #   tryit.sh install <stage dir>   before the run: <stage>/pad_mode.so -> $ROOT/lib/pad_mode.so
 #                                  (PAD_MODE_SO=/lib/pad_mode.so), <stage>/game.port ->
 #                                  $ROOT/dump/game.port, <stage>/gamecheck.on (Check this game,
-#                                  gamecheck.sh) -> $ROOT/dump, <stage>/mode*.cfg and each code mode's
+#                                  gamecheck.sh) and <stage>/soundlog.only (PAD-1071) -> $ROOT/dump, <stage>/mode*.cfg (and stock/clips/sounds/picture/attract/coop/idle/handicap/comp/cabshow/scorefeed/records.cfg) and each code mode's
 #                                  <stage>/<slug>.assets (sdk/pad_mode_assets.h) -> $ROOT/dump,
 #                                  after clearing the mode files, triggers and mode.log a
 #                                  previous run left there. cardmodes.sh calls this too, for
@@ -123,13 +123,18 @@ case "$cmd" in
         # have a later stock run take THOSE out.
         rm -f "$DUMP"/mode.cfg "$DUMP"/mode[1-7].cfg "$DUMP"/mode.start "$DUMP"/mode[1-7].start \
               "$DUMP"/mode.stop "$DUMP"/mode.clip "$DUMP"/mode.log "$DUMP"/cardmodes.from \
-              "$DUMP"/*.assets "$DUMP"/stock.cfg "$DUMP"/clips.cfg "$DUMP"/gamecheck.on \
-              "$DUMP"/census.mark
+              "$DUMP"/*.assets "$DUMP"/stock.cfg "$DUMP"/clips.cfg "$DUMP"/sounds.cfg "$DUMP"/picture.cfg "$DUMP"/settings.cfg "$DUMP"/attract.cfg "$DUMP"/coop.cfg "$DUMP"/idle.cfg "$DUMP"/handicap.cfg "$DUMP"/comp.cfg "$DUMP"/cabshow.cfg "$DUMP"/scorefeed.cfg "$DUMP"/records.cfg "$DUMP"/gamecheck.on \
+              "$DUMP"/census.mark "$DUMP"/soundlog.only
         put "$S/pad_mode.so" "$LIB/pad_mode.so" || die "could not copy the mode object into $LIB"
         put "$S/game.port" "$DUMP/game.port" || die "could not copy the port into $DUMP"
         # the Modes tab's Check this game: the object logs what the game sends (mode_file.c)
         if [ -f "$S/gamecheck.on" ]; then
             put "$S/gamecheck.on" "$DUMP/gamecheck.on" || die "could not copy gamecheck.on"
+        fi
+        # PAD-1071: the Emulate tab's stage for a boot with no runtime of its own - the object hooks the
+        # sound worker for the Sound and video log and nothing else (modes/soundlog.sh)
+        if [ -f "$S/soundlog.only" ]; then
+            put "$S/soundlog.only" "$DUMP/soundlog.only" || die "could not copy soundlog.only"
         fi
         n=0
         for f in "$S"/mode.cfg "$S"/mode[1-7].cfg; do
@@ -144,6 +149,50 @@ case "$cmd" in
         # PAD-446: the clips that play one of several at random, read beside the mode files
         if [ -f "$S/clips.cfg" ]; then
             put "$S/clips.cfg" "$DUMP/clips.cfg" || die "could not copy clips.cfg"
+        fi
+        # PAD-494: the music modes, read beside the mode files
+        if [ -f "$S/sounds.cfg" ]; then
+            put "$S/sounds.cfg" "$DUMP/sounds.cfg" || die "could not copy sounds.cfg"
+        fi
+        # PAD-537: the picture settings, read beside the mode files
+        if [ -f "$S/picture.cfg" ]; then
+            put "$S/picture.cfg" "$DUMP/picture.cfg" "$DUMP/settings.cfg" || die "could not copy picture.cfg"
+        fi
+        # PAD-1382: the settings sharing the MORE SETTINGS rows, read beside the mode files
+        if [ -f "$S/settings.cfg" ]; then
+            put "$S/settings.cfg" "$DUMP/settings.cfg" || die "could not copy settings.cfg"
+        fi
+        # PAD-782: the owner's attract items, read beside the mode files
+        if [ -f "$S/attract.cfg" ]; then
+            put "$S/attract.cfg" "$DUMP/attract.cfg" || die "could not copy attract.cfg"
+        fi
+        # PAD-1017: co-op play, read beside the mode files
+        if [ -f "$S/coop.cfg" ]; then
+            put "$S/coop.cfg" "$DUMP/coop.cfg" || die "could not copy coop.cfg"
+        fi
+        # PAD-1022: inactivity pausing the game's timers, read beside the mode files
+        if [ -f "$S/idle.cfg" ]; then
+            put "$S/idle.cfg" "$DUMP/idle.cfg" || die "could not copy idle.cfg"
+        fi
+        # PAD-1033: a handicap for each player, read beside the mode files
+        if [ -f "$S/handicap.cfg" ]; then
+            put "$S/handicap.cfg" "$DUMP/handicap.cfg" || die "could not copy handicap.cfg"
+        fi
+        # PAD-1040: the card's expression light shows, read beside the mode files
+        if [ -f "$S/cabshow.cfg" ]; then
+            put "$S/cabshow.cfg" "$DUMP/cabshow.cfg" || die "could not copy cabshow.cfg"
+        fi
+        # PAD-1041: Prolonged Competition on the start menu, read beside the mode files
+        if [ -f "$S/comp.cfg" ]; then
+            put "$S/comp.cfg" "$DUMP/comp.cfg" || die "could not copy comp.cfg"
+        fi
+        # PAD-1204: the score feed, read beside the mode files
+        if [ -f "$S/scorefeed.cfg" ]; then
+            put "$S/scorefeed.cfg" "$DUMP/scorefeed.cfg" || die "could not copy scorefeed.cfg"
+        fi
+        # PAD-1280: the owner's records on the game's high scores, read beside the mode files
+        if [ -f "$S/records.cfg" ]; then
+            put "$S/records.cfg" "$DUMP/records.cfg" || die "could not copy records.cfg"
         fi
         a=0
         for f in "$S"/*.assets; do       # a code mode's own assets (the build's carriers)
@@ -160,7 +209,7 @@ case "$cmd" in
         # game reads them as root), so it is said, not fatal.
         if [ "$(id -u)" = 0 ]; then
             given=("$LIB/pad_mode.so" "$DUMP/game.port")
-            for f in "$DUMP"/mode.cfg "$DUMP"/mode[1-7].cfg "$DUMP"/*.assets "$DUMP"/stock.cfg "$DUMP"/clips.cfg "$DUMP"/gamecheck.on; do
+            for f in "$DUMP"/mode.cfg "$DUMP"/mode[1-7].cfg "$DUMP"/*.assets "$DUMP"/stock.cfg "$DUMP"/clips.cfg "$DUMP"/sounds.cfg "$DUMP"/picture.cfg "$DUMP"/settings.cfg "$DUMP"/attract.cfg "$DUMP"/coop.cfg "$DUMP"/idle.cfg "$DUMP"/handicap.cfg "$DUMP"/comp.cfg "$DUMP"/cabshow.cfg "$DUMP"/scorefeed.cfg "$DUMP"/records.cfg "$DUMP"/gamecheck.on "$DUMP"/soundlog.only; do
                 [ -f "$f" ] && given+=("$f")
             done
             pad_give_back "${given[@]}"

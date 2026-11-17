@@ -48,6 +48,27 @@
 .scenes-list-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .scenes-list { flex: 1 1 auto; min-height: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .scenes-list .tr { padding: 0 10px; gap: 6px; }
+/* PAD-540 (DragonRR): the list of edits, in the scene list's place while it is open */
+.scenes-list-wrap.sc-off { display: none; }
+.sc-edits-open { all: unset; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; border-radius: 4px;
+  padding: 1px 4px; text-decoration: underline dotted; text-underline-offset: 3px; }
+.sc-edits-open:hover { background: var(--panel-2); text-decoration-style: solid; }
+.sc-edits-open:focus-visible { outline: 2px solid var(--accent); }
+.sc-edits { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+.sc-edits-hd { gap: 8px; flex-wrap: nowrap; }
+.sc-edits-body { flex: 1 1 auto; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg); padding: 4px 0; }
+.sc-edits-none { margin: 8px 12px; }
+.sc-edits-sh { gap: 8px; padding: 6px 10px 2px; font-family: var(--cond); font-weight: 600; font-size: 13px; color: var(--ink-2); flex-wrap: nowrap; }
+.sc-edit-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 6px; align-items: center;
+  padding: 3px 6px 3px 10px; font-size: 13px; cursor: pointer; }
+.sc-edit-txt { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.sc-edit-n { align-self: start; padding-top: 1px; }
+.sc-edit-row:hover { background: var(--panel-2); }
+.sc-edit-row.on { background: var(--sel); box-shadow: inset 2px 0 0 var(--accent); }
+.sc-edit-row.gone { cursor: default; opacity: .6; }
+.sc-edit-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sc-edit-n { text-align: right; font-variant-numeric: tabular-nums; }
 .scenes-list .th { letter-spacing: .02em; }
 .scenes-center { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
 /* centred by auto margins, not justify-content: a zoomed preview (PAD-282) then scrolls to every edge */
@@ -82,6 +103,12 @@
 .sc-item.sel { background: var(--sel); box-shadow: inset 2px 0 0 var(--accent); }
 .sc-item.note { color: var(--ink-3); font-style: italic; }
 .sc-sw { width: 12px; height: 12px; border-radius: 3px; }
+/* PAD-567 (DragonRR): a Contents row is its name, after its small picture (or text colour) */
+.ct-item { grid-template-columns: 22px minmax(0, 1fr); gap: 8px; padding-left: 22px; }
+.sc-pic { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; border-radius: 3px;
+  background: repeating-conic-gradient(#3a3a42 0% 25%, #2a2a30 0% 50%) 0 0 / 8px 8px; overflow: hidden; }
+.sc-pic img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+.ct-item .sc-sw { justify-self: center; }
 .scenes-canvas { aspect-ratio: 1360 / 768; border-radius: 8px; border: 1px solid var(--line-2); display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .scenes-canvas img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .scenes-msg { color: #6b6b76; font-size: 13px; }
@@ -102,6 +129,10 @@
 .scenes-top { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
 .scenes-top > .scenes-contents { flex: 1 1 auto; min-height: 0; }
 .tree-canvas { position: relative; cursor: default; touch-action: none; outline: none; }
+/* PAD-1211: the frame drawn round it, not a border: a border took 2 px off the inside, so the
+   picture (kept to the screen's shape) sat up to a pixel off the outlines and snap guides
+   (stretched to fill it) and a drag's live picture overshot where the drop put it */
+.tree-canvas { border: none; box-shadow: 0 0 0 1px var(--line-2); }
 .tree-canvas:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
 .tree-canvas img { position: absolute; inset: 0; user-select: none; pointer-events: none; }
 .tree-canvas canvas.tree-frame { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -130,17 +161,58 @@
 .scenes-prep-bar { max-width: 420px; }
 @media (prefers-reduced-motion: reduce) { .scenes-shimmer { animation: none; } .tree-busy { animation-duration: .01s; } }
 .tree-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+/* PAD-515: what the game does to a box as it plays, a color each - teal it fills its words in
+   (PAD-485), violet it paints its colors (PAD-507) - on its outline, its Layers row and its
+   bar in the Selected panel */
+:root { --game-fills: #2dd4bf; --game-paints: #c084fc; }
+:root.light { --game-fills: #0f9488; --game-paints: #9333ea; }
 .tree-hover { fill: rgba(255, 255, 255, 0.06); stroke: rgba(255, 255, 255, 0.7); stroke-width: 2; stroke-dasharray: 8 6; vector-effect: non-scaling-stroke; }
 .tree-sel { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
-/* PAD-485: a box the game fills in as it plays keeps an outline of its own (teal, dotted) */
-.tree-filled { fill: none; stroke: #2dd4bf; stroke-width: 2.5; stroke-dasharray: 2 6; stroke-linecap: round; vector-effect: non-scaling-stroke; opacity: .95; }
-.ly-filled { display: inline-flex; vertical-align: -2px; color: #2dd4bf; margin-right: 4px; }
+/* an outline of its own kind shows the same way (under the mouse, selected), in its own color
+   and dashes: teal dots for a box the game fills, violet dash-dots for a line it paints */
+.tree-hover.filled { fill: rgba(45, 212, 191, .08); stroke: var(--game-fills); stroke-width: 2.5; stroke-dasharray: 2 6; stroke-linecap: round; }
+.tree-hover.painted { fill: rgba(192, 132, 252, .08); stroke: var(--game-paints); stroke-width: 2.5; stroke-dasharray: 10 4 2 4; }
+.tree-sel.filled, .tree-box.filled { stroke: var(--game-fills); }
+.tree-sel.painted, .tree-box.painted { stroke: var(--game-paints); }
+.tree-handle.filled { fill: var(--game-fills); }
+.tree-handle.painted { fill: var(--game-paints); }
+.ly-filled { display: inline-flex; vertical-align: -2px; color: var(--game-fills); margin-right: 4px; }
+.ly-filled.ly-painted { color: var(--game-paints); }
 .ly-filled .i { width: 13px; height: 13px; }
-.tree-filled-note { display: flex; align-items: center; gap: 6px; color: #2dd4bf; flex-wrap: wrap; }
-.tree-filled-note .i { flex: none; }
-.tree-filled-note b { color: var(--ink); }
+/* the Selected panel's bars, like Switchable parts: lit in their color when the game does it,
+   greyed out when it does not */
+.tree-game { display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--line-2); border-radius: 6px; padding: 5px 8px; }
+.tree-game .tg-head { flex-wrap: nowrap; min-height: 24px; }
+.tree-game .tg-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.tree-game .tg-name .i { flex: none; width: 15px; height: 15px; }
+.tree-game .tg-name .eyebrow { margin: 0; color: inherit; white-space: nowrap; }
+.tree-game .tg-what b { color: var(--ink); }
+.tree-game.fills { border-color: var(--game-fills); color: var(--game-fills); background: rgba(45, 212, 191, .06); }
+.tree-game.paints { border-color: var(--game-paints); color: var(--game-paints); background: rgba(192, 132, 252, .06); }
+.tree-game.off { border-color: var(--line); color: var(--ink-3); background: none; }
+.tree-game.off .tg-name, .tree-game.off .tg-what { opacity: .6; }
+/* a control that does not apply to the selection is greyed out, not taken away */
+.tree-off .lbl, .tree-off > .small, .lbl.tree-off, .small.tree-off, label.tree-off { opacity: .6; }
+.tree-row.tgc-row { flex-wrap: nowrap; color: var(--ink); }
+/* the picture's size and Draw 1:1 on one line, a picture or not */
+.tree-row.tree-pic { flex-wrap: nowrap; }
+.tree-pic .btn { flex: none; }
+.tgc-row .tree-color { width: 32px; height: 22px; flex: none; }
+.tgc-label { flex: 1 1 auto; min-width: 0; }
+.tgc-src { flex: none; }
 .tree-box { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
 .tree-handle { fill: var(--accent); stroke: #000; stroke-width: 1; vector-effect: non-scaling-stroke; cursor: nwse-resize; }
+/* PAD-1014: snapping - the grid, the guide a snap shows, the point that snaps, and the Snap
+   button's dot while it is on */
+:root { --snap-guide: #f472b6; }
+:root.light { --snap-guide: #db2777; }
+.tree-grid { pointer-events: none; }
+.tree-grid-line { fill: none; stroke: rgba(255, 255, 255, .2); stroke-width: 1; vector-effect: non-scaling-stroke; }
+:root.light .tree-grid-line { stroke: rgba(0, 0, 0, .18); }
+.tree-guide { stroke: var(--snap-guide); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.tree-snap-at { fill: var(--snap-guide); stroke: #000; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.tree-snap.on { color: var(--accent); }
+.tree-snap-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--snap-guide); margin-left: 2px; }
 .tree-side { display: flex; flex-direction: column; gap: 6px; width: 100%; }
 .tree-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 /* PAD-468: a line's Words, with Previous / Next through every line of text */
@@ -163,7 +235,7 @@
 .tree-states-hint { margin: 6px 0; }
 .tree-state { display: grid; grid-template-columns: 22px minmax(0, 1fr) 150px; gap: 6px; align-items: center; margin: 3px 0; }
 .tree-state-n { text-align: right; }
-.ly-item { grid-template-columns: 20px minmax(0, 1.2fr) minmax(0, 1fr) 16px 16px 20px; cursor: pointer; }
+.ly-item { grid-template-columns: 20px minmax(0, 1.2fr) minmax(0, 1fr) 16px 20px 20px; cursor: pointer; }
 /* PAD-312: the picture's colour switch - green corrected, red its own colours, blue lock for
    the game's own picture (no switch) */
 .ly-color { all: unset; cursor: pointer; display: inline-flex; color: var(--ink-3); }
@@ -184,19 +256,22 @@
 .sc-views > .seg button { flex: 1 1 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: var(--bg); }
 .sc-views > .seg button:hover { background: var(--panel); }
 .sc-views > .seg button.on { background: var(--accent-soft); box-shadow: inset 0 -2px 0 var(--accent); }
-.ly-off { opacity: .5; }
+.ly-off > :not(.ly-ingame) { opacity: .5; }
 .ly-eye { all: unset; cursor: pointer; display: inline-flex; color: var(--ink-3); }
 .ly-eye:hover { color: var(--ink); }
 .ly-eye.solo { color: var(--accent); }
 .ly-solo { all: unset; cursor: pointer; margin-left: auto; color: var(--accent); }
 .ly-solo:hover { text-decoration: underline; }
-/* PAD-293: hidden in the game is its own mark, like Fusion's Suppress: the card at the row's
-   end, and the row struck through; the eye is the preview only */
-.ly-game { all: unset; cursor: pointer; display: inline-flex; color: var(--ink-3); opacity: 0; }
-.ly-item:hover .ly-game, .ly-game:focus-visible { opacity: .7; }
-.ly-game:hover { opacity: 1; color: var(--ink); }
-.ly-game.on, .ly-game.on:hover { opacity: 1; color: var(--err); }
-.ly-game:focus-visible { outline: 2px solid var(--accent); }
+/* PAD-293: hidden in the game is its own mark, like Fusion's Suppress, and the row is struck
+   through; the eye is the preview only.  PAD-535: the mark is always there at the row's end, a
+   green tick in the game, a red stop sign hidden, never dimmed with the row */
+.ly-ingame { all: unset; cursor: pointer; display: inline-flex; justify-content: center; border-radius: 4px; }
+.ly-ingame .i { width: 16px; height: 16px; stroke-width: 2.6; }
+.ly-ingame.in { color: #3fb950; }
+.ly-ingame.gone { color: #f85149; }
+.ly-ingame.gone .i { stroke-width: 3; }
+.ly-ingame:hover { filter: brightness(1.25); }
+.ly-ingame:focus-visible { outline: 2px solid var(--accent); }
 .ly-item.not-in-game .sc-t { text-decoration: line-through; color: var(--err); }
 .ly-item .sc-i.in-game, .tree-props .in-game { color: var(--err); }
 /* PAD-391: a row dragged in Layers - a line where it lands, a lit group it goes into; red
@@ -233,13 +308,26 @@ html.bp-1180 .scenes-card { flex: 0 0 auto; height: 980px; }
 .sc-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; vertical-align: middle; }
 .sc-dot.edited { background: var(--warn); }
 .sc-dot.written { background: var(--ok); }
+/* PAD-524: blue = changed only by the color profile applied to all its pictures or lines */
+.sc-dot.all { background: var(--info); }
 .scenes-list .tr.sc-edited { box-shadow: inset 3px 0 0 var(--warn); }
 .scenes-list .tr.sc-written { box-shadow: inset 3px 0 0 var(--ok); }
-.sc-legend { gap: 6px; align-items: center; margin-top: -2px; }
+.sc-legend { gap: 2px 14px; align-items: center; margin-top: -2px; flex-wrap: wrap; }
+/* PAD-524: four keys now; each dot stays with its words and the row wraps between keys */
+.sc-key { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .sc-dot.same { box-shadow: inset 0 0 0 1.5px var(--ink-3); }
-.sc-legend .sc-dot.edited, .sc-legend .sc-dot.written { margin-left: 8px; }
 .tree-keep { gap: 6px; cursor: pointer; margin-top: -2px; }
 .tree-playing { position: absolute; left: 10px; bottom: 8px; padding: 2px 9px; border-radius: 999px; background: rgba(12, 12, 16, .7); color: #f2f2f5; pointer-events: none; }
 .tree-layers .sc-head { display: flex; align-items: center; gap: 8px; }
 .tree-layers .sc-head { flex-wrap: wrap; row-gap: 2px; }
 .tree-layers .sc-head .eyebrow { white-space: nowrap; }
+/* PAD-539: the Filled-in marks are guesses until the card is read */
+.tree-game .tg-guess { flex-wrap: nowrap; gap: 6px; }
+.tree-game .tg-guess .i { width: 13px; height: 13px; vertical-align: -2px; }
+.tree-game.off .tg-guess { opacity: 1; }
+.sc-base-note { display: inline-flex; align-items: center; gap: 4px; cursor: default; }
+/* PAD-1278: an added picture animated */
+.tree-anim { border-top: 1px solid var(--line, rgba(255,255,255,.08)); margin-top: 6px; padding-top: 6px; }
+.tree-anim .tree-row { flex-wrap: wrap; gap: 6px; }
+.tree-anim .tree-num .field { width: 64px; }
+.tree-anim-pics .tag { display: inline-flex; align-items: center; gap: 2px; }

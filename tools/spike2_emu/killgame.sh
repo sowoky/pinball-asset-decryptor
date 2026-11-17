@@ -164,8 +164,12 @@ pad_pkill -9 -f 'padplay\.py'
 # that leaves it running keeps wsl.exe from reaching EOF, so the GUI sat out
 # its full 20 s wait timeout on every mid-copy Stop. The DETACHED copier is
 # deliberately not matched: it survives a Stop on purpose, so the copy is not
-# lost, and its output goes to the cardcache log, not the pipe.
-pad_pkill -9 -f '^bash .*(watch|runbridge|nbrun|run_game|cardmount)\.sh'
+# lost, and its output goes to the cardcache log, not the pipe. So is a
+# library sweep's copier (cardmount.sh --cache-now): it has no slot, and a
+# Stop on rig 0 took it for its own (PAD-632, padslot.sh).
+_rs=$(pad_run_script_pids)
+# shellcheck disable=SC2086
+[ -n "$_rs" ] && kill -9 $_rs 2>/dev/null
 pad_pkill -9 -f '^unshare (-r )?-m -p -f'
 # longplay.sh is started BESIDE a run rather than by one, so it is not in the
 # group above - and watch.sh's own teardown was the only thing that ever killed
@@ -176,6 +180,13 @@ pad_pkill -9 -f '^unshare (-r )?-m -p -f'
 # 'longplay.sh' matches any shell with the name on its command line, and this
 # one KILLS.
 pad_pkill -9 -f '^bash [^ ]*longplay\.sh'
+# PAD-764: THE RUN'S RECORDING GETS ITS SWITCH LOG HERE, for the same reason
+# the LCD block is kept below: Stop and app-quit come through this script, and
+# the kills above take watch.sh down before its teardown could write it. The
+# guest is gone, so the log is whole (runrec.py; once only, so a teardown that
+# did run first leaves nothing to do).
+[ "${PAD_RECORD:-1}" != 0 ] && command -v python3 >/dev/null 2>&1 \
+    && python3 "$(dirname "$0")/runrec.py" finish "$PAD_LOGDIR" 2>&1
 # The LED block doubles as the virtual playfield's liveness signal; removing
 # it lets that window close itself instead of surviving the kill.
 rm -f "$ROOT/dump/padled"
@@ -313,6 +324,33 @@ while IFS= read -r m; do
         echo "  a killed daemon wedges the mountpoint and the next run cannot start." >&2
     fi
 done < <(card_mounts)
+# A CARD MOUNTED IN A RUN'S OWN USER NAMESPACE (PAD-872: a container without
+# SYS_ADMIN) is not in /proc/self/mounts out here, and fusermount out here
+# cannot reach it. fuse2fs can: it was started in that namespace holding its
+# capabilities, and on SIGTERM it leaves its loop and unmounts itself - the
+# whole mount, kernel half and daemon, the same as fusermount -u (measured:
+# the namespace, still held open by the hidden run's Xvfb, lists no card
+# afterwards). TERM and not KILL, for the reason above. The sweep has
+# already killed everything of the run that could be reading it.
+# WHICH ONES: a fuse2fs serving this slot's card folder whose mountpoint is
+# NOT in our own mount table - one that is, the loop above has just tried
+# and must be left. Not by comparing /proc/<pid>/ns/mnt: the app's Stop for
+# a save-state Start is root through sudo, and root without SYS_PTRACE (a
+# container's) may not read another user's namespace links (measured).
+_cards=$(readlink -f "$PAD_CARDS" 2>/dev/null) || _cards=$PAD_CARDS
+_seen=$(card_mounts)
+for _fp in $(pad_pids -x fuse2fs); do
+    _m=$(tr '\0' '\n' < "/proc/$_fp/cmdline" 2>/dev/null | grep -m1 "^${_cards%/}/[^/]*$") || continue
+    printf '%s\n' "$_seen" | grep -qxF -- "$_m" && continue
+    kill -TERM "$_fp" 2>/dev/null || continue
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -d "/proc/$_fp" ] || break; sleep 0.2; done
+    if [ -d "/proc/$_fp" ]; then
+        echo "COULD NOT UNMOUNT $_m - its fuse2fs ($_fp, in the run's own namespace) did not stop" >&2
+    else
+        rmdir "$_m" 2>/dev/null
+        echo "unmounted card $_m (in the run's own namespace)"
+    fi
+done
 sleep 1
 
 # The board's run record (riglock.sh list, the app, the triage dashboard) says

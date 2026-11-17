@@ -13,6 +13,7 @@ import time
 import pytest
 
 from tests.webui_harness import web_app
+from tests.mode_examples import form as MX  # noqa: E402
 
 
 def _wait(w, pred, timeout=15.0):
@@ -221,6 +222,10 @@ def test_settings_gear_and_prereq_strip_autohide(tmp_path):
         texts = [e["text"] for e in w.window.log_history()]
         assert any(t.startswith("Update available: v99.0.0") for t in texts)
 
+        # Background download off: the banner's own Install update button
+        # (with it on, PAD-1024, the update downloads first - covered in
+        # test_pad1024_background_update.py).
+        app._settings["update_auto_download"] = False
         setup = {"name": "setup.exe", "url": "https://x/w.exe", "size": 1,
                  "sha256": None, "kind": "windows-installer"}
         w.run(app._handle_update_check_result,
@@ -245,6 +250,7 @@ def _dt_days(n):
     return datetime.timedelta(days=n)
 
 
+@pytest.mark.usefixtures("preview_modes_off")
 def test_the_mode_maker_is_hidden_until_a_preview_code_unlocks_it(tmp_path,
                                                                   monkeypatch):
     """The mode maker ships dark (core/preview.py): no Modes tab for Stern
@@ -295,6 +301,7 @@ def test_the_mode_maker_is_hidden_until_a_preview_code_unlocks_it(tmp_path,
         assert not _modes_visible()
 
 
+@pytest.mark.usefixtures("preview_modes_off")
 def test_an_expired_code_turns_the_mode_maker_off_at_the_next_start(
         tmp_path, monkeypatch):
     """Verification happens at start-up (App._load_preview_codes, cached for
@@ -318,6 +325,7 @@ def test_an_expired_code_turns_the_mode_maker_off_at_the_next_start(
         assert preview.enabled("modes") and tabs["modes"]["visible"]
 
 
+@pytest.mark.usefixtures("preview_modes_off")
 def test_the_write_scan_lists_no_mode_rows_with_the_switch_off(
         manufacturers_by_key, tmp_path, monkeypatch):
     """With the switch off a tester's project lists no "Pending (Modes)" or
@@ -327,7 +335,7 @@ def test_the_write_scan_lists_no_mode_rows_with_the_switch_off(
     from pinball_decryptor.plugins.stern import stock_modes as SM
     from pinball_decryptor.webui import write_scan
     project = str(tmp_path / "project")
-    for _name, spec in MP.example_specs()[:2]:
+    for _name, spec in MX.example_specs()[:2]:
         MP.new_mode(project, spec=spec)
     monkeypatch.setattr(SM, "staged_edits", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("read with the switch off")))
@@ -395,6 +403,7 @@ def _everything_readable(w):
     return out
 
 
+@pytest.mark.usefixtures("preview_modes_off")
 def test_the_app_without_a_preview_code_names_nothing_of_the_mode_maker(
         tmp_path, monkeypatch):
     """THE CLEAN SURFACE (David, 2026-09-18): a copy of the app with no
@@ -554,23 +563,22 @@ def test_audio_advanced_offers_replacement_loudness(tmp_path):
             assert var not in os.environ
 
 
-def test_audio_advanced_offers_longer_replacements_and_wires_them_up(
-        tmp_path, monkeypatch):
-    """The "Allow replacements longer than the original" option carries out
-    to the env var the engine gates on.  The engine reads it from os.environ
-    (spawned encode workers inherit that, nothing else), so an option that
-    is saved but not wired up would look normal and silently keep trimming.
-    It defaults to off."""
+def test_longer_replacements_are_always_on(tmp_path, monkeypatch):
+    """PAD-843: longer and shorter replacements are always on, so the
+    Advanced dialog no longer carries the option, and an "audio_grow" an
+    older settings.json carries (on or off) never reaches the engine: the
+    engine's default with PAD_STERN_AUDIO_GROW unset is on."""
     monkeypatch.delenv("PAD_STERN_AUDIO_GROW", raising=False)
-    with web_app(tmp_path, mfr="stern") as w:
+    settings = {"audio_advanced": {"audio_grow": False}}
+    with web_app(tmp_path, mfr="stern", settings=settings) as w:
         app = w.app
-        assert not w.call("audio.advanced_get")["cfg"].get("audio_grow")
+        assert "audio_grow" not in w.call("audio.advanced_get")["cfg"]
         assert "PAD_STERN_AUDIO_GROW" not in os.environ
-        w.run(app._on_audio_advanced_change, {"audio_grow": True})
-        assert os.environ.get("PAD_STERN_AUDIO_GROW") == "1"
-        assert app._settings["audio_advanced"]["audio_grow"] is True
-        w.run(app._on_audio_advanced_change, {})
-        assert "PAD_STERN_AUDIO_GROW" not in os.environ
+        assert w.window._audio_grow_active() is True
+        for cfg in ({"audio_grow": True}, {"audio_grow": False}, {}):
+            w.run(app._on_audio_advanced_change, cfg)
+            assert "PAD_STERN_AUDIO_GROW" not in os.environ
+            assert w.window._audio_grow_active() is True
 
 
 def test_audio_group_duplicates_off_by_default_and_not_remembered(tmp_path):
@@ -650,11 +658,12 @@ def test_audio_preview_limit_caps_trimmed_replacement(tmp_path):
 
 
 def test_audio_preview_keeps_a_longer_replacement_whole_when_the_bank_grows(
-        tmp_path):
-    """With the Stern longer-replacements option on, a replacement longer
-    than its slot is kept whole on Write, so the Replacement pane must not
-    mark its tail as trimmed: no cap, the original's end marked instead.
-    Off, or on Spike 1 (no grow path), it trims exactly as before."""
+        tmp_path, monkeypatch):
+    """Longer replacements are always on for Stern Spike 2 (PAD-843), so a
+    replacement longer than its slot is kept whole on Write and the
+    Replacement pane must not mark its tail as trimmed: no cap, the
+    original's end marked instead.  Switched off (PAD_STERN_AUDIO_GROW=0), or
+    on Spike 1 (no grow path), it trims exactly as before."""
     with web_app(tmp_path, mfr="stern") as w:
         svc = w.window.service("audio")
         stern = w.window.current_mfr
@@ -666,11 +675,11 @@ def test_audio_preview_keeps_a_longer_replacement_whole_when_the_bank_grows(
             svc._keep = {}
             svc.audio_trim_var.set(True)
         w.run(_setup)
-        svc._advanced = dict(svc._advanced, audio_grow=False)
+        monkeypatch.setenv("PAD_STERN_AUDIO_GROW", "0")
         assert w.run(svc._compute_preview_limit, rel, 45.6) == 0.32
         assert w.run(svc._preview_grow_from, rel, 45.6) is None
 
-        svc._advanced = dict(svc._advanced, audio_grow=True)
+        monkeypatch.delenv("PAD_STERN_AUDIO_GROW")
         assert w.run(svc._compute_preview_limit, rel, 45.6) is None
         assert w.run(svc._preview_grow_from, rel, 45.6) == 0.32
         # a replacement that fits its slot has nothing to mark

@@ -814,7 +814,7 @@ class WebMultibootPanel(_Base):
             "scores_column": bool(be.scores_column),
             "emulate": bool(be.emulate),
             "flash": bool(be.flash),
-            "new_text": "New update" if be.key == "bof" else "New card",
+            "new_text": "New update" if be.update_file else "New card",
             "out_label": be.out_label,
             "out_noun": be.out_noun,
             "medium": be.medium,
@@ -830,6 +830,7 @@ class WebMultibootPanel(_Base):
             "groups": bool(be.groups),
             "machine_volume": bool(be.machine_volume),
             "settings_tile": bool(be.settings_tile),
+            "editions": bool(be.editions),
             "volume_max": int(be.volume_max),
             "max_cards": min(mt.MAX_IMAGES, be.max_cards),
             "about": self.about_tip(),
@@ -842,6 +843,10 @@ class WebMultibootPanel(_Base):
             "preview_tip": self.PREVIEW_TIP,
             "select_tip": self.SELECT_TIP,
             "flipper_tip": self.FLIPPER_TIP,
+            # the preview's two move buttons, named for the machine's own: a
+            # Spike 3 menu moves on the coin door's PREVIOUS / NEXT (PAD-1263)
+            "flip_left": "◂ Previous" if self._backend.key == "s3" else "◂ Left flipper",
+            "flip_right": "Next ▸" if self._backend.key == "s3" else "Right flipper ▸",
             "volume_tip": self.VOLUME_TIP,
             "media_tip": self.MEDIA_TIP,
             "build_tip": self.BUILD_FLASH_TIP,
@@ -903,7 +908,7 @@ class WebMultibootPanel(_Base):
         for key, label, state, detail in self.checks():
             if label == plain.get(key):
                 label = words.get(key, label)
-            if self._backend.key == "bof":
+            if self._backend.update_file:
                 detail = bof_words(detail)
             checks.append({"key": key, "label": label, "state": state,
                            "mark": mt.CHECK_MARKS.get(state, ""),
@@ -1034,8 +1039,8 @@ class WebMultibootPanel(_Base):
                  for i, r in enumerate(self._rows)]
         # THE SETTINGS CARD where the selector will draw one (PAD-307): last,
         # and counted, because a fifth card turns the row into a carousel
-        if self._settings_var.get() and self._colour_profiles():
-            cards.append({"i": n, "title": "SETTINGS", "sub": "Color correction",
+        if self._settings_var.get() and (self._colour_profiles() or self.test_pictures()):
+            cards.append({"i": n, "title": "SETTINGS", "sub": "Color correction, test pictures",
                           "label": "", "settings": True})
         rows = n
         n = len(cards)
@@ -1056,7 +1061,9 @@ class WebMultibootPanel(_Base):
         foot = ""
         if self._footer_var.get():
             foot = (self._footer_text_var.get().strip()
-                    or "LEFT / RIGHT FLIPPER: choose    START: boot")
+                    or ("NEXT / PREVIOUS: choose    SELECT: boot"
+                        if self._backend.key == "s3"           # the coin door (PAD-1263)
+                        else "LEFT / RIGHT FLIPPER: choose    START: boot"))
         return {
             "heading": self._heading_var.get().strip(),
             "cards": cards, "counter": counter,
@@ -1154,7 +1161,19 @@ class WebMultibootPanel(_Base):
                 self._rows[d._index] if d._index is not None
                 and 0 <= d._index < len(self._rows) else mt.ImageRow("")) != "",
             "scores_label": mt.SCORES_LABEL,
+            "settings_label": mt.SETTINGS_LABEL,
             "scores_note": mt.SCORES_NOTE,
+            # PAD-1196: which other images it shares that store / table with
+            "share_label": mt.SHARE_WITH_LABEL,
+            "share_note": mt.SHARE_NOTE,
+            "settings_with": mt.share_choices(
+                self._rows, self._rows[d._index] if d._index is not None
+                and 0 <= d._index < len(self._rows) else mt.ImageRow(""),
+                "settings"),
+            "scores_with": mt.share_choices(
+                self._rows, self._rows[d._index] if d._index is not None
+                and 0 <= d._index < len(self._rows) else mt.ImageRow(""),
+                "scores"),
             "scores_modes": mt.modes_line(
                 self._rows[d._index] if d._index is not None
                 and 0 <= d._index < len(self._rows) else None),
@@ -1229,6 +1248,10 @@ class WebMultibootPanel(_Base):
                 mt._int(self._timeout_var, 15)),
             "footer_example": mt.footer_example(
                 self._footer_var.get(), self._footer_text_var.get()),
+            "editions_tip": mt.EDITIONS_TIP,
+            # PAD-1309: Jersey Jack and The Big Lebowski have no BACK hold (Version Select
+            # is The Big Lebowski's way back), so the row is not shown for them
+            "back_hold_ok": self._backend.key not in ("jjp", "dp"),
             "own_note": own,
             "sounds_note": (
                 "auto = a click and a stinger pulled from the primary "
@@ -1245,14 +1268,33 @@ class WebMultibootPanel(_Base):
                 "how loud the preview plays here."),
             "colors_note": (
                 "Make your own…: start from the theme shown, then "
-                "change any colour - type it (RRGGBB) or click its "
+                "change any color - type it (RRGGBB) or click its "
                 "swatch to pick one. The preview redraws as you go."
                 if roles else
                 "The themes file (%s) could not be read: the menu "
-                "keeps its default colours." % mt.THEMES_JSON),
+                "keeps its default colors." % mt.THEMES_JSON),
             "default_max": max(0, len(self._rows) - 1),
             "sound_words": list(mt.SOUND_CHOICES),
             "used": self._used(),
+            # PAD-1279: Settings > Test pictures on the machine
+            "tests": [{"path": p, "file": os.path.basename(p), "label": label,
+                       "missing": not os.path.isfile(p)}
+                      for p, label in self.test_pictures()],
+            "tests_max": mt.TEST_MAX,
+            "testcard_note": (
+                "A small card (under 1 GB) that opens on TEST CARD: Color "
+                "correction and these test pictures, and no game. It works in "
+                "any Spike 2 machine; the first image on the list only lends "
+                "its boot and system partitions. Tune the colors there and "
+                "copy the numbers into the Color profile tab."),
+            "tests_note": (
+                "Shown on the machine under SETTINGS > TEST PICTURES, after the "
+                "built-in test card, gray and color ramps and sharpness lines: "
+                "pictures pixel for pixel (a bigger one is fitted to the screen, a "
+                "smaller one never enlarged), videos as short menu-sized clips, "
+                "sounds through the machine's speakers. Each can be shown through "
+                "each game's color correction. Adding any puts the SETTINGS card "
+                "in the menu."),
         }
 
     def _pub_build(self, out):
@@ -1499,13 +1541,13 @@ class WebMultibootPanel(_Base):
 
     # -- the rig switch (tests, captures) ---------------------------------
     def _run_commands(self, cmds, on_step=None, on_done=None, quiet=(),
-                      preview=False, on_tick=None):
+                      preview=False, on_tick=None, _ready=False):
         if no_rig():
             if not preview:
                 self._error(NO_RIG_TEXT)
             return False
         return super()._run_commands(cmds, on_step, on_done, quiet, preview,
-                                     on_tick)
+                                     on_tick, _ready)
 
     def load_from_card(self, device_path, drive, whole=False):
         if no_rig():

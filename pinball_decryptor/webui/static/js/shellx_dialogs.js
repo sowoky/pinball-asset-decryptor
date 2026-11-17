@@ -1,7 +1,7 @@
 // The app-wide windows (service ns "shellx"): Tips, Preview features, the
 // disclaimer, Manage disk space, and the Project menu's windows (New
 // project, Save as (fork), Properties, Change history, Projects, Relink
-// moved files).  Python opens them with bus.publish("open_dialog", name=...);
+// moved files, Export replacement files).  Python opens them with bus.publish("open_dialog", name=...);
 // the menus in shell.js open them too.  State-driven windows (a project
 // copy's progress, the update download) are ShellxOverlays, which shell.js
 // renders once.
@@ -10,10 +10,11 @@
 // preview_dialog.py, disk_dialog.py, disclaimer.py).
 
 import { html, useEffect, useRef, useState, Modal, Button, Field, Select, Icon, Note, Table,
-         Progress, Spinner, cx, tip, menuOpen } from "./core/ui.js";
+         Progress, Spinner, Check, cx, tip, menuOpen } from "./core/ui.js";
 import { useNs, useEvent } from "./core/store.js";
 import { call } from "./core/rpc.js";
 import { registerDialog, openDialog } from "./core/dialogs.js";
+import "./report_board.js";   // window.PADReportBoard (PAD-914)
 
 // ------------------------------------------------------------ helpers
 // Escape closes only the window on TOP, as in Tk, where each window had its
@@ -194,7 +195,7 @@ function TipsPanel({ close, tab, anchor }) {
     let live = true;
     call("shellx.tips", key).then((d) => { if (live && d) { setData(d); if (body.current) body.current.scrollTop = 0; } });
     return () => { live = false; };
-  }, [key]);
+  }, [key, shell.lang]);
   useEffect(() => {
     // Escape is the Tips window's only while nothing is above it: an open
     // menu, a modal window or message box (a scrim), or a floating window
@@ -345,12 +346,33 @@ function ResizePrompt({ spec, onDone }) {
   <//>`;
 }
 
+// PAD-819 "Move to another drive": every fixed drive, the ones WSL's disks can't go to greyed
+// with why; Return is Move, Escape closes the prompt only.
+function MovePrompt({ spec, onDone }) {
+  const [pick, setPick] = useState(spec.pick);
+  const [uid, onClose] = useWin(() => onDone(null));
+  return html`<${Modal} title="Move to another drive" onClose=${onClose} cls=${uid}
+    footer=${html`<${Button} onClick=${() => onDone(null)}>Cancel<//><${Button} kind="primary" disabled=${!pick} onClick=${() => onDone(pick)}>Move…<//>`}>
+    <div class="muted small">Now:</div>
+    <div class="mono small sx-pre">${spec.where}</div>
+    <div class="small">Move to:</div>
+    <div class="stack" style="gap:2px" role="radiogroup" aria-label="Drive"
+      onKeyDown=${(e) => { if (e.key === "Enter" && pick) { e.preventDefault(); onDone(pick); } }}>
+      ${spec.drives.map((o) => html`<label class=${cx("row", !o.ok && "dim")} title=${o.why}>
+        <input type="radio" name="sx-move-drive" checked=${pick === o.letter} disabled=${!o.ok}
+          onChange=${() => setPick(o.letter)} />
+        <span>${o.text}</span>${o.ok ? null : html`<span class="small muted">${o.why}</span>`}</label>`)}
+    </div>
+  <//>`;
+}
+
 function DiskSpaceDialog({ close }) {
   const dup = useSingleton("disk_space", close);
   const sx = useNs("shellx");
   const d = sx.disk;
   const [sel, setSel] = useState(new Set());
   const [resize, setResize] = useState(null);
+  const [move, setMove] = useState(null);
   useEffect(() => { if (!dup) call("shellx.disk_open"); }, []);
   useEffect(() => { setSel(new Set()); }, [d && d.rows && d.rows.map((r) => r.id).join("|")]);
   const tryClose = async () => { const ok = await call("shellx.disk_close"); if (ok) close(); };
@@ -372,6 +394,10 @@ function DiskSpaceDialog({ close }) {
     const spec = await call("shellx.disk_resize_prepare");
     if (spec) setResize(spec);
   };
+  const startMove = async () => {
+    const spec = await call("shellx.disk_move_prepare");
+    if (spec) setMove(spec);
+  };
   return html`<${Modal} title="Manage disk space" icon="disk" wide onClose=${onClose} cls=${uid}
     footer=${html`<span class="grow small dim ellip" title=${d ? d.status : ""}>${d ? d.status : ""}</span><${Button} onClick=${tryClose}>Close<//>`}>
     <p class="sx-p muted">${d ? d.intro : ""}</p>
@@ -381,6 +407,15 @@ function DiskSpaceDialog({ close }) {
         <div class=${cx("sx-bar", barKind(b.pct))}><i style=${`width:${b.pct == null ? 0 : b.pct}%`}></i></div>
       </div>`)}
     </div>
+    <div class="stack" style="gap:4px">
+      <span class="h2">Automatic clean-up</span>
+      <${Check} checked=${!d || d.auto_on !== false} disabled=${!d} label="Clean up automatically"
+        onChange=${(v) => call("shellx.disk_set_auto", v)} />
+      <span class="small muted wrap">${d ? d.auto_note : ""}</span>
+      <div class="row wrap"><span class="small grow">${d ? d.auto_summary : ""}</span>
+        <${Button} onClick=${() => call("shellx.disk_tidy_now")} disabled=${!(d && d.can_tidy)}>Clean up now<//></div>
+    </div>
+    <hr class="sx-hr" />
     <div class="stack" style="gap:4px">
       <span class="h2">Leftover staging, caches and emulator files</span>
       <span class="small muted">${d ? d.tree_note : ""}</span>
@@ -409,10 +444,67 @@ function DiskSpaceDialog({ close }) {
       <span class="small muted">${d ? d.resize_note : ""}</span>
       <div><${Button} onClick=${startResize} disabled=${!(d && d.can_resize)}>Resize WSL disk…<//></div>
     </div>
+    <hr class="sx-hr" />
+    <div class="stack" style="gap:4px">
+      <span class="h2">Move to another drive</span>
+      <span class="small muted wrap">${d ? d.move_note : ""}</span>
+      ${d && d.move_where ? html`<div class="mono small sx-pre">${d.move_where}</div>` : null}
+      <div><${Button} onClick=${startMove} disabled=${!(d && d.can_move)}>Move to another drive…<//></div>
+    </div>
+    ${move ? html`<${MovePrompt} spec=${move} onDone=${(letter) => { setMove(null); if (letter) call("shellx.disk_move", letter); }} />` : null}
     ${resize ? html`<${ResizePrompt} spec=${resize} onDone=${(gib) => { setResize(null); if (gib) call("shellx.disk_resize", gib); }} />` : null}
   <//>`;
 }
 registerDialog("disk_space", DiskSpaceDialog);
+
+// ------------------------------------------------------- Reset…
+// PAD-569 (DragonRR): the project menu's Reset… (PAD-576) — the kinds of change in the open project,
+// ticked, put back the way they were extracted (shellx_reset.py).  The Write tab's "Revert
+// all changes…" opens it with every kind ticked (`all`).
+function ResetDialog({ close, all = false }) {
+  const dup = useSingleton("reset", close);
+  const r = useNs("shellx").reset;
+  const [ticked, setTicked] = useState(() => new Set());
+  useEffect(() => { if (!dup) call("shellx.reset_open"); }, []);
+  useEffect(() => {
+    if (all && r && r.rows) setTicked(new Set(r.rows.map((x) => x.key)));
+  }, [all, !!(r && r.rows)]);
+  const shut = () => { call("shellx.reset_close"); close(); };
+  const [uid, onClose] = useWin(shut);
+  if (dup) return null;
+  const rows = (r && r.rows) || [];
+  const every = rows.length > 0 && rows.every((x) => ticked.has(x.key));
+  const flip = (key, on) => {
+    const next = new Set(ticked);
+    if (on) next.add(key); else next.delete(key);
+    setTicked(next);
+  };
+  const go = async () => {
+    const ok = await call("shellx.reset_run", rows.filter((x) => ticked.has(x.key)).map((x) => x.key));
+    if (ok) close();
+  };
+  const count = (x) => r && r.busy && !x.n ? "counting…" : x.n ? `${x.n} change${x.n === 1 ? "" : "s"}` : "nothing to reset";
+  return html`<${Modal} title=${"Reset " + ((r && r.name) || "project") + "…"} icon="refresh" wide onClose=${onClose} cls=${cx(uid, "sx-reset")}
+    footer=${html`<span class="grow small dim ellip" title=${r ? r.folder : ""}>${r ? r.folder : ""}</span>
+      <${Button} onClick=${shut}>Cancel<//>
+      <${Button} kind="danger" disabled=${!ticked.size || !(r && r.ok) || (r && r.running)} onClick=${go}>${every ? "Reset everything…" : "Reset…"}<//>`}>
+    <p class="sx-p muted">${r ? r.intro : ""}</p>
+    <${Note} kind="warn">${r ? r.warning : ""}<//>
+    ${r && r.base_note ? html`<${Note} kind="info"><b>${r.base_note.head}.</b> ${r.base_note.lines.join(" ")}<//>` : null}
+    ${r && !r.ok ? html`<${Note} kind="err">Open a project first: there is no project folder to reset.<//>` : null}
+    <div class="stack sx-reset-list" style="gap:6px">
+      <${Check} checked=${every} disabled=${!rows.length} onChange=${(v) => setTicked(new Set(v ? rows.map((x) => x.key) : []))}
+        label=${html`<b>Everything</b><span class="small muted"> — the project as it was extracted</span>`} />
+      <hr class="sx-hr" />
+      ${rows.map((x) => html`<div class="sx-reset-row">
+        <${Check} checked=${ticked.has(x.key)} onChange=${(v) => flip(x.key, v)} label=${x.label} />
+        <span class=${cx("small", x.n ? "warn-ink" : "dim")}>${count(x)}</span>
+        <div class="small muted sx-reset-detail">${x.detail}</div>
+      </div>`)}
+    </div>
+  <//>`;
+}
+registerDialog("reset", ResetDialog);
 
 // ------------------------------------------------------- New project
 const BAD_NAME = /[<>:"/\\|?*]/;
@@ -439,6 +531,11 @@ function newProjectPreview(parent, name, stock) {
       "  " + ell(s),
     ].join("\n"),
   };
+}
+
+// PAD-1319: the whole project path under Folder name, so the name is never read alone.
+function joinPath(parent, name, sep = "\\") {
+  return /[\\/]$/.test(parent) ? parent + name : parent + sep + name;
 }
 
 // PAD-435: opened for the card just picked on Select card (extract.new_card_project), it
@@ -470,18 +567,23 @@ function NewProjectDialog({ close, stock: forCard = "", name: suggested = "", pa
   };
   return html`<${Modal} title=${why ? "New project for this card" : "New project"} icon="plus" wide onClose=${onClose} cls=${uid}
     footer=${html`<${Button} onClick=${close}>${why && why.project ? "Stay in " + why.project : "Cancel"}<//><${Button} kind="primary" busy=${busy} disabled=${busy} onClick=${create}>Create<//>`}>
-    ${why ? html`<${Note} kind="warn">The card you picked, <b>${why.card}</b>, is not the one ${why.project ? html`project <b>${why.project}</b>` : "this project"} was extracted from${why.project_card ? html` (${why.project_card})` : ""}. Make a project of its own for it, so the tabs work on this card's files.<//>` : null}
+    ${why ? html`<${Note} kind="warn"><span>The card you picked - <b>${why.card}</b> - is not part of your previous project${why.project ? html`, <b>${why.project}</b>` : ""}. Choose the new project's location and folder structure below.</span>
+      <span class="small muted" style="display:block;margin-top:4px">Closed this? <b>New project for this card…</b> on the Card tab brings it back.</span><//>` : null}
     <div class="sx-form">
       <${Row} label="Location:"><div class="row">
         <${Field} value=${parent} onChange=${(v) => { setParent(v); setErr(""); }} mono cls="grow" placeholder="The folder the project folder goes in" />
-        <${Button} onClick=${async () => { const p = await call("shellx.browse_location", parent); if (p) setParent(p); }}>Browse...<//></div><//>
-      <${Row} label="Folder name:"><${Field} value=${name} onChange=${(v) => { setName(v); setErr(""); }} autoFocus
-        bad=${!!name && BAD_NAME.test(name)} placeholder="TMNT 1.59 upscale" /><//>
+        <${Button} drop onClick=${async () => { const p = await call("shellx.browse_location", parent); if (p) setParent(p); }}>Browse...<//></div><//>
+      <${Row} label="Folder name:"><div class="stack" style="gap:4px"><div class="row">
+        <${Field} value=${name} onChange=${(v) => { setName(v); setErr(""); }} autoFocus cls="grow"
+          bad=${!!name && BAD_NAME.test(name)} placeholder="TMNT 1.59 upscale" />
+        <${Button} drop title="Pick the project folder itself (one you made already, or a new one)"
+          onClick=${async () => { const r = await call("shellx.browse_project_folder", parent.trim(), name.trim()); if (r && r.parent) { setParent(r.parent); setName(r.name || ""); setErr(""); } }}>Browse...<//></div>
+        ${parent.trim() && name.trim() ? html`<span class="small muted mono" title="The project folder Create makes">${joinPath(parent.trim(), name.trim(), form.sep)}</span>` : null}</div><//>
       <${Row} label="Manufacturer:"><${Select} value=${mfr} onChange=${setMfr}
         options=${form.mfrs.map((m) => ({ value: m.key, label: m.display }))} /><//>
       <${Row} label="Stock image:"><div class="row">
         <${Field} value=${stock} onChange=${(v) => { setStock(v); setErr(""); }} mono cls="grow" placeholder="Optional: the card image the project starts from" />
-        <${Button} onClick=${async () => { const p = await call("shellx.browse_stock", mfr, stock); if (p) setStock(p); }}>Browse...<//></div><//>
+        <${Button} drop onClick=${async () => { const p = await call("shellx.browse_stock", mfr, stock); if (p) setStock(p); }}>Browse...<//></div><//>
     </div>
     <div class="stack" style="gap:4px">
       <span class="small muted">${prev.title}</span>
@@ -523,7 +625,7 @@ function SaveAsDialog({ close, folder }) {
     <div class="sx-form">
       <${Row} label="Location:"><div class="row">
         <${Field} value=${parent} onChange=${(v) => { setParent(v); setErr(""); }} mono cls="grow" />
-        <${Button} onClick=${async () => { const x = await call("shellx.browse_location", parent); if (x) setParent(x); }}>Browse...<//></div><//>
+        <${Button} drop onClick=${async () => { const x = await call("shellx.browse_location", parent); if (x) setParent(x); }}>Browse...<//></div><//>
       <${Row} label="Folder name:"><${Field} value=${name} onChange=${(v) => { setName(v); setErr(""); }} autoFocus bad=${!!name && BAD_NAME.test(name)} /><//>
     </div>
     <div class="small muted mono ellip" title=${dest}>${dest}</div>
@@ -632,7 +734,7 @@ function ManagerDialog({ close }) {
       <${Button} disabled=${!live || !ent.anchored || running} onClick=${() => call("shellx.project_archive", sel)}>Archive...<//>
       <${Button} disabled=${!live} onClick=${() => call("shellx.manager_reveal", sel)}>Reveal<//>
       <${Button} disabled=${!ent} onClick=${() => call("shellx.manager_remove", sel).then(() => setSel(null))}>Remove from list<//>
-      <${Button} disabled=${!ent} onClick=${() => call("shellx.manager_locate", sel)}>Locate...<//>
+      <${Button} drop disabled=${!ent} onClick=${() => call("shellx.manager_locate", sel)}>Locate...<//>
       <span class="grow"></span><${Button} onClick=${close}>Close<//>`}>
     <${Table} columns=${cols} rows=${rows} rowKey=${(r) => r.folder} selected=${sel}
       onSelect=${(r) => setSel(r.folder)} onActivate=${(r) => { setSel(r.folder); if (!r.missing && !running) call("shellx.manager_open", r.folder); }}
@@ -675,7 +777,7 @@ function RelinkDialog({ close, folder }) {
     <div class="row" onKeyDown=${onEnter((t) => { if (rl.busy || rl.done) return; setRoot(t); search(t); })}>
       <span class="lbl nw">Where are those files now?</span>
       <${Field} value=${rootShown} onChange=${setRoot} mono cls="grow" disabled=${rl.busy} />
-      <${Button} onClick=${browse} disabled=${rl.busy}>Browse...<//>
+      <${Button} drop onClick=${browse} disabled=${rl.busy}>Browse...<//>
     </div>
     <${Table} columns=${cols} rows=${rl.rows || []} rowKey=${(r) => r.path} cls="card sx-fill"
       resizable widths=${widths} onResize=${setWidths}
@@ -684,6 +786,134 @@ function RelinkDialog({ close, folder }) {
   <//>`;
 }
 registerDialog("project_relink", RelinkDialog);
+
+// --------------------------------------- Export replacement files (PAD-1015)
+// Every file of the user's the project names, copied into one folder (Video,
+// Audio, Images) with replacements.json beside them; floating like Relink.
+function ExportFilesDialog({ close, folder }) {
+  const dup = useSingleton("project_export_files", close);
+  const sx = useNs("shellx");
+  const [ready, setReady] = useState(false);
+  const [dest, setDest] = useState(null);
+  const [widths, setWidths] = useState(null);
+  const ex = sx.export;
+  useEffect(() => {
+    if (dup) return;
+    call("shellx.export_open", folder || null).then((r) => { if (!r) close(); else setReady(true); });
+    return () => { call("shellx.export_close"); };
+  }, []);
+  if (dup || !ready || !ex) return null;
+  const destShown = dest == null ? ex.dest || "" : dest;
+  const commit = (t) => { setDest(null); call("shellx.export_set_dest", t); };
+  // a folder typed and not yet committed is taken first (Export blurs the field)
+  const run = async () => {
+    if (dest != null) { await call("shellx.export_set_dest", dest); setDest(null); }
+    call("shellx.export_run");
+  };
+  const browse = async () => { const p = await call("shellx.export_browse"); if (p) setDest(null); };
+  const cols = [
+    { key: "file", label: "File", width: "minmax(0,1.4fr)", render: (r) => html`<span class="ellip sx-cell" title=${r.path}>${r.file}</span>` },
+    { key: "uses", label: "Used by", width: "80px", num: true },
+    { key: "to", label: "Goes to", width: "minmax(0,1.6fr)", render: (r) => html`<span class="mono small ellip sx-cell" title=${r.to}>${r.to}</span>` },
+    { key: "state", label: "", width: "110px", render: (r) => html`<span class=${cx("small", r.state === "already there" && "ok-ink")}>${r.state}</span>` },
+  ];
+  return html`<${FloatWin} title="Export replacement files" icon="download" onClose=${close} cls="sx-export"
+    footer=${html`<${Check} checked=${ex.repoint !== false} onChange=${(v) => call("shellx.export_set_repoint", v)}
+        label="Use the copies in this project" title=${{ head: "Use the copies in this project", lines: [["On", "every slot is pointed at its copy, so the project builds from the export folder"], ["Off", "the project keeps using the files where they are now"]] }} />
+      <span class="grow"></span>
+      <${Button} kind="primary" disabled=${!ex.can_export && dest == null} onClick=${run}>Export<//>
+      <${Button} onClick=${close}>Close<//>`}>
+    <div class="sx-p">${ex.head}</div>
+    <div class="row">
+      <span class="lbl nw">Export into</span>
+      <${Field} value=${destShown} onChange=${setDest} onCommit=${commit} mono cls="grow" />
+      <${Button} drop onClick=${browse}>Browse...<//>
+    </div>
+    <${Table} columns=${cols} rows=${ex.rows || []} rowKey=${(r) => r.path} cls="card sx-fill"
+      resizable widths=${widths} onResize=${setWidths}
+      empty=${html`<div class="empty small">Nothing to export.</div>`} />
+    <div class="small muted sx-wrap">${ex.status}</div>
+  <//>`;
+}
+registerDialog("project_export_files", ExportFilesDialog);
+
+// ------------------------------------------------------- Team (PAD-1236)
+// Several PCs on one project: a team folder a sync service keeps the same on
+// every PC, each part of the project owned by one member, who shares it; the
+// others get it (webui/shellx_team.py, core/team_sync.py).  Floating like Export.
+function TeamDialog({ close }) {
+  const dup = useSingleton("project_team", close);
+  const sx = useNs("shellx");
+  const [ready, setReady] = useState(false);
+  const [team, setTeam] = useState(null);
+  const [name, setName] = useState(null);
+  const [widths, setWidths] = useState(null);
+  const tm = sx.team;
+  useEffect(() => {
+    if (dup) return;
+    call("shellx.team_open").then((r) => { if (!r) close(); else setReady(true); });
+    return () => { call("shellx.team_close"); };
+  }, []);
+  if (dup || !ready || !tm) return null;
+  const teamShown = team == null ? tm.default_team || "" : team;
+  const nameShown = name == null ? tm.default_name || "" : name;
+  const browse = async () => { const p = await call("shellx.team_browse"); if (p) setTeam(p); };
+  const join = async () => { if (await call("shellx.team_join", teamShown, nameShown)) { setTeam(null); setName(null); } };
+  const busy = !!tm.busy || !!sx.job;
+  if (!tm.joined) {
+    return html`<${FloatWin} title="Team" icon="refresh" onClose=${close} cls="sx-team"
+      footer=${html`<span class="grow"></span>
+        <${Button} kind="primary" disabled=${!teamShown.trim() || !nameShown.trim()} onClick=${join}>Join<//>
+        <${Button} onClick=${close}>Close<//>`}>
+      <div class="sx-p">${tm.intro}</div>
+      <div class="row">
+        <span class="lbl nw">Team folder</span>
+        <${Field} value=${teamShown} onChange=${setTeam} mono cls="grow" placeholder="A folder your sync service shares, e.g. OneDrive\\Godzilla team" />
+        <${Button} drop onClick=${browse}>Browse...<//>
+      </div>
+      <div class="row">
+        <span class="lbl nw">Your name</span>
+        <${Field} value=${nameShown} onChange=${setName} cls="grow" />
+      </div>
+      <div class="small muted sx-wrap">The first person to join makes the team; the others pick the same folder on their PC, each with their own name. Then each takes the parts they work on.</div>
+    <//>`;
+  }
+  const act = (r) => r.mine
+    ? html`<${Button} size="sm" disabled=${busy} onClick=${() => call("shellx.team_let_go", r.key)}
+        title=${{ head: "Let go", lines: [["Click", "nobody owns " + r.label + " until someone takes them; nobody gets yours from then on"]] }}>Let go<//>`
+    : html`<${Button} size="sm" disabled=${busy} onClick=${() => call("shellx.team_take", r.key)}
+        title=${{ head: "Take", lines: [["Click", r.owner ? "take " + r.label + " over from " + r.owner + ": from then on the others get yours" : "make " + r.label + " yours: you share them, the others get them"]] }}>Take<//>`;
+  const cols = [
+    { key: "label", label: "Part", width: "minmax(0,1fr)", render: (r) => html`<span class=${cx("sx-cell", r.mine && "ok-ink")}>${r.label}</span>` },
+    { key: "owner", label: "Whose", width: "120px", render: (r) => html`<span class="ellip sx-cell notr">${r.mine ? "Yours" : r.owner || "Nobody"}</span>` },
+    { key: "state", label: "", width: "minmax(0,2.2fr)", render: (r) => html`<span class=${cx("small ellip sx-cell", r.news && "acc-ink", r.changed_here && "warn-ink")} title=${r.state}>${r.state}</span>` },
+    { key: "act", label: "", width: "90px", render: act },
+  ];
+  const who = (tm.members || []).map((m) => m.name + (m.me ? " (you)" : "")
+    + (m.parts.length ? ": " + m.parts.join(", ") : ": no parts")
+    + (m.shared ? ", shared " + m.shared : "") + (m.arriving ? ", still arriving here" : "")).join("  ·  ");
+  return html`<${FloatWin} title="Team" icon="refresh" onClose=${close} cls="sx-team"
+    footer=${html`<${Button} size="sm" disabled=${busy} onClick=${() => call("shellx.team_leave")}>Leave team<//>
+      <span class="grow"></span>
+      ${tm.busy ? html`<${Spinner} />` : null}
+      <${Button} kind=${tm.news ? "primary" : ""} disabled=${busy || !tm.news} onClick=${() => call("shellx.team_get")}
+        title=${{ head: "Get from the team", lines: [["Click", "put the parts other people shared since you last got them into this project; each part is replaced by its owner's"]] }}>Get from the team${tm.news ? " (" + tm.news + ")" : ""}<//>
+      <${Button} kind=${tm.to_share && !tm.news ? "primary" : ""} disabled=${busy} onClick=${() => call("shellx.team_share")}
+        title=${{ head: "Share my parts", lines: [["Click", "copy the parts you own to your folder in the team folder, for the others to get"]] }}>Share my parts<//>
+      <${Button} onClick=${close}>Close<//>`}>
+    <div class="row small">
+      <span class="lbl nw">Team folder</span><span class="mono ellip grow notr" title=${tm.team}>${tm.team}</span>
+      <span class="lbl nw">You</span><span class="notr">${tm.me}</span>
+    </div>
+    ${tm.git && tm.git_remote && !(tm.warnings || []).length ? html`<${Note} kind="info">Kept in step by Git: Share my parts pushes, the team is pulled every 30 seconds${tm.git_lfs ? ", videos, sounds and pictures go through Git LFS" : ""}.<//>` : null}
+    ${(tm.warnings || []).map((w) => html`<${Note} kind="warn">${w}<//>`)}
+    <${Table} columns=${cols} rows=${tm.parts || []} rowKey=${(r) => r.key} cls="card sx-fill"
+      resizable widths=${widths} onResize=${setWidths}
+      empty=${html`<div class="empty small">${tm.busy ? "Looking at the team folder…" : "Nothing here."}</div>`} />
+    <div class="small muted sx-wrap notr">${who || "Nobody has joined yet."}</div>
+  <//>`;
+}
+registerDialog("project_team", TeamDialog);
 
 // ------------------------------------------- state-driven windows
 // A project copy / archive in progress (projects_ui._ProgressDialog) and
@@ -697,7 +927,7 @@ export function ShellxOverlays() {
       <div class="hd"><span class="h2">${job.title}</span></div>
       <div class="bd"><div class="msg">${job.text}</div>
         <${Progress} pct=${Math.round((job.frac || 0) * 100)} />
-        <div class="small muted ellip" title=${job.detail}>${job.cancelling ? "Cancelling…" : job.detail || " "}</div></div>
+        <div class="small muted ellip" title=${job.detail}>${job.cancelling ? "Canceling…" : job.detail || " "}</div></div>
       <div class="ft"><${Button} disabled=${job.cancelling} onClick=${() => call("shellx.job_cancel", job.id)}>Cancel<//></div>
     </div></div>` : null}
     ${dl ? html`<div class="scrim"><div class="modal" role="dialog" aria-modal="true" aria-label="Downloading update">
@@ -708,5 +938,672 @@ export function ShellxOverlays() {
       <div class="ft"><${Button} kind="danger" disabled=${dl.cancelling} onClick=${() => call("shellx.download_cancel")}>Cancel<//></div>
     </div></div>` : null}`;
 }
+
+// ------------------------------------------------------- Animal shelters
+// PAD-754: the paw chip's window.  The app takes no money; people report
+// what they gave to an animal shelter near them and the total everyone sees
+// grows (webui/shellx_donations.py, core/donations.py).  `auto` is the
+// once-only opening after a user's first card write.  Where the shelter is
+// (country, state or province, both optional) feeds the Top places board.
+//
+// The page, with a little casino in it: the total spins in on slot reels,
+// marquee lamps chase around the hero band, a drawn thermometer fills
+// toward the next milestone, the ladder's milestones are lit badges, the
+// top three places stand on a podium that rises in, and an entry landing
+// is a jackpot: the band flashes, the lamps race, paw prints float off the
+// button.  An entry is confirmed before it goes ("Is that right?"), and
+// the Yours list takes one back (the service keeps a token per entry for
+// the app that added it) and refills the form with it.  Colours are the
+// app's tokens, so both themes carry it; prefers-reduced-motion stills it.
+
+// a name's hue for its initials circle: the same name, the same colour
+function nameHue(name) {
+  let h = 0;
+  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return h;
+}
+function initials(name) {
+  const parts = String(name).trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "";
+  return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase();
+}
+const SYMBOL = { USD: "$", EUR: "€", GBP: "£", JPY: "¥", CAD: "CA$", AUD: "A$", NZD: "NZ$", BRL: "R$", MXN: "MX$" };
+function money(amount, currency) {
+  const n = Number(amount);
+  const text = Number.isInteger(n) ? n.toLocaleString("en-US") : n.toFixed(2);
+  return (SYMBOL[currency] || currency + " ") + text;
+}
+
+// one slot reel: a strip of digits that always spins forward at least a
+// full turn to land on its digit
+const REEL_LEN = 40;
+const REEL_DIGITS = Array.from({ length: REEL_LEN }, (_, i) => i % 10);
+function Reel({ digit, delay }) {
+  const ref = useRef({ pos: 0 });
+  const [pos, setPos] = useState(0);
+  const [go, setGo] = useState(false);
+  useEffect(() => {
+    const cur = ref.current.pos;
+    let step = ((digit - (cur % 10)) + 10) % 10;
+    if (step === 0) step = 10;
+    if (cur + step < REEL_LEN) {
+      ref.current.pos = cur + step; setGo(true); setPos(cur + step);
+    } else {                                 // wrap unseen, then spin
+      ref.current.pos = cur % 10; setGo(false); setPos(cur % 10);
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        ref.current.pos = (cur % 10) + step; setGo(true); setPos((cur % 10) + step);
+      }));
+    }
+  }, [digit]);
+  return html`<span class="sx-don-reel"><span class=${"strip" + (go ? " go" : "")}
+      style=${"transform:translateY(" + (-pos) + "em);transition-delay:" + delay + "ms"}>${REEL_DIGITS.map((n) => html`<span>${n}</span>`)}</span></span>`;
+}
+function Odometer({ text }) {
+  let n = 0;
+  return html`<span class="sx-don-total mono notr" aria-label=${text}>${[...String(text)].map((ch) =>
+    /[0-9]/.test(ch) ? html`<${Reel} digit=${Number(ch)} delay=${90 * n++} />` : html`<span>${ch}</span>`)}</span>`;
+}
+
+function Thermometer({ pct }) {
+  // the tube: x 31..49, y 14..234; the bulb sits on its foot
+  const T = 14, H = 220, X = 31, W = 18;
+  const inner = H - 8;
+  const fill = Math.max(0, Math.min(100, pct || 0)) / 100;
+  const mercH = inner * fill;
+  const mercY = T + 4 + inner - mercH;
+  return html`<svg class="sx-don-therm" viewBox="0 0 80 300" aria-hidden="true">
+    ${[0.25, 0.5, 0.75].map((k) => html`<line class="tick" x1=${X + W + 4} x2=${X + W + 11} y1=${T + 4 + inner * (1 - k)} y2=${T + 4 + inner * (1 - k)} />`)}
+    <rect class="tube" x=${X} y=${T} width=${W} height=${H} rx="9" />
+    <rect class="merc" x=${X + 4} width=${W - 8} rx="5" style=${"y:" + mercY + "px;height:" + (mercH + 40) + "px"} />
+    <circle class="bulb" cx=${X + W / 2} cy=${T + H + 20} r="24" />
+    <circle class="bulb-shine" cx=${X + W / 2 - 8} cy=${T + H + 12} r="5" />
+    <rect class="shine" x=${X + 3} y=${T + 8} width="3" height=${H - 30} rx="1.5" />
+  </svg>`;
+}
+
+// the tile maps: a square per country (the list core/donations.py knows)
+// and per US state, placed roughly where it sits, lit by what was given
+// there.  [column, row].
+const WORLD_TILES = {
+  CA: [2, 1], US: [2, 2], MX: [2, 3], BR: [4, 5], AR: [4, 6],
+  IE: [6, 1], GB: [7, 1], NL: [8, 1], DK: [9, 1], NO: [9, 0], SE: [10, 0], FI: [11, 0],
+  FR: [7, 2], BE: [8, 2], DE: [9, 2], PL: [10, 2], CZ: [10, 3],
+  PT: [6, 3], ES: [7, 3], CH: [8, 3], AT: [9, 3], HU: [11, 3], IT: [9, 4], GR: [11, 4],
+  IL: [12, 4], AE: [13, 4], IN: [14, 4], ZA: [10, 7], KR: [15, 2], JP: [16, 2],
+  SG: [15, 5], AU: [16, 6], NZ: [17, 7],
+};
+const WORLD_COLS = 18, WORLD_ROWS = 8;
+const US_TILES = {
+  AK: [0, 0], ME: [11, 0], WI: [6, 1], VT: [10, 1], NH: [11, 1],
+  WA: [1, 2], ID: [2, 2], MT: [3, 2], ND: [4, 2], MN: [5, 2], IL: [6, 2], MI: [7, 2], NY: [9, 2], MA: [10, 2], RI: [11, 2],
+  OR: [1, 3], NV: [2, 3], WY: [3, 3], SD: [4, 3], IA: [5, 3], IN: [6, 3], OH: [7, 3], PA: [8, 3], NJ: [9, 3], CT: [10, 3],
+  CA: [1, 4], UT: [2, 4], CO: [3, 4], NE: [4, 4], MO: [5, 4], KY: [6, 4], WV: [7, 4], VA: [8, 4], MD: [9, 4], DE: [10, 4],
+  AZ: [2, 5], NM: [3, 5], KS: [4, 5], AR: [5, 5], TN: [6, 5], NC: [7, 5], SC: [8, 5], DC: [9, 5],
+  OK: [4, 6], LA: [5, 6], MS: [6, 6], AL: [7, 6], GA: [8, 6],
+  HI: [0, 7], TX: [4, 7], FL: [8, 7],
+};
+const US_COLS = 12, US_ROWS = 8;
+function TileMap({ tiles, cols, rows, data }) {
+  const by = new Map((data || []).map((d) => [d.code, d]));
+  const top = data && data.length ? data[0].usd : 0;
+  return html`<div class="sx-don-map" style=${"grid-template-columns:repeat(" + cols + ",1fr);grid-template-rows:repeat(" + rows + ",1fr)"}>
+    ${Object.keys(tiles).map((code) => {
+      const d = by.get(code);
+      const k = d && top ? Math.max(0.18, Math.sqrt(d.usd / top)) : 0;
+      return html`<div class=${"sx-don-tile" + (d ? " lit" : "") + (k > 0.7 ? " hot" : "")} key=${code}
+          style=${"grid-column:" + (tiles[code][0] + 1) + ";grid-row:" + (tiles[code][1] + 1) + ";--k:" + k.toFixed(2)}
+          title=${d ? d.label + " · " + d.amount + " · " + d.count + (d.count === 1 ? " donation" : " donations") : ""}>
+        <i></i><span class="notr">${code}</span></div>`;
+    })}
+  </div>`;
+}
+
+// the playground: a dog chasing a ball past a cat, in ASCII, because a
+// window about animal shelters should have animals in it.  A tick every
+// 170 ms; still under prefers-reduced-motion.
+const PLAY_W = 62, PLAY_H = 3;
+const DOG = [
+  ["      ,_  ", " /\\__/ o\\ ", " \\_/\\_|\\_|"],
+  ["      ,_  ", " /\\__/ o\\ ", " \\_//__// "],
+];
+const CAT = [
+  [" /\\_/\\  ", "( o.o ) ", " > ^ <~ "],
+  [" /\\_/\\  ", "( o.o ) ", " > ^ < ~"],
+  [" /\\_/\\  ", "( O.O ) ", " > ^ <  "],
+];
+const BIRD = ["~v~", "-v-"];
+function putSprite(grid, x, y, lines) {
+  lines.forEach((ln, dy) => {
+    const row = y + dy;
+    if (row < 0 || row >= PLAY_H) return;
+    for (let i = 0; i < ln.length; i++) {
+      const col = x + i;
+      if (col < 0 || col >= PLAY_W || ln[i] === " ") continue;
+      grid[row][col] = ln[i];
+    }
+  });
+}
+function playFrame(t) {
+  const grid = Array.from({ length: PLAY_H }, () => Array(PLAY_W).fill(" "));
+  const lap = 70;                                     // ticks per run across
+  const dogX = -12 + (t % lap);
+  const catX = PLAY_W - 9;
+  const near = dogX + 10 >= catX - 2 && dogX < catX + 4;
+  const ballX = dogX + 13 + ((t >> 1) % 2);
+  const ballY = [0, 1, 2, 1][t % 4];
+  const birdX = PLAY_W - ((t * 2) % (PLAY_W + 30)) + 20;
+  putSprite(grid, birdX, 0, [BIRD[(t >> 2) % 2]]);
+  if (ballX < catX - 1) putSprite(grid, ballX, ballY, ["o"]);
+  putSprite(grid, catX, 0, CAT[near ? 2 : (t >> 3) % 2]);
+  putSprite(grid, dogX, 0, DOG[t % 2]);
+  return grid.map((r) => r.join("")).join("\n");
+}
+function Playground() {
+  const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const [t, setT] = useState(8);
+  useEffect(() => {
+    if (still) return undefined;
+    const id = setInterval(() => setT((n) => n + 1), 170);
+    return () => clearInterval(id);
+  }, []);
+  return html`<pre class="sx-don-play notr" aria-hidden="true">${playFrame(t)}</pre>`;
+}
+
+function Avatar({ name }) {
+  if (!name || name === "Anonymous") {
+    return html`<span class="sx-don-av anon"><${Icon} name="paw" /></span>`;
+  }
+  return html`<span class="sx-don-av notr" style=${"--h:" + nameHue(name)}>${initials(name)}</span>`;
+}
+
+function Podium({ places }) {
+  const slots = [places[1], places[0], places[2]];
+  const cls = ["p2", "p1", "p3"];
+  const rank = [2, 1, 3];
+  return html`<div class="sx-don-podium">
+    ${slots.map((p, i) => html`<div class=${"sx-don-step " + cls[i] + (p ? "" : " empty")}>
+      ${p ? html`<span class="who notr ellip" title=${p.where}>${p.where}</span>
+        <span class="amt mono notr">${p.amount}</span>` : html`<span class="who dim">—</span>`}
+      <div class="blk"><span class="mono">${rank[i]}</span></div>
+    </div>`)}
+  </div>`;
+}
+
+function DonationsDialog({ close, auto = false }) {
+  const sx = useNs("shellx");
+  const d = sx.donations || {};
+  const [uid, onClose] = useWin(close);
+  const [amount, setAmount] = useState("");
+  const [currency, setCurrency] = useState(d.currency || "USD");
+  const [shelter, setShelter] = useState("");
+  const [country, setCountry] = useState(d.country || "");
+  const [region, setRegion] = useState(d.region || "");
+  const [name, setName] = useState(d.name || "");
+  const [showName, setShowName] = useState(true);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [stage, setStage] = useState("form");    // form | confirm
+  const [added, setAdded] = useState(0);
+  const [hit, setHit] = useState(null);          // the jackpot: "+$30"
+  const [mapOf, setMapOf] = useState("world");   // world | us
+  const [hist, setHist] = useState(null);        // null, or {rows, total, next, busy, err}
+  const loadHistory = async (offset) => {
+    setHist((h) => ({ ...(h || { rows: [], total: 0, next: null }), busy: true, err: null }));
+    const r = await call("shellx.donations_history", offset || 0);
+    if (!r) { setHist((h) => ({ ...h, busy: false, err: "Couldn't reach the list just now." })); return; }
+    setHist((h) => ({ rows: offset ? [...(h ? h.rows : []), ...r.rows] : r.rows, total: r.total, next: r.next, busy: false, err: null }));
+  };
+  useEffect(() => { call("shellx.donations_open", auto); }, []);
+  useEffect(() => {
+    if (!hit) return undefined;
+    const id = setTimeout(() => setHit(null), 2200);
+    return () => clearTimeout(id);
+  }, [hit]);
+  const review = () => {
+    setErr(null);
+    const n = Number(String(amount).replace(/[^0-9.]/g, ""));
+    if (!String(amount).trim() || !isFinite(n) || n <= 0) { setErr("Enter the amount you gave."); return; }
+    setStage("confirm");
+  };
+  const submit = async () => {
+    setBusy(true);
+    const r = await call("shellx.donations_submit", amount, currency, shelter, name, showName, country, region);
+    setBusy(false);
+    setStage("form");
+    if (!r) return;                       // the toast said what was wrong
+    const n = Number(String(amount).replace(/[^0-9.]/g, ""));
+    setHit("+" + money(n, currency));
+    setAdded((k) => k + 1); setAmount(""); setShelter("");
+  };
+  const takeBack = async (row) => {
+    const e = await call("shellx.donations_remove", row.key);
+    if (!e) return;
+    setAmount(String(e.amount || "")); setCurrency(e.currency || "USD");
+    setShelter(e.shelter || ""); setCountry(e.country || ""); setRegion(e.region || "");
+    setName(e.name || ""); setShowName(e.show_name !== false);
+    setStage("form"); setErr(null);
+  };
+  const recent = d.recent || [];
+  const places = d.places || [];
+  const mine = d.mine || [];
+  const map = d.map || { world: [], us: [], elsewhere: null };
+  const rest = places.slice(3, 10);
+  const top = places.length ? places[0].usd : 0;
+  const n = Number(String(amount).replace(/[^0-9.]/g, ""));
+  const big = n * ((d.rates || {})[currency] || 1) > (d.hold_over || 299);   // checked by hand first
+  const countryName = ((d.countries || []).find((c) => c.value === country) || {}).label || "";
+  const where = country ? (region ? region + ", " + (country === "US" ? "US" : countryName) : countryName) : "";
+  if (hist) {
+    // every donation, newest first, a page at a time
+    return html`<${Modal} title="All donations" icon="paw" wide onClose=${onClose} cls=${"sx-don " + uid}
+      footer=${html`<span class="grow small dim notr">${hist.total ? hist.rows.length + " of " + hist.total : ""}</span>
+        <${Button} onClick=${() => setHist(null)}>Back<//><${Button} kind="primary" onClick=${close}>Close<//>`}>
+      <div class="sx-don-hist">
+        <table class="sx-don-list sx-don-hist-table"><thead><tr><th>When</th><th>Who</th><th>Shelter</th><th></th></tr></thead><tbody>
+          ${hist.rows.map((r, i) => html`<tr key=${i}>
+            <td class="muted notr">${r.date}</td>
+            <td><${Avatar} name=${r.name} /><span class="notr ellip">${r.name}</span></td>
+            <td class="muted notr ellip" title=${r.where ? r.shelter + " (" + r.where + ")" : r.shelter}>${r.shelter}${r.where ? html` <span class="dim">· ${r.where}</span>` : null}</td>
+            <td class="mono notr">${r.amount}</td></tr>`)}
+          ${!hist.rows.length && !hist.busy ? html`<tr><td class="muted" colspan="4">${hist.err || "Nothing reported yet."}</td></tr>` : null}
+        </tbody></table>
+        ${hist.err && hist.rows.length ? html`<span class="small err-ink">${hist.err}</span>` : null}
+        ${hist.busy ? html`<span class="small muted">Loading…</span>`
+          : hist.next != null ? html`<div><${Button} onClick=${() => loadHistory(hist.next)}>Load more<//></div>` : null}
+      </div>
+    <//>`;
+  }
+  return html`<${Modal} title="Donate to an animal shelter" icon="paw" wide onClose=${onClose} cls=${"sx-don " + uid}
+    footer=${html`<${Button} kind="ghost" onClick=${() => loadHistory(0)} disabled=${!d.known}>All donations<//>
+      <span class="grow small dim wrap">${d.offline ? "The total can't be reached right now; this is the last it answered." : ""}</span>
+      <${Button} onClick=${() => call("shellx.donations_refresh")}>Refresh<//><${Button} kind="primary" onClick=${close}>Close<//>`}>
+    <div class="sx-don-nomoney" role="note">
+      <${Icon} name="info" />
+      <div><b>No money changes hands here.</b> PAD doesn't take donations, and nothing is charged or processed. You give directly to any animal shelter you choose, on your own terms. This window only keeps a running tally of what people say they gave.</div>
+    </div>
+    <p class="sx-p">${auto ? "Your card is written. " : ""}If PAD saved you money or time, give some of it to an animal shelter near you, then tell me here so it counts toward the tally.</p>
+    <div class="sx-don-layout">
+      <div class="sx-don-therm-col">
+        <span class="small muted notr">${d.next_short || ""}</span>
+        <${Thermometer} pct=${d.pct || 0} />
+        <span class="small muted notr">${d.known ? d.last_text : ""}</span>
+      </div>
+      <div class="sx-don-main stack" style="gap:10px">
+        <${Playground} />
+        <div class=${"sx-don-hero" + (hit ? " hit" : "")}>
+          <${Odometer} text=${d.known ? d.total_text : "—"} />
+          <span class="stack" style="gap:2px">
+            <span class="small muted">${d.known ? "raised by PAD users" : "No total yet."}</span>
+            ${d.known ? html`<span class="chip acc sm notr" style="align-self:flex-start">${d.count_text}</span>` : null}
+          </span>
+          ${hit ? html`<span class="sx-don-plus mono notr" key=${added}>${hit}</span>` : null}
+          <span class="sx-don-paw" aria-hidden="true"><${Icon} name="paw" /></span>
+        </div>
+        <span class="small muted sx-don-h">Milestones for the tally</span>
+        <div class="sx-don-steps" role="list" aria-label="Milestones">
+          ${(d.ladder || []).map((c, i) => html`<div class=${"sx-don-step-m " + c.state} role="listitem">
+            ${i ? html`<i class="ln"></i>` : null}
+            <span class="sx-don-dot">${c.state === "reached" ? html`<${Icon} name="check" />` : c.state === "next" ? html`<${Icon} name="paw" />` : html`<b></b>`}</span>
+            <span class="lbl mono notr">${c.text}</span>
+            <span class="sub">${c.state === "reached" ? (c.date ? html`reached <span class="notr">${c.date}</span>` : "reached") : c.state === "next" ? "next up" : "later"}</span>
+          </div>`)}
+        </div>
+        <span class="small muted sx-don-h">Recent</span>
+        <table class="sx-don-list"><tbody>
+          ${recent.length ? recent.map((r) => html`<tr>
+              <td><${Avatar} name=${r.name} /><span class="notr ellip">${r.name}</span></td>
+              <td class="muted notr ellip" title=${r.where ? r.shelter + " (" + r.where + ")" : r.shelter}>${r.shelter}${r.where ? html` <span class="dim">· ${r.where}</span>` : null}</td>
+              <td class="mono notr">${r.amount}</td></tr>`)
+            : html`<tr><td class="muted" colspan="3">${d.known ? "Nothing reported yet. Be the first." : "No entries yet."}</td></tr>`}
+        </tbody></table>
+      </div>
+      <div class="sx-don-side stack" style="gap:10px">
+        ${places.length ? html`<span class="small muted sx-don-h">Top places</span>
+          <${Podium} places=${places} />
+          ${rest.length ? html`<div class="sx-don-places">
+            ${rest.map((p, i) => html`<div class="sx-don-place">
+              <span class="mono dim">${i + 4}</span>
+              <span class="notr ellip" title=${p.where}>${p.where}</span>
+              <div class="sx-bar"><i style=${"width:" + (top ? Math.max(4, Math.round(100 * p.usd / top)) : 0) + "%"}></i></div>
+              <span class="mono notr">${p.amount}</span>
+            </div>`)}
+          </div>` : null}` : null}
+        ${map.world.length ? html`<div class="row sx-don-map-head">
+            <span class="small muted sx-don-h">Map</span>
+            <span class="grow"></span>
+            ${map.us.length ? html`<span class="sx-don-map-pick">
+              <${Button} size="sm" kind=${mapOf === "world" ? "primary" : ""} onClick=${() => setMapOf("world")}>World<//>
+              <${Button} size="sm" kind=${mapOf === "us" ? "primary" : ""} onClick=${() => setMapOf("us")}>United States<//>
+            </span>` : null}
+          </div>
+          ${mapOf === "us" && map.us.length
+            ? html`<${TileMap} tiles=${US_TILES} cols=${US_COLS} rows=${US_ROWS} data=${map.us} />`
+            : html`<${TileMap} tiles=${WORLD_TILES} cols=${WORLD_COLS} rows=${WORLD_ROWS} data=${map.world} />`}
+          <span class="small muted">${mapOf === "us" && map.us.length
+            ? (map.us.length + (map.us.length === 1 ? " state" : " states") + " so far. Brighter is more.")
+            : (map.world.length + (map.world.length === 1 ? " country" : " countries") + " so far. Brighter is more.")}${map.elsewhere ? html` <span class="notr">${map.elsewhere.amount}</span> from somewhere else.` : null}</span>` : null}
+      </div>
+      <div class="stack" style="gap:10px;min-width:0">
+        <div class="card sx-don-form stack" style="gap:8px">
+          ${stage === "confirm" ? html`
+            <span class="h2">Is that right?</span>
+            <div class="sx-don-confirm stack" style="gap:4px">
+              <span class="sx-don-confirm-amt mono notr">${money(n, currency)}</span>
+              <span class="small">${shelter.trim() ? html`to <b class="notr">${shelter.trim()}</b>` : "to an animal shelter"}${where ? html` in <span class="notr">${where}</span>` : null}</span>
+              <span class="small muted">${name.trim() && showName ? html`listed as <span class="notr">${name.trim()}</span>` : "listed as Anonymous"}</span>
+            </div>
+            ${big ? html`<span class="small warn-ink wrap">An entry over $${(d.hold_over || 299).toLocaleString("en-US")} is checked by hand before it counts, so the total moves later.</span>` : null}
+            <span class="small muted wrap">Nothing is charged. This only adds what you already gave to the tally everyone sees. You can take it back from the Yours list below.</span>
+            <${Button} kind="primary" cls="sx-don-cta" onClick=${submit} disabled=${busy}>Yes, add it<//>
+            <${Button} kind="ghost" onClick=${() => setStage("form")} disabled=${busy}>Edit<//>`
+          : html`
+            <span class="h2">I gave, on my own</span>
+            <div class="row" style="gap:6px">
+              <${Select} value=${currency} options=${d.currencies || ["USD"]} onChange=${setCurrency} width=${84} />
+              <${Field} value=${amount} onChange=${setAmount} placeholder="25" mono width=${96} autoFocus bad=${!!err} />
+            </div>
+            <${Field} value=${shelter} onChange=${setShelter} placeholder="Shelter (optional)" maxLength=${80} />
+            <${Select} value=${country} options=${d.countries || [{ value: "", label: "Country (optional)" }]} onChange=${setCountry} cls="sx-don-country" />
+            <${Field} value=${region} onChange=${setRegion} placeholder="State or province (optional)" maxLength=${40} disabled=${!country} />
+            <${Field} value=${name} onChange=${setName} placeholder="Your name (optional)" maxLength=${40} />
+            <${Check} checked=${showName} onChange=${setShowName} label="Show my name in the list" />
+            ${err ? html`<span class="small err-ink">${err}</span>` : null}
+            <${Button} kind="primary" cls="sx-don-cta" onClick=${review} disabled=${busy}>Add to the tally<//>
+            ${added ? html`<span class="small ok-ink">Thank you.</span>` : null}
+            <span class="small muted wrap">Honor system. No payment here, and nothing else about you is sent.</span>`}
+          ${added ? html`<div class="sx-don-burst" key=${added} aria-hidden="true">
+            ${[0, 1, 2, 3, 4, 5, 6].map((i) => html`<i style=${"left:" + (8 + i * 13) + "%;animation-delay:" + (i * 70) + "ms;--r:" + ((i % 2 ? 1 : -1) * (10 + i * 7)) + "deg"}><${Icon} name="paw" /></i>`)}
+          </div>` : null}
+        </div>
+        ${mine.length ? html`<span class="small muted sx-don-h">Yours</span>
+          <div class="sx-don-mine">
+            ${mine.map((m) => html`<div class="sx-don-mine-row" key=${m.key}>
+              <span class="mono notr">${m.amount}</span>
+              <span class="small muted ellip notr" title=${m.shelter + (m.where ? " (" + m.where + ")" : "")}>${m.shelter || "an animal shelter"}${m.where ? " · " + m.where : ""}</span>
+              ${m.pending ? html`<span class="chip warn sm">waiting</span>` : m.held ? html`<span class="chip info sm" title="Checked by hand before it counts">in review</span>` : html`<span></span>`}
+              <${Button} kind="ghost" size="sm" icon="x" title="Take it back and fix it" onClick=${() => takeBack(m)} />
+            </div>`)}
+          </div>` : null}
+      </div>
+    </div>
+  <//>`;
+}
+registerDialog("donations", DonationsDialog);
+
+// ------------------------------------------------------------ report a problem
+// PAD-780: what happened in the user's words, the facts the developer
+// always asks for next, an optional picture, the whole record to read
+// before it goes, then Send (the app's service) or Save as a file
+// (webui/shellx_report.py, core/problem_report.py).  `prefill` is the
+// error box's words when its own link opened this.
+// PAD-975: Ctrl+V with a picture on the clipboard (Win+Shift+S, Print
+// Screen, a copied image or picture file) adds it, the same as one picked
+// from disk.  The page reads the picture off the paste when the webview
+// hands it over; when the paste carries neither a picture nor text, the
+// app reads the clipboard itself.  A text paste goes through untouched.
+// `rid` empty is the report's picture, otherwise a file of that answer.
+function pastePicture(e, rid, onErr) {
+  const cd = e.clipboardData;
+  const items = cd && cd.items ? Array.from(cd.items) : [];
+  const img = items.find((it) => it.kind === "file" && /^image\//.test(it.type || ""));
+  const send = (b64) => call("shellx.report_paste", b64, rid || "")
+    .catch((x) => onErr(x && x.message ? x.message : String(x)));
+  if (img) {
+    const file = img.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    const rd = new FileReader();
+    rd.onload = () => send(String(rd.result || ""));
+    rd.onerror = () => send("");
+    rd.readAsDataURL(file);
+    return;
+  }
+  const words = cd ? cd.getData("text/plain") : "";
+  if (words) return;
+  // the paste itself is left alone: when the webview hid text too, the
+  // box still gets it, and the app finds no picture and changes nothing
+  send("");
+}
+
+function ReportDialog({ close, prefill = "" }) {
+  const sx = useNs("shellx");
+  const r = sx.report || {};
+  const [uid, onClose] = useWin(close);
+  const [info, setInfo] = useState(null);           // facts, log size, memory
+  const [text, setText] = useState(prefill || "");
+  const [name, setName] = useState("");
+  const [hidePaths, setHidePaths] = useState(true);
+  const [preview, setPreview] = useState(null);     // null, or the record's text
+  const [showPreview, setShowPreview] = useState(false);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [hidden, setHidden] = useState(false);      // while the window is being shot
+  const [sentId, setSentId] = useState(null);
+  // PAD-1254: one of the user's own reports this is about ("" = something
+  // new); the one waiting on their answer comes picked
+  const [about, setAbout] = useState("");
+  useEffect(() => {
+    (async () => {
+      const i = await call("shellx.report_open", prefill || "");
+      if (!i) return;
+      setInfo(i);
+      setName(i.name || ""); setHidePaths(i.hide_paths !== false);
+      if (i.prefill && !text) setText(i.prefill);
+      if (i.about) setAbout(i.about);
+    })();
+  }, []);
+  useEffect(() => {
+    if (!showPreview) return undefined;
+    const id = setTimeout(async () => {
+      const p = await call("shellx.report_preview", text, name, hidePaths, about);
+      if (p) setPreview(p.text);
+    }, 300);
+    return () => clearTimeout(id);
+  }, [showPreview, text, name, hidePaths, about]);
+  useEffect(() => {
+    // the send finished off the loop: the service's answer, or why not
+    if (!r.last || busy === false) return;
+    setBusy(false);
+    if (r.last.ok) setSentId(r.last.id || "sent");
+    else setErr(r.last.error || "The report could not be sent.");
+  }, [r.last, r.busy]);
+  useEffect(() => {
+    // anywhere in the window, the text box or not (PAD-975)
+    if (sentId) return undefined;
+    const onPaste = (e) => { setErr(null); pastePicture(e, "", setErr); };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [sentId]);
+  const picture = r.picture;
+  const act = async (fn) => {
+    setErr(null);
+    try { return await fn(); } catch (e) { setErr(e && e.message ? e.message : String(e)); return null; }
+  };
+  const pick = () => act(() => call("shellx.report_picture", "pick"));
+  const clearPic = () => act(() => call("shellx.report_picture", "clear"));
+  const shoot = async () => {
+    setHidden(true);
+    await act(() => call("shellx.report_capture"));
+    setHidden(false);
+  };
+  const send = async () => {
+    setErr(null); setBusy(true);
+    const ok = await act(() => call("shellx.report_send", text, name, hidePaths, about));
+    if (!ok) setBusy(false);
+  };
+  const save = () => act(() => call("shellx.report_save", text, name, hidePaths));
+  // the reports this app sent are a board of their own (PAD-914)
+  const mine = r.mine || [];
+  // newest first, under where each one is
+  const open = mine.filter((m) => m.followable).slice().reverse();
+  const aboutOpts = [{ value: "", label: "Something new" }].concat(open.map((m) => ({
+    value: m.id, group: m.waiting ? "Needs your answer" : m.state === "filed" ? "Open" : "Finished",
+    label: (m.ticket ? m.ticket + ": " : "") + (m.title || "A problem report") })));
+  const aboutM = about ? open.find((m) => m.id === about) : null;
+  const fu = r.last && r.last.ok && r.last.follow_up ? r.last : null;
+  const hasNews = !!mine.find((m) => m.seen === false);
+  const asked = !!mine.find((m) => m.waiting);
+  const board = () => { close(); openDialog("reports"); };
+  const Mine = () => mine.length ? html`<div class="row" style="gap:8px">
+    <${Button} size="sm" onClick=${board}>Your reports (${mine.length})<//>
+    ${asked ? html`<span class="chip sm warn">Needs your answer</span>`
+      : hasNews ? html`<span class="chip sm info">News</span>` : null}
+  </div>` : null;
+  if (hidden) return null;
+  if (sentId) {
+    return html`<${Modal} title="Report a problem" icon="flag" onClose=${onClose} cls=${"sx-report " + uid}
+      footer=${html`<${Button} onClick=${board}>See your reports<//><${Button} kind="primary" onClick=${close}>Close<//>`}>
+      ${fu ? html`<${Note} kind="ok">Added to your report "${fu.title || "your report"}"${fu.ticket ? ` (${fu.ticket})` : ""}, with the log and the card's details attached. It goes to the same ticket, not a new one. Your reports shows where it is.<//>`
+        : html`<${Note} kind="ok">Sent. Thank you: it goes straight into the developer's queue, with the log and the card's details attached. Your reports shows where it is in the queue, and when a release addresses it this app tells you with a notice at the top.<//>`}
+    <//>`;
+  }
+  // ticked, the table shows the facts the way the record will carry them
+  const facts = (info && (hidePaths && info.facts_hidden || info.facts)) || [];
+  return html`<${Modal} title="Report a problem" icon="flag" wide onClose=${onClose} cls=${"sx-report " + uid}
+    footer=${html`<${Button} kind="ghost" onClick=${save} disabled=${busy}>Save as a file…<//>
+      <span class="grow"></span>
+      <${Button} onClick=${close} disabled=${busy}>Cancel<//>
+      <${Button} kind="primary" onClick=${send} busy=${busy} disabled=${busy || !r.available}>${busy ? "Sending…" : "Send"}<//>`}>
+    <div class="stack" style="gap:10px">
+      <p class="sx-p">Say what went wrong and what you expected. The app adds its version, your system, the card and project it has open, and the last ${(info && info.log_lines) || 0} lines of its log, so you don't have to.</p>
+      ${open.length ? html`<div class="row wrap sx-rep-about" style="gap:10px">
+        <label class="lbl" for="sx-rep-about">This is about</label>
+        <${Select} id="sx-rep-about" value=${about} options=${aboutOpts} onChange=${setAbout} width=${460} />
+        <span class="small muted">${aboutM ? "It goes onto that report, with the log and your picture, instead of starting a new one."
+          : "Something you sent before? Pick it so it stays one report."}</span>
+      </div>` : null}
+      <label class="lbl" for="sx-rep-text">${aboutM ? "What's new about it" : "What happened"}</label>
+      <textarea id="sx-rep-text" class="area" rows="5" value=${text} autoFocus
+        placeholder=${aboutM ? "I tried it again on the new version and…" : "I pressed Write on the Godzilla card and it stopped at 40% with…"}
+        onInput=${(e) => setText(e.target.value)}></textarea>
+      <div class="row wrap" style="gap:14px">
+        <span class="stack" style="gap:4px"><span class="lbl">Your name (optional)</span>
+          <${Field} value=${name} onChange=${setName} width=${200} /></span>
+        <span class="small muted" style="align-self:flex-end">No email needed: when a release addresses your report, this app tells you.</span>
+      </div>
+      <div class="row wrap" style="gap:10px">
+        <span class="lbl">Picture</span>
+        ${picture ? html`<span class="chip acc sm notr" title=${picture.name}>${picture.name} · ${picture.kb} KB</span>
+            <${Button} size="sm" kind="ghost" onClick=${clearPic}>Remove<//>`
+          : html`<${Button} drop size="sm" onClick=${pick}>Add a picture…<//>
+            ${r.capture ? html`<${Button} size="sm" onClick=${shoot} title="Hides this window for a moment and takes a picture of the app">Take a picture of the app<//>` : null}
+            <span class="small muted">or paste one with Ctrl+V</span>`}
+      </div>
+      <${Check} checked=${hidePaths} onChange=${setHidePaths} label="Leave file paths and my account name out of the report" />
+      <details class="sx-rep-facts" open=${showPreview} onToggle=${(e) => setShowPreview(e.target.open)}>
+        <summary class="small">What will be sent</summary>
+        ${preview === null ? html`<span class="small muted">Reading…</span>`
+          : html`<pre class="sx-rep-pre mono small">${preview}</pre>`}
+      </details>
+      ${!showPreview && facts.length ? html`<table class="sx-rep-tab small"><tbody>
+        ${facts.filter((f) => f[0] !== "History").map((f) => html`<tr><td class="muted">${f[0]}</td><td class="notr ellip" title=${f[1]}>${f[1]}</td></tr>`)}
+      </tbody></table>` : null}
+      ${!r.available ? html`<${Note} kind="warn">This copy of the app has no report service configured. Save the report as a file and attach it to a message instead.<//>` : null}
+      <${ErrorNote} text=${err} />
+      ${err && r.last && r.last.offline ? html`<${Note} kind="info">Save as a file writes the same report as a .zip you can attach to a Discord post or a mail.<//>` : null}
+      <${Mine} />
+    </div>
+  <//>`;
+}
+registerDialog("report", ReportDialog);
+
+// PAD-972: the developer's question about one report, in full, and the
+// box the user answers it in: words and files (a log, a picture), sent
+// off the UI loop.  The files live in the service until sent, so the box
+// only keeps the words.
+function AnswerBox({ m, reply, focus }) {
+  const rp = reply || {};
+  const files = rp.files || [];
+  const [text, setText] = useState("");
+  const [err, setErr] = useState(null);
+  // PAD-1254: the log tails a report carries go with the answer too
+  const [logs, setLogs] = useState(true);
+  const most = logs ? 4 : 5;
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!focus || !ref.current) return;
+    ref.current.scrollIntoView({ block: "nearest" });
+    const t = ref.current.querySelector("textarea");
+    if (t) t.focus();
+  }, [focus]);
+  const act = async (fn) => {
+    setErr(null);
+    try { return await fn(); } catch (e) { setErr(e && e.message ? e.message : String(e)); return null; }
+  };
+  const attach = () => act(() => call("shellx.report_reply_attach", m.id));
+  const remove = (i) => act(() => call("shellx.report_reply_remove", m.id, i));
+  const send = () => act(() => call("shellx.report_reply_send", m.id, text, logs));
+  const b = m.board || {};
+  const busy = !!rp.busy;
+  const onPaste = (e) => {
+    if (busy || files.length >= most) return;
+    setErr(null); pastePicture(e, m.id, setErr);
+  };
+  return html`<section class="sx-ask" ref=${ref} data-id=${m.id} onPaste=${onPaste}>
+    <div class="row wrap" style="gap:8px">
+      <span class="chip sm warn">Needs your answer</span>
+      <b class="sx-ask-title">${m.title || "A problem report"}</b>
+      ${b.ticket ? html`<span class="chip sm mono notr">${b.ticket}</span>` : null}
+    </div>
+    <div class="small muted" style="margin-top:6px">The developer asks:</div>
+    <div class="sx-ask-q">${b.question || "Something more about this report."}</div>
+    <textarea class="area" rows="4" value=${text} disabled=${busy} aria-label="Your answer"
+      placeholder="Your answer…" onInput=${(e) => setText(e.target.value)}></textarea>
+    <div class="row wrap" style="gap:8px;margin-top:6px">
+      <${Button} size="sm" onClick=${attach} disabled=${busy || files.length >= most}>Attach files…<//>
+      ${files.map((f, i) => html`<span class="chip acc sm notr" title=${f.trimmed ? "Too big to send whole: its last part goes" : f.name}>${f.name} · ${f.kb} KB${f.trimmed ? " (trimmed)" : ""}
+        <button class="sx-ask-x" aria-label=${"Remove " + f.name} disabled=${busy} onClick=${() => remove(i)}>×</button></span>`)}
+      <span class="grow"></span>
+      <${Button} kind="primary" size="sm" onClick=${send} busy=${busy}
+        disabled=${busy || (!text.trim() && !files.length)}>${busy ? "Sending…" : "Send"}<//>
+    </div>
+    <${Check} checked=${logs} onChange=${setLogs} disabled=${busy} cls="sx-ask-logs"
+      label="Include the app's logs" title="The app's log, and the Visual Pinball logs when you played a table, the same as a report carries" />
+    <div class="small muted" style="margin-top:4px">Any file helps, such as a log; paste a picture into the box with Ctrl+V. Up to ${most} files${logs ? " besides the logs" : ""}, about 1 MB in all; a log too big to send whole keeps its last part.</div>
+    <${ErrorNote} text=${err || rp.error} />
+  </section>`;
+}
+
+// PAD-914: Your reports, a board of every report this app sent, in the
+// column of where it is in the developer's queue.  report_board.js draws
+// it, the same script the developer's tracker draws the ticket's copy
+// with, so both see the same thing.  Opening it asks after the open
+// reports when the last ask is a few minutes old, and marks news seen.
+// A question waiting on the user (PAD-972) is answered above the board.
+function ReportsDialog({ close, focus }) {
+  const sx = useNs("shellx");
+  const r = sx.report || {};
+  const [uid, onClose] = useWin(close);
+  const mine = r.mine || [];
+  const hasNews = !!mine.find((m) => m.seen === false);
+  useEffect(() => { call("shellx.report_board_open"); }, []);
+  useEffect(() => { if (hasNews) call("shellx.report_mine_seen"); }, [hasNews]);
+  // the news stays marked for as long as the window is open
+  const [news] = useState(() => new Set(mine.filter((m) => m.seen === false).map((m) => m.id)));
+  const entries = mine.map((m) => Object.assign({}, m.board, { new: news.has(m.id) }));
+  const asks = mine.filter((m) => m.waiting);
+  const board = window.PADReportBoard
+    ? window.PADReportBoard.html(entries, { empty: "No reports sent from this app yet. Report a problem sends one.",
+      askHint: "Answer it above the board." })
+    : "";
+  const ago = r.checked_at ? Math.max(0, Math.round((Date.now() / 1000 - r.checked_at) / 60)) : null;
+  const checked = r.checking ? "Asking the developer's service…"
+    : ago === null ? "Not asked yet"
+    : ago < 1 ? "Up to date" : ago < 60 ? `Asked ${ago} min ago`
+    : ago < 2880 ? `Asked ${Math.round(ago / 60)} h ago` : `Asked ${Math.round(ago / 1440)} days ago`;
+  return html`<${Modal} title="Your reports" icon="flag" xwide onClose=${onClose} cls=${"sx-reports " + uid}
+    footer=${html`<span class="small muted">${checked}</span>
+      <span class="grow"></span>
+      <${Button} kind="ghost" onClick=${() => call("shellx.report_refresh")} disabled=${!r.available || r.checking}>Check now<//>
+      <${Button} onClick=${() => { close(); openDialog("report"); }}>Report a problem…<//>
+      <${Button} kind="primary" onClick=${close}>Close<//>`}>
+    <div class="stack" style="gap:10px">
+      <p class="sx-p">Every report this app sent, and where it is in the developer's queue. The number on a card is its ticket: mention it if you write about the problem anywhere else.</p>
+      ${asks.map((m) => html`<${AnswerBox} key=${m.id} m=${m} reply=${(r.replies || {})[m.id]} focus=${focus === m.id} />`)}
+      <div class="sx-board" dangerouslySetInnerHTML=${{ __html: board }}></div>
+    </div>
+  <//>`;
+}
+registerDialog("reports", ReportsDialog);
 
 export { TipsPanel };

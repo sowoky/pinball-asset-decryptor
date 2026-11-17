@@ -23,7 +23,19 @@ param(
     # Install Missing passes a temp-file path; writing it is this script's
     # first act, so the app can tell a PowerShell that never got this far
     # (blank window on hotel Wi-Fi, PAD-327) from one that is running.
-    [string]$StartedMarker = ""
+    [string]$StartedMarker = "",
+    # Set up WSL2 itself and nothing else: no Ubuntu, no packages, no menu
+    # (PAD-1103).  The app brings its own Linux (PAD-Runtime), so on a new PC
+    # the one thing it cannot do for itself is switch WSL on - which needs an
+    # administrator and usually a restart.  The Windows installer runs this
+    # (its "Set up WSL2" task), and so does Install Missing when WSL is off.
+    # Exit codes: 0 ready now, 3010 ready after a Windows restart, 2
+    # virtualization off in the firmware, 1 not installed.
+    [switch]$WslOnly,
+    # No "press Enter" at the end of a run that worked: the Windows installer
+    # waits on this window, and a prompt there would hold its Finish page.
+    # A run that FAILED still waits, so its reason can be read.
+    [switch]$Unattended
 )
 if ($StartedMarker) {
     try { Set-Content -LiteralPath $StartedMarker -Value $PID -ErrorAction Stop } catch {}
@@ -281,8 +293,10 @@ function Get-WslInstallPlan {
     } catch {}
     $online = Get-WslOnlineDistros
     $distro = Select-WslInstallDistro $online
-    # --no-launch skips the interactive 'create UNIX user' first boot; we
-    # only ever exec via 'wsl -u root' so a default user isn't needed.
+    # --no-launch skips the interactive 'create UNIX user' first boot, so
+    # this script never waits on a window.  The distro then logs in as root,
+    # which the emulator cannot use; Set-WslOrdinaryUser gives it the user
+    # that first boot would have made (PAD-661).
     $installArgs  = @("--install", "-d", $distro)
     $fallbackArgs = @("--install", "-d", "Ubuntu")
     if ($help -match '--no-launch') {
@@ -309,6 +323,100 @@ function Get-WslInstallPlan {
         # a try before settling for an older Ubuntu.
         Stale        = [bool](@($online).Count -gt 0 -and
                               @($online) -notcontains $PadKnownGoodDistro)
+    }
+}
+
+# --- AN UBUNTU THAT LOGS IN AS ROOT --------------------------------------
+# What --no-launch leaves behind: Ubuntu's first-boot "create a default Unix
+# user" step never ran, so the distro has no user and every `wsl` lands in it
+# as root - and as root the emulator's game window stays black (PAD-659,
+# PAD-661).  wsl_default_user.sh does that first-boot step without the
+# prompt; this makes the user it names the login.
+#
+# Asked of the default distro on every run, not only right after an install:
+# the install that needs a restart is followed by a SECOND run, which is the
+# first one that can reach the distro, and every machine an older release set
+# up is in the same state.  A distro that already logs in as somebody is left
+# alone.  So is the app's own runtime, which carries its own user.
+function Set-WslOrdinaryUser {
+    if ($script:PadDistro) { return }
+    $def = Get-WslDefaultDistro
+    if ($null -eq $def) { return }
+    $name = $def.Name
+    $who = ((& wsl -d $name -- id -un 2>$null | Out-String) -replace "`0", "").Trim()
+    if ($LASTEXITCODE -ne 0 -or $who -ne "root") { return }
+
+    Write-Step ("Giving {0} a user account (it logs in as root)..." -f $name)
+    $sh = Join-Path $PSScriptRoot "wsl_default_user.sh"
+    if (-not (Test-Path -LiteralPath $sh)) {
+        Write-FAIL ("{0} user account (wsl_default_user.sh missing beside the installer)" -f $name)
+        return
+    }
+    # -e, never `--`: `--` hands the line to Linux's shell, and wsl.exe quotes
+    # only an argument with a space in it, so a Windows path without one
+    # (C:\PAD, a source checkout) reached wslpath with its backslashes eaten -
+    # "C:PADwsl_default_user.sh".  The GDRE and repair steps below had the
+    # same line and the same hole.
+    $wslSh = ((& wsl -d $name -u root -e wslpath -a "$sh" | Out-String) -replace "`0", "").Trim()
+    $out = @(& wsl -d $name -u root -e bash $wslSh "$env:USERNAME" 2>&1 |
+             ForEach-Object { ("$_" -replace "`0", "") })
+    $out | Where-Object { $_ -notmatch '^PADUSER=' } |
+        ForEach-Object { Write-Host "    $_" }
+    $line = $out | Where-Object { $_ -match '^PADUSER=' } | Select-Object -Last 1
+    if (-not ($line -match '^PADUSER=(\S+) (\d+)')) {
+        Write-FAIL ("{0} user account (could not make one; the emulator's window stays black as root)" -f $name)
+        return
+    }
+    $user = $Matches[1]; $uid = [int]$Matches[2]
+
+    # wsl.conf only counts from the distro's next start; the login WSL reads
+    # for a new `wsl` is the distro's DefaultUid.  `wsl --manage
+    # --set-default-user` sets it at once where wsl.exe has it; before that,
+    # the registry value is the same setting (what `ubuntu.exe config
+    # --default-user` always wrote), read when the distro next starts.
+    $help = ((& wsl --help 2>&1 | Out-String) -replace "`0", "")
+    if ($help -match '--set-default-user') {
+        & wsl --manage $name --set-default-user $user *> $null
+    }
+    $who = ((& wsl -d $name -- id -un 2>$null | Out-String) -replace "`0", "").Trim()
+    if ($who -ne $user) {
+        $lxss = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss"
+        Get-ChildItem $lxss -ErrorAction SilentlyContinue | ForEach-Object {
+            $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            if ($p -and $p.DistributionName -eq $name) {
+                Set-ItemProperty $_.PSPath -Name DefaultUid -Value $uid -Type DWord
+            }
+        }
+        # A running distro keeps the login it started with (measured on WSL
+        # 2.6: the value was 1000 and `wsl` still said root).  Stopping it
+        # makes the next `wsl` start it with the new one, and with wsl.conf's.
+        & wsl --terminate $name *> $null
+        $who = ((& wsl -d $name -- id -un 2>$null | Out-String) -replace "`0", "").Trim()
+    }
+    if ($who -eq $user) {
+        Write-Installed ("{0} user account '{1}' (it logged in as root)" -f $name, $user)
+    } else {
+        Write-FAIL ("{0} still logs in as {1}, not '{2}' (the emulator's window stays black as root)" -f $name, $who, $user)
+    }
+}
+
+# --- No second clock-setter in the distro (PAD-1307) -------------------------
+# WSL keeps the guest clock on Windows time; systemd-timesyncd setting it from
+# NTP as well fights that (the clock has run up to 2.5% fast), and the
+# emulator's sound, paced on that clock, drifts and breaks up.  The clock is
+# shared by every distro, so a rig in PAD-Runtime hears Ubuntu's.  Turned off
+# here, where Ubuntu is set up; the app also does it at every run start
+# (core/timesync.py) for a distro set up some other way.  Same script.
+function Disable-WslTimesyncd {
+    $def = Get-WslDefaultDistro
+    if ($null -eq $def) { return }
+    $name = $def.Name
+    $script = "[ -d /run/systemd/system ] || exit 0; command -v systemctl >/dev/null || exit 0; " +
+              "systemctl is-active --quiet systemd-timesyncd || systemctl is-enabled --quiet systemd-timesyncd 2>/dev/null || exit 0; " +
+              "systemctl disable --now systemd-timesyncd >/dev/null 2>&1 && echo PAD_TIMESYNC_OFF"
+    $out = ((& wsl -d $name -u root -e sh -c $script 2>$null | Out-String) -replace "`0", "")
+    if ($out -match 'PAD_TIMESYNC_OFF') {
+        Write-Installed ("{0}: systemd-timesyncd turned off (WSL keeps the clock; the two fought and the sound drifted)" -f $name)
     }
 }
 
@@ -595,6 +703,142 @@ $ManufacturerPrereqs = [ordered]@{
             @{ probe="sounddevice";    pkg="sounddevice";    label="sounddevice";    reason="Emulate tab: plays the emulated game's sound out of Windows directly, instead of through WSLg's damaged audio hop" }
         )
     }
+}
+
+# =========================================================================
+# -WslOnly: switch WSL2 on, and stop there (PAD-1103)
+# =========================================================================
+# THE STEP A NEWCOMER CANNOT DO, AND THE ONLY ONE.  A Pinside helper set PAD
+# up on several PCs and every one needed WSL2 and then Ubuntu-24.04 installed
+# by hand from a command line, because the Windows installer left its
+# prerequisites box unticked and the full installer below insists on an
+# Ubuntu of the right release before anything works.  Neither is needed any
+# more: the app imports its own Linux (core/runtime.py), and the import only
+# asks that WSL itself be on.  So this does exactly that - `wsl --install
+# --no-distribution` - and says what comes next.  After it, Install Missing in
+# the app installs that Linux with every tool already in it.
+#
+# Same restart marker as the full install (the app's prerequisite strip reads
+# it to say "restart Windows" rather than "install WSL"), and the same rule
+# about it: written only when something was installed that waits on a
+# restart, and removed otherwise, because a marker from an install that did
+# not happen is a lie the next run would repeat (PAD-164).
+function Install-WslPlatform {
+    Write-Step "Checking WSL2..."
+    $ok = $false
+    try {
+        & wsl --status *> $null
+        $ok = ($LASTEXITCODE -eq 0)
+    } catch {}
+    if ($ok) {
+        Remove-Item -LiteralPath $script:RestartMarker -Force -ErrorAction SilentlyContinue
+        Write-OK "WSL2 (already set up)"
+        $script:WslSetupCode = 0; return
+    }
+    if (Test-VirtualizationDisabled) {
+        Write-VirtualizationBanner
+        Write-FAIL "WSL2 (virtualization disabled in BIOS/UEFI)"
+        $script:WslSetupCode = 2; return
+    }
+    $bootId = Get-BootSessionId
+    $pendingSince = $null
+    if (Test-Path -LiteralPath $script:RestartMarker) {
+        $pendingSince = (Get-Content -LiteralPath $script:RestartMarker `
+            -ErrorAction SilentlyContinue | Select-Object -First 1)
+    }
+    if ($bootId -and $pendingSince -eq $bootId -and (Test-WslFeatureEnabled)) {
+        Write-Host "  WSL2 is installed and waiting on a Windows restart (use Restart, not Shut down)." -ForegroundColor Yellow
+        Write-SKIP "WSL2 (waiting on a Windows restart)"
+        $script:WslSetupCode = 3010; return
+    }
+
+    Write-Host "  Installing WSL2 (no Linux distro: the app brings its own). This can take a few minutes..." -ForegroundColor Cyan
+    $help = ""
+    try { $help = ((& wsl --help 2>&1 | Out-String) -replace "`0", "") } catch {}
+    $exit = 1
+    if ($help -match '--no-distribution') {
+        & wsl --install --no-distribution
+        $exit = $LASTEXITCODE
+        if ($exit -ne 0 -and $help -match '--web-download') {
+            Write-Host ("  wsl --install exited with code {0} - retrying with --web-download (skips the Microsoft Store)..." -f $exit) -ForegroundColor Cyan
+            & wsl --install --no-distribution --web-download
+            $exit = $LASTEXITCODE
+        }
+    }
+    if ($exit -ne 0) {
+        # An older wsl.exe with no --no-distribution (it would install
+        # Ubuntu with no way to say otherwise), or an install it refused:
+        # switch the two Windows features on directly, which is what
+        # `wsl --install` itself does underneath.  3010 = done, restart due.
+        Write-Host "  Switching on the Windows features WSL2 runs on..." -ForegroundColor Cyan
+        $codes = @()
+        foreach ($f in @("Microsoft-Windows-Subsystem-Linux", "VirtualMachinePlatform")) {
+            & dism.exe /online /enable-feature /featurename:$f /all /norestart
+            $codes += $LASTEXITCODE
+        }
+        if (@($codes | Where-Object { $_ -ne 0 -and $_ -ne 3010 }).Count -eq 0) {
+            # The WSL 2 kernel comes with WSL's own update, not the feature.
+            & wsl --update *> $null
+            $exit = 0
+        } else {
+            $exit = 1
+        }
+    }
+    if ($exit -ne 0) {
+        Remove-Item -LiteralPath $script:RestartMarker -Force -ErrorAction SilentlyContinue
+        Write-Host ""
+        Write-Host "  WSL2 was NOT installed.  The error text above, from Windows itself, says why." -ForegroundColor Red
+        Write-Host "  Restarting will not change this - nothing is waiting on a restart." -ForegroundColor Yellow
+        Write-Host "  By hand, in an administrator PowerShell window:   wsl --install --no-distribution" -ForegroundColor Yellow
+        Write-FAIL "WSL2 (not installed)"
+        $script:WslSetupCode = 1; return
+    }
+
+    $ok = $false
+    try {
+        & wsl --status *> $null
+        $ok = ($LASTEXITCODE -eq 0)
+    } catch {}
+    if ($ok) {
+        Remove-Item -LiteralPath $script:RestartMarker -Force -ErrorAction SilentlyContinue
+        Write-Installed "WSL2 (ready, no restart needed)"
+        $script:WslSetupCode = 0; return
+    }
+    try {
+        New-Item -ItemType Directory -Force (Split-Path -Parent $script:RestartMarker) | Out-Null
+        Set-Content -LiteralPath $script:RestartMarker -Value $bootId
+    } catch {}
+    Write-Installed "WSL2 (restart required)"
+    $script:WslSetupCode = 3010; return
+}
+
+if ($WslOnly) {
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host "  Pinball Asset Decryptor - Setting up WSL2"                  -ForegroundColor Cyan
+    Write-Host "============================================================" -ForegroundColor Cyan
+    # Called bare, never assigned: wsl.exe and dism print straight to this
+    # window (captured, PowerShell 5.1 mangles them), and anything a
+    # function prints would land in its return value.  Hence the variable.
+    $script:WslSetupCode = 1
+    Install-WslPlatform
+    $code = $script:WslSetupCode
+    Write-Host ""
+    switch ($code) {
+        0 {
+            Write-Host "  WSL2 is ready.  Open Pinball Asset Decryptor and click 'Install Missing'" -ForegroundColor Green
+            Write-Host "  above the tabs: it installs the app's own Linux, with every tool in it." -ForegroundColor Green
+        }
+        3010 {
+            Write-Host "  RESTART WINDOWS to finish (use Restart, not Shut down)." -ForegroundColor Yellow
+            Write-Host "  Then open Pinball Asset Decryptor and click 'Install Missing' above the" -ForegroundColor Yellow
+            Write-Host "  tabs: it installs the app's own Linux, with every tool in it."         -ForegroundColor Yellow
+        }
+    }
+    if (-not $Unattended -or ($code -ne 0 -and $code -ne 3010)) {
+        Read-Host "Press Enter to close this window"
+    }
+    exit $code
 }
 
 # =========================================================================
@@ -1090,6 +1334,8 @@ if ($needsWsl) {
         Write-SKIP "Ubuntu (WSL2 not available yet)"
     }
 
+    if ($wslAvailable -and $ubuntuFound) { Set-WslOrdinaryUser; Disable-WslTimesyncd }
+
     # --- Is that distro WSL 2? -------------------------------------------
     # Only asked when something in the plan loop-mounts an image (Stern's
     # file growth, every JJP flow): those are the features WSL 1 cannot do
@@ -1207,13 +1453,13 @@ function Repair-WslPackages($failed) {
         return
     }
 
-    $wslFix = wsl @script:PadWslArgs -u root -- wslpath -a "$fix"
+    $wslFix = wsl @script:PadWslArgs -u root -e wslpath -a "$fix"
     if ($wslFix) { $wslFix = "$wslFix".Trim() }
     if (-not $wslFix) {
         Write-Host "  Could not reach the repair script from inside WSL." -ForegroundColor Yellow
         return
     }
-    wsl @script:PadWslArgs -u root -- bash $wslFix --packages $names 2>&1 |
+    wsl @script:PadWslArgs -u root -e bash $wslFix --packages $names 2>&1 |
         ForEach-Object { Write-Host "    $_" }
 
     # RE-PROBED, not trusted.  The script's own exit status answers for apt;
@@ -1340,8 +1586,8 @@ function Install-GdreTools {
         Write-FAIL "GDRE Tools (install_gdre.sh missing beside the installer)"
         return
     }
-    $wslSh = (wsl @script:PadWslArgs -u root -- wslpath -a "$gdreSh").Trim()
-    wsl @script:PadWslArgs -u root -- bash $wslSh 2>&1 | ForEach-Object { Write-Host "    $_" }
+    $wslSh = (wsl @script:PadWslArgs -u root -e wslpath -a "$gdreSh").Trim()
+    wsl @script:PadWslArgs -u root -e bash $wslSh 2>&1 | ForEach-Object { Write-Host "    $_" }
     wsl @script:PadWslArgs -u root -- bash -c "test -x /usr/local/bin/gdre_tools" *> $null
     if ($LASTEXITCODE -eq 0) {
         Write-Installed "GDRE Tools (wrapper at /usr/local/bin/gdre_tools)"

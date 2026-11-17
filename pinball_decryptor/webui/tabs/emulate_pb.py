@@ -39,7 +39,7 @@ import time
 
 from pinball_decryptor.webui import rig as _rig
 from .. import compat
-from ...core import rigslot, runtime
+from ...core import rigslot, runtime, timesync
 from .. import emulate_pb_core as pb
 from .. import runtime_prompt as _runtime_ui
 from ..emulate_jjp_common import (RigTabMixin, rig_off, audio_ctl_file,
@@ -228,8 +228,8 @@ class EmulatePBTab(RigTabMixin, TabService):
         if not self._starting or self._cancelling:
             return False
         self._cancelling = True
-        self._set_go("Cancelling…", False)
-        self._log("PB: cancelling the start…")
+        self._set_go("Canceling…", False)
+        self._log("PB: canceling the start…")
         kind = self._kind
 
         def work():
@@ -650,13 +650,14 @@ class EmulatePBTab(RigTabMixin, TabService):
                                                 first))
                 if pb.TITLE_NOTES.get(title):
                     self._log("PB: " + pb.TITLE_NOTES[title])
+                timesync.quiet_clocks_async(self._log)   # PAD-1307: the clock
                 rc = self._run_streaming(
                     pb.rig_cmd_root("watch.sh", _rig.wsl_path(path),
                                     kind=kind, env=env),
                     timeout=3600, on_line=self._footer_line)
                 if self._cancelling:
                     self._started_here = False
-                    self._log("PB: start cancelled.")
+                    self._log("PB: start canceled.")
                 elif rc not in (0, None):
                     self._log("PB: start failed (exit %d). %s"
                               % (rc, pb.exit_text(kind, rc)))

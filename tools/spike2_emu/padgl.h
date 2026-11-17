@@ -24,7 +24,7 @@
  * refuses a mismatch at attach (glbridge.c), and padgl.h is on BOTH source
  * lists, so bumping it here makes both halves stale together - a new-host/
  * old-guest pair fails loudly instead of dropping ops on the floor. */
-#define PADGL_VERSION 2
+#define PADGL_VERSION 3          /* 3: PADGL_PRESENTTEX (PAD-1090, Spike 3) */
 
 /* Ring is a byte buffer with a header at offset 0. Single producer (guest),
  * single consumer (host). head/tail are free-running byte counters; the
@@ -146,6 +146,49 @@ enum {
      * it for the whole 30 s intro. Appended, not inserted, so every op above
      * keeps its number. */
     PADGL_TEXCOMPRESSEDSUB,     /* u32 lvl,x,y,w,h,fmt,size + data             */
+    /* PAD-1090, SPIKE 3: THE FRAME IS A TEXTURE, NOT FBO 0. A Spike 3 game
+     * (Godot 4 under Stern's KMS display server) never swaps a window
+     * surface: it renders into a GBM buffer bound to a texture through
+     * glEGLImageTargetTexture2DOES and page-flips that buffer. The guest
+     * (tools/spike3_emu/s3gl.c) sends this at the flip; the host blits the
+     * texture into the screen framebuffer and then does exactly what SWAP
+     * does (present, frame_ack). Appended, so every op above keeps its
+     * number; Spike 2 never sends it.
+     *
+     * u32 guest texture name, width, height [, display]
+     *
+     * PAD-1199: the optional fourth word is the screen the flip was for (0 =
+     * main window, nonzero = the second display's window, the same one
+     * PADGL_TARGET opens). A two-screen title (Fallout: backbox + Pip-Boy)
+     * flips both outputs in turn; without it they alternated in one window.
+     * Three words is display 0, so an older guest still works. */
+    PADGL_PRESENTTEX,
+    /* PAD-1090, SPIKE 3: THE REST OF GLES 3 THAT GODOT 4 USES. Until these
+     * the Spike 3 guest answered each with a stub that did nothing, so an
+     * instanced batch, a uniform block, a uniform array past its first
+     * element and a colour mask were all silently lost (the game's video
+     * pass draws into the frame and the UI that should let it through
+     * covered it black). Appended, so every op above keeps its number;
+     * Spike 2 never sends them. Attribute indices are the usual tokens
+     * (attr_resolve), buffers/programs guest names (map_buf / map_obj). */
+    PADGL_DRAWARRAYSINST,       /* u32 mode,first,count,instances              */
+    PADGL_DRAWELEMSINST,        /* u32 mode,count,type,offset,instances        */
+    PADGL_ATTRIBDIVISOR,        /* u32 idx,divisor                             */
+    PADGL_VERTEXATTRIBI,        /* u32 idx,size,type,stride,offset (integer)   */
+    PADGL_VERTEXATTRIBC,        /* u32 idx,kind (0 = 4f, 1 = I4ui) + 4 words   */
+    PADGL_UBOBINDING,           /* u32 prog,binding + block name text          */
+    PADGL_BINDBUFBASE,          /* u32 target,index,buffer                     */
+    PADGL_BINDBUFRANGE,         /* u32 target,index,buffer,offset,size         */
+    PADGL_UNIFORMN,             /* u32 prog,slot,kind,count + data (PADGL_UN_*)*/
+    PADGL_COLORMASK,            /* u32 r,g,b,a                                 */
+    PADGL_DEPTHMASK,            /* u32 flag                                    */
+    PADGL_PIXELSTORE,           /* u32 pname,param                             */
+    PADGL_STATE1,               /* u32 which (PADGL_S1_*), value               */
+    PADGL_BLENDCOLOR,           /* f32 r,g,b,a                                 */
+    PADGL_TEXIMAGE3D,           /* u32 target,lvl,ifmt,w,h,d,fmt,type + pixels */
+    PADGL_TEXSUBIMAGE3D,        /* u32 target,lvl,x,y,z,w,h,d,fmt,type + pixels*/
+    PADGL_GENMIPMAP,            /* u32 target                                  */
+    PADGL_TEXSTORAGE2D,         /* u32 target,levels,ifmt,w,h                  */
     PADGL_OP_MAX
 };
 
@@ -169,5 +212,16 @@ enum { PADGL_SRC_INLINE = 0, PADGL_SRC_VIDSHM };
 
 /* Uniform kinds for PADGL_UNIFORM */
 enum { PADGL_U1F = 0, PADGL_U2F, PADGL_U3F, PADGL_U4F, PADGL_U1I, PADGL_U4FV, PADGL_UM4FV };
+
+/* Uniform kinds for PADGL_UNIFORMN (Spike 3): each is the GL call of that
+ * name with `count` elements of data following. */
+enum { PADGL_UN_1FV = 0, PADGL_UN_2FV, PADGL_UN_3FV, PADGL_UN_4FV,
+       PADGL_UN_1IV, PADGL_UN_2IV, PADGL_UN_3IV, PADGL_UN_4IV,
+       PADGL_UN_1UIV, PADGL_UN_2UIV, PADGL_UN_3UIV, PADGL_UN_4UIV,
+       PADGL_UN_M2FV, PADGL_UN_M3FV, PADGL_UN_M4FV };
+
+/* PADGL_STATE1 (Spike 3): one-value state calls */
+enum { PADGL_S1_CULLFACE = 0, PADGL_S1_FRONTFACE, PADGL_S1_DEPTHFUNC,
+       PADGL_S1_CLEARDEPTH /* value is an f32's bits */ };
 
 #endif

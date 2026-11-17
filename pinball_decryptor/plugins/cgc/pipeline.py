@@ -21,6 +21,7 @@ Linux, Docker on macOS) since Python has no in-tree ext4 writer.
 
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -32,6 +33,7 @@ import zipfile
 
 from ...core.checksums import (CHECKSUMS_FILE, NON_ASSET_DIRS,
                                TRACKING_SIDECARS, generate_checksums,
+                               is_other_extract,
                                md5_file, read_checksums)
 from ...core import runtime
 from ...core.executor import CommandError, create_executor
@@ -45,6 +47,7 @@ from ..williams import wpc_extract
 from .formats import (detect_game, find_data_partition, find_game_partition,
                       is_img_file, read_mbr_partitions)
 from .games import GAME_DB
+from . import mods as M
 
 
 # CGC's WPC remakes (MM/AFM/MB) ship the original Williams WPC ROM
@@ -88,6 +91,9 @@ _DCS_ROM_RE = re.compile(r"^s\d+\.rom$", re.IGNORECASE)
 #   new_audio/    -- CGC's added music/speech/SFX decoded from ccdata/usb.so
 #   display_art/  -- the 2044 colour images decoded from ccdata/cgc.so
 NEW_AUDIO_SUBDIR = "new_audio"
+# Room Write leaves free on Cactus Canyon's game partition when a longer
+# new_audio sound grows ccdata/usb.so (PAD-919, WritePipeline._fit_cc_bank).
+CC_BANK_HEADROOM = 16 * 1024 * 1024
 ART_SUBDIR = "display_art"
 VIDEO_SUBDIR = "videos"
 
@@ -204,7 +210,7 @@ class ExtractPipeline(BasePipeline):
             raise PipelineError("Detect",
                 f"Cannot identify CGC game from filename: "
                 f"{os.path.basename(self.img_path)}\n\n"
-                f"Recognised hints: MedievalMadness, AttackFromMars, "
+                f"Recognized hints: MedievalMadness, AttackFromMars, "
                 f"MonsterBash, PulpFiction, CactusCanyon (case-insensitive).")
         info = GAME_DB[game_key]
         self._log(f"Game detected: {info['display']}", "success")
@@ -234,17 +240,15 @@ class ExtractPipeline(BasePipeline):
             self._progress(0, 100, "dd P3")
             self.executor.run(f"mkdir -p {stage} && rm -f {p3_exec}",
                               timeout=30)
-            # Byte-exact copy (skip_bytes/count_bytes): a partition whose size
+            # Byte-exact copy (_dd_range): a partition whose size
             # isn't a whole number of MiB (Pulp Fiction P3 = 4607.998 MiB) would
             # otherwise lose its sub-MiB tail to whole-MiB rounding, leaving an
             # ext4 image shorter than its superblock declares ("likely corrupt"
             # per e2fsck). Harmless for a read-only extract, but the same
             # rounding in Write corrupts the round-tripped filesystem.
             self.executor.run(
-                f"dd if={shlex.quote(img_exec)} of={shlex.quote(p3_exec)} "
-                f"bs=1M iflag=skip_bytes,count_bytes "
-                f"skip={data_part['start_bytes']} "
-                f"count={data_part['size_bytes']} status=none",
+                _dd_range(img_exec, p3_exec, data_part['start_bytes'],
+                          data_part['size_bytes']),
                 timeout=900,
             )
             self._progress(50, 100, "dump emmc.img")
@@ -255,7 +259,7 @@ class ExtractPipeline(BasePipeline):
                 timeout=900,
             )
             emmc_size = int(self.executor.run(
-                f"stat -c%s {emmc_exec}", timeout=10).strip())
+                _size_cmd(emmc_exec), timeout=10).strip())
             self._log(
                 f"  emmc.img: {emmc_size / (1024 ** 3):.2f} GiB",
                 "info")
@@ -288,10 +292,8 @@ class ExtractPipeline(BasePipeline):
             self._log("Extracting inner game partition...", "info")
             self._progress(0, 100, "dd inner")
             self.executor.run(
-                f"dd if={shlex.quote(emmc_exec)} of={shlex.quote(inner_exec)} "
-                f"bs=1M iflag=skip_bytes,count_bytes "
-                f"skip={inner_part['start_bytes']} "
-                f"count={inner_part['size_bytes']} status=none",
+                _dd_range(emmc_exec, inner_exec, inner_part['start_bytes'],
+                          inner_part['size_bytes']),
                 timeout=900,
             )
             # emmc.img is consumed too now -- the rest of Extract only reads
@@ -454,7 +456,7 @@ class ExtractPipeline(BasePipeline):
             if cc_counts.get("art"):
                 dcs_help += (
                     f"\n\nDisplay art:    {cc_counts['art']}"
-                    f"\n  {ART_SUBDIR}/*.png — the colour LCD images from "
+                    f"\n  {ART_SUBDIR}/*.png — the color LCD images from "
                     f"cgc.so (RGB565). Edit a PNG (keep its dimensions) and "
                     f"Write re-packs cgc.so.")
             if cc_counts.get("videos"):
@@ -722,7 +724,7 @@ class ExtractPipeline(BasePipeline):
                       "skipping art decode.", "warning")
             return 0
         self._check_cancel()
-        self._log("Decoding colour display art (cgc.so)...", "info")
+        self._log("Decoding color display art (cgc.so)...", "info")
         out = os.path.join(self.output_dir, ART_SUBDIR)
         try:
             n = cc_art.extract_art(
@@ -816,6 +818,16 @@ class WritePipeline(BasePipeline):
 
         changed, missing = _diff_assets(self.assets_dir, baseline,
                                         log=self._log)
+        # PAD-877: C under pad_mods/ is built for the machine in phase 3,
+        # against the card's own libraries; its library ships like any file.
+        mod_plan = M.mod_sources(self.assets_dir)
+        for target in sorted(mod_plan):
+            if target in changed:
+                self._log(f"  {target} is built from {M.MODS_DIR}/ -- the "
+                          f"copy in the project folder is not used.",
+                          "warning")
+            changed[target] = os.path.join(
+                self.assets_dir, "build", M.MODS_DIR, *target.split("/"))
         if not changed:
             self._log(
                 "  No modified files found -- output will be a byte-for-byte "
@@ -875,16 +887,14 @@ class WritePipeline(BasePipeline):
                               f"{emmc_exec} {inner_exec}", timeout=30)
 
             self._log("Extracting installer P3 from output .img...", "info")
-            # Byte-exact (skip_bytes/count_bytes) — see the matching note in
+            # Byte-exact (_dd_range) — see the matching note in
             # Extract. Whole-MiB rounding here dropped P3's sub-MiB tail
             # (Pulp Fiction P3 = 4607.998 MiB), so the round-tripped ext4 came
             # out shorter than its superblock and the machine froze mounting
             # /data at power-up.
             self.executor.run(
-                f"dd if={shlex.quote(out_exec)} of={shlex.quote(p3_exec)} "
-                f"bs=1M iflag=skip_bytes,count_bytes "
-                f"skip={data_part['start_bytes']} "
-                f"count={data_part['size_bytes']} status=none",
+                _dd_range(out_exec, p3_exec, data_part['start_bytes'],
+                          data_part['size_bytes']),
                 timeout=900,
             )
             # CGC ships every installer with P3's journal DIRTY (the factory
@@ -914,10 +924,8 @@ class WritePipeline(BasePipeline):
                 f"xxd -s 446 -l 64 -c 64 -p {emmc_exec}", timeout=10).strip()
             inner_part = _parse_mbr_for_linux(mbr_hex)
             self.executor.run(
-                f"dd if={shlex.quote(emmc_exec)} of={shlex.quote(inner_exec)} "
-                f"bs=1M iflag=skip_bytes,count_bytes "
-                f"skip={inner_part['start_bytes']} "
-                f"count={inner_part['size_bytes']} status=none",
+                _dd_range(emmc_exec, inner_exec, inner_part['start_bytes'],
+                          inner_part['size_bytes']),
                 timeout=900,
             )
             # Stock inner game filesystems ship clean today, but this is the
@@ -926,9 +934,19 @@ class WritePipeline(BasePipeline):
             self._replay_stale_journal(inner_exec, "inner game partition")
 
             self._set_phase(3)
+            inner_root_to_assets_root = info["asset_subtree"]
+            card_dir = tempfile.mkdtemp(prefix="pad_cgc_libs_")
+            try:
+                self._build_mods(inner_exec, mod_plan, changed, card_dir)
+                self._check_programs(inner_exec, changed, card_dir,
+                                     inner_root_to_assets_root)
+            finally:
+                shutil.rmtree(card_dir, ignore_errors=True)
+            if game_key == "cactus_canyon":
+                self._fit_cc_bank(inner_exec, changed,
+                                  inner_root_to_assets_root)
             self._log("Writing modified files into inner ext4 via debugfs...",
                       "info")
-            inner_root_to_assets_root = info["asset_subtree"]
             self._write_modified_files(
                 inner_exec, changed, inner_root_to_assets_root)
 
@@ -943,19 +961,21 @@ class WritePipeline(BasePipeline):
             # Byte-exact seek/count so the inner ext4's sub-MiB tail isn't
             # dropped (same rounding trap as the extract dd's above).
             self.executor.run(
-                f"dd if={shlex.quote(inner_exec)} of={shlex.quote(emmc_exec)} "
-                f"bs=1M oflag=seek_bytes iflag=count_bytes "
-                f"seek={inner_part['start_bytes']} "
-                f"count={inner_part['size_bytes']} "
-                f"conv=notrunc status=none", timeout=900)
+                _dd_range(inner_exec, emmc_exec, 0, inner_part['size_bytes'],
+                          seek=inner_part['start_bytes']), timeout=900)
 
             self._log("Re-packing installer P3 (emmc.img into P3)...", "info")
+            emmc_meta = _parse_inode_meta(
+                self._inner_stat(p3_exec, EMMC_INNER_PATH))
             self.executor.run(
                 f"debugfs -w -R 'rm {EMMC_INNER_PATH}' {p3_exec} 2>&1 "
                 f"|| true", timeout=120)
             self.executor.run(
                 f"debugfs -w -R 'write {emmc_exec} {EMMC_INNER_PATH}' "
                 f"{p3_exec} 2>&1", timeout=900)
+            self._restore_meta(p3_exec, EMMC_INNER_PATH, emmc_meta,
+                               _parse_inode_meta(
+                                   self._inner_stat(p3_exec, EMMC_INNER_PATH)))
 
             # debugfs `write` exits 0 even when it never created the file or
             # ran P3 out of space partway.  e2fsck below can't catch that
@@ -976,11 +996,8 @@ class WritePipeline(BasePipeline):
             self._log("Re-packing installer .img (P3 into output)...", "info")
             try:
                 self.executor.run(
-                    f"dd if={shlex.quote(p3_exec)} of={shlex.quote(out_exec)} "
-                    f"bs=1M oflag=seek_bytes iflag=count_bytes "
-                    f"seek={data_part['start_bytes']} "
-                    f"count={data_part['size_bytes']} "
-                    f"conv=notrunc status=none", timeout=1800)
+                    _dd_range(p3_exec, out_exec, 0, data_part['size_bytes'],
+                              seek=data_part['start_bytes']), timeout=1800)
             except Exception:
                 # A failed/partial write-back leaves the output half-stock,
                 # half-modified: complete-looking, flashable, and broken.
@@ -1014,6 +1031,288 @@ class WritePipeline(BasePipeline):
             f"installer prompt. Keep a backup of the untouched card/drive "
             f"first.")
 
+    def _fit_cc_bank(self, inner_exec, changed, inner_root):
+        """Cut Cactus Canyon's longer sounds back if the card has no room.
+
+        The repack pre-step let each new_audio sound keep its own length, so
+        ccdata/usb.so grows with a longer one (PAD-919).  The game partition
+        it lives on is CGC's Debian root, shipped nearly full (cc113: 37 MB
+        free, already inside root's reserve), and it is also where the
+        machine keeps its logs and settings - so the bank may only grow
+        while :data:`CC_BANK_HEADROOM` stays free.  Past that, the bank is
+        rebuilt from the card's own usb.so with every replacement fitted to
+        its original slot, as Write always did before, and each cut is named
+        in the log.
+        """
+        rel = "ccdata/usb.so"
+        host = changed.get(rel)
+        if not host or not os.path.isfile(host):
+            return
+        root = inner_root.rstrip("/")
+
+        def card_size(r):
+            m = re.search(r"\bSize:\s*(\d+)",
+                          self._inner_stat(inner_exec, f"{root}/{r}"))
+            return int(m.group(1)) if m else 0
+
+        grow = os.path.getsize(host) - card_size(rel)
+        if grow <= 0:
+            return
+        others = sum(max(0, os.path.getsize(p) - card_size(r))
+                     for r, p in changed.items() if r != rel)
+        stats = self.executor.run(
+            f"debugfs -R stats {shlex.quote(inner_exec)} 2>&1", timeout=60)
+        free = re.search(r"^Free blocks:\s*(\d+)", stats, re.M)
+        bsize = re.search(r"^Block size:\s*(\d+)", stats, re.M)
+        if not (free and bsize):
+            raise PipelineError("Write",
+                f"Could not read the game partition's free space "
+                f"(debugfs stats):\n{stats.strip()[:400]}")
+        free = int(free.group(1)) * int(bsize.group(1))
+        mb = 1024 * 1024
+        if grow + others + CC_BANK_HEADROOM <= free:
+            self._log(
+                f"  Cactus Canyon's sound bank grows by {grow / mb:.1f} MB "
+                f"for the longer sounds; {(free - grow - others) / mb:.1f} "
+                f"MB of the card's game partition stays free.", "info")
+            return
+        from . import cc_usb_audio
+        card = tempfile.mkdtemp(prefix="pad_cc_usb_")
+        try:
+            card_usb = os.path.join(card, "usb.so")
+            dump = shlex.quote(
+                f"dump {_quote_dbg(f'{root}/{rel}')} "
+                f"{_quote_dbg(self.executor.to_exec_path(card_usb))}")
+            self.executor.run(
+                f"debugfs -R {dump} {shlex.quote(inner_exec)} 2>&1",
+                timeout=600)
+            summary = cc_usb_audio.repack_usb(
+                card_usb, os.path.join(self.assets_dir, NEW_AUDIO_SUBDIR),
+                host, fit=True)
+        finally:
+            shutil.rmtree(card, ignore_errors=True)
+        self._log(
+            f"  The longer sounds need {grow / mb:.1f} MB more on the card, "
+            f"but its game partition has {free / mb:.1f} MB free and "
+            f"{CC_BANK_HEADROOM // mb} MB of that must stay free for the "
+            f"machine. Each was cut to its original length instead:",
+            "warning")
+        for name, was, now in summary["cut"]:
+            self._log(f"    {NEW_AUDIO_SUBDIR}/{name}: {now:.1f} s cut to "
+                      f"{was:.1f} s", "warning")
+        self._log("  Shorter files fit: about 10 s of sound per MB.",
+                  "warning")
+
+    def _inner_stat(self, inner_exec, path):
+        cmd = shlex.quote(f"stat {_quote_dbg(path)}")
+        return self.executor.run(
+            f"debugfs -R {cmd} {shlex.quote(inner_exec)} 2>&1", timeout=60)
+
+    def _dump_card_lib(self, inner_exec, name, dirs, host_dir):
+        """Copy the library *name* the machine would load out of the game
+        filesystem into *host_dir*: the first of *dirs* that has it, its
+        symlinks followed inside the image.  Returns the host path, or None
+        when no folder has it."""
+        for d in dirs:
+            path = f"{d.rstrip('/')}/{name}"
+            for _hop in range(8):
+                out = self._inner_stat(inner_exec, path)
+                m = re.search(r"\bType:\s*(\w+)", out)
+                if not m or "not found" in out.lower():
+                    break
+                if m.group(1) == "symlink":
+                    link = re.search(r'Fast link dest:\s*"([^"]*)"', out)
+                    if not link:
+                        break
+                    path = posixpath.normpath(posixpath.join(
+                        posixpath.dirname(path), link.group(1)))
+                    continue
+                if m.group(1) != "regular":
+                    break
+                sub = os.path.join(host_dir, str(len(os.listdir(host_dir))))
+                os.makedirs(sub)
+                dest = os.path.join(sub, name)
+                dump = shlex.quote(
+                    f"dump {_quote_dbg(path)} "
+                    f"{_quote_dbg(self.executor.to_exec_path(dest))}")
+                self.executor.run(
+                    f"debugfs -R {dump} {shlex.quote(inner_exec)} 2>&1",
+                    timeout=120)
+                if os.path.isfile(dest) and os.path.getsize(dest):
+                    return dest
+                break
+        return None
+
+    def _build_mods(self, inner_exec, plan, changed, card_dir):
+        """Compile the project's ``pad_mods/`` C for the machine (PAD-877),
+        linked against the glibc on the card being written, so a mod can ask
+        for nothing the machine does not have."""
+        if not plan:
+            return
+        self._log(f"Building {len(plan)} code mod(s) from {M.MODS_DIR}/ "
+                  f"against the machine's own libraries...", "info")
+        try:
+            self.executor.run(f"command -v {M.CROSS_CC} >/dev/null",
+                              timeout=10)
+        except CommandError:
+            raise PipelineError("Write",
+                f"Building {M.MODS_DIR}/ needs the ARM cross compiler "
+                f"({M.CROSS_CC}), which is not installed. "
+                f"{_cross_cc_hint()} Nothing was written; the original "
+                f"image is unchanged.")
+        x = self.executor.to_exec_path
+        libs = []
+        for name in M.LINK_LIBS:
+            got = self._dump_card_lib(inner_exec, name, M.LIB_DIRS, card_dir)
+            if got:
+                libs.append(x(got))
+            elif name == "libc.so.6":
+                raise PipelineError("Write",
+                    f"The game filesystem has no libc.so.6 to build "
+                    f"{M.MODS_DIR}/ against. Nothing was written; the "
+                    f"original image is unchanged.")
+        compat = os.path.join(card_dir, "pad_libc_compat.c")
+        with open(compat, "w", encoding="utf-8", newline="\n") as f:
+            f.write(M.COMPAT_SOURCE)
+        mods_root = os.path.join(self.assets_dir, M.MODS_DIR)
+        for target, sources in sorted(plan.items()):
+            self._check_cancel()
+            out = changed[target]
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            if os.path.exists(out):
+                os.remove(out)
+            incs = []
+            for d in [os.path.dirname(s) for s in sources] + [mods_root]:
+                if x(d) not in incs:
+                    incs.append(x(d))
+            cmd = M.compile_command(M.CROSS_CC, x(out),
+                                    [x(s) for s in sources] + [x(compat)],
+                                    incs, libs)
+            try:
+                said = self.executor.run(cmd, timeout=300)
+            except CommandError as e:
+                raise PipelineError("Write",
+                    f"{target} did not build from {M.MODS_DIR}/ (a function "
+                    f"the machine's glibc does not have shows up as an "
+                    f"\"undefined reference\"). Nothing was written; the "
+                    f"original image is unchanged.\n\n"
+                    f"{(e.output or '').strip()[-1500:]}")
+            if not os.path.isfile(out):
+                raise PipelineError("Write",
+                    f"{target} did not build (no library was written): "
+                    f"{(said or '').strip()[-600:]}")
+            for line in (said or "").strip().splitlines()[-10:]:
+                self._log(f"    {line}", "info")
+            self._log(f"  built {target} ({os.path.getsize(out):,} bytes)",
+                      "success")
+
+    def _check_programs(self, inner_exec, changed, card_dir, inner_root):
+        """Refuse a program or library the machine cannot load (PAD-877):
+        not 32-bit hard-float ARM, or asking a library for a symbol version
+        the card's copy of it does not define -- a modern gcc's
+        ``dlsym@GLIBC_2.34`` against the machine's glibc 2.13.  Preloaded at
+        boot that is a dead PID 1 and a boot loop, so it never ships."""
+        elfs = {rel: p for rel, p in changed.items() if M.is_elf(p)}
+        if not elfs:
+            return
+        self._log(f"Checking {len(elfs)} program(s) and librar(ies) against "
+                  f"the machine's own libraries...", "info")
+        shipped = {rel.rsplit("/", 1)[-1]: p for rel, p in changed.items()}
+        root = inner_root.rstrip("/")
+        found = {}
+        problems = []
+        for rel, path in sorted(elfs.items()):
+            self._check_cancel()
+            try:
+                info = M.read_elf_file(path)
+            except (OSError, M.ElfError) as e:
+                problems.append(f"{rel} could not be read as a program ({e}).")
+                continue
+            here = posixpath.dirname(f"{root}/{rel}")
+            dirs = [p.replace("${ORIGIN}", here).replace("$ORIGIN", here)
+                    for p in info["runpath"]]
+            dirs = tuple(dirs + [here] + list(M.LIB_DIRS))
+            card_libs = {}
+            for lib in sorted(set(info["needed"]) | set(info["verneed"])):
+                if lib in shipped and M.is_elf(shipped[lib]):
+                    host = shipped[lib]
+                else:
+                    if (lib, dirs) not in found:
+                        found[(lib, dirs)] = self._dump_card_lib(
+                            inner_exec, lib, dirs, card_dir)
+                    host = found[(lib, dirs)]
+                try:
+                    card_libs[lib] = M.read_elf_file(host) if host else None
+                except (OSError, M.ElfError):
+                    card_libs[lib] = None
+                if card_libs[lib] is None:
+                    self._log(f"  {rel} needs {lib}, which is not in the "
+                              f"machine's library folders -- not checked "
+                              f"(the game may load it from a folder of its "
+                              f"own).", "warning")
+            why = M.check_elf(rel, info, card_libs)
+            if why:
+                problems += why
+                continue
+            top = M.newest([v for vs in info["verneed"].values() for v in vs])
+            self._log(f"  {rel}: 32-bit ARM"
+                      + (f", asks for up to {top} -- the machine has it"
+                         if top else ""), "success")
+        if problems:
+            raise PipelineError("Write",
+                "This build would not run on the machine:\n\n"
+                + "\n\n".join(problems)
+                + "\n\nNothing was written; the original image is "
+                  "unchanged.")
+
+    def _make_inner_dirs(self, inner_exec, inner_root, changed):
+        """Create every folder a modified file needs inside the inner ext4.
+
+        debugfs ``write`` cannot create a parent directory: a brand-new file
+        in a folder the game does not have (``custom_modes/mod.c``,
+        ``lib/custom.so``) never lands and the post-write verify aborts the
+        build.  Walk each file's folders from the asset root down, ``mkdir``
+        the missing ones and give each the owner of the folder it sits in
+        (debugfs makes them root's), so a new folder looks like its
+        siblings to the game's own user.
+        """
+        img_q = shlex.quote(inner_exec)
+
+        def stat(path):
+            cmd = shlex.quote(f"stat {_quote_dbg(path)}")
+            return self.executor.run(f"debugfs -R {cmd} {img_q} 2>&1",
+                                     timeout=60)
+
+        root = inner_root.rstrip("/")
+        seen = set()
+        for rel in sorted(changed):
+            parent = root
+            for part in rel.split("/")[:-1]:
+                path = f"{parent}/{part}"
+                if path not in seen:
+                    seen.add(path)
+                    if "not found" in stat(path).lower():
+                        self._mkdir_inner(img_q, path, stat(parent or "/"))
+                        if "not found" in stat(path).lower():
+                            raise PipelineError("Write",
+                                f"Could not create the folder {path} inside "
+                                f"the game filesystem for {rel}. The build "
+                                f"was aborted; the original image is "
+                                f"unchanged.")
+                parent = path
+
+    def _mkdir_inner(self, img_q, path, parent_stat):
+        self._log(f"  + folder {path}", "info")
+        self.executor.run(
+            f"debugfs -w -R {shlex.quote(f'mkdir {_quote_dbg(path)}')} "
+            f"{img_q} 2>&1", timeout=60)
+        m = re.search(r"\bUser:\s*(\d+)\s+Group:\s*(\d+)", parent_stat)
+        if m:
+            for field, value in (("uid", m.group(1)), ("gid", m.group(2))):
+                sif = shlex.quote(f"sif {_quote_dbg(path)} {field} {value}")
+                self.executor.run(f"debugfs -w -R {sif} {img_q} 2>&1",
+                                  timeout=60)
+
     def _write_modified_files(self, inner_exec, changed,
                               inner_root_to_assets_root):
         """Replace each modified file inside the inner ext4 via debugfs -w.
@@ -1023,6 +1322,9 @@ class WritePipeline(BasePipeline):
         ``inner_root_to_assets_root + "/" + rel``.
         """
         total = len(changed)
+        self._make_inner_dirs(inner_exec, inner_root_to_assets_root, changed)
+        # The mode/owner each file must land with (PAD-886): _wanted_meta.
+        want_meta = {}
         for i, (rel, abs_host) in enumerate(sorted(changed.items())):
             self._check_cancel()
             inner_path = f"{inner_root_to_assets_root.rstrip('/')}/{rel}"
@@ -1045,6 +1347,8 @@ class WritePipeline(BasePipeline):
             # transcribe-named callouts) would otherwise close a naive outer
             # 'rm "..."' early ("unexpected EOF while looking for matching '").
             img_q = shlex.quote(inner_exec)
+            want_meta[rel] = self._wanted_meta(inner_exec, inner_path,
+                                               abs_host)
             rm_cmd = shlex.quote(f"rm {_quote_dbg(inner_path)}")
             self.executor.run(
                 f"debugfs -w -R {rm_cmd} {img_q} "
@@ -1088,17 +1392,14 @@ class WritePipeline(BasePipeline):
                 # Two different faults share this check, and naming the
                 # wrong one sends the user resizing a partition that was
                 # never full.  No inode at all + "not found" from debugfs
-                # means the path is not in the image: debugfs `write`
-                # cannot create a parent directory, so a file whose folder
-                # the game does not have simply never lands.  A short
-                # inode is the real out-of-space signature.
+                # means the path is not in the image: its folder was made
+                # above, so debugfs `write` itself refused the file.  A
+                # short inode is the real out-of-space signature.
                 if got is None and "not found" in out.lower():
                     cause = (f"There is no {inner_path} inside the game "
-                             f"filesystem, and debugfs cannot create the "
-                             f"folder it would go in, so the file was "
-                             f"never written. That normally means it is "
-                             f"not a game asset at all -- something else "
-                             f"in the project folder picked up as one.")
+                             f"filesystem: debugfs did not create it, so "
+                             f"the file was never written. This is not "
+                             f"the partition running out of space.")
                 else:
                     cause = ("debugfs reported success but the file is "
                              "missing or truncated -- often the game "
@@ -1110,6 +1411,56 @@ class WritePipeline(BasePipeline):
                     f"{cause} The build was aborted; the original "
                     f"image is "
                     f"unchanged.\n\ndebugfs stat output:\n{out.strip()}")
+            self._restore_meta(inner_exec, inner_path, want_meta.get(rel),
+                               _parse_inode_meta(out))
+
+    def _wanted_meta(self, inner_exec, inner_path, abs_host):
+        """(perms, uid, gid) the file at *inner_path* must keep once written.
+
+        debugfs ``write`` builds a brand-new inode and takes its mode off the
+        HOST file -- 0664 for anything PAD extracted, since debugfs ``dump``
+        ignores the inode's own mode.  An edited ``service.sh`` or ``pin``
+        then lands non-executable, init.sh (PID 1) gets EACCES running it,
+        exits, and the machine kernel-panics in a boot loop (PAD-886).  So a
+        replaced file keeps the mode and owner of the one it replaces; a new
+        file takes its folder's owner, and is executable when it is a
+        program (an ELF or a ``#!`` script).
+        """
+        meta = _parse_inode_meta(self._inner_stat(inner_exec, inner_path))
+        if meta:
+            return meta
+        parent = _parse_inode_meta(self._inner_stat(
+            inner_exec, posixpath.dirname(inner_path) or "/"))
+        uid, gid = parent[1:] if parent else (0, 0)
+        return (0o755 if _is_program(abs_host) else 0o644, uid, gid)
+
+    def _restore_meta(self, inner_exec, inner_path, want, got):
+        """Set the fields of *want* that *got* (the written inode) lacks, in
+        one debugfs run, and refuse the build if the mode still is not
+        right: a game program the machine cannot run is a boot loop."""
+        if not want:
+            return
+        perms, uid, gid = want
+        # sif wants the full mode word, file-type bits included.
+        fields = [(f, v) for f, v, idx in
+                  (("mode", f"0{0o100000 | perms:o}", 0),
+                   ("uid", str(uid), 1), ("gid", str(gid), 2))
+                  if not got or got[idx] != want[idx]]
+        if not fields:
+            return
+        q = _quote_dbg(inner_path)
+        script = " ".join(shlex.quote(f"sif {q} {f} {v}") for f, v in fields)
+        self.executor.run(
+            f"printf '%s\\n' {script} | debugfs -w -f - "
+            f"{shlex.quote(inner_exec)} 2>&1", timeout=60)
+        out = self._inner_stat(inner_exec, inner_path)
+        now = _parse_inode_meta(out)
+        if not now or now[0] != perms:
+            raise PipelineError("Write",
+                f"{inner_path} was written but its permissions could not be "
+                f"set back to {perms:04o}, so the machine could not run it. "
+                f"The build was aborted; the original image is "
+                f"unchanged.\n\ndebugfs stat output:\n{out.strip()}")
 
     # A real CGC install payload (emmc.img) is 2-4 GB; anything under this
     # is an empty/truncated payload the machine can't install.
@@ -1242,7 +1593,7 @@ class WritePipeline(BasePipeline):
         downstream compares 0 == 0 and misses it.  Catch it at the source.
         """
         size = int(self.executor.run(
-            f"stat -c%s {shlex.quote(emmc_exec)}", timeout=10).strip() or "0")
+            _size_cmd(emmc_exec), timeout=10).strip() or "0")
         if size < self._MIN_PLAUSIBLE_EMMC:
             raise PipelineError("Stage partitions",
                 f"The source installer image holds an empty or truncated "
@@ -1266,7 +1617,7 @@ class WritePipeline(BasePipeline):
         """
         self._log("Verifying re-packed emmc.img inside P3...", "info")
         want = int(self.executor.run(
-            f"stat -c%s {shlex.quote(emmc_exec)}", timeout=10).strip())
+            _size_cmd(emmc_exec), timeout=10).strip())
         out = self.executor.run(
             f"debugfs -R 'stat {EMMC_INNER_PATH}' {shlex.quote(p3_exec)} "
             f"2>&1", timeout=60)
@@ -1282,7 +1633,7 @@ class WritePipeline(BasePipeline):
                 f"image is unchanged.\n\ndebugfs stat output:\n{out.strip()}")
 
     def _replay_stale_journal(self, image_exec, label):
-        """Replay and retire a stale ext4 journal BEFORE debugfs edits.
+        """Replay a stale ext4 journal and tidy the source BEFORE debugfs edits.
 
         CGC masters their installer partitions by yanking the card without a
         clean unmount, so stock images ship with ``needs_recovery`` set and
@@ -1298,15 +1649,35 @@ class WritePipeline(BasePipeline):
         Neither ``e2fsck -fn`` (which skips journal recovery) nor our
         pure-Python ext4 reader (which ignores journals) can see this armed
         state, so it must be defused here, not detected later.
+
+        The same unclean unmount can also leave the source with a kernel
+        orphan list (a file deleted while still open; ``First orphan inode``
+        in the superblock) and no armed journal.  The kernel would tidy that
+        at mount, but ``e2fsck -fn`` reports it as errors (exit 4), so the
+        strict check after our edits failed on damage that was in the source
+        all along (PAD-874).  Check the source read-only first and let
+        ``e2fsck -fy`` tidy anything it finds BEFORE debugfs edits it, so
+        the post-edit check only ever sees what our edits did.
         """
         out = self.executor.run(
             f"dumpe2fs -h {shlex.quote(image_exec)} 2>&1", timeout=60)
-        if "needs_recovery" not in out:
-            return
-        self._log(
-            f"  {label}: factory journal left armed (needs_recovery) -- "
-            f"replaying it now so the machine can't replay it over the "
-            f"modifications.", "info")
+        if "needs_recovery" in out:
+            self._log(
+                f"  {label}: factory journal left armed (needs_recovery) -- "
+                f"replaying it now so the machine can't replay it over the "
+                f"modifications.", "info")
+        else:
+            # Not while armed: -fn skips journal recovery, so an armed fs
+            # reads as inconsistent until the replay below.
+            if self._fsck_readonly_rc(image_exec)[0] == "0":
+                return
+            orphans = ("orphan list left by an unclean unmount"
+                       if "First orphan inode" in out
+                       else "inconsistencies")
+            self._log(
+                f"  {label}: the source filesystem has {orphans} -- "
+                f"tidying it with e2fsck before writing the modifications.",
+                "info")
         out = self.executor.run(
             f"e2fsck -fy {shlex.quote(image_exec)} 2>&1; echo __RC__$?",
             timeout=900)
@@ -1316,15 +1687,15 @@ class WritePipeline(BasePipeline):
         # something.  Anything else means the source fs is genuinely damaged.
         if rc not in ("0", "1"):
             raise PipelineError("Stage partitions",
-                f"Replaying the {label}'s stale journal failed (e2fsck exit "
+                f"Repairing the {label} before editing failed (e2fsck exit "
                 f"{rc}) -- the source image's filesystem is damaged and can't "
                 f"be built on. If this source .img was produced by an older "
                 f"version of this app, rebuild from a factory installer "
                 f"image.\n\ne2fsck output:\n{body}")
         if rc == "1":
             self._log(
-                f"  {label}: e2fsck corrected inconsistencies during the "
-                f"replay (usually a source .img built by an older app "
+                f"  {label}: e2fsck corrected inconsistencies before the "
+                f"edits (an unclean unmount, or a source .img built by an older app "
                 f"version). Downstream payload checks will confirm the "
                 f"result.\n{body}", "info")
         check = self.executor.run(
@@ -1334,6 +1705,21 @@ class WritePipeline(BasePipeline):
                 f"The {label}'s journal is still marked needs_recovery after "
                 f"replay -- refusing to build an image the machine would "
                 f"corrupt at first mount.")
+        rc, body = self._fsck_readonly_rc(image_exec)
+        if rc != "0":
+            raise PipelineError("Stage partitions",
+                f"The source image's {label} still fails its filesystem "
+                f"check after e2fsck repaired it (exit {rc}) -- it is too "
+                f"damaged to build on. Rebuild from a factory installer "
+                f"image.\n\ne2fsck output:\n{body}")
+
+    def _fsck_readonly_rc(self, image_exec):
+        """``e2fsck -fn`` an image; return (exit code str, output)."""
+        out = self.executor.run(
+            f"e2fsck -fn {shlex.quote(image_exec)} 2>&1; echo __RC__$?",
+            timeout=900)
+        return (out.rsplit("__RC__", 1)[-1].strip(),
+                out.rsplit("__RC__", 1)[0].strip())
 
     def _verify_partition_fs(self, image_exec, label):
         """Read-only e2fsck of a re-packed ext4 partition image; abort on any
@@ -1347,17 +1733,14 @@ class WritePipeline(BasePipeline):
         flashed.
         """
         self._log(f"Verifying {label} filesystem...", "info")
-        out = self.executor.run(
-            f"e2fsck -fn {shlex.quote(image_exec)} 2>&1; echo __RC__$?",
-            timeout=900)
-        rc = out.rsplit("__RC__", 1)[-1].strip()
+        rc, body = self._fsck_readonly_rc(image_exec)
         if rc != "0":
             raise PipelineError("Write",
                 f"The re-packed {label} failed its filesystem check — the "
                 f"rebuilt installer would freeze the machine at power-up "
                 f"(a corrupt ext4 the on-machine kernel can't mount). The "
                 f"build was aborted; the original image is unchanged.\n\n"
-                f"e2fsck output:\n{out.rsplit('__RC__', 1)[0].strip()}")
+                f"e2fsck output:\n{body}")
         # e2fsck -fn deliberately SKIPS journal recovery, so it returns 0 even
         # when the journal is still armed with stale factory transactions the
         # machine would replay over this build's edits.  The replay step
@@ -1432,7 +1815,7 @@ class FlashImagePipeline(BasePipeline):
                 cancel=lambda: self._cancelled, verify=self.verify,
                 on_verify_start=lambda: self._set_phase(2))  # Verify card
         except FlashCancelled:
-            self._log("Flash cancelled -- the card is incomplete and must be "
+            self._log("Flash canceled -- the card is incomplete and must be "
                       "re-flashed before use.", "error")
             self._check_cancel()   # raises PipelineError("Cancelled", ...)
             return
@@ -1510,7 +1893,7 @@ def _diff_assets(assets_dir, baseline, log=None):
     # source eMMC blobs (s*.rom / usb.so / cgc.so) in place, so the baseline
     # md5 diff below picks the blobs up as changed.  No-op when those dirs
     # aren't present (other CGC titles / non-CC extracts).
-    _repack_modified_cc_assets(assets_dir)
+    _repack_modified_cc_assets(assets_dir, log=log)
 
     changed = {}
     missing = []
@@ -1586,20 +1969,28 @@ def _diff_assets(assets_dir, baseline, log=None):
     # project first extracted under v0.43).  build/ is the same trap with worse
     # odds: it is where Write puts its own output, so a second build would post
     # a multi-GB installer image into the game partition.
-    _skip_top = set(_DERIVED_SUBDIRS) | {ORIG_DIR} | set(NON_ASSET_DIRS)
+    # ``pad_mods/`` holds C the Write compiles for the machine (PAD-877): its
+    # sources never ship, the libraries built from them do.
+    _skip_top = (set(_DERIVED_SUBDIRS) | {ORIG_DIR} | set(NON_ASSET_DIRS)
+                 | {M.MODS_DIR})
     # Directories the inner ext4 is known to have -- every directory the
-    # baseline lists a file in, plus the assets root.  debugfs `write` cannot
-    # create a parent directory, so a "new" file anywhere else can never land;
-    # shipping it only buys the misleading out-of-space abort above.  Skip
-    # those and say so, rather than dropping them silently.
+    # baseline lists a file in, plus the assets root.  A new file anywhere
+    # else ships too (a mod's own ``custom_modes/mod.c`` or ``lib/custom.so``,
+    # PAD-876): WritePipeline._make_inner_dirs creates its folders inside the
+    # image first.  Name those files in the log, since no on-screen list
+    # shows an unbaselined folder.
     baseline_dirs = {""}
     for rel in baseline:
         rel_norm = rel.replace("\\", "/")
         baseline_dirs.add(rel_norm.rsplit("/", 1)[0] if "/" in rel_norm else "")
-    stray = []
+    new_dirs = []
     for dirpath, dirnames, filenames in os.walk(assets_dir):
         if os.path.relpath(dirpath, assets_dir).replace("\\", "/") == ".":
             dirnames[:] = [d for d in dirnames if d not in _skip_top]
+        # A whole extract dropped inside this one (Extract Both, PAD-211) is
+        # another card's files, never new assets of this one.
+        dirnames[:] = [d for d in dirnames
+                       if not is_other_extract(os.path.join(dirpath, d))]
         for fn in filenames:
             if (fn == CHECKSUMS_FILE
                     or fn in TRACKING_SIDECARS
@@ -1616,16 +2007,15 @@ def _diff_assets(assets_dir, baseline, log=None):
             if rel not in consumed_on_disk:
                 parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
                 if parent not in baseline_dirs:
-                    stray.append(rel)
-                    continue
+                    new_dirs.append(rel)
                 changed[rel] = abs_path
-    if stray and log:
-        log(f"  {len(stray)} new file(s) sit in a folder the game "
-            f"filesystem does not have -- not written back:", "info")
-        for rel in sorted(stray)[:10]:
+    if new_dirs and log:
+        log(f"  {len(new_dirs)} new file(s) in a folder the game "
+            f"filesystem does not have yet -- the folder is created:", "info")
+        for rel in sorted(new_dirs)[:10]:
             log(f"    {rel}", "info")
-        if len(stray) > 10:
-            log(f"    ... and {len(stray) - 10} more", "info")
+        if len(new_dirs) > 10:
+            log(f"    ... and {len(new_dirs) - 10} more", "info")
     return changed, missing
 
 
@@ -1824,7 +2214,7 @@ def _repack_modified_jps_bnks(assets_dir, baseline=None, log=None):
     return decoded_subdir_files
 
 
-def _repack_modified_cc_assets(assets_dir):
+def _repack_modified_cc_assets(assets_dir, log=None):
     """Re-encode edited Cactus Canyon decoded assets back into their source
     eMMC blobs, in place, so the Write diff picks the blobs up as changed.
 
@@ -1850,20 +2240,34 @@ def _repack_modified_cc_assets(assets_dir):
         try:
             from . import cc_dcs
             cc_dcs.repack(data_rom, dcs_dir, data_rom)
-        except Exception:
-            pass
+        except Exception as e:
+            # Said out loud (PAD-919): a blob that could not be rebuilt
+            # ships stock, so the user's edits are NOT on the card.
+            if log:
+                log(f"  Could not rebuild the sound ROMs from {DCS_SUBDIR}/ "
+                    f"({e}); its sounds stay as they were.", "warning")
 
-    # new_audio WAVs -> usb.so (re-encrypt).
+    # new_audio WAVs -> usb.so (re-encrypt).  Each sound keeps its own
+    # length (PAD-919); Write fits them back if the card has no room
+    # (WritePipeline._fit_cc_bank).
     if os.path.isfile(usb_so) and os.path.isdir(new_audio):
         try:
             from . import cc_usb_audio
             tmp = usb_so + ".repack_tmp"
-            summary = cc_usb_audio.repack_usb(usb_so, new_audio, tmp)
+            summary = cc_usb_audio.repack_usb(usb_so, new_audio, tmp, log_cb=log)
             if summary.get("modified_count", 0) > 0 and os.path.isfile(tmp):
                 os.replace(tmp, usb_so)
+                if log:
+                    for name, was, now in summary["longer"]:
+                        log(f"  {NEW_AUDIO_SUBDIR}/{name} plays "
+                            f"{now:.1f} s (was {was:.1f} s).", "info")
             elif os.path.exists(tmp):
                 os.remove(tmp)
-        except Exception:
+        except Exception as e:
+            if log:
+                log(f"  Could not rebuild ccdata/usb.so from "
+                    f"{NEW_AUDIO_SUBDIR}/ ({e}); its sounds stay as they "
+                    f"were.", "warning")
             if os.path.exists(usb_so + ".repack_tmp"):
                 try:
                     os.remove(usb_so + ".repack_tmp")
@@ -1881,7 +2285,10 @@ def _repack_modified_cc_assets(assets_dir):
                 os.replace(tmp, cgc_so)
             elif os.path.exists(tmp):
                 os.remove(tmp)
-        except Exception:
+        except Exception as e:
+            if log:
+                log(f"  Could not rebuild ccdata/cgc.so from {ART_SUBDIR}/ "
+                    f"({e}); its pictures stay as they were.", "warning")
             if os.path.exists(cgc_so + ".repack_tmp"):
                 try:
                     os.remove(cgc_so + ".repack_tmp")
@@ -1965,27 +2372,34 @@ def _verify_staged_sizes(executor, image_exec, src_dir, staged_dir):
         timeout=120)
     src = {}
     for line in ls_out.splitlines():
-        toks = line.split()
+        # The name is everything after the time, spaces and all: split on
+        # every space, "sound one.wav" came back as "one.wav", which no
+        # staged file is called, and the extract aborted as out of space
+        # (PAD-571; transcribe names callouts with spaces).
+        toks = line.split(None, 8)
         # debugfs `ls -l`: inode mode (type) uid gid size date time name
         # Regular files have a mode field beginning "100" (0100000);
         # directories start "40", symlinks "120" — skip those.
         if len(toks) < 9 or not toks[1].startswith("100"):
             continue
         try:
-            src[toks[-1]] = int(toks[5])
+            src[toks[8]] = int(toks[5])
         except (ValueError, IndexError):
             continue
     if not src:
         return []
+    # `wc -c` per file, not GNU find's -printf, which a Mac's find lacks
+    # (PAD-571).  Each line is "<size> <dir>/<name>"; the "<n> total" line wc
+    # adds for several files has no slash, so it never names a file.
     stat_out = executor.run(
-        f"find {staged_dir} -maxdepth 1 -type f -printf '%s %f\\n' "
+        f"find {staged_dir} -maxdepth 1 -type f -exec wc -c {{}} + "
         f"2>/dev/null", timeout=60)
     staged = {}
     for line in stat_out.splitlines():
         parts = line.split(None, 1)
-        if len(parts) == 2:
+        if len(parts) == 2 and "/" in parts[1]:
             try:
-                staged[parts[1]] = int(parts[0])
+                staged[parts[1].rsplit("/", 1)[1]] = int(parts[0])
             except ValueError:
                 pass
     problems = []
@@ -1996,6 +2410,25 @@ def _verify_staged_sizes(executor, image_exec, src_dir, staged_dir):
         elif got < size:
             problems.append((name, size, got))
     return problems
+
+
+def _parse_inode_meta(stat_out):
+    """(perms, uid, gid) out of a debugfs ``stat`` dump, or None."""
+    mode = re.search(r"\bMode:\s*0?([0-7]{3,4})\b", stat_out or "")
+    owner = re.search(r"\bUser:\s*(\d+)\s+Group:\s*(\d+)", stat_out or "")
+    if not mode or not owner:
+        return None
+    return (int(mode.group(1), 8), int(owner.group(1)), int(owner.group(2)))
+
+
+def _is_program(path):
+    """An ELF or a ``#!`` script -- a file the machine runs."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError:
+        return False
+    return head == b"\x7fELF" or head[:2] == b"#!"
 
 
 def _quote_dbg(p):
@@ -2037,19 +2470,90 @@ def _detect_wsl_distro():
     return None
 
 
+def _pow2_dividing(*values, cap=1 << 20):
+    """The largest power of two up to *cap* that divides every value."""
+    b = cap
+    while b > 1 and any(v % b for v in values):
+        b >>= 1
+    return b
+
+
+def _dd_range(src, dst, start, size, seek=0):
+    """A shell command copying *size* bytes of *src* from byte *start* into
+    *dst* at byte *seek*, exactly - partitions are not whole MiB (Pulp
+    Fiction's P3 is 4607.998 MiB) and a rounded copy leaves an ext4 shorter
+    than its superblock.
+
+    Plain POSIX dd: the bulk in the largest block (up to 1 MiB) both offsets
+    allow, then the sub-block tail in a block that fits it.  GNU dd's
+    skip_bytes/count_bytes/seek_bytes flags did this in one call, but a
+    Mac's dd has no such flags (PAD-571).  ``conv=notrunc``
+    keeps the rest of an existing *dst* and is harmless on a new one."""
+    def dd(off, bs, n):
+        return (f"dd if={shlex.quote(src)} of={shlex.quote(dst)} bs={bs} "
+                f"skip={(start + off) // bs} seek={(seek + off) // bs} "
+                f"count={n} conv=notrunc")
+    bs = _pow2_dividing(start, seek)
+    head = size // bs * bs
+    cmds = [dd(0, bs, head // bs)] if head else []
+    tail = size - head
+    if tail:
+        tbs = _pow2_dividing(start + head, seek + head, tail)
+        cmds.append(dd(head, tbs, tail // tbs))
+    return " && ".join(cmds) or "true"
+
+
+def _size_cmd(path):
+    """Shell command printing a file's size in bytes, on GNU and BSD alike
+    (``stat -c%s`` is GNU's spelling; a Mac's stat wants ``-f%z``)."""
+    return f"wc -c < {shlex.quote(path)}"
+
+
+#: The executor-side tools the CGC pipelines run, all from e2fsprogs except
+#: dd and xxd (which every Mac has).
+_EXECUTOR_TOOLS = ("debugfs", "dd", "xxd", "e2fsck", "dumpe2fs")
+
+
+def _missing_tool_hint(platform=None):
+    """How to get the executor's tools on this machine.  It used to say
+    "Install in WSL" everywhere, which sent a Mac user looking for a WSL a Mac
+    does not have (PAD-571)."""
+    p = platform or sys.platform
+    if p == "darwin":
+        return ("Install e2fsprogs with Homebrew: brew install e2fsprogs\n"
+                "(or press Install Missing on the prerequisites strip).")
+    if p == "win32":
+        return "Install in WSL: apt-get install e2fsprogs xxd coreutils"
+    return ("Install them: sudo apt install e2fsprogs xxd  (Debian/Ubuntu; "
+            "other distros: the e2fsprogs and xxd packages)")
+
+
+def _cross_cc_hint(platform=None):
+    """How to get the ARM cross compiler a ``pad_mods/`` build needs."""
+    p = platform or sys.platform
+    if p == "win32":
+        return ("Install it in WSL: apt-get install gcc-arm-linux-gnueabihf "
+                "(or press Install Missing on the Emulate tab's "
+                "prerequisites).")
+    if p == "darwin":
+        return ("macOS has no packaged ARM Linux cross compiler; build on "
+                "Windows or Linux.")
+    return ("Install it: sudo apt install gcc-arm-linux-gnueabihf "
+            "(Debian/Ubuntu; Arch: arm-linux-gnueabihf-gcc from the AUR).")
+
+
 def _verify_executor_tools(executor):
     ok, msg = executor.check_available()
     if not ok:
         raise PipelineError("Detect",
             f"Executor not available: {msg}\n\n"
             f"On Windows, install WSL2 via: wsl --install -d Ubuntu")
-    for tool in ("debugfs", "dd", "xxd", "e2fsck", "dumpe2fs"):
+    for tool in _EXECUTOR_TOOLS:
         try:
             executor.run(f"command -v {tool} >/dev/null", timeout=10)
         except CommandError:
             raise PipelineError("Detect",
-                f"Missing tool: {tool}\n\n"
-                f"Install in WSL: apt-get install e2fsprogs xxd coreutils")
+                f"Missing tool: {tool}\n\n{_missing_tool_hint()}")
 
 
 def _copy_with_progress(src, dst, total_bytes, progress_cb,

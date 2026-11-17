@@ -102,6 +102,7 @@ const char *pm_shot_at(int i, uint64_t *mask);    /* the i-th named shot (0-base
 int pm_begin(void);        /* 1 = your mode is now the one running; 0 = another one is */
 void pm_end(void);         /* your mode stopped running */
 int pm_running(void);      /* your mode is the one running */
+int pm_other_running(void);   /* PAD-675: another of our modes is the one running (not yours) */
 void pm_running_name(const char *name);   /* PAD-363: after pm_begin, the name the runtime's own lines give
                                              your mode while it runs (one object running several modes) */
 unsigned pm_begun(void);   /* PAD-413: how many times one of our modes has begun. Remember it at your end: when it
@@ -147,8 +148,13 @@ int pm_sound_stop(unsigned request);     /* stop every channel playing it; 1 if 
  * Sets the request's priority and flags (-1 leaves one as it is) and returns the old pair as
  * priority << 8 | flags, or -1 when the port has no request table (data sound_requests) or
  * the record does not look like one. Only for a request the game never plays itself, such
- * as the carrier of a sound of your own. */
+ * as the carrier of a sound of your own - and give it back with pm_sound_priority_stock once
+ * your sound is over (PAD-682: a carrier can still be one the game plays where no census
+ * reached; Bond LE's music carrier 94 is Bird One Multiball's music). */
 int pm_sound_priority(unsigned request, int priority, int flags);
+/* PAD-682: the card's own priority and flags back on `request` (as pm_sound_priority first found them; a swap still
+ * armed on it puts those back too when it lapses). Returns the pair it had, or -1 without a request table. */
+int pm_sound_priority_stock(unsigned request);
 /* Item 150 follow-up (MODE_SDK.md "A music bed of your own"):
  * pm_sound_sid points `request` at ONE sound id until it is called again with sid 0, which puts
  * the request's own list back. The one music carrier plays a different bed for every mode this
@@ -169,6 +175,10 @@ int pm_sound_sid(unsigned request, unsigned sid);
  * the port has no sound_lookup site (then do NOT play: the carrier would play its own line). */
 int pm_sound_swap(unsigned request, const unsigned char stock[8], const unsigned char ours[8], int priority, unsigned ms);
 int pm_sound_fade(unsigned request, unsigned ms);
+/* PAD-678: `steps` (1/3 dB each) more taken off every voice playing `request`, on top of its own volume, ramped
+ * over `ms`; steps 0 ramps it back. As the game ducks its music under a clip's sound. Ends by itself when the
+ * request stops or a pm_sound_fade starts on it. 1 = done; 0 when it does not play or the port has no voice offsets. */
+int pm_sound_duck(unsigned request, unsigned steps, unsigned ms);
 int pm_sound_playing(unsigned *requests, unsigned *buses, int max);
 /* PAD-415: the game's own hit sounds, a rising run the port names (`value hit_sound_<n>`, n from 1, low to high: on
  * Godzilla its eight pitched orchestra hits), so every hit of a mode is heard - while one of ours runs the game's
@@ -226,7 +236,22 @@ int pm_lamp_shot(uint64_t shots, unsigned rgb, int pattern, unsigned period_ms);
 int pm_lamp_all(unsigned rgb, int pattern, unsigned period_ms);      /* every insert the port names */
 int pm_lamp_release(const char *names);
 int pm_lamp_release_shot(uint64_t shots);
-int pm_lamp_release_all(void);                             /* every insert THIS mode holds */
+int pm_lamp_release_all(void);                             /* every insert THIS mode holds (its cabinet lights too) */
+/* PAD-1040: the cabinet's EXPRESSION LIGHTS - the blades down the cabinet's sides and the backbox speaker lights
+ * (Led Zeppelin, Rush, Foo Fighters...), the port's `cablamp` lines. They are lights of the game's own light table, held
+ * on the mode's lamp layer exactly as inserts are, so a mode's cabinet light show covers the game's own while it runs.
+ * Each has a place on the CABINET drawing (the same 0-300 x 0-600 a light show's patterns run over: the left blade
+ * down x 12, the right down x 288, bottom up; the speaker ring at the top), so a show's patterns play on it too. */
+int pm_cab_count(void);                                    /* how many cabinet lights the port names (0: none) */
+const char *pm_cab_at(int i);                              /* the i-th one's name ("EXPRESSIVE LIGHTING L 1") */
+int pm_cab_xy(int i, int *x, int *y);                      /* its place on the cabinet drawing; 0 = not placed */
+int pm_cab_paint(int i, unsigned rgb);                     /* hold it solid in rgb, quietly (as pm_lamp_paint) */
+int pm_cab_release_all(void);                              /* every cabinet light THIS mode holds: the game's again */
+int pm_lamp_release_inserts(void);                         /* every insert THIS mode holds, its cabinet lights kept */
+/* PAD-1040: one of the card's own expression light shows (cabshow.cfg) by its name, over the cabinet's lights at once
+ * (the game's sound plays it too); 1 = it runs. pm_cab_show_stop ends it: the lights are the game's again. */
+int pm_cab_show(const char *name);
+int pm_cab_show_stop(void);
 /* PAD-415: a hit answers at once. The inserts of `shots` strobe in `rgb` (60 ms on, 60 off) for `ms` (0 = 480; at
  * most 2000) over whatever the mode holds them in, then show it again; one the mode does not hold is held for the
  * strobe only and handed back to the game after it, and one the mode releases while it strobes finishes the strobe
@@ -238,6 +263,9 @@ int pm_lamp_priority(unsigned priority);
 /* The game's lamp layers right now, bottom to top: each one's priority, with 0x100 added for a
  * layer of ours. Returns how many there are (up to max), or -1 without the port's layer list. */
 int pm_lamp_layers(unsigned *priorities, int max);
+/* PAD-945: what the GAME shows on insert i now - the top of its own layers holding each light, none of ours - as
+ * 0xRRGGBB (a one-light insert: its level as a grey); -1 when i is not an insert or the port names no lamp layers. */
+int pm_lamp_game_rgb(int i);
 
 /* ---- the display --------------------------------------------------------------------
  * A SCREEN of your own is a node the build added to the game's "hud" scene (the Modes
@@ -260,6 +288,9 @@ void pm_set_text(void *text, const char *words);
 int pm_clip(const char *name);        /* 1 if the game started it */
 int pm_clip_playing(void);
 void pm_clip_stop(void);
+int pm_game_clip(const char *name, int loop);  /* for a test (PAD-725): a clip of the video bank put on its
+                                              surface as the GAME puts its own (clip v2), so the runtime's
+                                              clip-back and backdrop take it for the game's; 1 = played */
 
 /* ---- the backdrop: a clip BEHIND the HUD (hud-layers) ---------------------------------
  * The game's own battles play their clip in the main-play background's place, with the score
@@ -314,7 +345,8 @@ const char *pm_stock_mode_what(unsigned kind);   /* "a battle", "a multiball", "
  * five times a second); 0 on a port that cannot tell, and outside a game. */
 int pm_aside(void);
 /* PAD-347 / PAD-363: ISOLATION. A mode may keep the game's own modes from STARTING while it runs: the
- * start of each mode the port names (generated from the game program; never a multiball) is refused at its
+ * start of each mode the port names (generated from the game program; never a multiball's start - on James Bond, PAD-578, Jetpack and Bird One
+ * Multiball's lock-open check, refused with 0, so no lock lights or counts) is refused at its
  * entry, so that mode never begins and the rule that asked carries on. Which ones: the mode's own list
  * (pm_block_list: n of the game's mode ids, 0-127 - the port's `text block_name_<id>` names them), or the
  * port's checked defaults (`text block_default <ids>`). On Godzilla a blocking mode also keeps a battle from
@@ -366,12 +398,51 @@ void pm_roster_release(unsigned slot);
  * ended it does nothing (a new game lights every player's ramps). A mode that never calls it gets it
  * called at the end of the ball its pick was taken in. */
 void pm_roster_done(void);
+/* PAD-706: the same, saying how the battle went. Where the port can (Godzilla: `site battle_stop`), a pick
+ * COUNTS AS THE BATTLE IT REPLACED: at the pick the battle's own start bookkeeping is done (its STARTED audit,
+ * the city holds it; the battle itself does not run), and here the battle's own stop runs with the outcome, so
+ * the game counts it as it counts its own: won (1) = the slot shows Completed, the COMPLETED audit, the city's
+ * win and its award, the wizard and tier-2 progress that follow; lost (0) = as a battle the player lost.
+ * pm_roster_done() is pm_roster_over(0). */
+void pm_roster_over(int won);
 /* The slot's spoken name. When the cursor lands on a slot the selection screen plays that slot's
  * callout (Godzilla: slot 0 says "Ebirah!"). A claimed slot is SILENT, so the old monster's name is
  * never heard over the new art; this sets a sound request id of the mode's own for the slot it holds
  * (0 = silent), and releasing the slot puts the game's back. 1 = written; 0 when the caller does not
  * hold the slot or the port has no `data roster_screen_table`. */
 int pm_roster_callout(unsigned slot, unsigned id);
+/* PAD-707: new monsters on the battle selection screen (MORE KAIJU). The roster cannot grow, but its SCREEN can: the
+ * card build lays the screen out again with a tile of your own for each new monster (its scene is the card's own, so
+ * a Heisei card keeps its art), and the runtime walks the cursor over them. Each new monster stands in `slot`'s place
+ * (a place no mode holds itself): with the cursor on its tile the game's own cursor is parked on that place, so the
+ * game's timer, its pick and its battle bookkeeping stay the game's - and a pick there is the monster's: it gets
+ * `on_pick(slot)` exactly as a claimed slot's pick (return 1 = taken; 0 lets the place's own battle run), and its
+ * pm_roster_over gives the place's battle back, won or lost. A pick of the place's own tile is the place's own battle.
+ * A monster lost is the one the game's city pick plays again. `page` names its nodes in the selection scene
+ * (`PadSel_<folder>`: the Modes tab and the blocks write it, the card build adds `<page>_Lit`, `_Lock`, `_Done`,
+ * `_Portrait` and its grey tile); `callout` (0 = silent) is played, through the game's own callout, as the cursor
+ * lands on it. Several places may have new monsters; at most 5 fit the screen. Returns the monster's place in the
+ * list (its names' order, 0..), or -1. pm_roster_more_leave takes the calling mode's monster `name` off; a place is
+ * the game's alone again when no monster stands in it. pm_roster_start_after: how long to wait after on_pick before
+ * showing the mode's start - the game's screen closing (the port's roster_start_after_ms). */
+int pm_roster_more(unsigned slot, const char *name, const char *page, unsigned callout, int (*on_pick)(unsigned slot));
+void pm_roster_more_leave(const char *name);
+int pm_roster_more_count(void);
+const char *pm_roster_more_picked(void);   /* inside on_pick: the name of the new monster picked (0 = a place's own pick) */
+long pm_roster_start_after(void);
+/* PAD-733: the count on the calling mode's new monster's tile, as the game's own places show theirs ("2/5": the hits
+ * made of the hits needed), for the player up, until the game ends; written each time the selection screen opens (the
+ * card build's `<page>_Prog`; a card without it shows nothing). of <= 0 shows none. 1 = kept; 0 when the calling mode
+ * has no new monster on the screen. */
+int pm_roster_more_progress(long done, long of);
+/* PAD-733: the shots the calling mode's new monster blinks on the playfield while the selection screen's cursor is on
+ * its tile, as the game's own battles blink theirs (yellow; every other shot's insert dark, the cabinet's left alone);
+ * 0 = none, the game's lights as they are. 1 = kept; 0 when the calling mode has no new monster on the screen. */
+int pm_roster_more_shots(uint64_t shots);
+/* PAD-733: 1 while the selection screen a pick was taken on is still closing - start the picked mode on the first tick
+ * this is 0, its start clip at once: the game's own battle is in its intro there. (The runtime watches the game's
+ * display effects: the close is one, Premium/LE 1.16's 132; the port's roster_start_after_ms is the most it waits.) */
+int pm_roster_closing(void);
 
 /* ---- display priority (item 154 display; MODE_SDK.md "Display priority") ------------------
  * The game decides what is on its screen with PRIORITIES, on two levels: its DISPLAY EFFECTS
@@ -395,9 +466,19 @@ int pm_roster_callout(unsigned slot, unsigned id);
  * mode is not the one running. */
 #define PM_CAN_DISPLAY_PRIORITY 0x4000u   /* pm_display_priority (0x0100 is the roster's) */
 int pm_display_priority(unsigned priority);
-/* 1 while a display of the game's that beat your priority has the screen (your screen is
- * under it); 0 otherwise, and with no priority held. */
+/* 1 while a display of the game's has the screen (an effect over the layered display, or a
+ * layered foreground: your screen is under it); 0 otherwise. With no priority held (your mode
+ * is not running: a qualification note) it looks at the game's display now (PAD-658). */
 int pm_display_covered(void);
+/* PAD-662: 1 while a screen of the game's own is on the glass under the HUD - a background of its layered display
+ * other than the main play (Godzilla's city): a mode of the game's, a multiball, a qualifying screen like
+ * Mechagodzilla's DEFENSE NEO BARRIER, any of them, listed or not. Its scene letters the game's words where a mode's
+ * are (a title above the score panel, an instruction line under it, counters along the top), so a mode's words step
+ * aside while it is up: the kit HUD moves its lines into the award line and hides its counters, a qualification note
+ * goes into the award line, a mode's own screen is hidden. 0 when the game's own words are not up - the main play, a
+ * mode's clip drawn in that screen's place (its words are not drawn then) - outside a game, or on a port without the
+ * backdrop lines. Watched as drawn; cheap to call every tick. Unlike pm_aside it never ends or refuses a mode. */
+int pm_game_words(void);
 /* Your mode is over (as pm_end: another may begin at once) but its ENDING - a full-screen clip, its
  * total - should keep the screen: the display priority it holds stays for `ms` more, so an award of
  * the game's that waited through the mode does not take the one video surface from the ending clip.
@@ -464,6 +545,15 @@ int pm_balls_in_play(void);
  * 0 = the game refused (no game in play, a tilt) or the port lacks the call. During the game's
  * own multiball it only lengthens that multiball's save (the framework keeps the longer). */
 int pm_ball_save(unsigned seconds);
+/* PAD-733: drain to one ball - a multiball that ends with two or more balls still up (MODE_SDK.md "Drain to one
+ * ball"). The game's flippers go dead (the flippers alone: pops, slings and the ball devices keep working) until the
+ * balls drain; the last one's drain is a ball save's - the game serves it back to the shooter lane and the SAME ball
+ * goes on (no bonus, no next ball). The flippers come back as that ball comes home, and in any case at the ball's
+ * end, a tilt or the game's end (the game's own next ball brings them back then), and after 30 s. Call it as your
+ * mode ends (in its end, before or after pm_end). 1 = started (or already draining); 0 = fewer than two balls are
+ * in play, no game in play, a tilt, or the port names no flippers off/on (`site flippers_off` / `flippers_on`) or no
+ * multiball serve. */
+int pm_drain_to_one(void);
 
 /* ---- the magnet (PAD-381; MODE_SDK.md "The magnet") ------------------------------------------
  * A grab with the playfield magnet, for `ms` milliseconds. You ask for a time and nothing else:
@@ -598,15 +688,19 @@ int pm_game_shows(void);
  *   - `ms` is at least 100 and never longer than the game's own longest shake at that strength (Godzilla:
  *     1000 ms at 0 and 1, 5000 ms at 2 and 3; the port's `text shake_max_ms`).
  *   - only while your mode runs, in a game (not attract, not tilted); never with the shaker set to off (or
- *     none fitted), while one of the game's own shakes runs, or while one of yours does; at most 20 shakes
- *     and 15 s of shaking in any minute.
- *   - the runtime stops your shake when your mode ends, the ball ends, or the game ends or tilts (and on
- *     pm_shake_stop) - unless the game has since asked for a shake of its own, which it leaves to run.
+ *     none fitted), or while one of the game's own shakes runs; at most 30 s of the motor running in any minute
+ *     (counted as it runs: a shake cut short counts what ran; PAD-670: the game's own shakes count too - the
+ *     ceiling is the motor's, measured against the game's busiest minute, MODE_SDK.md). PAD-658: one of yours at a
+ *     time, as the game's own call has it - a longer one takes the motor over, a shorter one is skipped (0).
+ *   - the runtime stops your shake when the ball ends, or the game ends or tilts (and on pm_shake_stop) -
+ *     unless the game has since asked for a shake of its own, which it leaves to run. PAD-658: your mode's end
+ *     leaves it to run out (as pm_shake_outlast did for the ending one).
  * pm_shake_game plays one of the GAME's own shakes by name, as the program has it (the port's `text
  * shake_<name>` lines): on Godzilla "hit" (200 ms, hard: a battle's shot), "big_hit" (334 ms), "jackpot"
  * (500 ms, hard: every super jackpot), "rumble" (3000 ms, soft: O2 Destroyer), "multiball_start" (five
  * shakes over 4 s: the Godzilla Multiball start); on the other titles the one the game calls most in each
- * length: "tap", "short", "medium", "long", "rumble". Same limits; its steps count as one shake.
+ * length: "tap", "short", "medium", "long", "rumble". Same limits; its steps are one shake (their span is what a
+ * longer one is measured by).
  * pm_shake / pm_shake_game: 1 = shaking; 0 = refused (the reason is in mode.log) or no shaker on this
  * game's port (PM_CAN_SHAKER). pm_shaking: 1 while a shake of yours runs. */
 #define PM_CAN_SHAKER       0x1000000u /* pm_shake / pm_shake_game / pm_shake_stop / pm_shaking / pm_shake_outlast */
@@ -638,12 +732,18 @@ void pm_shake_outlast(void);
  * yours has to be running, and one that is keeps running beside it. A wizard the player has played this game
  * plays again. PM_WIZARD_LIT (1): lit for the start shot; PM_WIZARD_STARTED (2); 0: not on this game, no game,
  * no such wizard (mode.log says which). pm_game_wizard_named: the same by the port's name for it (`text
- * wizard_name_<n>`, any case). pm_game_wizards: how many the port names (0 = none on this game). */
+ * wizard_name_<n>`, any case). pm_game_wizards: how many the port names (0 = none on this game).
+ * PAD-473, the C++ titles (MODE_SDK.md "The game's own mini-wizards on the other titles"): the port names each one's
+ * mode object, and PM_WIZARD_START calls its own START as the game's rules do - at once, or the moment none of the
+ * game's own modes is in its way (nor a mode of yours holding them off), that ball (PM_WIZARD_WAITING, 3, until
+ * then). PM_WIZARD_LIGHT starts the game's own mode that lights it for a start shot where it has one, and is a start
+ * where it has none. The game's own rules still light and start them too. */
 #define PM_CAN_GAME_WIZARDS 0x2000000u /* pm_game_wizard / pm_game_wizard_named / pm_game_wizards */
 #define PM_WIZARD_LIGHT     0
 #define PM_WIZARD_START     1
 #define PM_WIZARD_LIT       1
 #define PM_WIZARD_STARTED   2
+#define PM_WIZARD_WAITING   3   /* PAD-473, the C++ titles: to start the moment nothing of the game's is in its way */
 int pm_game_wizard(int n, int how);
 int pm_game_wizard_named(const char *name, int how);
 int pm_game_wizards(void);
@@ -653,5 +753,166 @@ int pm_game_wizards(void);
  * on this game, no such wizard, or the port names no `site wizard_light` (then the game lights it too). */
 int pm_game_wizard_claim(int n);
 int pm_game_wizard_claim_named(const char *name);
+/* PAD-503: the game's own check before it starts one of its mini-wizards (Bond: none of them running, no henchman,
+ * villain or Q Branch mode, no Victory Laps - the port's `site wizard_way`). 1 = nothing of the game's is in the way,
+ * 0 = something is, -1 = no game, or this game's port names no such check. From a tick, shot or event callback (the
+ * game's own thread). A blocks mode lit at a shot (Light the mode at) waits on it, as the game's own mini-wizards do. */
+int pm_game_wizard_way(void);
+/* PAD-503: a mode lit at a shot claims it, renewed every tick while it would start there now (the player up's, nothing
+ * of its own or the game's in its way; 0 = no claim). A hit on a claimed shot's switch holds the game's own mode starts
+ * off (the ones the port's block_start lines hook) while the game handles that switch, so the shot starts the lit mode
+ * and not, on James Bond's Right ramp, one of the game's henchman or villain modes. A claim not renewed for 250 ms is
+ * gone; one of your modes beginning ends a hold. Shots from switches only (the port's switch lines). 1 = claimed. */
+int pm_lit_claim(uint64_t shots);
+
+/* ---- the game's own status bar (PAD-521; MODE_SDK.md "The game's status bar") ------------------------------------
+ * James Bond LE shows each of its own modes in a coloured bar under the TV: the mode's name, the bar in the mode's
+ * colour, and its clock as a progress wipe draining along it (Goldfinger's Jackpot: gold). pm_status_bar puts a mode
+ * of yours there the same way: `words` (shown in the game's own lettering, so capitals), `rgb` (PM_RGB) and
+ * `percent` 0-100 of the wipe (-1 = no wipe). Call it again to change any of them (cheap when nothing changed).
+ * NULL or "" gives the bar back as it was. The runtime keeps it up while you hold it (a game display that hides it
+ * is answered on the next tick) and gives it back by itself when the game is over. 1 = shown; 0 = this game's port
+ * names no status bar (pm_can(PM_CAN_STATUS_BAR)), or the game has none yet. */
+#define PM_CAN_STATUS_BAR   0x4000000u /* pm_status_bar */
+int pm_status_bar(const char *words, unsigned rgb, int percent);
+
+/* ---- the Bond Women multiplier (PAD-889; title specific: James Bond LE and Pro 1.06) --------------------------------
+ * The game's own 2X-7X: each Bond Woman the player collects adds one (2X at the first, 7X at the sixth), and the
+ * multiplier then runs for a time of its own. While it runs the game counts it into its playfield multiplier, which
+ * pm_score_add's points go through - a mode's points are already multiplied by it, as the game's own are. This says
+ * what it is now: the game's own answer (`site bond_women_mult`, its getter), 1 when none runs or the port names none
+ * (the 60th Anniversary builds have no Bond Women). From a tick, shot or event callback (the game's own thread). */
+unsigned pm_bond_women_mult(void);
+
+/* ---- the game's Challenge list (PAD-615, PAD-619; title specific: Bond, Stranger Things, Rush, Sword of Rage) -
+ * A Player Challenge game: the player picks one of the game's challenges as the game starts and plays it on one
+ * ball, the game ending at that ball's end. A mode can CLAIM one of the challenges (slot 0.. in the order of the
+ * game's menu; Bond: 0 Chaos at Crab Key, 1 Ahoy Mr. Bond, 2 Goldfinger's Jackpot, 3 Duel on the Disco Volante,
+ * 4 Her Majesty's Secret Service): when a challenge game with that pick reaches its ball's start, the game's own
+ * challenge does not start and on_pick(slot) runs instead, on the game's thread, at the moment it would have
+ * started. on_pick returns 1 when it took the pick (start your mode: pm_begin from the next tick) and 0 to let the
+ * game's own run. The menu cannot grow: a mode takes a challenge's place, under that challenge's name. A claim
+ * holds until released, game after game; one mode per challenge. A challenge game a mode takes is one ball. */
+#define PM_CAN_CHALLENGE    0x8000000u /* pm_challenge_claim */
+int pm_challenge_slots(void);                                        /* 0 when the port names no challenges */
+const char *pm_challenge_name(unsigned slot);                        /* "Ahoy Mr. Bond", or 0 */
+int pm_challenge_named(const char *name);                            /* its slot, any case, or -1 */
+int pm_challenge_claim(unsigned slot, int (*on_pick)(unsigned slot)); /* 1 = claimed */
+void pm_challenge_release(unsigned slot);             /* a challenge claimed, or one added below */
+/* The game's own start menu (CHOOSE YOUR MODE OF PLAY, both flipper buttons held in attract; PAD-619: every build
+ * of Bond's generation) lists the challenges one entry at a time, CHALLENGE over the name. Where the port names it:
+ * pm_challenge_title shows `words` (in capitals) in place of the name of a challenge the calling mode holds, and
+ * pm_challenge_add puts a challenge of the mode's own in the menu, after the game's: picked, the game makes a
+ * one-ball challenge game of it (challenge 0's, whose own start does not run, or the plain one) and on_pick(slot) runs
+ * at the ball's start, as for a claimed one. It returns the new one's slot (16 and
+ * up; pm_challenge_name gives its words) or -1. The menu has room for a few (Bond: 9, 7 of them the game's): as many
+ * as fit are shown; the rest are logged. */
+#define PM_CAN_CHALLENGE_MENU 0x0400u /* pm_challenge_title / pm_challenge_add */
+int pm_challenge_menu(void);                                         /* 1 = the start menu is ours to change */
+int pm_challenge_title(unsigned slot, const char *words);            /* 1 = shown; the holder only */
+int pm_challenge_add(const char *words, int (*on_pick)(unsigned slot)); /* its slot, or -1 */
+/* PAD-643: a challenge game's ball waits in the shooter lane as the mode starts. Where the port names the game's
+ * launch (pm_ball_launch_known), the runtime launches it for the player - by default once the mode's start clip is
+ * over; pm_challenge_launch(slot, ms) changes that for a challenge the calling mode holds or added: ms after the mode
+ * began, or PM_LAUNCH_PLAYER (the player launches it). And the game's own ball-start work it leaves out of every
+ * challenge game (the port's challenge_plain sites: Bond's skill shot, with the left flipper button's loop at the
+ * launch) runs in a mode's challenge game as at a standard ball's start. */
+#define PM_LAUNCH_CLIP    0
+#define PM_LAUNCH_PLAYER  (-1)
+int pm_challenge_launch(unsigned slot, int ms);                     /* 1 = set; the holder only */
+int pm_ball_launch_known(void);                                      /* 1 = the port names the game's launch */
+
+/* ---- the end of a ball held for a mode's total (PAD-622; MODE_SDK.md "Holding the end of a ball") ------------
+ * The game's own mini-wizards (James Bond) show their TOTAL when the ball drains in one, and the game's end of ball
+ * (its bonus, the next ball, a challenge game's end) waits for it. Called from your .ball_end, pm_ball_end_hold
+ * does the same for your mode: once every mode's .ball_end has run, the game's end of ball waits up to `ms` (the
+ * longest any mode asked; 10000 at most), the game's own process sleeping a tick at a time as the scoop's hold does.
+ * Your tick goes on meanwhile, so the total you show then is drawn. The hold ends at its time, on
+ * pm_ball_end_release (from your tick), or at once on a tilted ball. 1 = it will hold; 0 = not from .ball_end, a
+ * tilted ball, or no PM_CAN_BALL_END_HOLD (the port's `site proc_sleep`). pm_ball_end_holding: 1 from the ask until
+ * the game's end of ball goes on (watch it from your tick to take the total down then). */
+#define PM_CAN_BALL_END_HOLD 0x0800u  /* pm_ball_end_hold / pm_ball_end_release / pm_ball_end_holding */
+int pm_ball_end_hold(unsigned ms);
+void pm_ball_end_release(void);
+int pm_ball_end_holding(void);
+
+/* ---- a mode in the place of one of the game's own modes (PAD-710; MODE_SDK.md "A mode in the place of one of the
+ * game's") ----------------------------------------------------------------------------------------------------------
+ * The game's modes the port names a start of (`text block_name_<id>`, the ids pm_block_list takes) are the ones a mode
+ * can take the place of. A mode CLAIMS one: when the game starts it (a rule of the game's, as the player earns it),
+ * its start does not run and on_start(id) runs instead, on the game's thread, at that moment. on_start returns 1 when
+ * it took it (start your mode: pm_begin from the next tick) and 0 to let the game's own start. Not while another mode
+ * of ours runs (pm_block_game_modes decides then). A claim holds until released; one mode per game mode.
+ * Where the port names the game's mode framework (every C++ title), the mode COUNTS AS the game's mode it replaced:
+ * at the take, what the game's own START writes for its bookkeeping (its start count, its STARTED audit where the
+ * game keeps one; the mode itself does not run), and at pm_place_over(won) the game's own STOP of it with the
+ * outcome - won (1) = completed, as when the player completes the game's mode: its COMPLETED audit, its wins, and the
+ * wizards and unlocks the game gates on it; lost (0) = as when the player loses it. A mode that never calls it at the
+ * end of the ball it took the place in counts as lost. On a plain-C title (no mode class) it counts through the
+ * mode's own books the port names: its STARTED audit and PLAYED flag at the take, its COMPLETED flag and audit when
+ * completed. pm_place_counts(id): 1 when it counts as id here. */
+#define PM_CAN_PLACE        0x10000000u /* pm_place_claim */
+int pm_place_claim(unsigned id, int (*on_start)(unsigned id));   /* 1 = claimed */
+void pm_place_release(unsigned id);
+int pm_place_counts(unsigned id);                                /* 1 = it counts as the game's mode id */
+const char *pm_game_mode_name(unsigned id);                      /* "Hoth I" (the port's name), or 0 */
+void pm_place_over(int won);                                     /* the mode that took the place ends */
+int pm_game_mode_start(unsigned id);  /* for a test: the game's START of mode id, as its rules call it (a plain-C
+                                         start only while claimed: the claim refuses it); 1 = called */
+/* PAD-768: a battle picked on the game's selection screen wins over the game's own modes running then (David: "Anything
+ * from the Kaiju Battle select screen should override the mini modes"): each of them running for the player up that
+ * ours would give way to (Godzilla's Jet Fighter Attack) is ended through its own STOP, lost, as its clock running out
+ * would, its TOTAL screen skipped (its points are in the score already; the port's `stock_award_at` /
+ * `battle_total_at`) - never a multiball, a battle, or one the port names beside ours (`text stock_any_beside`). Called by the
+ * blocks and mode files as a pick's mode starts. `why` is for the log. The number ended; -1 = the port cannot (no mode
+ * framework STOP, or its "a mode is active" query is not the known shape). */
+int pm_game_modes_end(const char *why);
+
+/* ---- the game's own modes the player has completed (PAD-747; MODE_SDK.md "The game's modes completed") -------------
+ * The runtime keeps, for each player, which of the game's modes (the ids pm_block_list takes) the player has completed
+ * this game, as the game records it: a C++ title's mode STOP entered with "completed", a plain-C title's COMPLETED
+ * audit or flag. A new game forgets it. pm_game_mode_done(id): 1 completed by the player up, 0 not yet, -1 the runtime
+ * cannot see that one's completion here. pm_game_modes_done(ids, n): how many of those n ids (n = 0: every one it can
+ * see) the player up has completed this game; -1 when it can see none of them. A mode of yours in one's place that
+ * ends won (pm_place_over(1)) counts as that mode completed. */
+#define PM_CAN_GAME_DONE    0x20000000u /* pm_game_mode_done / pm_game_modes_done */
+int pm_game_mode_done(unsigned id);
+int pm_game_mode_done_seen(unsigned id);                         /* 1 = its completion is seen here */
+int pm_game_modes_done(const unsigned char *ids, unsigned n);
+
+/* ---- spare switches and driver outputs (PAD-826; MODE_SDK.md "Spare switches and outputs") -------------------------
+ * For hardware a mod ADDS: a switch wired to a node board input the game has no switch on, a coil, flasher or toy
+ * wired to a driver output the game never fires. Both are named by the board's own numbers: the node (8, 9 ... as the
+ * switch list names it) and, for a switch, its input bit 0..63 (the switch list's `bit`), for an output its number
+ * 0..8. The runtime reads the game's own tables live and takes ONLY what nothing of the game's uses: an input with no
+ * switch of the game's, an output with no coil of the game's (on a board that drives coils). Anything else is
+ * refused, said in mode.log, and never touched.
+ *
+ * pm_spare_shot: the input as a SHOT of its own: a fresh shot bit, named `name` (pm_shot finds it), that comes to every
+ * mode's .shot each time the switch CLOSES (two ticks the same: a bounce is not a hit). Closed is the input reading 0,
+ * Stern's own way for a switch (`active_high` 1: closed reads 1, an opto's). 0 = refused, or no PM_CAN_SPARE_SWITCHES.
+ * Ask again with the same node and input for the same mask. At most 8 per game.
+ * pm_spare_switch: 1 closed, 0 open, -1 not a spare input here (or not readable now).
+ *
+ * pm_spare_drive: ONE command to a spare output, ended on the board by itself: `pulse_power` (1..255) for `pulse_ms`,
+ * then `hold_power` (0..255; 0 = none) for `hold_ms`. The runtime's limits, which cannot be raised (it is 48 V into
+ * wiring PAD has never seen):
+ *   - only the running mode, in a game (not attract, not tilted);
+ *   - pulse_ms 1..1000, the whole command at most 5000 ms;
+ *   - at most half the time on: an output's commands over any 10 s add up to 5000 ms or less;
+ *   - a new command to an output replaces the one running there (a flasher's pattern).
+ * Every spare output a mode drove goes off (the board's OFF) when the mode ends, the ball ends, and the game ends or
+ * tilts. pm_spare_drive: 1 = sent; 0 = refused (mode.log says why). pm_spare_pulse(n, o, power, ms) is
+ * pm_spare_drive(n, o, power, ms, 0, 0). pm_spare_off: the board's OFF now, for an output this mode drove.
+ * pm_spare_output: 1 when that output is spare here (no coil of the game's on it), else 0. */
+#define PM_CAN_SPARE_SWITCHES 0x40000000u /* pm_spare_shot / pm_spare_switch */
+#define PM_CAN_SPARE_COILS    0x80000000u /* pm_spare_drive / pm_spare_pulse / pm_spare_off / pm_spare_output */
+uint64_t pm_spare_shot(unsigned node, unsigned input, const char *name, int active_high);
+int pm_spare_switch(unsigned node, unsigned input);
+int pm_spare_drive(unsigned node, unsigned output, unsigned pulse_power, unsigned pulse_ms, unsigned hold_power,
+                   unsigned hold_ms);
+int pm_spare_pulse(unsigned node, unsigned output, unsigned power, unsigned ms);
+void pm_spare_off(unsigned node, unsigned output);
+int pm_spare_output(unsigned node, unsigned output);
 
 #endif

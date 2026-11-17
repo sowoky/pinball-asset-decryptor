@@ -57,10 +57,43 @@ LANGUAGE_LABELS = ["English", "German", "French", "Spanish", "Italian"]
 ONOFF_LABELS = ["Off", "On"]
 
 
-def _load_segments(data):
+#: PAD-1321: a Spike 3 game program (64-bit ARM, a PIE) holds the same table with 8-byte pointers.
+#: Its descriptor is 64 bytes: the value's address @0, default/min/max/step (i32) @0x08/0x0c/0x10/0x14,
+#: the caption @0x20, the row caption's line (five language pointers and a zero) @0x28, the help @0x30,
+#: and the display kind (u16) @0x38 with the feature category (u16) @0x3a.  Every pointer the loader
+#: relocates is stored in the file as its own value (load base 0), so it reads as written.
+WIDE_FIELDS = {"default": 0x08, "min": 0x0c, "max": 0x10, "step": 0x14,
+               "label": 0x20, "row": 0x28, "help": 0x30, "kind": 0x38}
+NARROW_FIELDS = {"default": OFF_DEFAULT, "min": OFF_MIN, "max": OFF_MAX, "step": OFF_STEP,
+                 "label": OFF_MENU_LABEL, "row": None, "help": OFF_MENU_HELP, "kind": 0x24}
+
+
+def is_wide(data):
+    """True for a little-endian 64-bit ELF (a Spike 3 game program)."""
+    return len(data) >= 0x40 and data[:4] == b"\x7fELF" and data[4] == 2 and data[5] == 1
+
+
+def _load_segments_wide(data):
+    e_phoff = struct.unpack_from("<Q", data, 0x20)[0]
+    e_phentsize, e_phnum = struct.unpack_from("<HH", data, 0x36)
+    segs = []
+    for i in range(e_phnum):
+        base = e_phoff + i * e_phentsize
+        if base + 56 > len(data):
+            break
+        p_type = struct.unpack_from("<I", data, base)[0]
+        p_offset, p_vaddr, _pa, p_filesz = struct.unpack_from("<4Q", data, base + 8)
+        if p_type == 1:
+            segs.append((p_offset, p_vaddr, p_filesz))
+    return segs
+
+
+def _load_segments(data, wide_ok=False):
     """PT_LOAD segments as ``[(file_off, vaddr, filesz), ...]`` from the ELF
     program headers (manual parse — no pyelftools dependency).  Returns [] if
-    it isn't a little-endian 32-bit ELF."""
+    it isn't a little-endian 32-bit ELF (or, with *wide_ok*, a 64-bit one)."""
+    if wide_ok and is_wide(data):
+        return _load_segments_wide(data)
     if len(data) < 0x34 or data[:4] != b"\x7fELF":
         return []
     if data[4] != 1 or data[5] != 1:            # 32-bit, little-endian
@@ -83,11 +116,19 @@ def _load_segments(data):
 class AdjustmentTable:
     """Decode (and patch) the adjustment-default table of a game ELF held in
     memory as ``bytes``.  Raises :class:`ValueError` if the table can't be
-    located (an unrecognised build — the caller falls back to no editor)."""
+    located (an unrecognised build — the caller falls back to no editor).
 
-    def __init__(self, elf_bytes):
+    PAD-1321: *wide_ok* reads a Spike 3 (64-bit) program too; without it one is
+    refused as before, so a caller built for Spike 2's program never meets one.
+    ``wide`` says which it is, ``ptr`` the pointer size, ``fields`` the
+    descriptor's field offsets."""
+
+    def __init__(self, elf_bytes, wide_ok=False):
         self.data = bytes(elf_bytes)
-        self._loads = _load_segments(self.data)
+        self.wide = bool(wide_ok and is_wide(self.data))
+        self.ptr = 8 if self.wide else 4
+        self.fields = WIDE_FIELDS if self.wide else NARROW_FIELDS
+        self._loads = _load_segments(self.data, wide_ok)
         if not self._loads:
             raise ValueError("not a little-endian 32-bit ELF")
         self.names = self._find_names()
@@ -121,6 +162,14 @@ class AdjustmentTable:
             return None
         return s if s.isprintable() else None
 
+    def word(self, off):
+        """The pointer-sized word at file offset *off*."""
+        return struct.unpack_from("<Q" if self.wide else "<I", self.data, off)[0]
+
+    def field_off(self, idx, field):
+        """File offset of *field* (a :data:`WIDE_FIELDS` key) of descriptor *idx*."""
+        return self._off(self.table_va + idx * self.elem) + self.fields[field]
+
     # --- discovery ---
     def _words(self, po, fsz):
         """``(base_offset, memoryview of u32)`` over a PT_LOAD's aligned words.
@@ -130,11 +179,12 @@ class AdjustmentTable:
         ``struct.unpack_from`` there costs seconds, a cast memoryview about a
         fifth of that.
         """
-        base = (po + 3) & ~3
-        n = (po + fsz - base) // 4
+        p, code = (8, "Q") if self.wide else (4, "I")
+        base = (po + p - 1) & ~(p - 1)
+        n = (po + fsz - base) // p
         if n <= 0:
-            return base, memoryview(b"").cast("I")
-        return base, memoryview(self.data)[base:base + n * 4].cast("I")
+            return base, memoryview(b"").cast(code)
+        return base, memoryview(self.data)[base:base + n * p].cast(code)
 
     def _find_names(self):
         ad_va = {}
@@ -143,27 +193,14 @@ class AdjustmentTable:
             if va is not None:
                 ad_va[va] = self.data[m.start():m.end() - 1].decode("latin1")
         va_set = set(ad_va)
-        best = []
-        for po, pv, fsz in self._loads:
-            base, words = self._words(po, fsz)
-            run = []
-            for j, w in enumerate(words):
-                if w in va_set:
-                    v = pv + (base + 4 * j - po)
-                    if run and v - run[-1] != 4:
-                        if len(run) > len(best):
-                            best = run
-                        run = []
-                    run.append(v)
-            if len(run) > len(best):
-                best = run
+        best = self._longest_name_run(va_set)
         if not best:
             raise ValueError("no AD_ name array found")
         # Walk contiguously from the run base so any non-AD slot is still
         # counted (keeps the id index aligned with the descriptor array).
         names, va = [], best[0]
         while True:
-            w = struct.unpack_from("<I", self.data, self._off(va))[0]
+            w = self.word(self._off(va))
             if w in va_set:
                 names.append(ad_va[w])
             else:
@@ -171,19 +208,62 @@ class AdjustmentTable:
                 if names and (not s or not s.startswith("AD_")):
                     break
                 names.append(s or "")
-            va += 4
+            va += self.ptr
             if len(names) > 6000:
                 break
         return names
 
-    def _find_section(self):
-        target = len(self.names)
+    def _longest_name_run(self, va_set):
+        """The VAs of the longest run of consecutive words that all point at
+        an ``AD_`` name (*va_set*) - the first such run when two tie.
+
+        numpy over the words rather than a Python loop: 1.5 s on Rush's
+        190 MB program, part of what Card details took (PAD-626)."""
+        import numpy as np
+        dt = np.uint64 if self.wide else np.uint32
+        names = np.array(sorted(va_set), dtype=dt)
+        best = []
         for po, pv, fsz in self._loads:
-            i = po
-            while i <= po + fsz - 20:      # record spans i..i+20 (node @ +16)
-                count = struct.unpack_from("<I", self.data, i + 8)[0]
+            base, words = self._words(po, fsz)
+            if not len(words) or not len(names):
+                continue
+            w = np.frombuffer(words, dtype=dt)
+            # the names sit together in the string pool: most words are out
+            # of their range, and only the rest are looked up
+            j = np.flatnonzero((w >= names[0]) & (w <= names[-1]))
+            pos = np.searchsorted(names, w[j])
+            pos[pos >= len(names)] = 0
+            j = j[names[pos] == w[j]]
+            if not len(j):
+                continue
+            v = pv + (base - po) + self.ptr * j
+            cuts = np.flatnonzero(np.diff(v) != self.ptr) + 1
+            starts = np.concatenate(([0], cuts))
+            ends = np.concatenate((cuts, [len(v)]))
+            k = int(np.argmax(ends - starts))          # the first longest
+            if ends[k] - starts[k] > len(best):
+                best = v[starts[k]:ends[k]].tolist()
+        return best
+
+    def _find_section(self):
+        if self.wide:
+            return self._find_section_wide()
+        target = len(self.names)
+        # The count word is looked for with bytes.find, not a word-by-word
+        # walk: the walk was most of the second Card details took (PAD-626).
+        pat = struct.pack("<I", target)
+        for po, pv, fsz in self._loads:
+            # record spans i..i+20 (node @ +16), i = po, po+4, ... <=
+            # po+fsz-20, so its count word sits in [po+8, po+fsz-8)
+            stop = po + fsz - 8
+            p = self.data.find(pat, po + 8, stop)
+            while p >= 0:
+                i = p - 8
+                p = self.data.find(pat, p + 1, stop)
+                if (i - po) % 4:
+                    continue
                 elem = struct.unpack_from("<I", self.data, i + 12)[0]
-                if count == target and 24 <= elem <= 96 and elem % 4 == 0:
+                if 24 <= elem <= 96 and elem % 4 == 0:
                     table = struct.unpack_from("<I", self.data, i + 4)[0]
                     node = struct.unpack_from("<I", self.data, i + 16)[0]
                     node_s = self._cstr(node, 16)
@@ -192,8 +272,27 @@ class AdjustmentTable:
                         # ``record + 4`` (table/count/elem) to the accessor the
                         # operator menu walks, which is how
                         # :mod:`.menu_visibility` finds the menu's pages.
-                        return table, count, elem, node_s, self._va(i)
-                i += 4
+                        return table, target, elem, node_s, self._va(i)
+        raise ValueError("adjustment section record not found")
+
+    def _find_section_wide(self):
+        """The 64-bit record: ``{live, table, count, elem, 0, node}`` in 8-byte words (Star Wars
+        ELG 1.10's at 0x6a0008: table 0x6b4510, 195, 64, 0, "SYS")."""
+        target = len(self.names)
+        pat = struct.pack("<Q", target)
+        for po, pv, fsz in self._loads:
+            stop = po + fsz - 24
+            p = self.data.find(pat, po + 16, stop)
+            while p >= 0:
+                i = p - 16
+                p = self.data.find(pat, p + 1, stop)
+                if (i - po) % 8:
+                    continue
+                table, _n, elem, _z, node = struct.unpack_from("<5Q", self.data, i + 8)
+                if 32 <= elem <= 128 and elem % 8 == 0 and self._off(table) is not None:
+                    node_s = self._cstr(node, 16)
+                    if node_s:
+                        return table, target, elem, node_s, self._va(i)
         raise ValueError("adjustment section record not found")
 
     # --- read ---
@@ -202,18 +301,19 @@ class AdjustmentTable:
 
     def entry(self, idx):
         o = self._off(self.table_va + idx * self.elem)
+        f = self.fields
         return {"id": idx, "name": self.names[idx],
-                "default": self._s32(o + OFF_DEFAULT),
-                "min": self._s32(o + OFF_MIN),
-                "max": self._s32(o + OFF_MAX),
-                "step": self._s32(o + OFF_STEP)}
+                "default": self._s32(o + f["default"]),
+                "min": self._s32(o + f["min"]),
+                "max": self._s32(o + f["max"]),
+                "step": self._s32(o + f["step"])}
 
     def get(self, name):
         return self.entry(self.by_name[name])
 
     def default_file_offset(self, name):
         idx = self.by_name[name]
-        return self._off(self.table_va + idx * self.elem + OFF_DEFAULT)
+        return self._off(self.table_va + idx * self.elem + self.fields["default"])
 
     def sane(self):
         """True iff default in [min,max] for a strong majority of entries — a
@@ -226,21 +326,117 @@ class AdjustmentTable:
         return ok >= int(self.count * 0.95)
 
     # --- patch ---
-    def patched_bytes(self, overrides):
+    def patched_bytes(self, overrides, ranges=None):
         """Return a copy of the ELF with each ``{name: value}`` default set,
         validated against that adjustment's own min/max.  Raises ValueError on
-        an unknown name or out-of-range value."""
+        an unknown name or out-of-range value.
+
+        *ranges* is ``{name: (min, max)}`` (PAD-750): the lowest and highest
+        value the machine's menu lets an operator pick, written into the
+        same descriptor as the default (two more 4-byte fields, so still
+        size-neutral).  A default is checked against the range it will have.
+        """
         buf = bytearray(self.data)
+        ranges = ranges or {}
+        for name, (lo, hi) in ranges.items():
+            if name not in self.by_name:
+                raise ValueError("unknown adjustment %r" % name)
+            lo, hi = int(lo), int(hi)
+            if not (INT32_MIN <= lo <= hi <= INT32_MAX):
+                raise ValueError("%s range [%d, %d] is not a range"
+                                 % (name, lo, hi))
+            base = self.default_file_offset(name) - self.fields["default"]
+            struct.pack_into("<i", buf, base + self.fields["min"], lo)
+            struct.pack_into("<i", buf, base + self.fields["max"], hi)
         for name, value in overrides.items():
             if name not in self.by_name:
                 raise ValueError("unknown adjustment %r" % name)
             e = self.get(name)
+            lo, hi = ranges.get(name, (e["min"], e["max"]))
             value = int(value)
-            if not (e["min"] <= value <= e["max"]):
+            if not (lo <= value <= hi):
                 raise ValueError("%s = %d out of range [%d, %d]"
-                                 % (name, value, e["min"], e["max"]))
+                                 % (name, value, lo, hi))
             struct.pack_into("<i", buf, self.default_file_offset(name), value)
         return bytes(buf)
+
+
+# ---------------------------------------------------------------------------
+# Changed ranges (PAD-750).  The menu's lowest and highest value for a setting
+# sit in its descriptor beside the default, so a card can carry a wider (or
+# narrower) range than Stern shipped: the machine's own menu then steps through
+# it.  Staged as ``{AD_name: [min, max]}`` in internal units, in the project's
+# ``setting_ranges`` (and a preset's ``__ranges__``).
+# ---------------------------------------------------------------------------
+INT32_MIN, INT32_MAX = -2 ** 31, 2 ** 31 - 1
+PRESET_RANGES_KEY = "__ranges__"
+
+
+def clean_ranges(raw):
+    """``{name: (min, max)}`` of whole numbers out of a staged record, or
+    ``{}``.  Anything that is not a two-number range, low to high, inside a
+    32-bit field, is dropped rather than trusted."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for name, pair in raw.items():
+        try:
+            lo, hi = (int(pair[0]), int(pair[1]))
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        # a Spike 1 caller keys by adjustment id
+        if (isinstance(name, (str, int)) and not isinstance(name, bool)
+                and INT32_MIN <= lo <= hi <= INT32_MAX):
+            out[name] = (lo, hi)
+    return out
+
+
+def range_editable(name, e):
+    """Can *name*'s range be changed?  Not an on/off setting (a third value
+    means nothing to it), not one the app shows as named choices (the game
+    only has the names it was written with), and not the master volume (the
+    firmware refuses anything over 63 whatever the range says)."""
+    if e["min"] == 0 and e["max"] == 1:
+        return False
+    if _ENUM_LABELS.get(name):
+        return False
+    return name != MASTER_VOLUME
+
+
+def resolve_overrides(entry_of, vals, ranges=None):
+    """What a Build writes: ``(overrides, ranges)`` for the image whose
+    adjustment ``name -> entry`` lookup is *entry_of* (None for a setting the
+    image doesn't carry, which is skipped).
+
+    Each staged value is pulled into the range it will have (the changed one
+    if there is one); a changed range that leaves out the image's own default
+    takes the nearest end of it as the new default, so the menu never starts
+    outside what it offers.  A range back at the image's own is dropped."""
+    ranges = clean_ranges(ranges or {})
+    out_r = {}
+    for name, (lo, hi) in ranges.items():
+        e = entry_of(name)
+        if e is None or not range_editable(name, e):
+            continue
+        if (lo, hi) != (e["min"], e["max"]):
+            out_r[name] = (lo, hi)
+    out_v = {}
+    for name, v in (vals or {}).items():
+        e = entry_of(name)
+        if e is None:
+            continue
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            continue
+        lo, hi = out_r.get(name, (e["min"], e["max"]))
+        out_v[name] = max(lo, min(hi, v))
+    for name, (lo, hi) in out_r.items():
+        if name not in out_v:
+            d = entry_of(name)["default"]
+            if not lo <= d <= hi:
+                out_v[name] = max(lo, min(hi, d))
+    return out_v, out_r
 
 
 # ---------------------------------------------------------------------------
@@ -552,16 +748,18 @@ def _is_caption(text):
 def _caption_at(table, idx):
     """``(direct, indirect)`` caption candidates for one descriptor."""
     off = table._off(table.table_va + idx * table.elem)
-    if off is None or OFF_MENU_LABEL + 4 > table.elem:
+    label = getattr(table, "fields", NARROW_FIELDS)["label"]
+    ptr = getattr(table, "ptr", 4)
+    if off is None or label + ptr > table.elem:
         return None, None
-    va = struct.unpack_from("<I", table.data, off + OFF_MENU_LABEL)[0]
+    va = struct.unpack_from("<Q" if ptr == 8 else "<I", table.data, off + label)[0]
     if not va:
         return None, None
     direct = table._cstr(va, 64)
     indirect = None
     inner = table._off(va)
-    if inner is not None and inner + 4 <= len(table.data):
-        first = struct.unpack_from("<I", table.data, inner)[0]
+    if inner is not None and inner + ptr <= len(table.data):
+        first = struct.unpack_from("<Q" if ptr == 8 else "<I", table.data, inner)[0]
         if first:
             indirect = table._cstr(first, 64)
     return direct, indirect

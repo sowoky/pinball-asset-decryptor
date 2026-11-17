@@ -12,7 +12,8 @@ vtable. From that, each mode gets one veto site in the title's port:
 The runtime hooks each named start and refuses it, while a mode of ours that asked runs, for the objects
 that mode listed (`pm_block_list`, a mode file's `block_modes`) or the port's checked defaults (`value
 block_default`). A MULTIBALL is never written: balls sit in a lock or on a magnet while it starts (PAD-353),
-so a refused one could strand them. Ids from 128 up are left out (the runtime's masks are 128 bits), and so is a
+so a refused one could strand them (PAD-578: on James Bond the game's own lock-open check before Jetpack and Bird One
+Multiball is named instead, cstarts/c_port_tool.py LOCKS: closed, no lock lights or counts). Ids from 128 up are left out (the runtime's masks are 128 bits), and so is a
 start whose first two words cannot be moved into the veto's trampoline (:func:`movable`).
 """
 
@@ -69,9 +70,10 @@ class GameMode:
         return not self.multiball and 0 <= self.id < MAX_ID and bool(self.start) and movable(self.words)
 
 
-def read_modes(elf):
+def read_modes(elf, start_slot=None):
     """[:class:`GameMode`] of a C++ rule title's program (bytes), in id order. Raises
-    :class:`.stock_scan.ScanError` when the program has no C++ mode manager."""
+    :class:`.stock_scan.ScanError` when the program has no C++ mode manager. *start_slot*: the title's START slot
+    where the scanner finds none (Jurassic Park LE, Rush: cstarts' reading, in the same title's port - PAD-714)."""
     from . import stock_scan as S
     from . import stock_scan_cpp as C
     prog = S.Program(elf)
@@ -80,6 +82,8 @@ def read_modes(elf):
         raise S.ScanError("no C++ rule manager in this game program")
     reading = C.read(prog, model)
     slot = reading.engine.get("start_slot")
+    if slot is None:
+        slot = start_slot
     if slot is None:
         raise S.ScanError("the scanner found no start slot in this game program")
     out = []
@@ -308,6 +312,114 @@ def read_rules(elf):
         out.append(GameRule(cls, name, fn, words, slot))
     out.sort(key=lambda r: (r.cls not in RULE_FIRST, r.cls))
     return out[:MAX_RULES]
+
+
+def stock_rule_lines(modes):
+    """PAD-699: the port's `rule <id> <vptr> <name>` lines for *modes* (:func:`read_modes`): every one of the game's
+    own modes - its battles, its multiballs - that a counts-as or instead-of row (the Modes tab's Shots; the
+    runtime's stock.cfg) may name. The vptr is what the mode's object carries (the vtable + 8); the runtime wraps a
+    rule only when the object the manager returns holds exactly that word, so a line for another build wraps
+    nothing."""
+    out = ["# PAD-699: the game's own modes a counts-as / instead-of row may name (game_mode_blocks.stock_rule_lines,",
+           "# from the game program): `rule <id> <the vtable pointer its object carries> <name>`"]
+    for m in modes:
+        if m.vtable and m.obj:
+            out.append("rule %-3d 0x%08x %s" % (m.id, m.vtable + 8, m.name))
+    return out
+
+
+#: PAD-699: the shot entry every mode has (v[15]: the manager's dispatch calls it, it calls the shot handler)
+SHOT_ENTRY_SLOT = 15
+
+
+def stock_shot_slot(elf, modes=None):
+    """PAD-699: the vtable slot of a mode's SHOT HANDLER in this program (Godzilla Premium/LE 1.16: 42, Pro 1.15
+    and Pro 1.16: 41), read off the code: the first virtual call the shot entry (v[15]) makes, ``ldr rX, [rY,
+    #4 * slot]``. The same in every mode that has a vtable, else None. A port's `stock_slot_shot` (and
+    `stock_slot_mask`, three slots on) must be this build's: the runtime wraps that slot."""
+    from . import stock_scan as S
+    prog = S.Program(elf)
+    found = set()
+    for m in (modes if modes is not None else read_modes(elf)):
+        if not m.vtable:
+            continue
+        entry = _word(prog, m.vtable + 8 + 4 * SHOT_ENTRY_SLOT)
+        for i in range(120 if entry else 0):
+            w = _word(prog, entry + 4 * i)
+            if w is not None and (w & 0x0FF00000) == 0x05900000 and 0x80 <= (w & 0xFFF) <= 0xD0:
+                found.add((w & 0xFFF) // 4)
+                break
+    return found.pop() if len(found) == 1 else None
+
+
+# ---- PAD-1026: James Bond's gadget countdowns, which count nothing while one of the game's mini-wizards runs ----
+#: The owner, Bond LE: "the (4) other mini wizard modes suppress progress of DB5 (right scoop) and powerpack (left
+#: scoop) during their mini wizard modes". Bond is plain C: no rule base to hook. Each gadget's countdown (its own
+#: shot's handler) opens `push {r4-r7, lr}; mov r0, #<gadget>; sub sp, sp, #12; bl <countdown>; mov r6, r0;
+#: bl <check>; cmp r0, #0` and goes no further when the check says 0: no count, no clip, no lights. The check is
+#: the game's "nothing of mine in the way" (its multiballs 0x9f460, its mini-wizards 0x110b20, ... on LE 1.06),
+#: asked from the same countdown's lamp and show code too. The port names each check as a rule the runtime REFUSES
+#: with 0 (`value block_rule_gate_<n> 1`) while a mode of ours blocks: the game's own route for its own wizards.
+#: The gadget table's order (0x62f168 on LE 1.06); the Geiger counter's, Little Nellie's and the ring's do not ask
+#: such a check.
+GADGET_COUNTDOWNS = {1: "Attache Case Countdown", 2: "DB5 Countdown", 3: "Powerpack Countdown"}
+_COUNTDOWN_HEAD = (0xE92D40F0, None, 0xE24DD00C, None, 0xE1A06000, None, 0xE3500000)
+
+
+@dataclass
+class GateRule:
+    gadget: int         # 2: the gadget table's index
+    name: str           # DB5 Countdown
+    rule: int           # the countdown's shot handler
+    gate: int           # the check it asks first (what the runtime refuses)
+    words: tuple        # the check's first two words (`push {.., lr}; bl`: hook_veto_bl)
+
+
+def _bl_target(va, w):
+    return va + 8 + ((((w & 0xFFFFFF) ^ 0x800000) - 0x800000) << 2)
+
+
+def read_gate_rules(elf):
+    """[:class:`GateRule`] of a James Bond program (bytes), by gadget: each countdown of :data:`GADGET_COUNTDOWNS`
+    whose head is :data:`_COUNTDOWN_HEAD`, all calling ONE countdown, each check movable. [] on any other title."""
+    from . import stock_scan as S
+    prog = S.Program(elf)
+    tw = prog.tw
+    found = []
+    for i in range(len(tw) - len(_COUNTDOWN_HEAD)):
+        if int(tw[i]) != _COUNTDOWN_HEAD[0] or int(tw[i + 2]) != _COUNTDOWN_HEAD[2]:
+            continue
+        ws = [int(w) for w in tw[i:i + len(_COUNTDOWN_HEAD)]]
+        if (ws[4], ws[6]) != (_COUNTDOWN_HEAD[4], _COUNTDOWN_HEAD[6]) or ws[1] & 0xFFFFFFF0 != 0xE3A00000:
+            continue
+        if ws[3] >> 24 != 0xEB or ws[5] >> 24 != 0xEB or (ws[1] & 0xF) not in GADGET_COUNTDOWNS:
+            continue
+        va = prog.tlo + 4 * i
+        found.append((ws[1] & 0xF, va, _bl_target(va + 12, ws[3]), _bl_target(va + 20, ws[5])))
+    if len({f[2] for f in found}) != 1 or len({f[0] for f in found}) != len(found):
+        return []                                        # not ONE countdown, or a gadget twice: not this title
+    out = []
+    for g, rule, _count, gate in sorted(found):
+        words = (_word(prog, gate), _word(prog, gate + 4))
+        if movable(words):
+            out.append(GateRule(g, GADGET_COUNTDOWNS[g], rule, gate, words))
+    return out
+
+
+def gate_rule_lines(gates, first=0):
+    """The port's rule lines for *gates*, numbered from *first* (after any rule the port names already)."""
+    if not gates:
+        return []
+    out = ["# PAD-1026: the game's gadget countdowns (game_mode_blocks.read_gate_rules, from the game program): each",
+           "# asks one check before it counts, plays its clip or lights its inserts - the check the game's own",
+           "# mini-wizards and multiballs make say no. While a mode of ours blocks, the runtime refuses it with 0",
+           "# (`value block_rule_gate_<n> 1`) unless the mode keeps that countdown counting."]
+    for n, g in enumerate(gates, first):
+        out.append("site block_rule_%-10d 0x%08x 0x%08x 0x%08x  # the check of the countdown at 0x%08x (gadget %d)"
+                   % (n, g.gate, g.words[0], g.words[1], g.rule, g.gadget))
+        out.append("value block_rule_gate_%-4d 1" % n)
+        out.append("text block_rule_name_%-5d %s" % (n, g.name))
+    return out
 
 
 def rule_lines(rules):

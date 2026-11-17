@@ -9,6 +9,8 @@ import { useNs } from "../core/store.js";
 
 export const css = true;
 
+const INTRO3 = "Runs a real Stern Spike 3 game on this PC under emulation, in its own window, with sound and its virtual playfield. "
+  + "Pick a card image: its first run decrypts it once with your OTP key, then it runs straight from that copy.";
 const INTRO = "Runs a real Stern Spike 2 game binary on this PC under emulation, in its own window, with sound. "
   + "Pick a card image and it runs straight off it — nothing is extracted and the image is opened read only.";
 
@@ -60,8 +62,19 @@ function RigStrip({ s }) {
   if (!mine.slot && !busy.some((r) => !r.mine)) return null;
   const chips = rigs.filter((r) => r.mine || held(r)).map((r) => {
     const run = r.run;
+    // the game's clock against the wall's (PAD-649): a sweep's run says "4x"
+    const speed = run && !run.stale && run.speed && Math.abs(run.speed - 1) > 1e-6
+      ? (Math.round(run.speed * 100) / 100) + "x" : "";
+    // the card copy this rig waits on (PAD-649): "copying Jaws LE 1.02 19%", or queued behind another copy
+    const cp = !run && r.copy ? r.copy : null;
+    const copyText = cp ? (cp.state === "queued" ? "card copy queued: " + cp.title
+                                                 : "copying " + cp.title + " " + cp.pct + "%"
+                                                   + (cp.total_mb ? " (" + (cp.done_mb / 1024).toFixed(1) + " of "
+                                                                    + (cp.total_mb / 1024).toFixed(1) + " GB)" : ""))
+                         : "";
     const what = run ? (run.stale ? run.game + " (no heartbeat " + ago(run.up_s) + ")"
-                                  : run.game + " running " + ago(run.up_s))
+                                  : run.game + " running " + ago(run.up_s) + (speed ? " at " + speed : ""))
+                     : cp ? copyText
                      : (r.doing || "held") + (r.state === "active" && r.idle_s != null
                                               ? ", idle " + ago(r.idle_s) : "");
     const who = r.holder || (run && run.label) || "";
@@ -73,6 +86,8 @@ function RigStrip({ s }) {
         style=${"--rig-c:" + r.colour} title=${tipText}>
       <span class="emu-rig-n">${r.slot ? "Rig " + r.slot : "Main rig"}</span>
       ${who ? html`<span class="emu-rig-who">${who}</span>` : null}
+      ${speed ? html`<span class="emu-rig-speed" title=${"The game runs its clock " + speed + " the wall's (PAD_SPEED)"}>${speed}</span>` : null}
+      ${cp ? html`<span class=${cx("emu-rig-copy", cp.state === "queued" && "queued")} title=${copyText}>${cp.state === "queued" ? "copy queued" : cp.pct + "%"}</span>` : null}
       <span class="emu-rig-what">${r.mine && !r.holder && !run ? "this window" : what}</span>
     </span>`;
   });
@@ -89,8 +104,13 @@ function RunButton({ s }) {
   const b = s.run_btn || { label: "Start emulator", enabled: false, mode: "start" };
   const kind = b.mode === "stop" ? "danger" : b.mode === "cancel" ? "" : "primary";
   const icon = b.mode === "stop" ? "stop" : b.mode === "cancel" ? "x" : b.mode === "start" ? "play" : null;
-  return html`<${Button} kind=${kind} size="big" cls="emu-run" icon=${icon} busy=${b.mode === "busy"}
+  const run = html`<${Button} kind=${kind} size="big" cls="emu-run" icon=${icon} busy=${b.mode === "busy"}
     disabled=${!b.enabled} onClick=${() => call("emulate.toggle")}>${b.label}<//>`;
+  // PAD-735: Stop and Start in one press - the whole game booted again
+  if (b.mode !== "stop") return run;
+  return html`${run}<${Button} size="big" cls="emu-restart" icon="refresh"
+    title="Stop the game and start it again, as switching the machine off and on does"
+    onClick=${() => call("emulate.restart")}>Restart game<//>`;
 }
 
 function Volume({ s }) {
@@ -125,7 +145,7 @@ function useEndScroll(ref, value) {
 // project's own cards back.
 function Which({ s }) {
   const w = s.which;
-  if (!w) return null;
+  if (!w || s.not_card) return null;
   const proj = html`<b>${w.project}</b>`;
   const ours = w.kind === "source" || w.kind === "build";
   let text;
@@ -134,7 +154,10 @@ function Which({ s }) {
   else if (w.kind === "other_build") text = html`Not your project's card: PAD built this one from another project, <b>${w.other}</b>.`;
   else text = html`Not your project's card: ${proj} was extracted from ${w.source_name
     ? html`<span class="mono">${w.source_name}</span>` : "a different card"}.`;
-  const also = ours ? null : s.overrides
+  const era3 = (useNs("shell").mfr || {}).era === "spike3";
+  const also = ours ? null : era3
+    ? " It runs exactly as it is; to see your project's edits, build the card on the Write tab and use the last build."
+    : s.overrides
     ? " With the box below ticked, your project's edits run on top of it."
     : " It runs exactly as it is; tick the box below to run your project's edits on top of it.";
   const btns = [];
@@ -150,6 +173,7 @@ function Which({ s }) {
 }
 
 function CardSource({ s }) {
+  const era3 = (useNs("shell").mfr || {}).era === "spike3";
   const pathRef = useRef(null);
   useEndScroll(pathRef, s.card);
   const countries = (s.countries || []).map((c) => ({ value: c, label: c }));
@@ -165,19 +189,26 @@ function CardSource({ s }) {
       ${s.hint ? html`<span class="small dim emu-hint" role="status">${s.hint}</span>` : null}`}>
     <div class="row emu-src">
       <div class="grow emu-path" ref=${pathRef}>
-        <${Field} ns="emulate" k="card" value=${s.card} mono placeholder="Pick a Spike 2 card image" title=${s.card || ""} />
+        <${Field} ns="emulate" k="card" value=${s.card} mono placeholder=${era3 ? "Pick a Spike 3 card image" : "Pick a Spike 2 card image"} title=${s.card || ""} />
       </div>
-      <${Button} onClick=${() => call("emulate.browse")}>Browse…<//>
+      <${Button} drop onClick=${() => call("emulate.browse")}>Browse…<//>
       <${Button} kind="ghost" onClick=${() => call("emulate.open_cache")}
         title="Shows and manages the card cache: the copies of each card on the WSL disk that later boots start from. Deleting frees the space now; the card re-copies on its next boot.">Cache…<//>
     </div>
+    ${s.not_card ? html`<div class="note emu-which warn" role="alert">
+      <span class="small grow emu-which-t"><span class="emu-which-dot warn-ink">●</span> ${s.not_card}</span>
+    </div>` : null}
     <${Which} s=${s} />
     <div class="grid2 emu-machine">
       <div class="stack emu-lblf"><label class="lbl" for="emu-country">Country (DIP switches)</label>
         <${Select} id="emu-country" ns="emulate" k="country" value=${s.country} options=${countries} title=${s.country_tip} /></div>
       <div class="stack emu-lblf"><label class="lbl" for="emu-power">Power</label>
         <${Select} id="emu-power" ns="emulate" k="power" value=${s.power} options=${powers} title=${s.power_tip} /></div>
+      <div class="stack emu-lblf"><label class="lbl" for="emu-edition">Edition</label>
+        <${Select} id="emu-edition" ns="emulate" k="edition" value=${s.edition || ""} options=${s.editions || []}
+          disabled=${!s.editions_on} title=${s.edition_tip} /></div>
     </div>
+    ${s.edition_note ? html`<div class="small muted emu-edition-note" role="status">${s.edition_note}</div>` : null}
     ${s.mains_note ? html`<div class="note warn emu-mains" role="status">
       <span class="small warn-ink">${s.mains_note}</span></div>` : null}
     <div class="row emu-flags">
@@ -189,13 +220,18 @@ function CardSource({ s }) {
         title="Draws the game window through your project's Machine screen (Color profile tab), the way the Scenes preview does, so this PC shows the colors the machine's own screen will. Works on any card, a card you already wrote included, with or without your replaced assets. Off: you see the colors exactly as they go on the card, which on a PC look darker or brighter where your color profiles correct for the machine. Only the emulator's window: the card is never changed. Takes effect at the next Start." />
     </div>
     ${s.screen_live ? html`<div class="small muted">${s.screen_live}</div>` : null}
-    <div class=${cx("note emu-ovr", s.ovr_refused && "warn")}>
+    ${era3 ? html`<div class="note emu-ovr" role="status"><span class="small muted">${S3_EDITS}</span></div>` : html`<div class=${cx("note emu-ovr", s.ovr_refused && "warn")}>
       <${Check} ns="emulate" k="overrides" checked=${s.overrides} wrap
         label="Apply my replaced assets on top, without rebuilding the card" />
       ${s.overrides && s.scene_edits_offer ? html`<div class="emu-ovr-sub">
         <${Check} ns="emulate" k="scene_edits" checked=${s.scene_edits !== false}
           label="Include my Scenes tab edits"
           title="On: the game runs with what you changed on the Scenes tab (and takes further edits there while it runs, for the screens it loads each time it shows them). Off: the scenes run as the card has them; everything else you replaced still applies." />
+      </div>` : null}
+      ${s.overrides && (s.leave_out_offer || []).length ? html`<div class="emu-ovr-sub emu-leave-out">
+        <span class="small muted nw" ...${tip("For a quicker Start while you test one thing: what you tick here is not in this run, so it is not rebuilt or converted. Changing a tick builds your edits again once. Builds on the Write tab always carry everything. Back to all included each time the app starts.")}>Leave out of this run:</span>
+        ${s.leave_out_offer.map((o) => html`<${Check} key=${o.key} checked=${o.on} label=${o.label} title=${o.tip}
+          onChange=${(v) => call("emulate.set_leave_out", o.key, v)} />`)}
       </div>` : null}
       ${s.overrides ? html`<div class="emu-ovr-sub">
         ${s.colour_offer ? html`<${Check} ns="emulate" k="colour_stock" checked=${!!s.colour_stock}
@@ -209,9 +245,13 @@ function CardSource({ s }) {
           title="The Write tab's Assets Folder: the edits that would run." />
       </div>
       <span class=${cx("small emu-ovr-hint", s.ovr_refused ? "warn-ink" : "muted")}>${s.ovr_hint}</span>
-    </div>
+    </div>`}
   <//>`;
 }
+
+// PAD-1186: a Spike 3 run is a whole card (the Spike 3 rig has no override
+// set), so a project's edits are seen by building them
+const S3_EDITS = "To see your replaced assets here, build the card on the Write tab, then use the last build (or pick the built card above).";
 
 // -------------------------------------------------------- save states
 // A cell cut short shows the whole of it on hover, and every column but the
@@ -275,7 +315,8 @@ function Status({ s }) {
       <span class="row emu-state">${v.state || "—"}${s.state_tip ? html`<${InfoBadge} text=${s.state_tip} />` : null}</span>
       <span class="k">Processes</span><span>${v.procs || "—"}</span>
       <span class="k">Game CPU / memory</span><span class="mono">${v.cpu || "—"}</span>
-      <span class="k">Renderer</span><span class="mono">${v.host || "—"}</span>
+      <span class="k">Renderer</span>
+      <span class=${cx("row mono", s.host_tip && "warn-ink")}>${v.host || "—"}${s.host_tip ? html`<${InfoBadge} text=${s.host_tip} />` : null}</span>
       <span class="k">Audio</span><span class=${cx("mono", dropping && "warn-ink")}>${v.audio || "—"}</span>
     </div>
   <//>`;
@@ -288,15 +329,28 @@ function Status({ s }) {
 // name gives the game; otherwise it is described, never a placeholder.
 function WindowsCard({ s }) {
   const game = s.game;
+  const era3 = (useNs("shell").mfr || {}).era === "spike3";
   const mac = s.platform === "darwin";
   const gameWin = html`<div class="note emu-win"><div class="stack">
-      ${game ? html`<b class="emu-wt mono">${game} - Stern Spike 2 emulator</b>` : html`<b class="emu-wt">The game window</b>`}
-      <span class="small">The game's own picture and sound, with a “Controls - Spike 2 emulator” window beside it that lists the keys.</span>
+      ${game ? html`<b class="emu-wt mono">${game} - Stern ${era3 ? "Spike 3" : "Spike 2"} emulator</b>` : html`<b class="emu-wt">The game window</b>`}
+      <span class="small">${era3 ? "The game's own picture and sound; its keys work in that window."
+        : "The game's own picture and sound, with a “Controls - Spike 2 emulator” window beside it that lists the keys."}</span>
     </div></div>`;
   const playfield = html`<div class="note emu-win"><div class="stack">
       ${game ? html`<b class="emu-wt mono">${game} - virtual playfield</b>` : html`<b class="emu-wt">The virtual playfield</b>`}
       <span class="small">Every switch by name, the key panel, Insert coin · Start · Plunge · Reset balls · Clear switch alerts, and Save state / Load state.</span>
     </div></div>`;
+  // PAD-1071: the Sound and video log, a window of its own the user opens (a browser session
+  // opens the page in a window of the browser's)
+  const openLog = async () => {
+    const r = await call("emulate.log_open");
+    if (r && r.url) window.open(r.url, "pad-sound-video-log", "width=760,height=640");
+  };
+  const logWin = html`<div class="note emu-win"><div class="row emu-win-row"><div class="stack">
+      <b class="emu-wt">Sound and video log</b>
+      <span class="small">Every sound and clip the game plays, in order, from Start to Stop. Play a sound from it, or open a sound or clip on its tab. Put it beside the game wherever you like.</span>
+    </div><${Button} size="sm" onClick=${openLog}
+      title="Open the Sound and video log, or bring it back in front">Open<//></div></div>`;
   let body;
   if (mac) {
     body = html`
@@ -306,17 +360,53 @@ function WindowsCard({ s }) {
       </div></div>`;
   } else {
     body = html`${gameWin}${playfield}
-      <span class="small muted">Both open by themselves at Start. Reset windows above puts them back on screen if one is lost.</span>`;
+      <span class="small muted">Both open by themselves at Start. Reset windows above puts them back on screen if one is lost.</span>
+      ${logWin}`;
   }
   return html`<${Card} title="Windows the emulator opens" cls="emu-wins">${body}<//>`;
+}
+
+// PAD-811: where the game window goes, full screen or a window on a chosen
+// monitor, borderless or framed (tools/spike2_emu/padisplay.py).  Each
+// change is saved at once and a running game's window follows it.
+const DISPLAY_MODES = [
+  { value: "free", label: "Where I leave it" },
+  { value: "fullscreen", label: "Full screen" },
+  { value: "window", label: "Window" },
+];
+
+function GameDisplay({ s }) {
+  const d = s.gdisp;
+  if (!d || s.platform !== "win32") return null;
+  const set = (k, v) => call("emulate.display_set", k, v);
+  const free = d.mode === "free";
+  // a label and its field wrap together, never a label left at a line's end
+  const num = (k, label) => html`<span class="emu-gd-f"><label class="lbl small" for=${"emu-gd-" + k}>${label}</label>
+    <${Field} id=${"emu-gd-" + k} sm type="number" width=${76} value=${String(d[k])} onCommit=${(v) => set(k, v)} /></span>`;
+  return html`<${Card} title="Game display" cls="emu-gdisp">
+    <div class="row wrap">
+      <label class="lbl small" for="emu-gd-mon">Monitor</label>
+      <${Select} id="emu-gd-mon" sm width=${190} value=${d.monitor} options=${d.mons} disabled=${free}
+        onChange=${(v) => set("monitor", v)} title="The monitor the game window goes on. 1 is the main one." />
+      <${Select} sm width=${150} value=${d.mode} options=${DISPLAY_MODES} onChange=${(v) => set("mode", v)}
+        title="Where I leave it: where you last dragged it, with its frame. Full screen: fills the monitor. Window: the size and place below, on that monitor." />
+      <${Check} label="Borderless" checked=${!d.border} disabled=${free} onChange=${(v) => set("border", !v)}
+        title="No title bar or frame around the game's picture." />
+    </div>
+    ${d.mode === "window" ? html`<div class="row wrap">${num("rx", "X")}${num("ry", "Y")}${num("w", "Width")}${num("h", "Height")}</div>` : null}
+    <span class="small muted">${(d.text || "").charAt(0).toUpperCase() + (d.text || "").slice(1)}. Changes apply at once, to a running game too.</span>
+  <//>`;
 }
 
 // ------------------------------------------------------------- modals
 const CACHE_COLS = [
   { key: "label", label: "Card", width: "minmax(160px,1.2fr)", cls: "mono", titleOf: (r) => r.label },
-  { key: "size", label: "On disk", width: "90px", num: true },
-  { key: "booted", label: "Last booted", width: "140px", titleOf: (r) => r.booted || undefined },
-  { key: "src", label: "Source image", width: "minmax(0,1.6fr)", cls: "mono dim", titleOf: (r) => r.src || undefined },
+  { key: "size", label: "On disk", width: "80px", num: true },
+  { key: "booted", label: "Last used", width: "150px",
+    titleOf: (r) => (/^copied /.test(r.booted || "") ? "Never booted: this is when it was copied, not when it was last used" : r.booted || undefined) },
+  { key: "source", label: "Image", width: "190px", titleOf: (r) => r.why ? r.source + " (" + r.why + ")" : r.source || undefined },
+  { key: "use", label: "In use", width: "70px", titleOf: (r) => r.use ? "A running emulator reads this card, or it is being copied: it cannot be deleted now" : undefined },
+  { key: "src", label: "Source image", width: "minmax(0,1.4fr)", cls: "mono dim", titleOf: (r) => r.src || undefined },
 ];
 
 function CacheModal({ c }) {
@@ -378,16 +468,25 @@ function CacheModal({ c }) {
   const rowsKey = rows.map((x) => x.label).join("\n");
   useEffect(() => { anchor.current = null; cursor.current = null; }, [rowsKey]);
   const close = () => call("emulate.cache_close");
+  const limits = (c.limits || []).map((o) => ({ value: String(o.gb), label: o.text }));
   return html`<${Modal} title="Card cache — Spike 2 emulator" icon="disk" xwide onClose=${close} cls="emu-cache"
-    footer=${html`<span class="small muted grow emu-cache-hint">${c.hint}</span>
-      <${Button} kind="danger" disabled=${c.busy || !sel.size} onClick=${() => call("emulate.cache_delete")}>Delete selected<//>
+    footer=${html`<span class="small muted grow emu-cache-hint">${c.sel_text || c.hint}</span>
+      <${Button} disabled=${c.busy || !c.unused} onClick=${() => call("emulate.cache_select_unused")}
+        title="Selects every card that will not be missed: a copy that never finished, one whose image was rebuilt, deleted or renamed since, or one not used for 30 days. Never one in use or the library's.">Select unused<//>
+      <${Button} kind="danger" disabled=${c.busy || !sel.size} onClick=${() => call("emulate.cache_delete")}>Delete selected…<//>
       <${Button} disabled=${c.busy} onClick=${() => call("emulate.cache_refresh")}>Refresh<//>
       <${Button} onClick=${close}>Close<//>`}>
-    <div class="row">${c.busy ? html`<span class="spin"></span>` : null}<span>${c.head}</span></div>
+    <div class="row">${c.busy ? html`<span class="spin"></span>` : null}<span class="grow">${c.head}</span>
+      ${limits.length ? html`<label class="lbl small" for="emu-cache-limit">Keep the cache under</label>
+        <${Select} id="emu-cache-limit" sm width=${110} value=${String(c.limit)} options=${limits} disabled=${c.busy}
+          onChange=${(v) => call("emulate.cache_set_limit", Number(v))}
+          title="When a new card is copied and the cache would grow past this, the least recently booted cards are deleted first (cards whose image changed go before any). Cards in use and the library's are kept." />` : null}</div>
     <div class="emu-cache-tbl" ref=${wrap}>
       <${Table} columns=${CACHE_COLS} rows=${rows} rowKey=${(r) => r.label} selected=${sel}
-        onSelect=${pick} style="height:300px" resizable widths=${widths} onResize=${setWidths} />
+        onSelect=${pick} style="height:300px" resizable widths=${widths} onResize=${setWidths}
+        rowClass=${(r) => (r.locked ? "dim" : undefined)} />
     </div>
+    ${c.note ? html`<div class="small muted emu-cache-note">${c.note}</div>` : null}
   <//>`;
 }
 
@@ -412,9 +511,10 @@ function RenameModal({ r }) {
 // --------------------------------------------------------------- page
 export default function EmulateTab() {
   const s = useNs("emulate");
+  const era3 = (useNs("shell").mfr || {}).era === "spike3";
   const win = s.platform === "win32";
   return html`<div class="page emu">
-    <${PageHead} title="Emulate" sub=${INTRO}>
+    <${PageHead} title="Emulate" sub=${era3 ? INTRO3 : INTRO}>
       <${Button} disabled=${!s.check_enabled} busy=${!s.check_enabled}
         title="Re-checks what this PC needs to run the emulator and writes the full report to the log, including a machine with nothing wrong. It changes nothing."
         onClick=${() => call("emulate.check_setup")}>${s.check_label || "Check setup…"}<//>
@@ -433,6 +533,7 @@ export default function EmulateTab() {
       <div class="stack emu-col">
         <${Status} s=${s} />
         <${WindowsCard} s=${s} />
+        <${GameDisplay} s=${s} />
       </div>
     </div>
     ${s.cache ? html`<${CacheModal} c=${s.cache} />` : null}

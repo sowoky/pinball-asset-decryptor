@@ -10,18 +10,29 @@ sweep that stopped seeing the pages' text cannot pass by finding nothing.
 
 import json
 import re
+import time
 
 import pytest
 
 from tests.webui_harness import web_app
+from tests.mode_examples import form as MX  # noqa: E402
+
+#: the switch as it was while the mode maker was a preview (it is released since PAD-763)
+pytestmark = pytest.mark.usefixtures("preview_modes_off")
 
 #: the preview feature's words, as the browser sweep searched them
 WORDS = re.compile(r"\b(modes?|mode maker|mode editor|try it|code modes?|film cutter|"
                    r"stock modes?)\b", re.I)
 
 #: the game's OWN modes as any pinball player says it, on tabs that have nothing to do with
-#: the preview feature (on main before it): these phrases are allowed
-ALLOWED = ("topper-only modes", "how a mode looks")
+#: the preview feature (on main before it): these phrases are allowed. "Attract Mode" is the
+#: operator menu page EDITION sits on (PAD-495), named as the machine names it. The Audio
+#: tab's Attract flipper sounds (PAD-641) and Sounds on shots (PAD-945) tips speak of the
+#: game's own modes too; they show once its scan of the project ends
+#: PAD-1382: "Music Mode" is MUSIC MODE's row caption on the machine (PAD-494), named on the Service menu tab as the
+#: machine names it, as "Attract Mode" is
+ALLOWED = ("topper-only modes", "how a mode looks", "Attract Mode", "attract mode", "Music Mode",
+           "game's modes", "pick the mode", "a mode whose lit shots")
 
 #: store keys whose VALUES are data, not words a page shows (paths, ids, option values)
 _DATA_KEYS = {"mode", "modes", "kind", "key", "ns", "id", "icon", "path", "value"}
@@ -74,7 +85,7 @@ def _scratch_project(tmp_path):
         "input_path": str(tmp_path / "godzilla_pro-1_15_0.raw"),
         "input_name": "godzilla_pro-1_15_0.raw"}), encoding="utf-8")
     from pinball_decryptor.plugins.stern import mode_project as MP
-    MP.save(str(proj), "kaiju_rush", dict(MP.example_specs())["KAIJU RUSH"])
+    MP.save(str(proj), "kaiju_rush", dict(MX.example_specs())["KAIJU RUSH"])
     return proj
 
 
@@ -101,6 +112,12 @@ def _sweep(tmp_path, with_project, switch_on):
         for ns in shown:
             w.call("ui.select_tab", ns)
             w.drain()
+            # a tab still scanning the project draws more when it ends (the Audio tab's
+            # tips came or not by the runner's speed): read what it draws once done
+            deadline = time.monotonic() + 30
+            while w.state(ns).get("scanning") and time.monotonic() < deadline:
+                time.sleep(0.1)
+                w.drain()
             found += _hits(ns, w.state(ns))
         found += _hits("shell", {k: v for k, v in w.state("shell").items() if k != "tabs"})
         found += _hits("shell.tabs", [t.get("label", "") for t in w.state("shell")["tabs"]

@@ -125,6 +125,7 @@ def test_build_args_go_to_mkjjpmulti():
     assert args[args.index("--titles") + 1] == "GUNS N' ROSES 3.03;CHAKA'S LOTLJ"
     assert args[args.index("--subtitles") + 1] == "Stock;Retheme"
     assert args[args.index("--timeout") + 1] == "15"
+    assert "--back-hold" not in args                                 # PAD-1309: no hold on JJP
     assert args[args.index("--default") + 1] == "0"
     assert args[args.index("--volume") + 1] == "50"
     assert args[args.index("--media-dir") + 1] == wsl(r"D:\Pinball\multi\media")
@@ -185,13 +186,13 @@ def test_build_commands_run_the_writing_steps_as_root():
     labels = [c[0] for c in cmds]
     assert labels == ["selector", "prepare", "plan", "build", "verify"]
     argv = dict(cmds)
-    # the JJP steps that mount things run as root: on Windows a callable
-    # (resolved as root just before the step, root_command's shape), on a
-    # Linux desktop the rig's `sudo -n` argv, on a Mac the container whose
-    # own user is root already; the plan runs as the user
+    # the JJP steps that mount things run as root: on Windows and a Linux
+    # desktop a callable (resolved as root just before the step, root_command's
+    # shape - on Linux the route and the AppImage copy, PAD-1188), on a Mac
+    # the container whose own user is root already; the plan runs as the user
     head = root_head()
     for label in ("selector", "prepare", "build", "verify"):
-        if sys.platform == "win32":
+        if sys.platform != "darwin":
             assert callable(argv[label]), label
         else:
             assert not callable(argv[label]) and list(argv[label][:len(head)]) == head, label
@@ -203,8 +204,8 @@ def test_build_commands_run_the_writing_steps_as_root():
     scmds = dict(mt.build_commands(stern, cwd="/repo"))
     assert callable(scmds["selector"]) == (sys.platform == "win32")
     assert not callable(scmds["plan"])
-    assert callable(scmds["build"]) == (sys.platform == "win32")
-    if sys.platform != "win32":
+    assert callable(scmds["build"]) == (sys.platform != "darwin")
+    if sys.platform == "darwin":
         assert list(scmds["build"][:len(head)]) == head
     assert not callable(scmds["verify"])
 

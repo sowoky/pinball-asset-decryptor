@@ -11,6 +11,12 @@ import re
 
 CHECKSUMS_FILE = ".checksums.md5"
 
+# Folders an update delta wrote into after the baseline was taken (Dutch
+# Pinball and Pinball Brothers baseline the pristine base, then merge their
+# deltas on top): card content the baseline does not list, one ``/``-path a
+# line.  Read by :func:`extract_dirs`; a fresh baseline starts it over.
+EXTRACT_DIRS_FILE = ".extract_dirs"
+
 # A ``.checksums.md5`` line in md5sum form: "<md5>  <path>" (optionally "*path").
 _MD5SUM_LINE = re.compile(r'^([a-f0-9]{32})\s+\*?(.+)$')
 
@@ -18,7 +24,11 @@ _MD5SUM_LINE = re.compile(r'^([a-f0-9]{32})\s+\*?(.+)$')
 # derived tracking metadata — they have no destination inside the card/ISO
 # binary and must never be diffed as a "modified asset".  Excluded both from
 # the baseline written here and from the Write "Modified Files Preview".
-TRACKING_SIDECARS = frozenset({"callouts.csv", "music_titles.csv"})
+# The app's own cache sidecars (core.hashcache's ".hashcache.json", core.
+# video's ".probecache.json", PAD-797) are named too: dot-files are skipped
+# by every walk anyway, but the name says so.
+TRACKING_SIDECARS = frozenset({"callouts.csv", "music_titles.csv",
+                               ".hashcache.json", ".probecache.json"})
 
 # Top-level folders inside a project that hold generated or staged state rather
 # than card assets: the build output, the hydrate parking lot, and the copies a
@@ -37,8 +47,40 @@ TRACKING_SIDECARS = frozenset({"callouts.csv", "music_titles.csv"})
 # card's slots, so listing them as slots of their own flagged them "not on
 # this card" (PAD-417).
 SHARED_PICTURES_DIR = "Shared pictures"
+# "Music mode files" holds the files a mod pack carried for a project's music
+# modes (core.modpack, PAD-494): the user's own sounds for the card's slots,
+# never slots of their own.
+MUSIC_MODE_FILES_DIR = "Music mode files"
+# "Random clip files" holds the clips a file of random clips carried
+# (plugins.stern.media_share, PAD-553): the user's own clips for the card's
+# slots, never slots of their own.
+RANDOM_CLIP_FILES_DIR = "Random clip files"
+# "Attract files" holds the photos and clips a mod pack carried for a project's
+# attract items (core.modpack, PAD-782), never slots of their own.
+ATTRACT_FILES_DIR = "Attract files"
+# "Team files" holds the files a project took from its team (core.team_sync,
+# PAD-1236): the teammates' own picks for the card's slots, never slots of
+# their own.
+TEAM_FILES_DIR = "Team files"
 NON_ASSET_DIRS = frozenset({"build", ".hydrate", "card_files", "logs",
-                            ".write_cache", SHARED_PICTURES_DIR})
+                            ".write_cache", SHARED_PICTURES_DIR,
+                            MUSIC_MODE_FILES_DIR, RANDOM_CLIP_FILES_DIR,
+                            ATTRACT_FILES_DIR, TEAM_FILES_DIR})
+
+# What the app keeps in a project folder for itself and no edit lives in, left
+# out of the "have the edits moved since the emulator's set was built?" walks
+# (the Emulate tab's and the Modes tab's Try it), at the top of the folder:
+# the project's log, the build output, the caches (".write_cache", core.
+# hashcache's ".hashcache.json", core.video's ".probecache.json") and
+# core.history_log's ".history.log".
+# PAD-509: the log is written on every line the app logs, so with it in the
+# walk no Start ever found its set current, and a Godzilla project with every
+# picture color-corrected rebuilt 1,243 files on each one.
+FINGERPRINT_SKIP_DIRS = frozenset({"logs", "build", ".write_cache"})
+FINGERPRINT_SKIP_FILES = frozenset({".hashcache.json", ".probecache.json",
+                                    ".history.log",
+                                    # core.team_sync's record of the project's team
+                                    ".team_sync.json"})
 
 
 def is_other_extract(path):
@@ -52,12 +94,172 @@ def is_other_extract(path):
     return os.path.isfile(os.path.join(path, CHECKSUMS_FILE))
 
 
+def extract_dirs(folder, baseline=None):
+    """The folders of the project *folder* its extract wrote files into:
+    every folder that holds a baselined file, and every folder above one
+    (``""`` is the project root).  Casefolded ``/``-separated paths.
+
+    ``None`` when the project has no baseline to go by (a folder never
+    extracted, or one from before baselines): nothing can be told apart, so
+    callers walk everything as before."""
+    if baseline is None:
+        baseline = read_baseline_any(folder)
+    if not baseline:
+        return None
+    out = {""}
+    for rel in list(baseline) + [d + "/-" for d in _noted_dirs(folder)]:
+        parts = rel.casefold().split("/")[:-1]
+        for i in range(len(parts), 0, -1):
+            sub = "/".join(parts[:i])
+            if sub in out:
+                break
+            out.add(sub)
+    return out
+
+
+def _noted_dirs(folder):
+    try:
+        with open(os.path.join(folder, EXTRACT_DIRS_FILE), "r",
+                  encoding="utf-8") as f:
+            return [ln.strip().strip("/") for ln in f if ln.strip().strip("/")]
+    except OSError:
+        return []
+
+
+def note_extract_files(folder, rels):
+    """Record that the extract's own update (a delta merged after the
+    baseline) wrote the files *rels* (``/``-paths) into *folder*, so the
+    Replace tabs keep listing the folders they are in (:func:`extract_dirs`).
+    """
+    dirs = {r.replace("\\", "/").strip("/").rsplit("/", 1)[0]
+            for r in rels if "/" in r.replace("\\", "/").strip("/")}
+    have = set(_noted_dirs(folder))
+    new = sorted(dirs - have)
+    if not new:
+        return
+    with open(os.path.join(folder, EXTRACT_DIRS_FILE), "a",
+              encoding="utf-8") as f:
+        for d in new:
+            f.write(d + "\n")
+
+
+def slot_dir_filter(assets_dir, keep=()):
+    """A ``keep(root, name) -> bool`` for the Replace tabs' slot walks
+    (core.audio_slots / video_slots / image_slots): which sub-folder *name*
+    of the walked folder *root* to descend into.
+
+    Left out: dot-folders (folder state: .orig, .hydrate), the project's own
+    generated or staged folders at the top (:data:`NON_ASSET_DIRS`), another
+    card's extract inside this one (:func:`is_other_extract`), and (PAD-1193)
+    any folder the extract never wrote into: a folder of the user's own
+    replacement clips or sounds kept beside the extract listed every file in
+    it as a slot "not on this card".  The baseline tells them apart
+    (:func:`extract_dirs`); a project without one walks every folder.
+
+    *keep* names top-level folders a plugin's Extract writes but leaves out
+    of the baseline on purpose (derived copies the tabs still list), so the
+    baseline rule never hides them."""
+    base = os.path.normcase(os.path.normpath(assets_dir))
+    try:
+        ours = extract_dirs(assets_dir)
+    except OSError:
+        ours = None
+    if not isinstance(keep, (list, tuple, set, frozenset)):
+        keep = ()                    # a hook that answered nothing usable
+    kept_top = {k.casefold() for k in keep if isinstance(k, str)}
+
+    def _keep(root, name):
+        if name.startswith("."):
+            return False
+        at_top = os.path.normcase(os.path.normpath(root)) == base
+        if at_top and name in NON_ASSET_DIRS:
+            return False
+        full = os.path.join(root, name)
+        if is_other_extract(full):
+            return False
+        if ours is None:
+            return True
+        rel = os.path.relpath(full, assets_dir).replace(os.sep, "/")
+        if rel.startswith(".."):
+            return True              # a plugin root outside the project
+        rel = rel.casefold()
+        return rel in ours or rel.split("/", 1)[0] in kept_top
+
+    return _keep
+
+
+#: how many files the baseline and the change scans hash at once.  MD5 runs
+#: outside the GIL, so a few threads overlap the reads with the hashing (one
+#: core hashed 1.8 GB in 2.6 s, PAD-610); more than this and a spinning disk
+#: or a network share just thrashes.
+HASH_THREADS = 4
+
+#: one read per MiB: the 64 KiB reads of old cost a Python round trip each
+#: (sixteen per MiB) and showed up as the hashing's own overhead on the
+#: multi-hundred-MB videos a Stern extract writes
+_HASH_BUF = 1 << 20
+
+
 def md5_file(path):
     h = hashlib.md5()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
+    buf = bytearray(_HASH_BUF)
+    view = memoryview(buf)
+    with open(path, "rb", buffering=0) as f:
+        while True:
+            n = f.readinto(view)
+            if not n:
+                break
+            h.update(view[:n])
     return h.hexdigest()
+
+
+def _stat_and_md5(abs_path):
+    """``(size, mtime_ns, md5)`` of a file: the stat first, so a file that
+    changes while it is being hashed is remembered with the OLD stat (and so
+    re-hashed next time) rather than with the new one."""
+    st = os.stat(abs_path)
+    return st.st_size, st.st_mtime_ns, md5_file(abs_path)
+
+
+def hash_files(abs_paths, cancel=None, threads=None):
+    """Yield ``(size, mtime_ns, md5)`` for each of *abs_paths*, IN ORDER, or
+    the ``OSError`` that reading it raised, hashing on *threads* threads
+    (:data:`HASH_THREADS` when not given; 1 hashes inline, no pool).
+
+    Stops yielding promptly once *cancel()* goes true: the files not started
+    yet are dropped, and the ones in flight finish on their own threads.
+    """
+    cancel = cancel or (lambda: False)
+    paths = list(abs_paths)
+    if not paths:
+        return
+    if threads is None:
+        threads = HASH_THREADS
+
+    def _one(abs_path):
+        if cancel():
+            return None
+        try:
+            return _stat_and_md5(abs_path)
+        except OSError as e:
+            return e
+
+    if threads <= 1 or len(paths) == 1:
+        for abs_path in paths:
+            result = _one(abs_path)
+            if result is None:
+                return
+            yield result
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor(max_workers=min(threads, len(paths)))
+    try:
+        for result in pool.map(_one, paths):
+            if cancel() or result is None:
+                break
+            yield result
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def generate_checksums(folder, log_cb=None, progress_cb=None,
@@ -114,27 +316,40 @@ def generate_checksums(folder, log_cb=None, progress_cb=None,
             rel_path = os.path.relpath(abs_path, folder).replace("\\", "/")
             files.append((rel_path, abs_path))
 
+    # The files are hashed on a few threads and written in walk order, so the
+    # baseline reads exactly as the one-at-a-time version wrote it.  Each
+    # file's size and mtime go into the hash cache as well (core.hashcache):
+    # the first change scan after an extract then costs a stat per file
+    # instead of hashing the whole extract a second time.
+    from . import hashcache
     out_path = os.path.join(folder, CHECKSUMS_FILE)
+    try:
+        os.remove(os.path.join(folder, EXTRACT_DIRS_FILE))
+    except OSError:
+        pass
     skipped = 0
     written = 0
+    cache = {}
     with open(out_path, "w", encoding="utf-8") as out:
-        for i, (rel_path, abs_path) in enumerate(files):
-            if cancel():
-                break
-            try:
-                md5 = md5_file(abs_path)
-            except OSError as e:
+        results = hash_files((abs_path for _rel, abs_path in files), cancel)
+        for i, ((rel_path, _abs_path), result) in enumerate(zip(files, results)):
+            if isinstance(result, OSError):
                 skipped += 1
                 if log_cb and skipped <= 5:
-                    log_cb(f"  Skipping (cannot read): {rel_path} — {e}", "info")
+                    log_cb(f"  Skipping (cannot read): {rel_path} — {result}",
+                           "info")
                 elif log_cb and skipped == 6:
                     log_cb("  ... further unreadable files will be skipped silently.",
                            "info")
                 continue
+            size, mtime_ns, md5 = result
             out.write(f"{rel_path}\t{md5}\n")
+            cache[rel_path] = [size, mtime_ns, md5]
             written += 1
             if progress_cb:
                 progress_cb(i + 1, len(files), rel_path)
+    if cache and not cancel():
+        hashcache.save(folder, cache)
 
     if log_cb:
         if skipped:
@@ -290,21 +505,48 @@ def all_changed(folder, baseline=None, progress=None, cancel=None, quick=False):
     rels = [r for r in baseline if not r.startswith(".orig/")]
     out = set()
     total = len(rels)
+    # 1. a stat per file: the quick mtime fast-path, then the size+mtime hash
+    #    cache (core.hashcache, seeded by generate_checksums) answers for
+    #    every file untouched since it was last hashed
+    from . import hashcache
+    hcache = hashcache.load(folder)
+    todo = []                        # (index, rel, abs_path) still to hash
     for i, rel in enumerate(rels):
         if cancel():
             break
-        if progress:
-            progress(i, total)
         abs_path = os.path.join(folder, *rel.split("/"))
         try:
-            if skip_mtime is not None and int(os.path.getmtime(abs_path)) <= skip_mtime:
-                continue             # untouched since extract — pristine, skip hash
-            if md5_file(abs_path) != baseline[rel]:
-                out.add(rel)
+            st = os.stat(abs_path)
         except OSError:
             # Missing/unreadable now but present at extract — treat as changed so
             # the caller can try to restore it.
             out.add(rel)
+            continue
+        if skip_mtime is not None and int(st.st_mtime) <= skip_mtime:
+            continue                 # untouched since extract — pristine, skip hash
+        ent = hcache.get(rel)
+        if ent and ent[0] == st.st_size and ent[1] == st.st_mtime_ns:
+            if ent[2] != baseline[rel]:
+                out.add(rel)
+            continue
+        todo.append((i, rel, abs_path))
+    # 2. the rest are hashed on a few threads, in baseline order
+    dirty = False
+    if todo and not cancel():
+        results = hash_files((abs_path for _i, _rel, abs_path in todo), cancel)
+        for (i, rel, _abs_path), result in zip(todo, results):
+            if progress:
+                progress(i, total)
+            if isinstance(result, OSError):
+                out.add(rel)
+                continue
+            size, mtime_ns, md5 = result
+            hcache[rel] = [size, mtime_ns, md5]
+            dirty = True
+            if md5 != baseline[rel]:
+                out.add(rel)
+    if dirty and not os.environ.get("PAD_UI_CAPTURE"):
+        hashcache.save(folder, hcache)
     if progress:
         progress(total, total)
     return out

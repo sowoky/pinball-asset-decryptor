@@ -19,6 +19,7 @@ def _no_tools(monkeypatch, tmp_path):
     monkeypatch.setenv("PAD_MULTIBOOT_AUTO", "0")
     monkeypatch.setenv("PAD_MULTIBOOT_PLAN", "0")
     monkeypatch.setenv("PAD_MULTIBOOT_PROBE", "0")
+    monkeypatch.setattr(mt._mac, "enabled", lambda: False)
     from pinball_decryptor.webui import multiboot_panel as mbp
 
     def refuse(*a, **k):
@@ -497,9 +498,10 @@ def test_edit_dialog_writes_through_and_cancel_restores(tmp_path):
 
 
 def test_edit_dialog_gives_an_image_its_own_high_scores(tmp_path):
-    """PAD-226: the tick names a store after the title the first time, keeps
-    that name when the title changes later, shows in the table, and Cancel
-    and an untick both put the image back on the shared table."""
+    """PAD-226: the ticks name a store after the title the first time, keep
+    that name when the title changes later, show in the table, and Cancel
+    and an untick both put the image back on the shared table.  PAD-1194:
+    settings and high scores are two ticks; both ticked is the old one."""
     a = _raw(tmp_path, "a_pro-1_59_0.Release.8G.sdcard.raw")
     b = _raw(tmp_path, "b_pro-1_59_0.Other.8G.sdcard.raw")
     with web_app(tmp_path, mfr="stern") as w:
@@ -510,8 +512,11 @@ def test_edit_dialog_gives_an_image_its_own_high_scores(tmp_path):
         w.call("multiboot.edit", 1)
         s = _st(w)
         assert s["ed"]["scores"] is True and s["ed_own_scores"] is False
+        assert s["ed_own_settings"] is False
         assert s["ed"]["scores_label"] == "Keep its own high scores on the machine"
+        assert s["ed"]["settings_label"] == "Keep its own settings and audits on the machine"
         w.call("ui.set", "multiboot", "ed_title", "HEISEI")
+        w.call("ui.set", "multiboot", "ed_own_settings", True)
         w.call("ui.set", "multiboot", "ed_own_scores", True)
         s = _st(w)
         assert s["rows"][1]["scores"] == "own"
@@ -524,15 +529,139 @@ def test_edit_dialog_gives_an_image_its_own_high_scores(tmp_path):
         s = _st(w)
         assert s["rows"][1]["scores"] == "shared" and _panel(w)._rows[1].own_scores == ""
         w.call("multiboot.edit", 1)
+        w.call("ui.set", "multiboot", "ed_own_settings", True)
         w.call("ui.set", "multiboot", "ed_own_scores", True)
         w.call("multiboot.edit_ok")
         assert _panel(w)._rows[1].own_scores != ""
         w.call("multiboot.edit", 1)
-        assert _st(w)["ed_own_scores"] is True
+        assert _st(w)["ed_own_scores"] is True and _st(w)["ed_own_settings"] is True
         w.call("ui.set", "multiboot", "ed_own_scores", False)
+        w.call("ui.set", "multiboot", "ed_own_settings", False)
         w.call("multiboot.edit_ok")
         s = _st(w)
         assert s["rows"][1]["scores"] == "shared" and _panel(w)._rows[1].own_scores == ""
+
+
+def test_own_settings_with_a_shared_high_score_table(tmp_path):
+    """PAD-1194 (pb_lawww, Pinside): an Original with everything of its own and
+    two Heisei images with their own settings but one high-score table.  The
+    ticks give each Heisei image a store and put its scores in the shared
+    group; the table says so; the build hands the selector one group per game;
+    a modded image whose scores still mix is flagged."""
+    imgs = [_raw(tmp_path, "godzilla_le-1_16_0.%s.8G.sdcard.raw" % n)
+            for n in ("Release", "HeiseiOS", "HeiseiOrch")]
+    with web_app(tmp_path, mfr="stern") as w:
+        for a in imgs:
+            _add(w, a)
+        for ri, (title, settings, scores) in enumerate((
+                ("Original", True, True),
+                ("Heisei - Original Sound", True, False),
+                ("Heisei - Orchestral Sound", True, False))):
+            w.call("multiboot.edit", ri)
+            w.call("ui.set", "multiboot", "ed_title", title)
+            w.call("ui.set", "multiboot", "ed_own_settings", settings)
+            w.call("ui.set", "multiboot", "ed_own_scores", scores)
+            w.call("multiboot.edit_ok")
+        p = _panel(w)
+        s = _st(w)
+        assert [r["scores"] for r in s["rows"]] == ["own", "own settings", "own settings"]
+        assert "plays into the high-score table it shares" in s["rows"][1]["scores_tip"]
+        assert [r.own_scores for r in p._rows] == [
+            "original", "heisei-original-sound", "heisei-orchestral-sound"]
+        assert [r.hiscores for r in p._rows] == ["", "shared", "shared"]
+        args = mt.build_args(p.form())
+        assert args[args.index("--own-scores") + 1] == \
+            "original;heisei-original-sound;heisei-orchestral-sound"
+        assert args[args.index("--hiscores") + 1] == "original;shared;shared"
+        # the dialog reads the row back as it was left
+        w.call("multiboot.edit", 1)
+        assert _st(w)["ed_own_settings"] is True and _st(w)["ed_own_scores"] is False
+        w.call("multiboot.edit_cancel")
+        # the other way round: shared settings, a table of its own
+        w.call("multiboot.edit", 2)
+        w.call("ui.set", "multiboot", "ed_own_settings", False)
+        w.call("ui.set", "multiboot", "ed_own_scores", True)
+        w.call("multiboot.edit_ok")
+        assert _st(w)["rows"][2]["scores"] == "own scores"
+        assert p._rows[2].own_scores == "" and p._rows[2].hiscores not in ("", "shared")
+        args = mt.build_args(p.form())
+        assert args[args.index("--hiscores") + 1] == \
+            "original;shared;%s" % p._rows[2].hiscores
+        # a modded image whose scores go to the shared table is flagged
+        p._take_modes({1: "2 mode files, 0 code modes"})
+        assert _st(w)["rows"][1]["scores_warn"] is True
+        # every image back to one tick each way: no group at all, the PAD-226 card
+        for ri in range(3):
+            w.call("multiboot.edit", ri)
+            w.call("ui.set", "multiboot", "ed_own_settings", False)
+            w.call("ui.set", "multiboot", "ed_own_scores", False)
+            w.call("multiboot.edit_ok")
+        args = mt.build_args(p.form())
+        assert args[args.index("--hiscores") + 1] == ";;"
+        assert args[args.index("--own-scores") + 1] == ";;"
+
+
+def test_share_with_groups_settings_and_tables(tmp_path):
+    """PAD-1196 (pb_lawww, Pinside): six Godzilla images, each with settings
+    of its own except the two orchestral 3-ball ones that share a store, the
+    two Original images on one high-score table and the four Heisei ones on
+    another.  Edit image's 'Share with' choices make it; the build hands
+    mkmulticard the names; the dialog reads it back; the tip names who
+    shares."""
+    names = ["Original - 3 ball", "Original - 5 ball", "Heisei color, original sound, 3 ball",
+             "Heisei color, orchestral, 3 ball", "Heisei b/w, orchestral, 3 ball",
+             "Heisei color, orchestral, 5 ball"]
+    imgs = [_raw(tmp_path, "godzilla_le-1_16_0.v%d.8G.sdcard.raw" % n) for n in range(6)]
+    with web_app(tmp_path, mfr="stern") as w:
+        for a in imgs:
+            _add(w, a)
+        p = _panel(w)
+
+        def edit(ri, title, settings_with=None, scores_with=None):
+            w.call("multiboot.edit", ri)
+            w.call("ui.set", "multiboot", "ed_title", title)
+            w.call("ui.set", "multiboot", "ed_own_settings", True)
+            w.call("ui.set", "multiboot", "ed_own_scores", True)
+            ed = _st(w)["ed"]
+            if settings_with:
+                assert settings_with in [o["value"] for o in ed["settings_with"]]
+                w.call("ui.set", "multiboot", "ed_settings_with", settings_with)
+            if scores_with:
+                if scores_with in [o["value"] for o in ed["scores_with"]]:
+                    w.call("ui.set", "multiboot", "ed_scores_with", scores_with)
+            w.call("multiboot.edit_ok")
+
+        edit(0, names[0])
+        assert _st(w)["rows"][0]["scores"] == "own"
+        edit(1, names[1], scores_with=p._rows[0].own_scores)
+        edit(2, names[2])
+        heisei = p._rows[2].own_scores
+        edit(3, names[3], scores_with=heisei)
+        edit(4, names[4], settings_with=p._rows[3].own_scores, scores_with=heisei)
+        edit(5, names[5], scores_with=heisei)
+        stores = [r.own_scores for r in p._rows]
+        assert stores[3] == stores[4] and len(set(stores)) == 5 and "" not in stores
+        tables = [mt.row_table(r) for r in p._rows]
+        assert tables == [stores[0]] * 2 + [heisei] * 4
+        args = mt.build_args(p.form())
+        assert args[args.index("--own-scores") + 1] == ";".join(stores)
+        assert args[args.index("--hiscores") + 1] == ";".join(tables)
+        # the dialog reads it back as it was left
+        w.call("multiboot.edit", 4)
+        s = _st(w)
+        assert s["ed_settings_with"] == stores[3] and s["ed_scores_with"] == heisei
+        labels = {o["value"]: o["label"] for o in s["ed"]["settings_with"]}
+        assert labels[stores[3]] == names[3] and labels[mt.NEW_GROUP] == "No other image"
+        w.call("multiboot.edit_cancel")
+        assert "Shares its settings and audits with: %s." % names[4] in             _st(w)["rows"][3]["scores_tip"]
+        assert "Shares its high-score table with: %s." % names[0] in             _st(w)["rows"][1]["scores_tip"]
+        # leaving a group: 'No other image' gives image 4 a store of its own
+        w.call("multiboot.edit", 4)
+        w.call("ui.set", "multiboot", "ed_settings_with", mt.NEW_GROUP)
+        w.call("ui.set", "multiboot", "ed_title", names[4] + " (v2)")
+        w.call("multiboot.edit_ok")
+        assert p._rows[4].own_scores not in stores and mt.row_table(p._rows[4]) == heisei
+        assert p._rows[3].own_scores == stores[3]
 
 
 def test_an_image_found_running_modes_gets_its_own_scores_once(tmp_path):
@@ -554,7 +683,9 @@ def test_an_image_found_running_modes_gets_its_own_scores_once(tmp_path):
         # the owner unticks it: the table warns, and the next plan leaves it be
         w.call("multiboot.edit", 1)
         assert "runs custom modes (2 mode files" in _st(w)["ed"]["scores_modes"]
+        assert _st(w)["ed_own_settings"] is True and _st(w)["ed_own_scores"] is True
         w.call("ui.set", "multiboot", "ed_own_scores", False)
+        w.call("ui.set", "multiboot", "ed_own_settings", False)
         w.call("multiboot.edit_ok")
         p._take_modes({1: "2 mode files, 0 code modes"})
         s = _st(w)
@@ -1176,7 +1307,7 @@ def test_busy_turns_the_green_button_into_cancel(tmp_path):
         assert w.call("multiboot.build_flash") is True
         s = _st(w)
         assert s["build_mode"] == "cancelling"
-        assert s["message"] == "Cancelling…"
+        assert s["message"] == "Canceling…"
         w.run(lambda: panel._set_busy(False))
         panel._cancel_pending = False
         assert _st(w)["build_mode"] == "build"
@@ -1511,7 +1642,7 @@ def _colours_settled(w, panel):
             w.drain()
             return
         time.sleep(0.02)
-    raise AssertionError("the colour reads never finished")
+    raise AssertionError("the color reads never finished")
 
 
 def test_the_preview_draws_the_settings_card_where_the_card_will(tmp_path, monkeypatch):
@@ -1693,3 +1824,35 @@ def test_every_step_of_a_run_is_routed_when_it_starts(tmp_path, monkeypatch):
         assert done == [(0, None)]
         assert [a[:3] for a in started] == [["wsl.exe", "-d", "PAD-Runtime"]] * 2
         assert len(asked) == 2
+
+
+def test_a_new_cards_default_path_is_the_open_projects(tmp_path):
+    """PAD-1385: inside a project the first image no longer names the card -
+    the project does, so two projects from one stock card never collide."""
+    from pinball_decryptor.core import project_file
+    proj = tmp_path / "Godzilla Heisei multi"
+    proj.mkdir()
+    project_file._write_maybe_hidden(project_file.anchor_path(str(proj)),
+                                     {"manufacturer": "stern"})
+    card = _raw(tmp_path, "godzilla_pro-1_16_0.raw")
+    with web_app(tmp_path, mfr="stern") as w:
+        w.run(w.window.write_assets_var.set, str(proj))
+        w.call("ui.select_tab", "multiboot")
+        w.drain()
+        _add(w, card)
+        assert os.path.normpath(_panel(w)._out_var.get()) == os.path.normpath(
+            str(proj / "multi" / "Godzilla Heisei multi.multi.raw"))
+
+
+def test_a_plain_folder_keeps_the_card_beside_the_image(tmp_path):
+    """Not a project (no anchor): the default stays beside the first image."""
+    plain = tmp_path / "just a folder"
+    plain.mkdir()
+    card = _raw(tmp_path, "godzilla_pro-1_16_0.raw")
+    with web_app(tmp_path, mfr="stern") as w:
+        w.run(w.window.write_assets_var.set, str(plain))
+        w.call("ui.select_tab", "multiboot")
+        w.drain()
+        _add(w, card)
+        assert os.path.normpath(_panel(w)._out_var.get()) == os.path.normpath(
+            str(tmp_path / "multi" / "godzilla_pro-1_16_0.multi.raw"))

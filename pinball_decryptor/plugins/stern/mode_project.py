@@ -56,6 +56,7 @@ class TitleProfile:
     # GODZILLA_PRO_1_15) keeps meaning "this title can do everything the tab offers".
     version: str = ""            # the game build, as its port says ("1.15")
     port: str = ""               # the port's file name in PORTS_DIR (or an absolute path)
+    arch: str = "arm"            # PAD-1277: the machine its build runs on - "arm" Spike 2, "a64" Spike 3
     proven: bool = True          # False: the port was drafted and never run
     proven_note: str = ""        # why it is not proven
     example_start_shot: str = ""
@@ -68,6 +69,7 @@ class TitleProfile:
     #                              keeps every score report off Insider Connected (a must for a card)
     switch_shots: tuple = ()     # names in ``shots`` that come from the port's `switch` lines
     switch_shots_note: str = ""  # why those are not proven yet; "" when they are (or there are none)
+    drain_shot: str = ""         # PAD-690: the port's code-only switch shot a drain closes ("Trough"), or ""
     stack_note: str = ""         # item 164: what ``stack no`` waits for when it is less than every mode
     game_modes: tuple = ()       # PAD-363: ((id, name, held off by default), ...) the game's own modes a
     #                              mode can keep from starting (the port's block_start_<id> lines)
@@ -82,9 +84,26 @@ class TitleProfile:
     magnet_shot: str = ""            # PAD-381: the shot whose hit is the ball over the magnet; "" = no magnet
     held_coils: tuple = ()           # PAD-381: ((name, label), ...) the other coils a mode may hold, proven ones only
     coil_caps: tuple = ()            # PAD-420: ((name, ms), ...) a held coil's longest hold where the game's own
-    #                                  longest command on it is shorter than COIL_MAX_MS (its `_drive` line's last word)
+    #                                  longest command on it is shorter than COIL_MAX_MS (its `_drive` line's last word);
+    #                                  PAD-621: or longer, where the port names the game's own longest hold there
+    #                                  (`value <name>_max_ms`: a post the game holds the ball with itself)
     shield_rule: str = ""            # PAD-392: the game's own shield feature (the port's `text shield_rule`, one of
     #                                  game_rules): it turns the platform back while it counts shots
+    roster: tuple = ()               # PAD-589: the battle selection's slots a mode may take (their names, slot order);
+    #                                  () where the title has no roster a mode can take
+    roster_counts: bool = False      # PAD-706: a pick counts as the battle it replaced (the port's `site battle_stop`):
+    #                                  won, Completed and the city's win; lost, played again. Else only the city's bit
+    challenge_menu: int = 0          # PAD-615 round 2: how many challenges of the modes' own the game's start menu has
+    challenge_by_default: bool = False   # PAD-619: the service menu's Default Game Mode can pick its challenges
+    #                                  room for (0 = none: the build's menu is not the runtime's to change)
+    challenges: tuple = ()           # PAD-615: the game's Challenge list a mode may take a place in (the challenges'
+    #                                  names, in the game's menu order); () where the title names none a mode can take
+    places: tuple = ()               # PAD-710: ((id, name, counts), ...) the game's own modes a mode may run in the
+    #                                  place of (when the game starts one); counts: it counts as that mode there
+    done_modes: tuple = ()           # PAD-747: ((id, name), ...) the game's own modes whose completion the runtime
+    #                                  sees, for a mode that starts once the player has completed some of them
+    building_rule: str = ""          # PAD-589: the game's own building locks (one of game_rules, BUILDING_RULES): a
+    #                                  mode moves the building only while it sees no shots
     shakes: tuple = ()               # PAD-414: ((name, label), ...) the game's own shakes (`text shake_<name>`)
     shake_max_ms: tuple = ()         # PAD-414: the game's own longest shake at strength 0..3 (`text shake_max_ms`)
     game_shows: tuple = ()           # PAD-418: ((name, kind, secs), ...) the game's own light shows a mode can play
@@ -94,6 +113,24 @@ class TitleProfile:
     game_wizards: tuple = ()         # PAD-436: ((name, film), ...) the game's own mini-wizards a mode can hand over
     #                                  (the port's wizard_name_<n> / wizard_film_<n> lines, in number order)
     wizard_shot: str = ""            # PAD-436: the game's shot that starts a lit mini-wizard (`text wizard_shot`)
+    wizard_lights: tuple = ()        # PAD-473: the names of those a mode can light for it (the rest are started)
+    wizard_claims: bool = False      # PAD-457: one a mode hands out is its mode's: the game's own lighting leaves it
+    white_shots: tuple = ()          # PAD-733: the shots whose inserts are all one light (white only: no colour shows)
+    inserts: tuple = ()              # PAD-503: the names of every insert the port names a mode can light (a villain's
+    #                                  on Bond's Right ramp, shot or not); () = none it can light on this title
+    status_bar: bool = False         # PAD-521: the port names the game's own status bar (`site status_bar`): a mode's
+    #                                  name, colour and clock can go in it (Bond LE: the coloured bar under the TV)
+    bond_women: bool = False         # PAD-889: the port names the game's Bond Women multiplier (`site bond_women_mult`):
+    #                                  a blocks value reads it (James Bond LE / Pro)
+    limits: tuple = ()               # PAD-479: the parts (PARTS, "end_game" = the game's own time-up call, "stack",
+    #                                  "own_music") whose reason is a GAME limit, every place on the card checked:
+    #                                  the tab says so in grey, not in yellow (nothing left for the app to find)
+    spare: tuple = ()                # PAD-826: "in" / "out": the board inputs the game has no switch on and the driver
+    #                                  outputs it never fires, for hardware a mod adds (the port's spare lines, the
+    #                                  build in SPARE_IO_PROVEN); () = neither on this build
+    info_at: tuple = ()              # PAD-547: (x, y) on the glass, the middle of a mode's info line (its words and a
+    #                                  value, "SUPER JACKPOT = 53,200,000"), from the port's `text info_line_at`: where
+    #                                  the game shows its own (Bond LE: under the status bar); () = INFO_AT_DEFAULT
 
     def lcd(self, which):
         """``assets/lcd/<tree>/<scene id>`` of the title's ``"bank"`` or ``"hud"`` scene."""
@@ -108,6 +145,10 @@ class TitleProfile:
     def why_not(self, part):
         """Why this title cannot do ``part``, as a sentence; "" when it can."""
         return dict(self.cannot).get(part, "")
+
+    def limit(self, part):
+        """PAD-479: True when what keeps ``part`` from this title is the game itself (:attr:`limits`)."""
+        return part in self.limits
 
     def mask(self, names):
         """The OR of the named shots' masks. Raises on a name this title does not have."""
@@ -275,10 +316,11 @@ PORTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path
 #: The parts of a mode a title may be unable to do. The tab greys each one it cannot,
 #: with :meth:`TitleProfile.why_not`, and :func:`runtime_cfg` leaves its lines out.
 PARTS = ("countdown", "lights", "screen", "clip", "own_sound", "stack", "events", "multiball", "ball_save",
-         "magnet", "scoop", "coils", "shield", "shaker", "shows", "wizard")
+         "magnet", "scoop", "coils", "shield", "building", "shaker", "shows", "wizard", "roster", "challenge",
+         "place", "done")
 
 #: PAD-420: the parts that are a piece of the machine. A machine without one has no section for it on the tab.
-HARDWARE_PARTS = ("magnet", "scoop", "coils", "shield", "shaker")
+HARDWARE_PARTS = ("magnet", "scoop", "coils", "shield", "building", "shaker")
 
 #: PAD-420: which of HARDWARE_PARTS each model's machine has, by its game directory (the same machine on every
 #: version), from the coil names in each newest build's device table: a magnet that catches the ball (not
@@ -292,8 +334,7 @@ HARDWARE_PARTS = ("magnet", "scoop", "coils", "shield", "shaker")
 #: name it like any coil, Godzilla and the older ones only in the test menu's record ("an optional accessory for
 #: Premium games, and is included in LE editions"), which the coil names missed. Every title but the Home Editions
 #: has it; it is listed where the latest build's own shake call is ported and proven (not James Bond 60th, whose
-#: newer framework has no such call, nor D&D LE, whose game the emulator does not start: its lines are ported,
-#: unproven).
+#: newer framework has no such call). D&D LE joined once the emulator started its game (PAD-713).
 MACHINE_HARDWARE = {
     "aerosmith": ("magnet", "scoop", "shaker"),
     "aerosmith_le": ("magnet", "scoop", "coils", "shaker"),
@@ -303,12 +344,12 @@ MACHINE_HARDWARE = {
     "beatles": ("magnet", "coils", "shaker"),
     "deadpool_le": ("scoop", "coils", "shaker"),
     "deadpool_pro": ("scoop", "coils", "shaker"),
-    "dungeons_and_dragons_le": ("magnet", "scoop", "coils"),
+    "dungeons_and_dragons_le": ("magnet", "scoop", "coils", "shaker"),
     "dungeons_and_dragons_pro": ("magnet", "scoop", "coils", "shaker"),
     "elvira3": ("scoop", "coils", "shaker"),
     "foo_fighters_le": ("magnet", "coils", "shaker"),
     "foo_fighters_pro": ("coils", "shaker"),       # run 21: its device table (the names resolve now) has no OVERLORD MAGNET - the LE's only
-    "godzilla_le": ("magnet", "scoop", "coils", "shield", "shaker"),   # its shaker drive is no coil name: PAD-414 shakes it
+    "godzilla_le": ("magnet", "scoop", "coils", "shield", "building", "shaker"),   # its shaker drive is no coil name: PAD-414 shakes it
     "godzilla_pro": ("magnet", "scoop", "shaker"),   # the shaker kit is optional; the game's own shake call is the LE's
     "guardians": ("magnet", "scoop", "coils", "shaker"),
     "guardians_le": ("magnet", "scoop", "coils", "shaker"),
@@ -330,7 +371,7 @@ MACHINE_HARDWARE = {
     "led_zeppelin_pro": ("scoop", "coils", "shaker"),
     "mando_le": ("magnet", "scoop", "coils", "shaker"),
     "mando_pro": ("scoop", "coils", "shaker"),
-    "metallica_spike": ("magnet", "scoop", "coils", "shaker"),
+    "metallica_spike": ("scoop", "coils", "shaker"),   # PAD-475: COFFIN MAGNET DOWN holds the coffin, not a ball
     "munsters_le": ("magnet", "scoop", "coils", "shaker"),
     "munsters_pro": ("magnet", "scoop", "coils", "shaker"),
     "rush_le": ("magnet", "scoop", "coils", "shaker"),
@@ -486,6 +527,30 @@ MULTIBALL_PROVEN = frozenset({
     "star_wars_le-1.31",                 # PAD-420 2026-10-07 mb_job (stock card, hidden, muted): served 3, jackpots, add-a-ball to 4, drains 4-3-2-1, END (one ball left): counts [3, 4, 3, 2, 1]
     "venom_pro-1.07",                    # PAD-420 2026-10-07 mb_job (stock card, hidden, muted): served 3, jackpots, add-a-ball to 4, drains 4-3-2-1, END (one ball left): counts [3, 4, 3, 2, 1]
     "batman-1.14",                       # PAD-420 2026-10-08 mb_job (stock card, hidden, muted; the port's 22 block lines in): served 3, jackpots, add-a-ball to 4, drains 4-3-2-1, END (one ball left): counts [3, 4, 3, 2, 1]
+    "munsters_pro-1.28",                 # PAD-480 2026-10-14 mb_job (stock card, hidden, muted; pop bumpers tapped through the multiball, as balls in play hit them - its ball search wrote silent balls off): served 3, jackpots, add-a-ball to 4, drains 4-3-2-1, END (one ball left): counts [3, 4, 3, 2, 1]
+    # PAD-1285 2026-11-14, the Spike 3 card (rig slot 85, hidden, muted, a mode file started on Top lane center x3 - three
+    # Death Star hits start the game's own multiball): served 3 through the game's serve, the mode ran its 40 s (the game's
+    # Orbits start refused meanwhile), drains 3-2-1, then "ours is over" at one ball
+    "star_wars_elg-1.10/spike3",
+    # PAD-1289 2026-11-15, Pokemon LE's Spike 3 card (rig slot 129, hidden, muted, s3proof.sh TITLE=pokemon_le PROOF=mb,
+    # a mode file started on Berry target left x3): 3 balls asked for, served through the game's serve (trough 3/6),
+    # 3 shots scored 6,000,000, balls in play 3 -> 2, the mode ended on its 40 s clock, then "ours is over" at one ball
+    "pokemon_le-0.82/spike3",
+    # PAD-1287 2026-11-15 (Spike 3 rig slot 37, hidden, muted): a mode.cfg `multiball 3 10` on three Tower target hits,
+    # the game served to 3 balls in play (trough 3/6), 3 shots scored, counted 3 -> 2 -> 1 and gave its multiball back
+    "walking_dead_remastered_le-0.92/spike3",
+    # PAD-1288 2026-11-15 (Spike 3 rig slot 66, hidden, muted, s3proof.sh PROOF=mb TITLE=fallout_le): MB TEST on three
+    # Junk target hits served 3 through the game's serve, scored 3 shots, ran its 40 s, drains 3-2-1, "ours is over"
+    "fallout_le-0.82/spike3",
+    # PAD-1290 2026-11-15, the Spike 3 card (rig slot 192, hidden, muted, s3proof.sh PROOF=mb, a mode file started on Right
+    # target x3): "3 balls asked for (3 in play now) ... the game is serving" through the game's serve, the mode ran its
+    # 40 s and scored 3 shots, then "ours is over (1 ball in play)"
+    "star_wars_2025_le-0.96/spike3",
+    "star_wars_2025_pro-0.84/spike3",    # PAD-1291 2026-11-15 (Spike 3 rig slot 240, hidden, muted): MB TEST served 3 balls through the game's serve, scored 3 shots (+6,000,000), "ours is over" at one ball
+    # PAD-1293 2026-11-16, Transformers LE 0.96 (Spike 3 rig slot 163, hidden, muted, s3proof.sh PROOF=mb
+    # TITLE=transformers_mtmte_le): MB TEST on three Megatron target left hits, "3 balls asked for (3 in play now) ...
+    # the game is serving", 3 shots scored, its 40 s clock ended it and "ours is over (1 ball in play)"
+    "transformers_mtmte_le-0.96/spike3",
 })
 
 
@@ -579,7 +644,38 @@ BALL_SAVE_PROVEN = frozenset({
     "batman-1.14",                       # PAD-420 2026-10-08 bs_job (stock card, hidden, muted; jackpot presses only, NOPF - its VUK and eject switches left alone): the save taken, the drain inside it served back (auto-launched), shots scored on it, the next drain ended the ball: END (ball ended): 14 shots, awarded 105000000
     "elvira3-1.13",                      # PAD-420 2026-10-08 bs_job (stock card, hidden, muted; fresh NVRAM, coins one at a time): the save taken, the drain inside it served back, the next drain ended the ball; no control run: END (ball ended): 4 shots, awarded 10000000
     "jaws_pro-1.02",                     # PAD-420 2026-10-08 bs_job2 (stock card, hidden, muted; past Guided Setup, coins one at a time after the tech alerts): the save taken, the drain inside it served back, the next drain ended the ball; no control run: END (ball ended): 3 shots, awarded 6000000
+    "deadpool_le-1.14",                  # PAD-589 2026-10-15 bs_job (stock card, hidden, muted): the save taken, the drain inside it served back, the next drain ended the ball; no control run: END (ball ended): 2 shots, awarded 3000000
+    "iron_maiden_le-1.16",               # PAD-589 2026-10-15 bs_job (stock card, hidden, muted): the save taken, the drain inside it served back, the next drain ended the ball; no control run: END (ball ended): 4 shots, awarded 10000000
     "turtles_le-1.59",                   # PAD-420 2026-10-08 bs_job3 (stock card, hidden, muted, fresh NVRAM; the rig's van stocked with two balls - PAD_BALL_VAN_STOCK=2: the TMNT LE has 8, and the game serves a saved ball from the van): the save taken, the drain inside it served back, the next drain ended the ball; no control run: END (ball ended): 4 shots, awarded 10000000
+    # PAD-1286 2026-11-15 (Spike 3 rig slots 88/89, hidden, muted, C:/tmp/PAD-1286 play_bs.sh; the rig's trough
+    # turned round at the game's first eject retry, so one ball in play): SAVE TEST's 15 s save taken through
+    # multiball_serve, the drain 3 s in served back (eject + auto plunger), 3 shots scored 6,000,000 on that ball, the
+    # drain after the save ended it; the control without ball_save ended the ball on its first drain
+    "star_wars_elg-1.10/spike3",
+    # PAD-1289 2026-11-15, Pokemon LE's Spike 3 card (rig slot 129, hidden, muted, s3proof.sh TITLE=pokemon_le
+    # PROOF=ballsave): SAVE TEST's 15 s save taken through multiball_serve, the drain 3 s in served back (trough eject +
+    # auto plunger), 3 shots scored 6,000,000 on that ball, the drain after the save ended it; SAVE CONTROL (no
+    # ball_save) ended the ball on its first drain, 5.9 s in
+    "pokemon_le-0.82/spike3",
+    # PAD-1288 2026-11-15 (Spike 3 rig slots 64/65, hidden, muted, s3proof.sh PROOF=ballsave TITLE=fallout_le): SAVE
+    # TEST's 15 s save taken, the drain inside it served back (eject + auto plunger 1 s later), 3 shots scored 6,000,000
+    # on that ball, the drain after the save ended it; the control without ball_save ended on its first drain, 5.9 s in
+    "fallout_le-0.82/spike3",
+    # PAD-1290 2026-11-15 (Spike 3 rig slots 190/191, hidden, muted, s3proof.sh PROOF=ballsave): SAVE TEST's 15 s save taken
+    # ("the game is saving"), the drain inside it served back (trough eject + auto plunger), 3 shots scored 6,000,000 on
+    # that ball and the drain after the save ended it; SAVE CONTROL (no ball_save) ended the ball on its first drain, 5.8 s in
+    "star_wars_2025_le-0.96/spike3",
+    "star_wars_2025_pro-0.84/spike3",    # PAD-1291 2026-11-15 (Spike 3 rig slot 241, hidden, muted): SAVE TEST's 15 s save, the drain inside it served back (eject, auto plunger), 3 shots +6,000,000 on that ball, the drain after it ended the ball; SAVE CONTROL ended on its first drain (6 s)
+    # PAD-1292 2026-11-15, Walking Dead Remastered LE 0.92 (Spike 3 rig slot 93, hidden, muted, s3proof.sh
+    # PROOF=ballsave CFG=save_wdr.cfg / savectl_wdr.cfg): SAVE TEST's 15 s save taken ("the game is saving"), the drain
+    # inside it served back (eject + auto plunger), 3 shots scored 6,000,000 on that ball, the drain after the save
+    # ended it; the control without ball_save ended the ball on its first drain
+    "walking_dead_remastered_le-0.92/spike3",
+    # PAD-1293 2026-11-16, Transformers LE 0.96 (Spike 3 rig slots 161/162, hidden, muted, s3proof.sh PROOF=ballsave
+    # TITLE=transformers_mtmte_le): SAVE TEST's 15 s save taken, the drain inside it served back (trough eject + auto
+    # plunger), 3 shots scored 6,000,000 on that ball, the drain after the save ended it; SAVE CONTROL (no ball_save)
+    # ended the ball on its first drain, 5.9 s in
+    "transformers_mtmte_le-0.96/spike3",
 })
 
 
@@ -669,9 +765,60 @@ def _magnet_ports(port):
     return route0 or _drive_ok(port, "magnet")
 
 
+#: PAD-475: the newest builds whose magnet a mode cannot hold because of the GAME (PAD-420's magnet census, runs
+#: 18-22): key -> (how, the magnet, where). "shot": the game drives the magnet itself at the shot it sits at, so a
+#: mode's grab there always gives way to the game's ("the game wants it" / a command of the game's own on the coil
+#: while ours held) - safe, but never a clean hold. "feature": the game uses it only inside a feature of its own,
+#: never on a single switch press or at a ball's start, and it has no place on the playfield picture, so there is no
+#: shot to grab on. "player": the player's own magnet (a magna-save: the button fires it while it is lit). The tab
+#: says these in grey (TitleProfile.limits), not yellow.
+MAGNET_GAME_LIMIT = {
+    "aerosmith-1.16": ("shot", "toy box magnet", "the toy box"),
+    "aerosmith_le-1.16": ("shot", "toy box magnet", "the toy box"),
+    "avengers_infinity_le-1.10": ("shot", "tower magnet", "the tower optos"),
+    "avengers_infinity_pro-1.10": ("shot", "tower magnet", "the tower optos"),
+    "king_kong_le-0.97": ("shot", "spider magnet", "the pit targets"),      # 4 x 20 ms pulses on a pit target hit
+    "king_kong_pro-0.97": ("shot", "spider magnet", "the pit targets"),
+    "munsters_le-1.28": ("shot", "magnet", "the Herman opto"),             # census 2: the game pulses it there
+    "munsters_pro-1.28": ("shot", "magnet", "the Herman opto"),
+    "batman-1.14": ("shot", "magnet", "the Bat Phone Target"),             # and Joker target 1, nearest on the picture
+    "rush_pro-1.19": ("shot", "Time Machine magnet", "the Center ramp opto"),   # a retry 30 s into the ball met the same
+    "led_zeppelin_le-1.22": ("shot", "Electric Magic magnet", "the spinner"),   # an OFF 1 ms after our grab: it keeps
+    #                                                                             the magnet off outside its feature
+    # PAD-475 walk (8 rounds of every playfield switch, scoops held): the TOP MAGNET (9:6) only ever in the game's own
+    # center drop target sequence - drop target DOWN (8:7), magnet 255 for 1000 ms, drop target UP (8:6), magnet 20 ms
+    # - twice, seconds after an Orb standup hit (the LE the same, and a 10-on / 90-off pulse train with other coils
+    # after one); the magnet catches a ball only while the game has the target down
+    "guardians-1.15": ("feature", "top magnet", ""),
+    "guardians_le-1.15": ("feature", "top magnet", ""),
+    # PAD-475 walk: 255 for 3000 ms on 9:7 twice, each 0.4 s after the magna-save button (34) - the player's own
+    "sword_of_rage_le-1.19": ("player", "magna-save magnet", ""),          # magnet; only OFFs while it is not lit
+    "sword_of_rage_pro-1.19": ("player", "magna-save magnet", ""),
+    # a feature's process (0x129860). PAD-475 walk: on the Pro, an Upper lock hit started it - the PIZZA MOTOR (9:5) on
+    # for 30 s, the trough serving (8:1), the upper left flipper held, and the PIZZA MAGNET (9:6) 255 for 1200 / 2400 ms
+    # then 128 for 4 s; the LE's 8 rounds (~200 shots) never met it
+    "turtles_le-1.59": ("feature", "pizza magnet", ""),
+    "turtles_pro-1.59": ("feature", "pizza magnet", ""),
+    # PAD-475 walk: OVERLORD MAGNET (9:0; group 8 = node 9) 255 for 120 ms, OVERLORD HIT (9:1), then 90 ms, ~300 ms
+    # after an Overlord opto / hit target press (2 of 16) - the census's single presses never met it
+    "foo_fighters_le-1.04": ("shot", "Overlord magnet", "the Overlord"),
+}
+
+
 def _magnet_cannot(key, label, port=None):
     """The ``cannot`` entry for holding the ball on the magnet on build ``key``, or () when it can: the port
     names the magnet's calls, its device or its board address, and its shot, and the build is proven."""
+    if key in MAGNET_GAME_LIMIT and key not in MAGNET_PROVEN:       # PAD-475: the game's own limit
+        how, magnet, where = MAGNET_GAME_LIMIT[key]
+        if how == "shot":
+            return (("magnet", "%s uses its %s itself at the shot it sits at (%s), so a hold of a mode's there "
+                               "would always give way to the game's: a mode of yours cannot hold the ball on it."
+                     % (label, magnet, where)),)
+        if how == "player":
+            return (("magnet", "%s gives its %s to the player: the button fires it while it is lit, so a mode of yours "
+                               "cannot hold the ball on it." % (label, magnet)),)
+        return (("magnet", "%s uses its %s only inside a feature of its own, never at a shot of its own, so "
+                           "there is no shot where a mode of yours could hold the ball on it." % (label, magnet)),)
     if not port or not (_magnet_ports(port) and _magnet_shot_name(port)):
         return (("magnet", "The app has not found how %s drives its magnet, so a mode of yours cannot "
                            "hold the ball on it." % label),)
@@ -747,6 +894,512 @@ SHIELD_PROVEN = frozenset({
 })
 
 
+#: PAD-589: a mode that takes the place of one of the game's battles on its selection screen (item 146: the port's
+#: ``roster_slot`` line). What mode_file.c's roster claim needs - (sites, data, values): the battle's start and the
+#: "battle over" the runtime calls at the mode's end, the battle rule, and how many slots there are.
+ROSTER_NEEDS = (("roster_start", "roster_done"), ("rule_battle",), ("roster_slots",))
+#: The slots' names, by game directory, in slot order (MODE_SDK.md "A monster in the roster")
+ROSTER_NAMES = {
+    "godzilla_pro": ("Ebirah", "Titanosaurus", "Gigan", "Megalon", "King Ghidorah", "Megalon & Gigan",
+                     "King Ghidorah & Gigan"),
+    "godzilla_le": ("Ebirah", "Titanosaurus", "Gigan", "Megalon", "King Ghidorah", "Megalon & Gigan",
+                    "King Ghidorah & Gigan"),
+}
+#: The builds where a mode holding a slot was seen in the emulator: picked on the selection screen, it started instead
+#: of the game's battle and, at its end, the game was told the battle was over (the ramps lit again).
+ROSTER_PROVEN = frozenset({
+    "godzilla_pro-1.15",               # item 146 runs 3, 4, 6, 8: MOTHRA START (roster pick) ~3000 ms after the pick, battle over at its end
+    "godzilla_le-1.16",                # item 146 runs 5, 7: the same on the stock Premium/LE card
+    "godzilla_pro-1.16",               # PAD-589 2026-10-15 rig 1, the stock card, hidden, muted: slot 0 claimed (its callout 1888 -> 0); ramps lit, the scoop held, BATTLE SELECTION, Action: START (roster pick) 3017 ms after the pick, the game's battle not started; END (time ran out), battle over for player 1, the pick counted for city 0; the tab's own seven files (one per battle) all claimed, Megalon picked: its mode started 3000 ms later, the same end
+})
+
+
+def _roster_cannot(key, label, port=None):
+    """The ``cannot`` entry for taking a battle slot on build ``key``, or () when it can."""
+    sites, data, values = ROSTER_NEEDS
+    if not port or not (all(n in port["site"] for n in sites) and all(port["data"].get(n) for n in data)
+                        and all(n in port["value"] for n in values)):
+        return (("roster", "%s has no battle selection a mode of yours can take a place on." % label),)
+    if key in ROSTER_PROVEN:
+        return ()
+    return (("roster", "The app has found %s's battle selection but has not yet seen a mode of yours start from "
+                       "it in the emulator, so it cannot here yet." % label),)
+
+
+def _roster(game, port):
+    """The names of the port's battle slots, in slot order ("Slot n" past the names known for ``game``)."""
+    n = int(port["value"].get("roster_slots", 0) or 0) if port else 0
+    names = ROSTER_NAMES.get(game, ())
+    return tuple(names[i] if i < len(names) else "Slot %d" % i for i in range(min(n, 16)))
+
+
+#: PAD-615: a mode that takes the place of one of the game's challenges in a Player Challenge game (the mode file's
+#: ``challenge`` line; MODE_SDK.md "A mode in the game's Challenge list"). What pad_mode_runtime.c's challenge list
+#: needs - (sites, data, values): the game flags it reads and the flag of a challenge game; and per challenge either
+#: its own start (`site challenge_go_<n>`, PAD-615) or, PAD-619, its flag alone (`value challenge_flag_<n>`, taken as
+#: the ball starts: the port's `event ball_start`). portchallenge.py writes them.
+CHALLENGE_NEEDS = ((), ("game_flags",), ("challenge_on_flag",))
+#: The builds where a mode holding a challenge was seen in the emulator: the game made a Player Challenge game with that
+#: pick by its own Default Game Mode setting (AD_DEFAULT_GAME_MODE), the mode started at the first ball's start instead
+#: of the game's challenge, and a control run (the same setting, no mode) started the game's own.
+CHALLENGE_PROVEN = frozenset({
+    "james_bond_le-1.06",              # PAD-615 2026-10-19 rig 1-2, the stock card, hidden, muted: Default Game Mode 3 (Ahoy Mr. Bond), challenge 1 claimed: YOLT TEST START (challenge pick) 8 ms after the pick, the game's Ahoy (flag 85) never set; the drain ended it, GAME OVER after the one ball. Control: the game's own Ahoy started (flag 85)
+    "james_bond_pro-1.06",             # PAD-615 2026-10-19: the same on the stock Pro card (Default Game Mode = adjustment 194): START 9 ms after the pick, GAME OVER after the ball; control: the game's own Ahoy started
+    "stranger_things-1.13",            # PAD-615 2026-10-19: Default Game Mode 2 (Demogorgon), challenge 0 claimed: DEMO TEST START 7 ms after the pick, the game's Demogorgon Challenge (flag 104) never set; control: it started
+    "stranger_things_le-1.12",         # PAD-615 2026-10-19: the same (its Demogorgon Challenge flag 99): mode started, the game's not; control: the game's started
+    "stranger_things_le-1.13",         # PAD-615 2026-10-19: the same (flag 104): mode started, the game's not; control: the game's started
+    "godzilla_le-1.16",                # PAD-619 2026-10-19 rig 3: the game-play mode set to King of the Monsters (4) in attract, challenge 0 claimed by its flag: flag 40 cleared at the ball's start, START (challenge pick), the game's end-of-ball call when the mode ended, GAME OVER after the one ball
+    "godzilla_pro-1.15",               # PAD-619 2026-10-19 rig 1: the same on the stock Pro 1.15 card
+    "godzilla_pro-1.16",               # PAD-619 2026-10-19 rig 2: the same on the stock Pro 1.16 card; control (no mode): flags 18 and 40 set, the game's own King of the Monsters
+    "jaws_le-1.02",                    # PAD-619 2026-10-19 rig 1: the same as Jaws Pro below on the stock LE card - 8 -> 1 at the ball's start, START (challenge pick), one ball, GAME OVER
+    "venom_le-1.07",                   # PAD-619 2026-10-19 rig 2: the game-play mode set to Challenge Mode Low (11) in attract, challenge 0 claimed: 11 -> 0 (Standard) at the ball's start, START (challenge pick), one ball, GAME OVER
+    "venom_pro-1.07",                  # PAD-619 2026-10-19 rig 2: the same on the stock Pro card; control (rig 4, no mode): index kept at 11, flag 18, the game's own challenge
+    "jaws_pro-1.02",                   # PAD-619 2026-10-19 rig 3, the stock card, hidden, muted: the game-play mode set to 4th of July (8) in attract as the start menu's pick sets it, challenge 0 claimed: at the ball's start the index went 8 -> 1 (Standard), TAKEN BY PAD START (challenge pick), no 4th of July screen, one ball (the getter said 1), GAME OVER. Control (no mode): index kept at 8, flag 18 set, the game's own 4th OF JULY challenge on screen
+    "john_wick_le-1.01",               # PAD-619 2026-10-19 rig batch_r15: the game-play mode set to Tick Tock Mr. Wick (5) in attract, challenge 0 claimed: 5 -> 1 at the ball's start, START (challenge pick), one ball, GAME OVER
+    "john_wick_le-1.02",               # PAD-619 2026-10-19 rig batch_r15: the same with Red Circle Reckoning (4) on the stock LE 1.02 card
+    "john_wick_pro-1.02",              # PAD-619 2026-10-19 rig 3: the game-play mode set to Red Circle Reckoning (4, wck_cm_dance_club) in attract, challenge 0 claimed: 4 -> 1 at the ball's start, TAKEN BY PAD START (challenge pick), one ball, GAME OVER. Control: index kept at 4, flag 18, the game's own DANCE CLUB challenge (60 s) on screen
+    "metallica_spike-1.03",            # PAD-619 2026-10-19 rig batch_r15: the Lux Aeterna Combo Challenge (7; the challenge game's flag is 17 on 1.03), challenge 0 claimed: 7 -> 1 at the ball's start, START (challenge pick), one ball, GAME OVER
+    "metallica_spike-1.04",            # PAD-619 2026-10-19 rig 3: the game-play mode set to the Lux Aeterna Combo Challenge (8) in attract, challenge 0 claimed: 8 -> 1 at the ball's start, TAKEN BY PAD START (challenge pick), one ball, GAME OVER. Control: index kept at 8, flag 18, the game's own COMBO CHALLENGE on screen
+    "rush_pro-1.19",                   # PAD-619 2026-10-19 rig 1, the stock card, hidden, muted: Default Game Mode 2 (Cygnus Book 1), challenge 0 claimed by its flag: RUSH TEST START (challenge pick) as the ball started, flag 29 cleared, the game's Cygnus intro (flag 37) never set, GAME OVER after the one ball. Control: flags 29 and 37 set, the game's own Cygnus played
+})
+
+
+#: PAD-615 round 2 / PAD-619: the builds whose start menu (CHOOSE YOUR MODE OF PLAY) was seen in the emulator showing
+#: challenges of the modes' own after the game's (and a taken challenge under its mode's name), one picked starting
+#: its mode as a one-ball challenge game - and how many entries the game's own menu took there (the room left for
+#: ours is the port's challenge_menu_cap less those).
+CHALLENGE_MENU_PROVEN = {
+    "james_bond_le-1.06": 7,           # PAD-615 2026-10-19 rig 2, the stock card, hidden, muted: both flipper buttons in attract; YOLT WIZARD (`challenge new`) the 8th entry, DAF WIZARD (`challenge 1`) in Ahoy's place; YOLT picked: START (challenge pick) at the ball's start, the game's Ahoy not started, GAME OVER after the ball. Three of our own: 9 entries, the third "no room"; the last (DAF) picked and started. Control (no modes): 7 entries, Ahoy picked, the game's own Ahoy
+    "james_bond_pro-1.06": 7,          # PAD-615 2026-10-19 rig 2: the same on the stock Pro card (flipper buttons 62/63): YOLT WIZARD the 8th entry, picked, START at the ball's start, GAME OVER after the ball
+    "aerosmith_le-1.16": 2, # PAD-619 2026-10-19 rig sweep (job619*.sh), the stock card, hidden, muted: both flipper buttons in attract; PAD CHALLENGE (`challenge new`) appended after the game's 2, picked: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "batman-1.14": 2,       # PAD-619 2026-10-19 rig sweep (job619*.sh), the stock card, hidden, muted: both flipper buttons in attract; PAD CHALLENGE (`challenge new`) appended after the game's 2, picked: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "deadpool_le-1.14": 2,  # PAD-619 2026-10-19 rig sweep (job619*.sh), the stock card, hidden, muted: both flipper buttons in attract; PAD CHALLENGE (`challenge new`) appended after the game's 2, picked: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "deadpool_le-1.16": 2,  # PAD-619 2026-10-19 rig sweep (job619*.sh), the stock card, hidden, muted: both flipper buttons in attract; PAD CHALLENGE (`challenge new`) appended after the game's 2, picked: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "deadpool_pro-1.16": 2, # PAD-619 2026-10-19 rig sweep (job619*.sh), the stock card, hidden, muted: both flipper buttons in attract; PAD CHALLENGE (`challenge new`) appended after the game's 2, picked: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "guardians-1.15": 2,    # PAD-619 2026-10-19 rig sweep (job619*.sh), the stock card, hidden, muted: both flipper buttons in attract; PAD CHALLENGE (`challenge new`) appended after the game's 2, picked: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "guardians_le-1.15": 2, # PAD-619 2026-10-19 rig sweep (job619*.sh), the stock card, hidden, muted: both flipper buttons in attract; PAD CHALLENGE (`challenge new`) appended after the game's 2, picked: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "iron_maiden_le-1.18": 2, # PAD-619 2026-10-19 rig sweep (job619*.sh), the stock card, hidden, muted: both flipper buttons in attract; PAD CHALLENGE (`challenge new`) appended after the game's 2, picked: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "iron_maiden_pro-1.18": 2, # PAD-619 2026-10-19 rig sweep (job619*.sh), the stock card, hidden, muted: both flipper buttons in attract; PAD CHALLENGE (`challenge new`) appended after the game's 2, picked: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "mando_le-1.44": 9,               # PAD-619 2026-10-20 rig batch_r26: the live-applied menu read through registers (buttons at the loop's foot, the cursor in r6, a byte pick), PAD CHALLENGE after the game's 9, picked as Standard: START (challenge pick), the end-of-ball call, the balls getter said 1, GAME OVER on the glass after the one ball
+    "mando_le-1.45": 9,               # PAD-619 2026-10-19 rig batch_r10: the live-applied menu (20-byte entries), PAD CHALLENGE after the game's 9, picked as Standard: START (challenge pick), one ball, GAME OVER
+    "mando_pro-1.45": 9,              # PAD-619 2026-10-19 rig batch_r10: the same on the stock Pro card
+    "munsters_le-1.28": 5,  # PAD-619 2026-10-19 rig sweep (job619*.sh), the stock card, hidden, muted: both flipper buttons in attract; PAD CHALLENGE (`challenge new`) appended after the game's 5, picked: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "munsters_pro-1.28": 5, # PAD-619 2026-10-19 rig sweep (job619*.sh), the stock card, hidden, muted: both flipper buttons in attract; PAD CHALLENGE (`challenge new`) appended after the game's 5, picked: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "avengers_infinity_le-1.10": 3, # PAD-619 2026-10-19 rig sweep (job619d.sh): PAD CHALLENGE after the game's 3, picked: START (challenge pick), the game's end-of-ball call when it ended, GAME OVER after the one ball
+    "avengers_infinity_pro-1.10": 3, # PAD-619 2026-10-19 rig sweep (job619d.sh): PAD CHALLENGE after the game's 3, picked: START (challenge pick), the game's end-of-ball call when it ended, GAME OVER after the one ball
+    "beatles-1.29": 4,      # PAD-619 2026-10-19 rig sweep (job619d.sh): PAD CHALLENGE after the game's 4, picked: START (challenge pick), the game's end-of-ball call when it ended, GAME OVER after the one ball
+    "led_zeppelin_le-1.22": 3, # PAD-619 2026-10-19 rig sweep (job619d.sh): PAD CHALLENGE after the game's 3, picked: START (challenge pick), the game's end-of-ball call when it ended, GAME OVER after the one ball
+    "led_zeppelin_pro-1.22": 3, # PAD-619 2026-10-19 rig sweep (job619d.sh): PAD CHALLENGE after the game's 3, picked: START (challenge pick), the game's end-of-ball call when it ended, GAME OVER after the one ball
+    "rush_le-1.18": 6,                # PAD-619 2026-10-19 rig batch_r19 (retry; the r9 run had not opened the menu): PAD CHALLENGE after the game's 6, picked: START (challenge pick), the game's end-of-ball call when it ended, one ball, GAME OVER
+    "rush_le-1.19": 6,                # PAD-619 2026-10-19 rig batch_r11: PAD CHALLENGE after the game's 6, picked: START (challenge pick), the game's end-of-ball call (the lookalike-proof site) when it ended, one ball, GAME OVER
+    "rush_pro-1.19": 6,     # PAD-619 2026-10-19 rig sweep (job619d.sh): PAD CHALLENGE after the game's 6, picked: START (challenge pick), the game's end-of-ball call when it ended, GAME OVER after the one ball
+    "aerosmith-1.16": 2,              # PAD-619 2026-10-20 rig batch_r27 (once the rig's switch list was the game's own numbering: 93 of 93 ids had moved): PAD CHALLENGE after the game's 2, picked: START (challenge pick), the end-of-ball call, one ball, GAME OVER
+    "aerosmith_le-1.15": 2,           # PAD-619 2026-10-19 rig batch_r9: PAD CHALLENGE after the game's 2, picked: START (challenge pick) - kept past the game's own start - one ball, GAME OVER
+    "avengers_infinity_le-1.09": 3,   # PAD-619 2026-10-19 rig batch_r9: PAD CHALLENGE after the game's 3, picked: START past the game's ball-start mode, the end-of-ball call, the game left after the one ball (in_game last 1 -> 0, no second ball; no game_over event in its port)
+    "elvira3-1.13": 2,                # PAD-619 2026-10-19 rig batch_r9: PAD CHALLENGE after the game's 2 (the count in r5), picked: START (challenge pick), the end-of-ball call when it ended, the game left after the one ball (in_game last 1 -> 0, no second ball; no game_over event in its port)
+    "foo_fighters_le-1.04": 3,        # PAD-619 2026-10-19 rig batch_r10: the live-applied menu, PAD CHALLENGE after the game's 3, picked as Standard: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "foo_fighters_pro-1.04": 3,       # PAD-619 2026-10-19 rig batch_r10: the same on the stock Pro card
+    "guardians_le-1.14": 2,           # PAD-619 2026-10-19 rig batch_r9: PAD CHALLENGE after the game's 2, picked: START (challenge pick), one ball, GAME OVER
+    "batman-1.13": 2,                 # PAD-619 2026-10-19 rig batch_r8: PAD CHALLENGE after the game's 2, picked: START (challenge pick) - the pick kept past the game's own start, which this build dispatches after the ball's - one ball, GAME OVER
+    "iron_maiden_le-1.16": 2,         # PAD-619 2026-10-19 rig batch_r9: PAD CHALLENGE after the game's 2, picked: START (challenge pick) - the pick kept past the game's own start - the end-of-ball call, the game over after the one ball (in_game 1 -> 0, attract on screen; no game_over event in its port)
+    "jurassic_park_le-1.16": 8,       # PAD-619 2026-10-19 rig batch_r18 (NVRAM wiped, the service splash passed with Select and Back): the live-applied menu, PAD CHALLENGE after the game's 8, picked as Standard: START (challenge pick), one ball, GAME OVER
+    "jurassic_park_pro-1.16": 8,      # PAD-619 2026-10-19 rig batch_r12: the live-applied menu (20-byte entries), PAD CHALLENGE after the game's 8, picked as Standard: START (challenge pick), one ball, GAME OVER
+    "jurassic_park_the_pin-1.05": 2,  # PAD-619 2026-10-19 rig batch_r8 (its buttons are L/R FLIPPER BUTTON): PAD CHALLENGE after the game's 2, picked: START (challenge pick), one ball, GAME OVER
+    "sword_of_rage_le-1.18": 4,       # PAD-619 2026-10-19 rig batch_r9: PAD CHALLENGE after the game's 4, picked: START (challenge pick), one ball, GAME OVER
+    "star_wars_le-1.30": 2,           # PAD-619 2026-10-20 rig batch_r23 (once the rig's switch list was the game's own numbering, mktables 70 of 103 ids moved): the compare-chain menu, PAD CHALLENGE after the game's 2, picked as Standard: START (challenge pick), one ball, HIGH SCORE initials (in_game last 1 -> 0, no second ball)
+    "star_wars_elg-1.10": 2,          # PAD-619 2026-10-20 rig batch_r27: PAD CHALLENGE after the game's 2, picked: START (challenge pick), an extra ball earned in it refused (challenge_extra_ball), the balls getter said 1, GAME OVER after the one ball
+    "star_wars_elg-1.10/spike3": 2,   # PAD-1330 2026-11-16 (Spike 3 rig slot 230, hidden, muted, the set spike3_modes.plan built from the library card): PAD CHALLENGE after the game's STANDARD and DJ MIXER (kinds 0 6 256), picked: START (challenge pick) as the ball started, the ball launched for the player 2 s in, the mode's clock ended the ball (0x322180 from the game's bus call), the dead ball drained: the balls read said 1, the extra-ball test refused, GAME OVER, the game's own "Player 1 - Enter Initials / PAD CHALLENGE", the champion shown in attract. Control (the port's balls sites taken out): the same game served BALL 2
+    "walking_dead_remastered_le-0.92/spike3": 2,   # PAD-1369 2026-11-17 (Spike 3 rig, hidden, muted, the set spike3_modes.plan built from the library card): PAD CHALLENGE after the game's STANDARD and DJ MIXER (kinds 0 2 256), picked: START (challenge pick) as the ball started, launched for the player, the drain ended the ball with the mode, the extra-ball test refused, the balls read said 1, GAME OVER, PAD CHALLENGE's own high score filed
+    "stranger_things-1.13": 6,        # PAD-619 2026-10-19 rig sweep: PAD CHALLENGE after the game's 6, picked: START (challenge pick) at the ball's start (its handler hands it over), one ball, GAME OVER
+    "stranger_things_le-1.12": 6,     # PAD-619 2026-10-19 rig sweep: the same on the stock LE 1.12 card
+    "stranger_things_le-1.13": 6,     # PAD-619 2026-10-19 rig sweep: the same on the stock LE 1.13 card
+    "sword_of_rage_le-1.19": 4,       # PAD-619 2026-10-19 rig batch_all: PAD CHALLENGE after the game's 4, picked: START (challenge pick), one ball, GAME OVER
+    "sword_of_rage_pro-1.19": 4,      # PAD-619 2026-10-19 rig batch_all: the same on the stock Pro card
+    "star_wars_le-1.31": 2,           # PAD-619 2026-10-20 rig batch_r30 (the Action Button pressed at the ball start's path choice): the compare-chain menu, PAD CHALLENGE after the game's 2, picked as Standard: START (challenge pick), the balls getter said 1, ball_end, an extra ball refused, game_over
+    "star_wars_pro-1.31": 2,          # PAD-619 2026-10-19 rig 2: the compare-chain menu (no challenge kind of the game's): PAD CHALLENGE appended after Standard and Competition, picked as Standard: START (challenge pick) at the ball's start, one ball, GAME OVER
+    "turtles_le-1.59": 12,            # PAD-619 2026-10-20 rig batch_r53 (fresh NVRAM and NVRAM chip image, the van stocked; its game began on the 5th try of coins / Guided Setup / Start, as PAD-420's did on the 3rd): the wide-entry menu, PAD CHALLENGE after the game's 12, played as Standard: START (challenge pick), the end-of-ball call, the balls getter said 1, an extra ball refused, game_over
+    "turtles_pro-1.58": 12,           # PAD-619 2026-10-20 rig batch_r40, on the event ids the rig saw fire (batch_r38: 1.59's less 4): the wide-entry menu, PAD CHALLENGE after the game's 12, played as Standard: START (challenge pick), the end-of-ball call, the balls getter said 1, an extra ball refused, attract after the one ball
+    "turtles_pro-1.59": 12,           # PAD-619 2026-10-20 rig batch_r36 (fresh NVRAM; plunged once the game had served, after its turtle select): the wide-entry menu, PAD CHALLENGE after the game's 12, played as Standard (TMNT's challenges are locked until unlocked): START (challenge pick), the end-of-ball call, the balls getter said 1, an extra ball refused, attract after the one ball. Control (batch_r35): a Standard game ended its first ball and served a second
+}
+#: Bond's: Standard, Competition and the five challenges (Tournament and DJ Mixer when switched on take two more)
+CHALLENGE_MENU_GAMES_OWN = 7
+CHALLENGE_NEW = 16                   #: ModeSpec.challenge for a challenge of the mode's own (the runtime's first own slot)
+#: PAD-686: the builds whose start menu lists game-mode indices (Godzilla's), seen in the emulator showing ONE MODE
+#: CHALLENGE entry whose flippers step through every challenge of the modes' own, one picked starting its mode as a
+#: one-ball challenge game
+CHALLENGE_MENU_FRAME_PROVEN = {
+    "godzilla_le-1.16": "PAD-686, 2026-10-22: one MODE CHALLENGE entry stepped through 13 modes; JET JAGUAR, KING KONG and OXYGEN DESTROYER picked, each started as the ball did (one ball)",
+    "fallout_le-0.82/spike3": "PAD-1369, 2026-11-17 (Spike 3 rig, hidden, muted, the set spike3_modes.plan built from the library card): MODE CHALLENGE appended as entry 9 of 9 (Standard's index again, lettered CHALLENGE / PAD CHALLENGE), picked; START (challenge pick) as the ball started, its ball launched for the player, its clock ended the ball (0x935490), the extra-ball test refused, one ball (the game's Standard plays 4), GAME OVER, PAD CHALLENGE's own high score filed",
+    "pokemon_le-0.82/spike3": "PAD-1369, 2026-11-17 (Spike 3 rig, hidden, muted, the set spike3_modes.plan built from the library card): MODE CHALLENGE appended as entry 3 of 3, picked; START (challenge pick) as the ball started, launched for the player, the drain ended the ball with the mode, the extra-ball test refused, one ball, GAME OVER, PAD CHALLENGE's own high score filed",
+    "star_wars_2025_le-0.96/spike3": "PAD-1369, 2026-11-17 (Spike 3 rig, hidden, muted, the set spike3_modes.plan built from the library card): MODE CHALLENGE appended as entry 8 of 8, picked; START (challenge pick) as the ball started, launched for the player, its clock ended the ball (0x378a30), the extra-ball test refused, one ball, GAME OVER, PAD CHALLENGE's own high score filed",
+    "star_wars_2025_pro-0.84/spike3": "PAD-1369, 2026-11-17 (Spike 3 rig, hidden, muted, the set spike3_modes.plan built from the library card): MODE CHALLENGE appended as entry 3 of 3 (one step left from STANDARD), picked; START (challenge pick) as the ball started, launched for the player, its clock ended the ball (0x33ea50), the extra-ball test refused, one ball, GAME OVER, PAD CHALLENGE's own high score filed",
+    "transformers_mtmte_le-0.96/spike3": "PAD-1369, 2026-11-17 (Spike 3 rig, hidden, muted, the set spike3_modes.plan built from the library card): MODE CHALLENGE appended as entry 6 of 6, picked; START (challenge pick) as the ball started, launched for the player, a scoring shot awarded, the drain ended the ball with the mode, the extra-ball test refused, one ball, GAME OVER, PAD CHALLENGE's own high score filed",
+}
+#: the runtime's room for challenges of the modes' own (N_OWN_CHALLENGE): one MODE CHALLENGE entry holds them all
+CHALLENGE_FRAME_ROOM = 16
+
+
+def _challenge_menu(key, port):
+    """PAD-615 round 2: how many challenges of the modes' own the build's start menu has room for (0 = none)."""
+    if port and key in CHALLENGE_MENU_FRAME_PROVEN and "challenge_menu_frame" in port["site"]:
+        return CHALLENGE_FRAME_ROOM                                  # PAD-686: one entry, every mode
+    if not port or key not in CHALLENGE_MENU_PROVEN or not {"challenge_menu", "challenge_menu_pick"} <= set(port["site"]):
+        return 0
+    try:
+        cap = int(port["value"].get("challenge_menu_cap", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, cap - CHALLENGE_MENU_PROVEN[key])
+
+
+def _challenge_ready(port):
+    """PAD-619: the port names what the runtime needs for a challenge list (:data:`CHALLENGE_NEEDS`), and either a
+    challenge (its start, or its flag with the ball's start to take it on) or a start menu of the known shape."""
+    _sites, data, values = CHALLENGE_NEEDS
+    if not port or not (all(port["data"].get(n) for n in data) and all(n in port["value"] for n in values)):
+        return False
+    return bool(_challenges(port)) or {"challenge_menu", "challenge_menu_pick"} <= set(port["site"])         or _plain_index_menu(port)
+
+
+def _plain_index_menu(port):
+    """PAD-1369: a start menu of game-mode indices with no challenge of the game's (the Spike 3 index menus): its one
+    MODE CHALLENGE entry is Standard's index again, lettered CHALLENGE and the mode's name."""
+    v = port["value"] if port else {}
+    return bool(port) and "challenge_menu_frame" in port["site"] and v.get("challenge_menu_slot") == -1         and bool(v.get("challenge_menu_sets_on")) and bool(v.get("challenge_menu_frame_name_msg"))
+
+
+def _challenge_cannot(key, label, port=None):
+    """The ``cannot`` entry for a mode in the game's challenges on build ``key`` (taking one's place, or one of its
+    own on the start menu), or () when it can do either."""
+    if not _challenge_ready(port):
+        if key.startswith("james_bond_60th"):            # PAD-619: its one challenge is the whole game, on a clock
+            return (("challenge", "%s's only challenge is Challenge Mode, a whole game played against the clock: there "
+                                  "is no challenge in it a mode of yours could take the place of, and its start menu "
+                                  "is not one the app can add a challenge to." % label),)
+        return (("challenge", "%s's Player Challenge mode has no list of challenges a mode of yours can take a place "
+                              "in, and no start menu the app can add one to." % label),)
+    if key in CHALLENGE_PROVEN or key in CHALLENGE_MENU_PROVEN or key in CHALLENGE_MENU_FRAME_PROVEN:
+        return ()
+    return (("challenge", "The app has found %s's challenges but has not yet seen a mode of yours start from one in "
+                          "the emulator, so it cannot here yet." % label),)
+
+
+#: PAD-710: a mode in the place of one of the game's own modes (the mode file's ``in_place_of``, a blocks mode's When the
+#: game starts one of its modes; MODE_SDK.md "A mode in the place of one of the game's"). The builds where it was seen
+#: in the emulator: the game's START of its mode (called as its rules call it) taken, the mode run in its place, and
+#: at its end the game's own STOP run with the outcome (rig sweep, C:\tmp\PAD-710\rig, place_job.sh).
+PLACE_PROVEN = frozenset({
+    "avengers_infinity_le-1.10",     # PAD-710 run all2: Super Reactor (19): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1
+    "avengers_infinity_pro-1.10",    # PAD-710 run all2: Super Reactor (19): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1
+    "deadpool_le-1.16",              # PAD-710 run all2: Disco Loops (19): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1
+    "deadpool_pro-1.16",             # PAD-710 run all2: Disco Loops (19): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1
+    "dungeons_and_dragons_le-1.10",  # PAD-713 (the rig starts its games since the dragon hold fills from HOLD 1): Mimic Hurry Up (12): the game's start taken, starts 0 -> 1, completed by its clock: stopped 0 -> 1, wins 0 -> 1, the game played on
+    "dungeons_and_dragons_pro-1.10", # PAD-710 run all2: Map Choosen Ritual Singleball (53): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "foo_fighters_le-1.04",          # PAD-710 run all2: Super Skill Shot (8): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "foo_fighters_pro-1.04",         # PAD-710 run all2: Super Skill Shot (8): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "godzilla_le-1.16",              # PAD-710 run all2: Jet Fighter Attack (21): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, reason 1, STARTED audit 0 -> 1, COMPLETED 0 -> 1
+    "godzilla_pro-1.16",             # PAD-710 run all2: Jet Fighter Attack (21): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, reason 1, STARTED audit 0 -> 1, COMPLETED 0 -> 1
+    "iron_maiden_le-1.18",           # PAD-710 run all2: Rime of the Ancient Mariner Hurry Up (5): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1
+    "iron_maiden_pro-1.18",          # PAD-710 run all2: Rime of the Ancient Mariner Hurry Up (5): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1. PAD-716: Soul Shard Hurry Up (0) under a running Fear of the Dark: the song records it won, it sets itself back
+    "jaws_le-1.02",                  # PAD-710 run all2: Super Buoys (29): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, reason 1
+    "jaws_pro-1.02",                 # PAD-710 run all2: Super Buoys (29): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, reason 1
+    "john_wick_le-1.02",             # PAD-710 run all2: Lights Out (0): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "john_wick_pro-1.02",            # PAD-710 run all2: Lights Out (0): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "jurassic_park_le-1.16",         # PAD-710 run all2: Chaos Hurry Up (4): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1. PAD-716: its six T-Rex and Ctrl Room modes (7-12), taken twice in a game: COMPLETED audit 0 -> 2
+    "king_kong_le-0.97",             # PAD-710 run all2: King Kombos (27): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, reason 1
+    "king_kong_pro-0.97",            # PAD-710 run all2: King Kombos (27): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, reason 1
+    "led_zeppelin_le-1.22",          # PAD-710 run all2: Black Dog (1): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "led_zeppelin_pro-1.22",         # PAD-710 run all2: Black Dog (1): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "mando_le-1.45",                 # PAD-710 run all2: Super Skill Shot (10): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "mando_pro-1.45",                # PAD-710 run all2: Super Skill Shot (10): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "munsters_le-1.28",              # PAD-710 run all2: Lily Mode (3): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "munsters_pro-1.28",             # PAD-710 run all2: Lily Mode (3): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "rush_le-1.19",                  # PAD-710 run all2: La Villa Strangiato (2): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "rush_pro-1.19",                 # PAD-710 run all2: La Villa Strangiato (2): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "star_wars_le-1.31",             # PAD-710 run all2: Hoth I (0): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "star_wars_pro-1.31",            # PAD-710 run all2: Hoth I (0): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "sword_of_rage_le-1.19",         # PAD-710 run all2: Sand Worm (0): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "sword_of_rage_pro-1.19",        # PAD-710 run all2: Sand Worm (0): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "turtles_le-1.59",               # PAD-710 run all2: Training Level Two (0): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "turtles_pro-1.59",              # PAD-710 run all2: Training Level Two (0): the game's start taken, starts 0 -> 1, completed by its clock: stopped 1, wins 0 -> 1
+    "venom_le-1.07",                 # PAD-710 run r3: Mini Mode 01 (19) - the game started it itself as the ball started and the mode took it; the test's start completed it by its clock: stopped 1, wins 0 -> 1
+    "venom_pro-1.07",                # PAD-710 run r3: the same on the stock Pro card: stopped 1, wins 0 -> 1
+    "jurassic_park_pro-1.16",        # PAD-710 run r3: Escape Nublar (127): starts 0 -> 1, completed by its clock: stopped 1. PAD-716: Trex Chase (119), Trex Rampage (120), Ctrl Room Virus Attack (121) and Restore Power (122) keep their own stopped byte (v[32] / v[55]): taken twice in a game, COMPLETED audit 0 -> 2
+    "aerosmith-1.16",                # PAD-710 run plain2: Super Scoring (0): its books, the game played on: STARTED audit 0 -> 1. PAD-714 run fplainall: Super Scoring (0): its books: STARTED audit 0 -> 1; the game played on (the game's own audit ids)
+    "aerosmith_le-1.16",             # PAD-710 run plain2: Super Scoring (0): its books, the game played on: STARTED audit 0 -> 1. PAD-714 run fplainall: Super Scoring (0): its books: STARTED audit 0 -> 1; the game played on (the game's own audit ids)
+    "batman-1.14",                   # PAD-710 run plain2: Catwoman (episodes 19-20) (1): its books, the game played on: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1. PAD-714 run fplainall: Catwoman (episodes 19-20) (1): its books: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1; the game played on (the game's own audit ids)
+    "beatles-1.29",                  # PAD-710 run plain2: All My Loving (0): its books, the game played on: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1. PAD-714 run fplainall: All My Loving (0): its books: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1; the game played on (the game's own audit ids)
+    "elvira3-1.13",                  # PAD-710 run plain2: Houses (whichever House is selected) (0): its books, the game played on: STARTED audit 0 -> 1. PAD-714 run fplainall: Houses (whichever House is selected) (0): its books: STARTED audit 0 -> 1; the game played on (the game's own audit ids)
+    "guardians-1.15",                # PAD-710 run plain2: Super Scoring (0): its books, the game played on: STARTED audit +1. PAD-714 run fplainall: Super Scoring (0): its books: STARTED audit 0 -> 1; the game played on (the game's own audit ids)
+    "guardians_le-1.15",             # PAD-710 run plain2: Super Scoring (0): its books, the game played on: STARTED audit 0 -> 1. PAD-714 run fplainall: Super Scoring (0): its books: STARTED audit 0 -> 1; the game played on (the game's own audit ids)
+    "james_bond_le-1.06",            # PAD-710 run plain2: Ahoy Mr Bond Wizard Mode (6): its books, the game played on: STARTED audit 0 -> 1, PLAYED flag set, COMPLETED flag set. Challenge 1 (Ahoy Mr. Bond) taken by a mode file: STARTED audit 180, PLAYED flag 86, won: COMPLETED flag 89. PAD-715 place715.sh: Jetpack (28) and Bird One (29) Multiballs taken at their own starts on the last lock only (not at the lamps' lock check, not at an earlier lock): STARTED audit 0 -> 1, PLAYED flag set, no multiball served. PAD-714 run fplainall: Ahoy Mr Bond Wizard Mode (6): its books: STARTED audit 0 -> 1, PLAYED flag set, COMPLETED flag set; the game played on (the game's own audit ids)
+    "james_bond_pro-1.06",           # PAD-710 run plain2: Ahoy Mr Bond Wizard Mode (6): its books, the game played on: STARTED audit 0 -> 1, PLAYED flag set, COMPLETED flag set. PAD-715 place715.sh: Jetpack (28) and Bird One (29) Multiballs as on LE. PAD-714 run fplainall: Ahoy Mr Bond Wizard Mode (6): its books: STARTED audit 0 -> 1, PLAYED flag set, COMPLETED flag set; the game played on (the game's own audit ids)
+    "jurassic_park_the_pin-1.05",    # PAD-710 run plain2: Stegosaurus (0): its books, the game played on: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1. PAD-715: Restore Power (5): STARTED audit 189 0 -> 1. PAD-714 run fplainall: Stegosaurus (0): its books: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1; the game played on (the game's own audit ids)
+    "metallica_spike-1.04",          # PAD-710 run plain2: Battery (0): its books, the game played on: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1. PAD-714 run fplainall: Battery (0): its books: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1; the game played on (the game's own audit ids)
+    "star_wars_elg-1.10",            # PAD-710 run plain2: Orbits (1): no audit add, its flags only: COMPLETED flag 67 set, read back by the runtime
+    "star_wars_elg-1.10/spike3",     # PAD-1286 2026-11-15 (Spike 3 rig slot 88, hidden, muted, C:/tmp/PAD-1286 place_probe_mode.c): Orbits (1): the game's start called as its rules call it taken, PLACE TEST ran its 8 s, ended WON: COMPLETED flag 67 set; the game played on to the cap
+    "stranger_things-1.13",          # PAD-710 run plain2: Bullshit Scoring (0): its books, the game played on: STARTED audit 0 -> 1, PLAYED flag set. PAD-714 run fplainall: Bullshit Scoring (0): its books: STARTED audit 0 -> 1, PLAYED flag set; the game played on (the game's own audit ids)
+    "stranger_things_le-1.13",       # PAD-710 run plain2: Bullshit Scoring (0): its books, the game played on: STARTED audit 0 -> 1, PLAYED flag set. PAD-714 run fplainall: Bullshit Scoring (0): its books: STARTED audit 0 -> 1, PLAYED flag set; the game played on (the game's own audit ids)
+    "uncanny_xmen_le-0.98",          # PAD-710 run plain2: Fastball Special (0): its books, the game played on: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1. PAD-714 run fplainall: Fastball Special (0): its books: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1; the game played on (the game's own audit ids)
+    "uncanny_xmen_pro-0.98",         # PAD-710 run plain2: Fastball Special (0): its books, the game played on: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1. PAD-714 run fplainall: Fastball Special (0): its books: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1; the game played on (the game's own audit ids)
+    # PAD-714: the older builds (and Bond 60th 1.11), each build's own port - shipped, or derived as on a card - with
+    # a mode file in the place of one of its game modes (C:\tmp\PAD-714\rig, place_job2c.sh / place_job4b.sh)
+    "aerosmith_le-1.15",             # PAD-714 run fplainall: Super Scoring (0): its books: STARTED audit 0 -> 1; the game played on
+    "avengers_infinity_le-1.09",     # PAD-714 run fcpp: Super Reactor (19): won: stopped 0 -> 1, STARTED audit 0 -> 1; the game played on
+    "batman-1.13",                   # PAD-714 run fplainall: Catwoman (episodes 19-20) (1): its books: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1; the game played on
+    "deadpool_le-1.14",              # PAD-714 run fcpp: Disco Loops (19): won: stopped 0 -> 1, STARTED audit 0 -> 1; the game played on
+    "foo_fighters_le-1.03",          # PAD-714 run f2cpp: Super Skill Shot (8): starts 0 -> 1, won: stopped 0 -> 1, wins 0 -> 1; the game played on
+    "godzilla_le-1.13",              # PAD-714 run fcpp: Hedorah (25): won: stopped 0 -> 1, STARTED audit 0 -> 1; the game played on
+    "godzilla_pro-1.15",             # PAD-714 run fcpp: Hedorah (25): won: stopped 0 -> 1, STARTED audit 0 -> 1; the game played on
+    "guardians_le-1.14",             # PAD-714 run fplainall: Super Scoring (0): its books: STARTED audit 0 -> 1; the game played on
+    "iron_maiden_le-1.16",           # PAD-714 run fcpp: Rime of the Ancient Mariner Hurry Up (5): won: stopped 0 -> 1; the game played on
+    "james_bond_60th_le-1.11",       # PAD-714 run take1: Villain Mode (0): taken, counting only as ours (the Villain Mode keeps no books), won; the game played on
+    "jaws_le-1.01",                  # PAD-714 run fcpp: Super Buoys (29): starts 0 -> 1, won: stopped 0 -> 1, STARTED audit 0 -> 1, COMPLETED audit 0 -> 1; the game played on
+    "john_wick_le-1.01",             # PAD-714 run f2cpp: Lights Out (0): starts 0 -> 1, won: stopped 0 -> 1, wins 0 -> 1; the game played on
+    "jurassic_park_le-1.15",         # PAD-714 run f2cpp: Trex Chase (119): starts 0 -> 1, won: stopped 0 -> 1; the game played on
+    "king_kong_le-0.96",             # PAD-714 run fcpp: King Kombos (27): won: stopped 0 -> 1, STARTED audit 0 -> 1; the game played on
+    "led_zeppelin_le-1.21",          # PAD-714 run fcpp: Black Dog (1): starts 0 -> 1, won: stopped 0 -> 1, wins 0 -> 1; the game played on
+    "mando_le-1.44",                 # PAD-714 run fcpp: Super Skill Shot (10): starts 0 -> 1, won: stopped 0 -> 1, wins 0 -> 1; the game played on
+    "metallica_spike-1.03",          # PAD-714 run fplainall: Battery (0): its books: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1; the game played on
+    "munsters_le-1.27",              # PAD-714 run f2cpp: Lily Mode (3): starts 0 -> 1, won: stopped 0 -> 1, wins 0 -> 1; the game played on
+    "rush_le-1.18",                  # PAD-714 run fcpp: La Villa Strangiato (2): starts 0 -> 1, won: stopped 0 -> 1, wins 0 -> 1; the game played on
+    "star_wars_le-1.30",             # PAD-714 run fcpp: Hoth I (0): starts 0 -> 1, won: stopped 0 -> 1, wins 0 -> 1; the game played on
+    "stranger_things_le-1.12",       # PAD-714 run fplainall: Where's Barb (11): its books: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1; the game played on
+    "sword_of_rage_le-1.18",         # PAD-714 run fcpp: Sand Worm (0): starts 0 -> 1, won: stopped 0 -> 1, wins 0 -> 1; the game played on
+    "turtles_pro-1.58",              # PAD-714 run fcpp: Training Level Two (0): starts 0 -> 1, won: stopped 0 -> 1, wins 0 -> 1; the game played on
+    "uncanny_xmen_le-0.97",          # PAD-714 run f2plain: Fastball Special (0): its books: STARTED audit 0 -> 1, COMPLETED audit 0 -> 1; the game played on
+})
+#: PAD-710: what counting as the game's mode needs: the game's own mode framework (mode_framework.py)
+PLACE_COUNT_NEEDS = (("mode_player",), (), ("mode_slot_stop", "mode_stopped_at"))
+
+
+def _place_counts(port):
+    """PAD-710: 1 when the port names the game's own mode framework (a mode in one's place counts as it). PAD-714: the
+    player getter, or on an older build that reads the player up inline the byte itself (``data mode_player_at``)."""
+    sites, _data, values = PLACE_COUNT_NEEDS
+    return (bool(port) and (all(n in port["site"] for n in sites) or bool(port["data"].get("mode_player_at")))
+            and all(n in port["value"] for n in values))
+
+
+def _plain_books(port, i):
+    """PAD-710: 1 when a plain-C port names the books of its mode ``i`` (its STARTED / COMPLETED audits, its PLAYED /
+    COMPLETED flags) and the framework's audit add: a mode in its place counts as it."""
+    if not port:
+        return False
+    audits = "audit_add" in port["site"] and any("place_%s_%d" % (k, i) in port["value"]
+                                                 for k in ("audit_started", "audit_completed"))
+    flags = bool(port["data"].get("game_flags")) and any("place_%s_%d" % (k, i) in port["value"]
+                                                         for k in ("flag_played", "flag_completed"))
+    return audits or flags
+
+
+def _places(port):
+    """PAD-710: ``((id, name, counts), ...)``, in id order: the game's own modes a mode may run in the place of - the
+    ones whose START the port names (PAD-363's block lines: with the mode's object on a C++ title; on a plain-C title
+    the ones whose own books the port names), and not one of the battle selection's battles where the build has one
+    (those are the battle hat's, PAD-706). ``counts``: the mode counts as the game's (the C++ framework, or the plain-C
+    mode's books)."""
+    if not port:
+        return ()
+    counts = _place_counts(port)
+    roster = "roster_start" in port["site"]
+    out = []
+    for i, name, _on in _game_modes(port):
+        if port["data"].get("block_obj_%d" % i):
+            c = counts
+        elif _plain_books(port, i):
+            c = True
+        else:
+            continue
+        if roster and name.startswith("Battle vs"):
+            continue
+        out.append((i, name, c))
+    return tuple(out)
+
+
+def _place_cannot(key, label, port=None):
+    """PAD-710: the ``cannot`` entry for a mode in the place of one of the game's own modes on build ``key``, or ()."""
+    if not _places(port):
+        return (("place", "%s names none of its own modes' starts with the mode they start, so a mode of yours cannot "
+                          "run in the place of one there yet." % label),)
+    if key in PLACE_PROVEN:
+        return ()
+    return (("place", "The app has found %s's own modes' starts but has not yet seen a mode of yours run in the place "
+                      "of one in the emulator, so it cannot here yet." % label),)
+
+
+#: PAD-747: a mode that starts once the player has completed some of the game's own modes (the mode file's
+#: ``starts_on completed``, a blocks mode's When the player has completed some of the game's modes; MODE_SDK.md "The
+#: game's modes completed"). The builds where it was seen in the emulator: one of the game's modes completed - the
+#: game's own STOP of it entered with "completed" on a C++ title, its COMPLETED audit or flag on a plain-C one - and a
+#: mode file waiting for that one started (rig sweep, C:\tmp\PAD-747\rig).
+DONE_PROVEN = frozenset({
+    "aerosmith-1.16",               # PAD-747 sweep: Medley Multiball (128) completed - its COMPLETED flag - and a mode file waiting for 1 started on it
+    "aerosmith_le-1.15",            # PAD-747 sweep: Medley Multiball (128) completed - its COMPLETED flag - and a mode file waiting for 1 started on it
+    "aerosmith_le-1.16",            # PAD-747 sweep: Medley Multiball (128) completed - its COMPLETED flag - and a mode file waiting for 1 started on it
+    "avengers_infinity_le-1.09",    # PAD-747 sweep: Super Reactor (19) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "avengers_infinity_le-1.10",    # PAD-747 sweep: Super Reactor (19) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "avengers_infinity_pro-1.10",   # PAD-747 sweep: Super Reactor (19) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "batman-1.13",                  # PAD-747 sweep: Catwoman (episodes 19-20) (1) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "batman-1.14",                  # PAD-747 sweep: Catwoman (episodes 19-20) (1) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "beatles-1.29",                 # PAD-747 sweep: All My Loving (0) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "deadpool_le-1.14",             # PAD-747 sweep: Disco Loops (19) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "deadpool_le-1.16",             # PAD-747 sweep: Disco Loops (19) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "deadpool_pro-1.16",            # PAD-747 sweep: Disco Loops (19) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "dungeons_and_dragons_le-1.00", # PAD-747 sweep: Mimic Hurry Up (12) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "dungeons_and_dragons_le-1.10", # PAD-747 sweep: Mimic Hurry Up (12) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "dungeons_and_dragons_pro-1.10", # PAD-747 sweep: Map Choosen Ritual Singleball (53) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "elvira3-1.13",                 # PAD-747 sweep: ABOB (128) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "foo_fighters_le-1.03",         # PAD-747 sweep: Super Skill Shot (8) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "foo_fighters_le-1.04",         # PAD-747 sweep: Super Skill Shot (8) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "foo_fighters_pro-1.04",        # PAD-747 sweep: Super Skill Shot (8) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "godzilla_le-1.13",             # PAD-747 sweep: Hedorah (25) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "godzilla_le-1.16",             # PAD-747 sweep: Super Train (18) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "godzilla_pro-1.15",            # PAD-747 sweep: Hedorah (25) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "godzilla_pro-1.16",            # PAD-747 sweep: Jet Fighter Attack (21) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "guardians-1.15",               # PAD-747 sweep: Cherry Bomb Multiball (128) completed - its COMPLETED flag - and a mode file waiting for 1 started on it
+    "guardians_le-1.14",            # PAD-747 sweep: Cherry Bomb Multiball (128) completed - its COMPLETED flag - and a mode file waiting for 1 started on it
+    "guardians_le-1.15",            # PAD-747 sweep: Cherry Bomb Multiball (128) completed - its COMPLETED flag - and a mode file waiting for 1 started on it
+    "iron_maiden_le-1.16",          # PAD-747 sweep: Rime of the Ancient Mariner Hurry Up (5) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "iron_maiden_le-1.18",          # PAD-747 sweep: Rime of the Ancient Mariner Hurry Up (5) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "iron_maiden_pro-1.18",         # PAD-747 sweep: Rime of the Ancient Mariner Hurry Up (5) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "james_bond_le-1.06",           # PAD-747 sweep: Ahoy Mr Bond Wizard Mode (6) completed - its COMPLETED flag - and a mode file waiting for 1 started on it
+    "james_bond_pro-1.06",          # PAD-747 sweep: Ahoy Mr Bond Wizard Mode (6) completed - its COMPLETED flag - and a mode file waiting for 1 started on it
+    "jaws_le-1.01",                 # PAD-747 sweep: Super Buoys (29) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "jaws_le-1.02",                 # PAD-747 sweep: Super Buoys (29) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "jaws_pro-1.02",                # PAD-747 sweep: Cast N Catch 1 (12) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "john_wick_le-1.01",            # PAD-747 sweep: Lights Out (0) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "john_wick_le-1.02",            # PAD-747 sweep: Lights Out (0) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "john_wick_pro-1.02",           # PAD-747 sweep: Lights Out (0) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "jurassic_park_le-1.15",        # PAD-747 sweep: Trex Chase (119) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "jurassic_park_le-1.16",        # PAD-747 sweep: Chaos Hurry Up (4) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "jurassic_park_pro-1.16",       # PAD-747 sweep: Escape Nublar (127) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "jurassic_park_the_pin-1.05",   # PAD-747 sweep: Stegosaurus (0) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "king_kong_le-0.96",            # PAD-747 sweep: King Kombos (27) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "king_kong_le-0.97",            # PAD-747 sweep: King Kombos (27) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "king_kong_pro-0.97",           # PAD-747 sweep: King Kombos (27) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "led_zeppelin_le-1.21",         # PAD-747 sweep: Black Dog (1) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "led_zeppelin_le-1.22",         # PAD-747 sweep: Black Dog (1) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "led_zeppelin_pro-1.22",        # PAD-747 sweep: Black Dog (1) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "mando_le-1.44",                # PAD-747 sweep: Super Skill Shot (10) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "mando_le-1.45",                # PAD-747 sweep: Super Skill Shot (10) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "mando_pro-1.45",               # PAD-747 sweep: Super Skill Shot (10) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "metallica_spike-1.03",         # PAD-747 sweep: Battery (0) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "metallica_spike-1.04",         # PAD-747 sweep: Battery (0) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "munsters_le-1.27",             # PAD-747 sweep: Lily Mode (3) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "munsters_le-1.28",             # PAD-747 sweep: Lily Mode (3) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "munsters_pro-1.28",            # PAD-747 sweep: Lily Mode (3) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "rush_le-1.18",                 # PAD-747 sweep: La Villa Strangiato (2) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "rush_le-1.19",                 # PAD-747 sweep: La Villa Strangiato (2) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "rush_pro-1.19",                # PAD-747 sweep: La Villa Strangiato (2) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "star_wars_elg-1.10",           # PAD-747 sweep: Orbits (1) completed - its COMPLETED flag - and a mode file waiting for 1 started on it
+    "star_wars_elg-1.10/spike3",    # PAD-1286 2026-11-15 (Spike 3 rig slot 88, the same run): Orbits (1) completed by a mode in its place - its COMPLETED flag 67 - and DONE TEST (starts_on completed 1 1) started on it 16 ms later
+    "star_wars_le-1.30",            # PAD-747 sweep: Hoth I (0) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "star_wars_le-1.31",            # PAD-747 sweep: Hoth I (0) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "star_wars_pro-1.31",           # PAD-747 sweep: Hoth I (0) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "stranger_things-1.13",         # PAD-747 sweep: Wheres Barb (128) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "stranger_things_le-1.12",      # PAD-747 sweep: Where's Barb (11) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "stranger_things_le-1.13",      # PAD-747 sweep: Wheres Barb (128) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "sword_of_rage_le-1.18",        # PAD-747 sweep: Sand Worm (0) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "sword_of_rage_le-1.19",        # PAD-747 sweep: Sand Worm (0) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "sword_of_rage_pro-1.19",       # PAD-747 sweep: Sand Worm (0) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "turtles_le-1.59",              # PAD-747 sweep: Training Level Two (0) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "turtles_pro-1.58",             # PAD-747 sweep: Training Level Two (0) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "turtles_pro-1.59",             # PAD-747 sweep: Training Level Two (0) completed - its stop, completed - and a mode file waiting for 1 started on it
+    "uncanny_xmen_le-0.97",         # PAD-747 sweep: Fastball Special (0) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "uncanny_xmen_le-0.98",         # PAD-747 run x1: A Fiery Assault (3), a mission, completed in its place - its COMPLETED audit - and MINI WIZ (starts_on completed 1 of the eight missions) started 16 ms later; sweep: Fastball Special (0) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "uncanny_xmen_pro-0.98",        # PAD-747 sweep: Fastball Special (0) completed - its COMPLETED audit - and a mode file waiting for 1 started on it
+    "venom_le-1.07",                # PAD-747 sweep: Riot Mode (12) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+    "venom_pro-1.07",               # PAD-747 sweep: Riot Mode (12) completed - its stop through its vtable, completed - and a mode file waiting for 1 started on it
+})
+#: PAD-747: the ids of a plain-C build's modes with books and no start (pad_mode_runtime.c's DONE_EXTRA + n), at most
+DONE_EXTRA, DONE_EXTRA_MAX = 128, 128
+
+
+def _done_modes(port):
+    """PAD-747: ``((id, name), ...)``, in id order: the game's own modes whose completion the runtime sees - on a C++
+    title each mode object's (the framework's STOP, PAD-710's lines), on a plain-C title the ones whose COMPLETED audit
+    (with the framework's audit add) or COMPLETED flag (with the flag bitmap) the port names, and after them (ids
+    DONE_EXTRA + n) the modes the game keeps such books of that the port names no start of (`text done_name_<n>`)."""
+    if not port:
+        return ()
+    counts = _place_counts(port)
+    audits = "audit_add" in port["site"]
+    flags = bool(port["data"].get("game_flags"))
+    out = []
+    for i, name, _on in _game_modes(port):
+        if port["data"].get("block_obj_%d" % i):
+            if counts:
+                out.append((i, name))
+        elif (audits and "place_audit_completed_%d" % i in port["value"]) or (
+                flags and "place_flag_completed_%d" % i in port["value"]):
+            out.append((i, name))
+    n = 0                                            # the modes with books and no start (mode_framework.done_lines)
+    while port["text"].get("done_name_%d" % n, "").strip() and n < DONE_EXTRA_MAX:
+        if (audits and "done_audit_%d" % n in port["value"]) or (flags and "done_flag_%d" % n in port["value"]):
+            out.append((DONE_EXTRA + n, port["text"]["done_name_%d" % n].strip()))
+        n += 1
+    return tuple(out)
+
+
+def _done_cannot(key, label, port=None):
+    """PAD-747: the ``cannot`` entry for a mode started by the game's own modes completed on build ``key``, or ()."""
+    if not _done_modes(port):
+        return (("done", "The app cannot tell when %s's own modes are completed, so a mode of yours cannot start on "
+                         "them there yet." % label),)
+    if key in DONE_PROVEN:
+        return ()
+    return (("done", "The app has found how %s records its own modes completed but has not yet seen a mode of yours "
+                     "start on them in the emulator, so it cannot here yet." % label),)
+
+
+def _challenges(port):
+    """The names of the port's challenges, in the game's menu order, from 0 with no gap: each one's own start
+    (``challenge_go_<n>``) or, PAD-619, its flag - or its game-play mode's index (``challenge_mode_<n>``, the
+    GamePlayModes builds) - where the port has the ball's start to take it on."""
+    out = []
+    ball = any(e[0] == "ball_start" for e in (port or {}).get("event", ()))
+    while port and len(out) < 8:
+        n = len(out)
+        by_mode = ball and port["data"].get("game_play_modes")             and str(port["value"].get("challenge_mode_%d" % n, "")).strip() not in ("", "-1")   # the mode's index
+        if not ("challenge_go_%d" % n in port["site"] or by_mode
+                or ball and str(port["value"].get("challenge_flag_%d" % n, "0")).strip() not in ("", "0")):
+            break
+        out.append(port["text"].get("challenge_name_%d" % n, "").strip() or "Challenge %d" % (n + 1))
+    return tuple(out)
+
+
+#: PAD-589: Godzilla Premium/LE's building on its stepper (a Pro has none). What pad_mode_runtime.c's building_arm
+#: needs - (sites, data, values): the game's own move by floor and its "not now", the stepper object, its vtable
+#: word, where it keeps the floor it is at and the one it is going to, and how many floors there are.
+BUILDING_NEEDS = (("building_move", "building_busy"), ("building_stepper",),
+                  ("building_vptr", "building_at", "building_target_at", "building_floors"))
+#: The floors a mode may send the building to: the game's own 1-3 (0 is where it rests, and where the runtime puts it
+#: back), as the tab names them.
+#: The game's own feature that locks balls in the building (its port's `text block_rule_name_<n>`): a mode moves the
+#: building only while it sees no shots, so no lock of the game's is lit or made while the building is off its floor.
+BUILDING_RULES = ("Building Locks",)
+BUILDING_FLOORS = {1: "Floor 1", 2: "Floor 2", 3: "Floor 3 (the furthest)"}
+#: The builds where a mode file's ``building`` line was seen in the emulator: the building went to the floor as the
+#: mode started (or on its shot) and was put back where it was when the mode ended.
+BUILDING_PROVEN = frozenset({
+    "godzilla_le-1.16",                # PAD-589 2026-10-15 rigs 1-2, the stock Premium/LE card, hidden, muted: `building 3` - floor 0 -> 3 1.5 s after the start (the stepper -150 -> -7650, 1.5 s), kept there 18 s, put back on floor 0 at the mode's end; `building 2 0x08000000` - floor 0 -> 2 on the Maser target's hit, kept to the end, put back on 0. A hit on the Building Hit Opto itself had the game send it home 2.3 s later (the runtime then stood aside)
+})
+
+
+def _building_cannot(key, label, port=None):
+    """The ``cannot`` entry for moving the building on build ``key``, or () when it can."""
+    sites, data, values = BUILDING_NEEDS
+    if not port or not (all(n in port["site"] for n in sites) and all(port["data"].get(n) for n in data)
+                        and all(n in port["value"] for n in values)):
+        return (("building", "The app has not found a building that moves on %s, so a mode of yours cannot "
+                             "move it." % label),)
+    if key in BUILDING_PROVEN:
+        return ()
+    return (("building", "The app has found how %s moves its building but has not yet seen a mode of yours "
+                         "move it in the emulator, so it cannot here yet." % label),)
+
+
 def _shield_cannot(key, label, port=None):
     """The ``cannot`` entry for turning the shield targets on build ``key``, or () when it can."""
     sites, data, values = SHIELD_NEEDS
@@ -784,6 +1437,7 @@ SHAKER_PROVEN = frozenset({
     "beatles-1.29",                    # PAD-474 2026-10-09 stock card, PAD_COIL_PROBE=1: node 1 coil 0, setting 3: start 42/255 1020 ms, OFF at the stop (523 ms left); its short shake 42/255 200 ms on a hit; end 42/255 600 ms ran out
     "deadpool_le-1.16",                # PAD-474 2026-10-09 stock card, PAD_COIL_PROBE=1: node 1 coil 0, setting 3: start 42/255 1020 ms, OFF at the stop (526 ms left); its short shake 42/255 200 ms on a hit; end 42/255 600 ms ran out
     "deadpool_pro-1.16",               # PAD-474 2026-10-09 stock card, PAD_COIL_PROBE=1: node 1 coil 0, setting 3: start 42/255 1020 ms, OFF at the stop (524 ms left); its short shake 42/255 200 ms on a hit; end 42/255 600 ms ran out
+    "dungeons_and_dragons_le-1.10",    # PAD-713 2026-10-24 stock card, PAD_COIL_PROBE=1 (after PAD-658: a mode's end lets its shake run out): node 1 coil 0, setting 4: start 51/255 480 ms (on a hit, run out past a stop); end 51/255 480 ms ran out; the game's own 51/255 200 ms on the hits
     "dungeons_and_dragons_pro-1.10",   # PAD-474 2026-10-09 stock card, PAD_COIL_PROBE=1: node 1 coil 0, setting 4: start 51/255 480 ms, OFF at the stop (351 ms left); its short shake 51/255 200 ms on a hit; end 51/255 480 ms ran out
     "elvira3-1.13",                    # PAD-474 2026-10-09 stock card, PAD_COIL_PROBE=1: node 1 coil 0, setting 2: start 42/255 1020 ms, OFF at the stop (524 ms left); its short shake 42/255 200 ms on a hit; end 42/255 600 ms ran out
     "foo_fighters_le-1.04",            # PAD-474 2026-10-09 stock card, PAD_COIL_PROBE=1: node 1 coil 0, setting 4: start 51/255 330 ms, OFF at the stop (134 ms left); its short shake 23/255 200 ms on a hit; end 23/255 600 ms ran out
@@ -945,6 +1599,74 @@ WIZARDS_PROVEN = frozenset({
     # running query 1, flags 85 86, its intro on the glass); Goldfinger then `light`ed Goldfinger's Jackpot (selected 2,
     # lit 0x4) while Ahoy ran
     "james_bond_le-1.06",
+    # PAD-473 2026-10-09 rig 1, the stock James Bond Pro 1.06 card (hidden, muted): a `game_wizard light Goldfinger's
+    # Jackpot` file lit it (selected 2, lit 0x4, the game's ready check 1), the Right ramp's switches started it
+    # (played 0x4, its running query 1, GOLDFINGER'S JACKPOT on the glass), and a `game_wizard start Ahoy Mr. Bond`
+    # file while it ran left Ahoy lit for the ramp (selected 1, lit 0x2: the game's own check said one was running)
+    "james_bond_pro-1.06",
+    # PAD-473 2026-10-09, the C++ titles' mode route (rigbatch, stock cards, hidden, muted; C:/tmp/PAD-473/gen): a
+    # `game_wizard start` file started the game's mini-wizard by its own START (ACTIVE 1, its intro on the glass),
+    # and a second file while it ran waited ("... is in its way"); no abort
+    "avengers_infinity_le-1.10",   # Soul Gem Quest started (ACTIVE 1); Black Order Multiball waited while it ran
+    "avengers_infinity_pro-1.10",   # Soul Gem Quest started (ACTIVE 1); Black Order Multiball waited while it ran
+    "deadpool_le-1.16",   # Megakrakolodonus Rex started (ACTIVE 1); Clone Multiball waited while it ran
+    "deadpool_pro-1.16",   # Megakrakolodonus Rex started (ACTIVE 1); Clone Multiball waited while it ran
+    "dungeons_and_dragons_le-1.10",    # PAD-713: Tiny's Dice Game started (ACTIVE 1, the mode's own start); Tavern Brawl waited while it ran (ctinys_dice_game in its way)
+    "dungeons_and_dragons_pro-1.10",   # Tiny's Dice Game started (ACTIVE 1); Tavern Brawl waited while it ran
+    "godzilla_le-1.16",   # Monster Zero started (ACTIVE 1); Terror of Mechagodzilla waited while it ran
+    "godzilla_pro-1.16",   # Monster Zero started (ACTIVE 1); Terror of Mechagodzilla waited while it ran
+    "iron_maiden_le-1.18",   # 2 Minutes to Midnight started (ACTIVE 1); Number of the Beast waited while it ran
+    "iron_maiden_pro-1.18",   # 2 Minutes to Midnight started (ACTIVE 1); Number of the Beast waited while it ran
+    "jaws_le-1.02",   # 4th of July started (ACTIVE 1); Super Cast 'n Catch waited while it ran
+    "jaws_pro-1.02",   # 4th of July started (ACTIVE 1); Super Cast 'n Catch waited while it ran
+    "john_wick_le-1.02",   # The Staircase started (ACTIVE 1); The Duel waited while it ran
+    "john_wick_pro-1.02",   # The Staircase started (ACTIVE 1); The Duel waited while it ran
+    "king_kong_le-0.97",   # Crash the Gate started (ACTIVE 1); T-Rex Battle waited while it ran
+    "king_kong_pro-0.97",   # Crash the Gate started (ACTIVE 1); T-Rex Battle waited while it ran
+    "led_zeppelin_le-1.22",   # Mothership Multiball started (ACTIVE 1, 4 balls); World Tour waited while it ran
+    "led_zeppelin_pro-1.22",   # Mothership Multiball started (ACTIVE 1, 4 balls); World Tour waited while it ran
+    "mando_le-1.45",   # Precious Cargo started (ACTIVE 1, 4 balls); You Have What I Want waited while it ran
+    "mando_pro-1.45",   # Precious Cargo started (ACTIVE 1, 4 balls); You Have What I Want waited while it ran
+    # Star Wars, Light as well: `game_wizard light Lightsaber Duel` started the game's own clightsaber_duel_ready
+    # (ACTIVE 1), and the Left ramp opto then started Lightsaber Duel (ready 0, duel ACTIVE 1), LE and Pro
+    "star_wars_le-1.31",   # Lightsaber Duel started (ACTIVE 1); Escape from Hoth waited while it ran
+    "star_wars_pro-1.31",   # Lightsaber Duel started (ACTIVE 1); Escape from Hoth waited while it ran
+    "sword_of_rage_le-1.19",   # KNIGHT Multiball started (ACTIVE 1, 3 balls); The King's Ransom waited while it ran
+    "sword_of_rage_pro-1.19",   # KNIGHT Multiball started (ACTIVE 1, 3 balls); The King's Ransom waited while it ran
+    "turtles_le-1.59",   # Team-Up Multiball started (ACTIVE 1, 2 balls)
+    "turtles_pro-1.59",   # Team-Up Multiball started (ACTIVE 1, 2 balls)
+    "venom_le-1.07",   # Toxin Team-Up started (ACTIVE 1)
+    "venom_pro-1.07",   # Toxin Team-Up started (ACTIVE 1)
+    # Foo Fighters: its START needs the mode enabled first (`value wizard_slot_enable 42`, run 1b)
+    "foo_fighters_le-1.04",   # Austin started (ACTIVE 1, 4 balls); D.C. waited while it ran
+    "foo_fighters_pro-1.04",   # Austin started (ACTIVE 1, 4 balls); D.C. waited while it ran
+    "jurassic_park_le-1.16",   # Visitor's Center started (ACTIVE 1, 2 balls); Museum Mayhem waited while it ran
+    "jurassic_park_pro-1.16",   # Visitor's Center started (ACTIVE 1, 2 balls); Museum Mayhem waited while it ran
+    # Rush: with the ball not in the Time Machine, Book 1's own start waits for it to drain (the game's mode mask
+    # 0x202 meanwhile) before its intro plays; the rig's drain (plunge.py) let it run on (sweep p6)
+    "rush_le-1.19",   # Cygnus X-1 Book 1 started (ACTIVE 1, CHOOSE A PLANET on the glass); Book 2 waited while it ran
+    "rush_pro-1.19",   # Cygnus X-1 Book 1 started (ACTIVE 1, CHOOSE A PLANET on the glass); Book 2 waited while it ran
+    # the plain-C titles' function route (rigbatch p8, stock cards, hidden, muted): a `game_wizard start` file called
+    # the mini-wizard's own start, its ACTIVE game flag rose and its balls were served; a second one waited ("a
+    # multiball is in its way") - the game's own starts would have started it on top (the probe, p7)
+    "batman-1.14",   # Batusi Multiball started (flag 84, 6 balls, 5 MORE SHOTS); Gas Attack Multiball waited
+    "metallica_spike-1.04",   # Blackened Multiball started (flag 50, 4 balls, BLACKENED on the glass); The End of the Line waited
+    "stranger_things-1.13",   # Season One Wizard Mode started (flag 72, 3 balls); Season Two waited while it ran
+    "stranger_things_le-1.13",   # Season One Wizard Mode started (flag 72, 3 balls); Season Two waited while it ran
+    # earned, and only between the game's own modes: Aerosmith's songs and Guardians' modes run from a ball's launch, so
+    # the file was started with the ball in the shooter lane (sweep p12); `site wizard_earned_1` answered for the player
+    "aerosmith_le-1.16",   # Medley Tour Multiball started (flag 57, 3 balls, MEDLEY TOUR MULTIBALL), no song played
+    "guardians-1.15",   # Cherry Bomb Multiball started (flag 52, 6 balls, its TIME REMAINING), no mode completed
+    "guardians_le-1.15",   # Cherry Bomb Multiball started (flag 52, 6 balls, its TIME REMAINING), no mode completed
+    "aerosmith-1.16",   # Medley Tour Multiball started (flag 57, 3 balls), on PAD-420's NVRAM past Guided Setup (sweep p13)
+    "beatles-1.29",   # Beatlemania Multiball started (flag 81, 4 balls, TAXMAN PLAYED BEFORE BEATLEMANIA) (p13)
+    "jurassic_park_the_pin-1.05",   # Escape Nublar started (its +0x4c, 4 balls, BREAKING NEWS); Restore Power waited (p13)
+    # X-Men: its own enable-and-start on the mode singleton (r0), the object's running byte (sweep p13)
+    "uncanny_xmen_le-0.98",   # The Future started (+0xdc, HELP KITTY PRYDE ESCAPE); Save Senator Kelly waited behind it
+    "uncanny_xmen_pro-0.98",   # The Future started (+0xdc); Save Senator Kelly waited behind it
+    # Elvira: its rules' own start (v[22]) on the rule object, the rule's +0x32 its own running test reads (sweep p15,
+    # PAD-420's NVRAM past Guided Setup); the probe p14 started They Came From Space the same way, 6 balls
+    "elvira3-1.13",   # House Party started (+0x32, 4 balls, the House lit up); They Came From Space waited
 })
 #: how a mode hands one over: lit for the game's start shot, or started at once
 WIZARD_HOW = ("light", "start")
@@ -952,17 +1674,56 @@ WIZARD_HOW = ("light", "start")
 WIZARD_NAME_MAX = 40
 
 
+#: PAD-473: the C++ titles' route (pad_mode_runtime.c wizm_arm): each mini-wizard's mode object (`data
+#: wizard_obj_<n>`), started by the title's START virtual and asked its ACTIVE one - these values; a `data
+#: wizard_ready_<n>` is the game's own mode that lights it for a start shot
+WIZARD_MODE_NEEDS = ("stock_slot_start", "stock_slot_active")
+
+
+def _wizard_route(port):
+    """PAD-473: 1 James Bond's wizard table (WIZARD_NEEDS), 2 the C++ titles' mode objects, 3 the plain-C titles'
+    start functions (`site wizard_go_<n>`), 0 none complete."""
+    sites, data = WIZARD_NEEDS
+    if all(n in port["site"] for n in sites) and all(n in port["data"] for n in data):
+        return 1
+    if "wizard_obj_1" in port["data"] and all(n in port["value"] for n in WIZARD_MODE_NEEDS):
+        return 2
+    if "wizard_go_1" in port["site"]:
+        return 3
+    return 0
+
+
+def _wizard_whole(port, route, n):
+    """PAD-473: the lines mini-wizard ``n`` needs on its route: its mode object (2); its start and how it says it runs
+    - a game flag where the port names the flag bitmap, a process of its own where it names proc_exists, or a byte of
+    its own (3)."""
+    if route == 2:
+        return "wizard_obj_%d" % n in port["data"]
+    if route == 3:
+        if "wizard_go_%d" % n not in port["site"]:
+            return False
+        if "wizard_flag_%d" % n in port["value"]:
+            return "game_flags" in port["data"]
+        if "wizard_proc_%d" % n in port["value"]:
+            return "proc_exists" in port["site"]
+        return "wizard_running_%d" % n in port["data"]
+    return True
+
+
 def _game_wizards(port):
     """PAD-436: ``((name, film), ...)`` in number order: the port's mini-wizards as the runtime arms them -
     `text wizard_name_<n>` numbered from 1 with no gaps, each with its film (`text wizard_film_<n>`, "" when not
-    named). () when the port lacks the lines the runtime needs."""
+    named; PAD-473: on the mode and function routes, what earns it), each with the lines its route needs
+    (_wizard_whole). () when the port lacks the lines the runtime needs."""
     if not port:
         return ()
-    sites, data = WIZARD_NEEDS
-    if not (all(n in port["site"] for n in sites) and all(n in port["data"] for n in data)):
+    route = _wizard_route(port)
+    if not route:
         return ()
     out, n = [], 1
     while port["text"].get("wizard_name_%d" % n, "").strip():
+        if not _wizard_whole(port, route, n):
+            break
         name = port["text"]["wizard_name_%d" % n].strip()
         if len(name) < WIZARD_NAME_MAX:
             out.append((name, port["text"].get("wizard_film_%d" % n, "").strip()))
@@ -970,8 +1731,37 @@ def _game_wizards(port):
     return tuple(out)
 
 
+def _wizard_lights(port):
+    """PAD-473: the names of the mini-wizards a mode can LIGHT for the game's start shot: all of Bond's table; on the
+    mode route, the ones the game lights through a mode of its own (`data wizard_ready_<n>`); none on the function
+    route. The rest are started."""
+    names = _game_wizards(port)
+    if not names or _wizard_route(port) == 1:
+        return tuple(n for n, _f in names)
+    return tuple(n for k, (n, _f) in enumerate(names, 1) if "wizard_ready_%d" % k in port["data"])
+
+
+#: PAD-473: the games with no mini-wizard of their own, by game directory (the same game on every version), and
+#: what they have instead: read from each newest build's own modes and its rules (docs/plans/pad473_mini_wizards.md).
+#: The Modes tab leaves the section out on them, as it does a machine part a machine does not have
+#: (MACHINE_HARDWARE).
+NO_GAME_WIZARDS = {
+    # its one wizard, Munster Madness (cmunster_madness, _ii, _ready), is the final one: every family member a level
+    "munsters_le": "Munster Madness is its final wizard mode",
+    "munsters_pro": "Munster Madness is its final wizard mode",
+    # the Home Edition's own rules (not the 2017 game's): Jedi Multiball, all four characters done, is its only one
+    "star_wars_elg": "Jedi Multiball is its only wizard mode",
+    # a game of its own (not the 2022 Bond's films): 007 Mode, its three multiballs started, is its only one
+    "james_bond_60th_le": "007 Mode is its only wizard mode",
+}
+
+
 def _wizards_cannot(key, label, port=None):
     """The ``cannot`` entry for the game's own mini-wizards on build ``key``, or () when a mode can hand one over."""
+    game = key.rsplit("-", 1)[0]
+    if game in NO_GAME_WIZARDS and not _game_wizards(port):
+        return (("wizard", "%s has no mini-wizards of its own (%s), so there is none for a mode of yours to hand to "
+                           "the player." % (label, NO_GAME_WIZARDS[game])),)
     if not _game_wizards(port):
         return (("wizard", "The app has not found %s's own mini-wizards, so a mode of yours cannot hand one to the "
                            "player." % label),)
@@ -987,6 +1777,10 @@ def _wizards_cannot(key, label, port=None):
 #: the emulator; a coil not here is not offered.
 COIL_MIN_MS = 100
 COIL_MAX_MS = 5000                     # pad_mode_runtime.c MAGNET_MAX_MS: every held coil's cap
+#: PAD-621: the longest hold of any held coil: a post the game holds the ball with for longer than COIL_MAX_MS may be
+#: held as long as the game's own longest there (`value <name>_max_ms`: James Bond's right return up post, 14 s at a
+#: mini-wizard's start); never above this
+COIL_LONGEST_MS = 14000
 HELD_COILS_PROVEN = frozenset({
     ("godzilla_le-1.16", "mg_magnet"),  # 2026-10-05 rig 1, the stock Premium/LE card: held 2000 ms as the mode started (255 for 250, then 80 for 1750: its own adjustments), OFF at its end
     ("godzilla_le-1.16", "bridge"),     # the same run: held 2000 ms on the left ramp (255 for 300, then 25 for 1700), a hit mid-hold refused, held again, a mode stop let go 617 ms early; no abort
@@ -1008,6 +1802,11 @@ HELD_COILS_PROVEN = frozenset({
     ("jaws_pro-1.02", "right_post"),
     ("led_zeppelin_pro-1.22", "control_gates"),  # PAD-420 2026-10-07 coil_job (stock card, hidden, muted): node 9 coil 5, 255 for 60 ms then 96 (its own); OFF 2015 ms on; a mode stop 1.5 s in let go 1499 ms on; no abort
     ("star_wars_elg-1.10", "right_gate"),        # PAD-420 2026-10-07 coil_job (stock card, hidden, muted): node 8 coil 2, 255 for 60 ms then 128 (its own); OFF 2014 ms on; a mode stop 1.5 s in let go 1500 ms on; no abort
+    # PAD-1285 2026-11-14, the Spike 3 card (rig slots 85/87, hidden, muted): node 8 coil 2 is the game's device 9, its object
+    # (0x711730) taken through coil_take; held 2000 ms at the start and 1500 ms on shots, each ONE command on the bus
+    # (`40 02 ff 06 00 80 c1 00`: 255 for ~60 ms, then 128 for 1.93 s), given back at its time or 483 ms early when the mode
+    # ended; refused while the game's own 20 s commands held it; no abort
+    ("star_wars_elg-1.10/spike3", "right_gate"),
     ("sword_of_rage_le-1.19", "control_gates"),  # PAD-420 2026-10-07 coil_job (stock card, hidden, muted): node 9 coil 0, 255 for 60 ms then 96 (its own); OFF 2015 ms on; a mode stop 1.5 s in let go 1500 ms on; no abort
     ("sword_of_rage_pro-1.19", "control_gates"), # PAD-420 2026-10-07 coil_job (stock card, hidden, muted): node 9 coil 0, 255 for 60 ms then 96 (its own); OFF 2015 ms on; a mode stop 1.5 s in let go 1499 ms on; no abort
     ("deadpool_le-1.16", "control_gates"),       # PAD-420 2026-10-07 coil_job (stock card, hidden, muted): node 9 coil 6, 255 for 60 ms then 96 (its own); OFF 2015 ms on; a mode stop 1.5 s in let go 1500 ms on; no abort
@@ -1049,7 +1848,9 @@ HELD_COILS_PROVEN = frozenset({
     ("venom_le-1.07", "up_post"),                # PAD-420 2026-10-08 coil_job_c (stock card, hidden, muted): node 9 coil 1, 255 for 32 ms then 48 (the game's own), at most 1032 ms; held 1030 ms to its end; a mode stop 0.7 s in sent the game's OFF; no abort
     ("james_bond_le-1.06", "jet_pack_magnet"),   # PAD-420 2026-10-08 coil_job_c (stock card, hidden, muted): node 9 coil 0, 255 for 1000 ms then 15 (the game's own); held 2000 ms to its end; a mode stop 0.7 s in sent the game's OFF; no abort
     ("james_bond_le-1.06", "gate"),              # PAD-420 2026-10-08 coil_job_c (stock card, hidden, muted): node 9 coil 6, 255 for 64 ms then 96 (the game's own); held 1990 ms to its end; a mode stop 0.7 s in sent the game's OFF; no abort
+    ("james_bond_le-1.06", "right_return_up"),  # PAD-621 2026-10-19 (stock card, hidden, muted; a mode started on the Right ramp exit, `coil_hold right_return_up 6000 wait`): process 13187 took control, ONE command node 8 coil 7 255 for 60 ms then 48 for 5930 ms (the game's own, AD_BOTTOM_LANE_UP_POST_POWER), no OFF of the game's through slingshot hits, let go at 6011 ms, the clock 20 s from then; the game's modes held off and stacked alike; no abort
     ("james_bond_pro-1.06", "gate"),             # PAD-420 2026-10-08 coil_job_c (stock card, hidden, muted): node 9 coil 6, 255 for 64 ms then 96 (the game's own); held 1990 ms to its end; a mode stop 0.7 s in sent the game's OFF; no abort
+    ("james_bond_pro-1.06", "right_return_up"), # PAD-621 2026-10-19 (stock card, hidden, muted; a mode started on the Right ramp exit, `coil_hold right_return_up 9000 wait`): process 13186 took control, ONE command node 8 coil 7 255 for 60 ms then 48 for 8930 ms (past the 5 s: the post's own longest is 14 s), let go at 9011 ms, the clock 20 s from then; no abort
     ("elvira3-1.13", "gate"),                    # PAD-420 2026-10-08 coil_job_c2 (stock card, hidden, muted; coins one at a time): node 9 coil 5, 255 for 64 ms then 96 (the game's own); held 1990 ms to its end; a mode stop 0.7 s in sent the game's OFF; no abort
     ("aerosmith_le-1.16", "upper_gate"),         # PAD-420 2026-10-08 coil_job_c (stock card, hidden, muted): node 10 coil 0, 255 for 250 ms then 255 (the game's own), at most 1488 ms; held 1480 ms to its end; when the game raised it mid-hold, let go with no OFF of its own; no abort
     ("aerosmith_le-1.16", "toy_box_magnet"),     # PAD-420 2026-10-08 coil_job_c (stock card, hidden, muted): node 9 coil 0, 255 for 1000 ms then 16 (the game's own, its ToyBoxMagnet's grab - device 17 by its static object; its hold runs 5 s, so the runtime's 5 s cap); held 2000 ms to its end; a mode stop 0.7 s in sent the game's OFF; no abort
@@ -1102,13 +1903,24 @@ def _held_coils(port):
 
 def _coil_caps(port, names):
     """PAD-420: ``((name, ms), ...)`` for the held coils whose `_drive` line names the game's own longest command
-    on the coil, where that is shorter than COIL_MAX_MS: a hold of it is never longer (pad_mode_runtime.c)."""
+    on the coil, where that is shorter than COIL_MAX_MS: a hold of it is never longer (pad_mode_runtime.c).
+    PAD-621: and a coil whose port names `value <name>_max_ms`: the game's own longest hold there (a post the game
+    holds the ball with longer than COIL_MAX_MS), up to COIL_LONGEST_MS."""
     out = []
     for name in names:
         words = port["text"].get("%s_drive" % name, "").split("#")[0].split() if port else []
-        if len(words) == 6 and words[5].isdigit() and int(words[5]) < COIL_MAX_MS:
+        top = port["value"].get("%s_max_ms" % name) if port else None
+        if isinstance(top, int) and COIL_MIN_MS <= top:
+            out.append((name, min(top, COIL_LONGEST_MS)))
+        elif len(words) == 6 and words[5].isdigit() and int(words[5]) < COIL_MAX_MS:
             out.append((name, int(words[5])))
     return tuple(out)
+
+
+def coil_max_ms(p, name):
+    """PAD-621: the longest hold of held coil ``name`` on title ``p``: its own cap (shorter or, for a post the game
+    keeps up itself, longer), else COIL_MAX_MS."""
+    return dict(getattr(p, "coil_caps", ()) or ()).get(name, COIL_MAX_MS)
 
 
 def _coils_cannot(key, label, port=None):
@@ -1144,6 +1956,9 @@ GODZILLA_PRO_1_15 = replace(GODZILLA_PRO_1_15, cannot=_multiball_cannot("godzill
                             + _scoop_cannot("godzilla_pro-1.15", "Godzilla Pro 1.15")
                             + _coils_cannot("godzilla_pro-1.15", "Godzilla Pro 1.15")
                             + _shield_cannot("godzilla_pro-1.15", "Godzilla Pro 1.15")
+                            + _building_cannot("godzilla_pro-1.15", "Godzilla Pro 1.15")
+                            + _roster_cannot("godzilla_pro-1.15", "Godzilla Pro 1.15")
+                            + _challenge_cannot("godzilla_pro-1.15", "Godzilla Pro 1.15")
                             + _shaker_cannot("godzilla_pro-1.15", "Godzilla Pro 1.15")
                             + _shows_cannot("Godzilla Pro 1.15")
                             + _wizards_cannot("godzilla_pro-1.15", "Godzilla Pro 1.15"))
@@ -1166,17 +1981,44 @@ STACK_BALLS_PROVEN = frozenset({
     "uncanny_xmen_pro-0.98",             # PAD-420 2026-10-07 st_job (stock card, hidden, muted): our own multiball stopped with its three balls in play, a stack no mode refused (a multiball is running), then started at one ball: WAITER not started (trigger file): a multiball is running
     "aerosmith-1.16",                    # PAD-420 2026-10-07 st_job (stock card, hidden, muted): our own multiball stopped with its three balls in play, a stack no mode refused (a multiball is running), then started at one ball: WAITER not started (trigger file): a multiball is running
     "batman-1.14",                       # PAD-420 2026-10-08 st_job (stock card, hidden, muted; the port's 22 block lines in): our own multiball stopped with its three balls in play, a stack no mode refused (a multiball is running), then started at one ball: WAITER not started (trigger file): a multiball is running
+    "star_wars_elg-1.10/spike3",         # PAD-1285 2026-11-14 stackmb (Spike 3 rig slot 86, hidden, muted): the game's own Death Star multiball held a stack no mode back twice (a multiball is running); two drains later it started on its trigger
+    "star_wars_2025_pro-0.84/spike3",    # PAD-1291 2026-11-15 stackmb (Spike 3 rig slot 240, hidden, muted): six centre (jump) ramp shots started the game's own 2-ball multiball; a stack no mode was held back (a multiball is running) and started on its trigger after the drain to one ball
 })
 
 
-def end_sound_carried(game, version):
+def end_sound_carried(game, version, arch="arm"):
     """item 164: a title whose time-up callout is not known can still end a mode with a sound
     of its own - on a CARRIER, swapped in while the mode plays (item 163's key swap, the route
     its start and shot sounds take); mode_file.c's ``sound_end`` plays it when time runs out.
-    True when the title has swap carriers measured (mode_sounds)."""
+    True when the title has swap carriers measured (mode_sounds; *arch* "a64": its Spike 3 build's)."""
     from . import mode_sounds as MS
-    c = MS.carriers(game, version)
+    c = MS.carriers(game, version, arch)
     return bool(c and c.swap and c.calls)
+
+
+#: PAD-479: builds whose voice has no "time is up" line: every request's first five clips (mono and stereo,
+#: <= 4.5 s; PAD-420's run had read mono only, and Star Wars speaks in stereo) transcribed (C:/tmp/PAD-479/t2
+#: voices.py + pick_tu.py, 2026-10-14) and no request says the time is up in every clip it may play, so the game's
+#: own call cannot end a mode there - a game limit, said in grey. A mode's own end sound still can
+#: (end_sound_carried). Near misses: Deadpool's "Time's up!" is one of request 261's 25 random lines; X-Men's
+#: 565 "... nine, Time!" is a count to ten like 557-567 (a misheard "Ten"); the "almost out of time" lines are
+#: the ten-seconds calls. The requests whose records the resolver could not name are the music block (Deadpool
+#: 62-177, John Wick 112-126) or name no record on the card (every descriptor site was named on each build).
+TIME_UP_NONE = frozenset({
+    "beatles-1.29", "deadpool_le-1.16", "deadpool_pro-1.16", "elvira3-1.13", "john_wick_le-1.02",
+    "john_wick_pro-1.02", "jurassic_park_the_pin-1.05", "led_zeppelin_le-1.22", "led_zeppelin_pro-1.22",
+    "star_wars_elg-1.10", "star_wars_le-1.31", "star_wars_pro-1.31", "turtles_le-1.59", "turtles_pro-1.59",
+    "uncanny_xmen_le-0.98", "uncanny_xmen_pro-0.98",
+})
+
+
+def own_music_none(game, version, arch="arm"):
+    """PAD-479: True when a mode's own music cannot ride on title ``game`` ``version`` because the game
+    has no spare music: its carriers were measured (item 163's census) and every stereo music request is
+    one the game plays, and no music bed is free either (The Beatles, Deadpool) - a game limit."""
+    from . import mode_sounds as MS
+    c = MS.carriers(game, version, arch)
+    return bool(c is not None and c.swap and not c.music and not c.beds)
 
 
 #: item 164: the plain-C titles whose OTHER modes a ``stack no`` mode was seen wait for in the emulator:
@@ -1185,6 +2027,7 @@ def end_sound_carried(game, version):
 STACK_FLAGS_PROVEN = frozenset({
     "jurassic_park_the_pin-1.05",     # 2026-09-25: Stegosaurus (flag 40) held a stack no mode back
     "star_wars_elg-1.10",             # Inner loop (flag 86)
+    "star_wars_elg-1.10/spike3",      # PAD-1285 2026-11-14 (Spike 3 rig slot 86): the game's Ramps start (flag 87, called as its rules call it) held a stack no mode back 21 times; with nothing running the same start had run
     "stranger_things_le-1.12",        # Bust out (flag 78)
     "james_bond_le-1.06",             # Bust out (flag 102), and the flag cleared when it ended
     "batman-1.13",                    # Shame (flag 71, its start takes one argument), cleared when it ended
@@ -1330,8 +2173,22 @@ RUNTIME_CORE = (("tick", "shot_dispatch", "ball_end", "score_add"), ("cur_player
 INSIDER_GATE_SITES = ("agent_header", "agent_begin")
 #: what the Modes page and a Write say about a card that carries modes
 INSIDER_NOTE = ("Insider Connected: players still log in on a card with modes, but the machine "
-                "sends no game, score, high-score or achievement report to Insider Connected. A "
-                "mode's points are not the game's stock scoring, so they stay on the machine.")
+                "sends no game, score, high-score or achievement report to Insider Connected, and the "
+                "game awards no Insider achievements. A mode's points are not the game's stock "
+                "scoring, so they stay on the machine.")
+
+#: PAD-1204: the Modes tab's banner. David: "users see the banner at the top and assume they lose IC access which is
+#: important to a lot of users" - so it says which things on the tab hold the reports back, and that the ones under
+#: KEEPS_IC_HEAD do not
+INSIDER_TAB_NOTE = ("Insider Connected with modes or co-op play on the card: players still log in, but the machine "
+                    "sends no game, score, high-score or achievement report to Insider Connected, and the game "
+                    "awards no Insider achievements, because a mode's points are not the game's stock scoring. "
+                    "The Play options tab's options (handicaps, Prolonged Competition, the score feed, inactivity "
+                    "pausing the timers) change no score: a card with only those stays fully on Insider Connected.")
+#: PAD-1204: the Play options tab's note, the options that change no score
+KEEPS_IC_HEAD = "Insider Connected keeps working"
+KEEPS_IC_NOTE = ("Nothing on this tab changes a score, so a card carrying only these stays on Insider Connected: "
+                 "players' scores, high scores and achievements reach it as before.")
 
 
 def insider_gate_words(label):
@@ -1349,7 +2206,28 @@ BUS_IDS = 208
 #: proven (:attr:`TitleProfile.switch_shots_note`).
 #: beatles-1.29: emulator-proven 2026-09-23, each of 73-76 and 48-51 gave exactly one shot in play, the
 #: slingshots none, and a mode file started on Target 1 and scored on Target 2-4 and the return lanes.
-SWITCH_SHOTS_PROVEN = frozenset({"beatles-1.29"})
+#: The Spike 3 ports have no shot dispatch: every shot is a switch line through the two switch_hit sites
+#: (PAD-1289 2026-11-15, the banner was still up on all three):
+#: star_wars_elg-1.10/spike3: PAD-1271 (slot 41) TRENCH RUN started on its third trigger hit and scored five shots;
+#: walking_dead_remastered_le-0.92/spike3: PAD-1287 (slot 37) TARGET RUSH started on the third Tower target hit
+#: (switch 54) and scored 6 shots;
+#: pokemon_le-0.82/spike3: PAD-1289 (slot 129, `value switch_hit_log`) Berry target left 36, Left orbit 48, Rear ramp
+#: made 50, Captive ball-target 71 each one hit and one shot, a mode started on Berry target left x3 and scored on the
+#: other three, and the written card's mode scored on Left outlane and Left return lane.
+#: PAD-1290 (2026-11-15, Spike 3 rig slot 190, hidden, muted): Star Wars 2025 LE 0.96's - proofs/s3census.sh pressed
+#: each of its 32 drafted switches in a game, 27 reached the modes on ids of their own (the port's lines are those ids:
+#: the table's ranks were wrong from its RIGHT TARGET on), and a mode file started on Right target x3 and scored on Left
+#: orbit, At-at target and Right orbit.
+#: star_wars_2025_pro-0.84/spike3: PAD-1291 2026-11-15 (Spike 3 rig slot 240, hidden, muted): a mode file with all
+#: 27 of its port's switch lines as shots (proofs/modes/allshots.cfg) took 54 shots for 54 presses (each switch twice)
+#: and ended on its clock; its ids are the ones the game sent in a census (proofs/titles/star_wars_2025_pro-0.84.switch_ids).
+#: transformers_mtmte_le-0.96/spike3: PAD-1293 2026-11-16 (Spike 3 rig slot 160, hidden, muted): the census pressed all
+#: 37 of its switch lines in a game and every one reached the modes from the switch drain's edges, each id 3 below its
+#: device-table rank (proofs/titles/transformers_mtmte_le-0.96.switch_ids); a mode file started on Megatron target left
+#: x3 and scored 6 shots on Right orbit, Center loop and Left orbit.
+SWITCH_SHOTS_PROVEN = frozenset({"beatles-1.29", "star_wars_elg-1.10/spike3", "walking_dead_remastered_le-0.92/spike3",
+                                 "pokemon_le-0.82/spike3", "star_wars_2025_le-0.96/spike3",
+                                 "star_wars_2025_pro-0.84/spike3", "transformers_mtmte_le-0.96/spike3"})
 #: Builds whose shots from the framework's switch drain (site switch_edge, `switch` lines) were seen
 #: reaching a mode in the emulator, each switch once, as ``<game>-<version>`` (2026-09-23: The Beatles
 #: 1.29 and Star Wars ELG 1.10 of generation B, Batman 66 1.13 and Rush LE 1.18 of generation A).
@@ -1362,9 +2240,19 @@ SWITCH_SHOTS_PROVEN = frozenset({"beatles-1.29"})
 #: one shot per press, in play, each on its own bit (the outlanes 59 and 62 too); Coffin lock 1-3 (89-91) gave none,
 #: even held 2.5 s - their descriptor flags are 0x0020 (the playfield's 0x0003), which the drain does not pass in
 #: play, the same switch table as 1.03's.
+#: PAD-1322 (2026-11-15, Spike 3 rig slots 91 / 92, PROOF=edge): the two Spike 3 ports that carry the 64-bit switch_edge
+#: source - Star Wars ELG 1.10 (Top lane center x3 started EDGE TEST, Center / Hidden target and Left Luke orbit scored
+#: one hit per press, the slingshots and Right pop bumper too) and Walking Dead Remastered LE 0.92 (Tower target x3
+#: started it, Left loop / Right loop / Right spinner scored six shots); keyed here by PAD-1289, whose merge found the
+#: "not seen reaching a mode" banner back on both once their shots came from the edges.
+#: PAD-1293 (2026-11-16, Spike 3 rig slots 160-163): Transformers LE 0.96's shots come from the same edges ("the switch
+#: drain's edges (switch_edge ... the record in x19, the game's mode mask applied)"): the census above and four modes
+#: started on Megatron target left x3 and scored on Right orbit, Center loop and Left orbit.
 SWITCH_EDGE_PROVEN = frozenset({"beatles-1.29", "star_wars_elg-1.10", "batman-1.13", "rush_le-1.18",
                                 "godzilla_pro-1.15", "godzilla_pro-1.16", "godzilla_le-1.16",
-                                "metallica_spike-1.04"})
+                                "metallica_spike-1.04",
+                                "star_wars_elg-1.10/spike3", "walking_dead_remastered_le-0.92/spike3",
+                                "transformers_mtmte_le-0.96/spike3"})
 
 
 def _core_names(port):
@@ -1475,6 +2363,10 @@ TITLE_SCENES = {
     "munsters_pro-1.28": dict(screen_proven=True, hud="056ab46ff95f247af8217f23eae382df", bank="056ab46ff95f247af8217f23eae382df", clip_proven=True),   # PAD-420 2026-10-07 media proof (stock card, hidden, muted): our screen and clip seen on the glass (magenta 87% clip, 6.5% screen, 0.0% before)
     "rush_le-1.19": dict(screen_proven=True, hud="85f8f187e7bffe0d434076d406d7366c", bank="85f8f187e7bffe0d434076d406d7366c", clip_proven=True),   # PAD-420 2026-10-07 media proof (stock card, hidden, muted): our screen seen on the glass (magenta 6.5% screen, 0.0% before); the clip not yet; PAD-420 2026-10-08 media proof (round 7, no census): the clip seen on the glass over the song video (magenta 73%) in a Video grafted into the HUD
     "rush_pro-1.19": dict(screen_proven=True, hud="4509258cd7d67da57a14d337ae421721", bank="4509258cd7d67da57a14d337ae421721", clip_proven=True),   # PAD-420 2026-10-08 media proof (round 3) (stock card, hidden, muted): our screen seen on the glass (magenta 6.5% screen, 0.0% before); the clip not yet; PAD-420 2026-10-08 media proof (round 7, no census): the clip seen on the glass over the song video (magenta 73%) in a Video grafted into the HUD
+    # PAD-1284: the Spike 3 build. Its video bank is the Spike 2 build's file; its HUD differs from it in 3 bytes of
+    # one texture block (scene_write.PROFILES carries it as its own)
+    "star_wars_elg-1.10/spike3": dict(hud="be374b87996e190f23897bd33dffbf23", screen_proven=True,
+                                      bank="895f74e53622cf5acfa55a1df89a8fc8", clip_proven=True),
     "star_wars_le-1.31": dict(screen_proven=True, hud="9183de0da4e6ed603f16064ec7a8493b", bank="8d984a6a6e50a1d50241c80c0edab0b5", clip_proven=True),   # PAD-420 2026-10-08 media proof (stock card, hidden, muted; the ball-start hero / path choice confirmed with the Action Button first): our screen and clip seen on the glass (magenta 44% clip, 45% screen, 0.0% before)
     "star_wars_pro-1.31": dict(screen_proven=True, hud="101c344663e5acdcf0e9e5d42ef0f2ae", bank="8d984a6a6e50a1d50241c80c0edab0b5", clip_proven=True),   # PAD-420 2026-10-08 media proof (round 4: two playfield switches first, its ball-start path/hero choice off the glass) (stock card, hidden, muted): our screen and clip seen on the glass (magenta 44% clip, 45.1% screen, 0.0% before)
     "stranger_things-1.13": dict(screen_proven=True, hud="e3bb429535838471027451e9f6f86950", bank="e3bb429535838471027451e9f6f86950", clip_proven=True),   # PAD-420 2026-10-07 media proof (stock card, hidden, muted): our screen seen on the glass (magenta 6.5% screen, 0.0% before); the clip not yet; PAD-420 2026-10-08 media proof (round 7, no census): the clip seen on the glass (magenta 75%) in a Video grafted into the HUD - its HUD draws no video bank in play
@@ -1519,6 +2411,7 @@ _TITLE_NAMES = {
     "rush": "Rush",
     "star_wars": "Star Wars",
     "star_wars_elg": "Star Wars ELG",
+    "transformers_mtmte": "Transformers",            # PAD-1293: the Spike 3 card's stem
     "stranger_things": "Stranger Things",
     "sword_of_rage": "Sword of Rage",
     "turtles": "TMNT",
@@ -1549,6 +2442,20 @@ def _title_words(base):
         else:
             out.append(w[:1].upper() + w[1:])
     return " ".join(out)
+
+
+def clip_frame(title, default=(1360, 768)):
+    """PAD-562: ``(w, h)`` a mode's own clip is made at on ``title`` (a profile key): the size of
+    the game's own clips in its bank (:data:`.video_bank.CLIP_FRAMES`, Bond's 920x416 TV), else
+    ``default``, the bank Video's size on every other title. For a cut made before the build
+    (From a film), so it is already the shape the game shows."""
+    from . import video_bank as VB
+    try:
+        prof = profile(title)
+    except ModeProjectError:
+        return default
+    bank = TITLE_SCENES.get("%s-%s" % (prof.game_dir, prof.version), {}).get("bank")
+    return VB.CLIP_FRAMES.get(bank, default)
 
 
 def title_label(game, version=""):
@@ -1593,6 +2500,7 @@ def read_port(path):
     out = dict(game="", version="", site={}, data={}, value={}, callout={}, shot=[],
                scene={}, text={}, header=[], event=[])
     out["lamp"] = []                      # item mode-leds: [(name, (r, g, b) light ids, shot mask)]
+    out["cablamp"] = []                   # PAD-1040: the cabinet's expression lights [(name, (r, g, b), u)]
     out["switch"] = []                    # shots from switches: [(switch id, shot mask, name)]
     body = False
     with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -1634,6 +2542,10 @@ def read_port(path):
                     lamp = _port_lamp(rest)
                     if lamp:
                         out["lamp"].append(lamp)
+                elif key == "cablamp":            # PAD-1040: `cablamp <R,G,B> <u> <name>`, as the runtime's cab_line
+                    lamp = _port_lamp(rest)
+                    if lamp:
+                        out["cablamp"].append(lamp)
                 elif key == "switch":             # `switch <id> <shot mask> <name>`: a switch's hit is a shot
                     sw, mask, name = rest.split(None, 2)
                     sw, mask, name = _port_number(sw), _port_number(mask), name.strip()
@@ -1667,6 +2579,49 @@ def _hud_is_profiled(md5):
     return md5 in scene_write.PROFILES
 
 
+#: PAD-1277: a Spike 3 profile's key ends in this, after the version (``star_wars_elg_1_10_spike3``):
+#: Star Wars ELG 1.10 is a Spike 2 build AND a Spike 3 build, and a project's modes name their
+#: title by key, so the two must never share one.
+SPIKE3_KEY = "_spike3"
+#: ... and its label ends in this, so the two builds read apart wherever both are named.
+SPIKE3_LABEL = " (Spike 3)"
+
+
+def profile_key(game, version, arch="arm"):
+    """A profile's key: the game dir and the version with its dots as underscores
+    (``turtles_pro_1_59``), and :data:`SPIKE3_KEY` after it for a Spike 3 build."""
+    return "%s_%s%s" % (game, str(version).replace(".", "_"), SPIKE3_KEY if arch == "a64" else "")
+
+
+def table_key(game, version, arch="arm"):
+    """The key the proven-in-the-emulator tables (LAMPS_PROVEN, TITLE_SCENES ...) use for a
+    build: ``<game>-<version>``, with ``/spike3`` after it for a Spike 3 build."""
+    return "%s-%s%s" % (game, version, "/spike3" if arch == "a64" else "")
+
+
+def _key_build(key):
+    """A profile key with :data:`SPIKE3_KEY` taken off (the game dir + version that are left)."""
+    key = str(key or "")
+    return key[:-len(SPIKE3_KEY)] if key.endswith(SPIKE3_KEY) else key
+
+
+#: what a shipped Spike 3 port's name starts with in a profile (:func:`_port_name`)
+SPIKE3_PORT_PREFIX = "spike3/"
+
+
+def _port_name(path):
+    """What a profile records as its port (:func:`port_path` joins it back): the file name for
+    a shipped Spike 2 port, ``spike3/<name>`` for a shipped Spike 3 one, else the whole path."""
+    from . import mode_runtime
+    d = os.path.normcase(os.path.dirname(os.path.abspath(path)))
+    base = os.path.basename(path)
+    if d == os.path.normcase(os.path.abspath(PORTS_DIR)):
+        return base
+    if d == os.path.normcase(os.path.abspath(mode_runtime.spike3_ports_dir())):
+        return SPIKE3_PORT_PREFIX + base
+    return path
+
+
 def profile_from_port(path):
     """A :class:`TitleProfile` derived from one SDK port file (item 148): its shots,
     callout ids, light owner and set, scenes and example shot, what the runtime would arm
@@ -1680,6 +2635,12 @@ def profile_from_port(path):
     game, version = port["game"].strip(), port["version"].strip()
     if not game or not version:
         raise ModeProjectError("%s names no game and version" % base)
+    from . import mode_runtime
+    arch = mode_runtime.port_arch(path)
+    # PAD-1277: what the emulator proved of a build is keyed "<game>-<version>"; a Spike 3
+    # build of a game folder and version Spike 2 also has is another program, so its proofs
+    # are its own ("<game>-<version>/spike3") and none of the Spike 2 build's carry over.
+    tkey = table_key(game, version, arch)
     sites, data, values = port["site"], port["data"], port["value"]
     missing = core_missing(port)
     if missing:
@@ -1688,15 +2649,19 @@ def profile_from_port(path):
     shots, switch_shots = _shots_with_switches(port)
     if not shots:
         raise ModeProjectError("%s names no shots" % base)
+    # PAD-1284: the 64-bit runtime builds its std::strings itself (the program's are the C++11 ABI and it
+    # imports no constructor), so a Spike 3 port's screens and clips need no string_new site
+    have = set(sites) | ({"string_new"} if arch == "a64" else set())
     runtime = tuple(cap for cap, (s, d, v) in RUNTIME_NEEDS.items()
-                    if all(n in sites for n in s) and all(data.get(n) for n in d)
+                    if all(n in have for n in s) and all(data.get(n) for n in d)
                     and all(n in values for n in v))
-    if "clips" not in runtime and (_clip_layer(sites, data, values) or _clip_v2(sites, data, values, port["scene"])):
+    if "clips" not in runtime and (_clip_layer(have, data, values) or _clip_v2(have, data, values, port["scene"])):
         runtime = tuple(c for c in RUNTIME_NEEDS if c in runtime or c == "clips")
-    label = title_label(game, version)
+    label = title_label(game, version) + (SPIKE3_LABEL if arch == "a64" else "")
     callouts, scenes = port["callout"], port["scene"]
-    measured = TITLE_SCENES.get("%s-%s" % (game, version), {})
+    measured = TITLE_SCENES.get(tkey, {})
     cannot = []
+    limits = []
 
     def no(part, why):
         cannot.append((part, why % dict(label=label)))
@@ -1704,13 +2669,14 @@ def profile_from_port(path):
     if "callout" not in runtime:
         no("countdown", "The app has not found how %(label)s plays its callouts, so the game's "
                         "own voice cannot count down.")
-    elif not callouts.get("countdown") and "%s-%s" % (game, version) in COUNTDOWN_NO_NUMBERS:
+    elif not callouts.get("countdown") and tkey in COUNTDOWN_NO_NUMBERS:
         no("countdown", "%(label)s's voice never says a number on its own (every callout on the "
                         "card was checked), so the game's own voice cannot count down.")
+        limits.append("countdown")                 # PAD-479: the game's, and no number is pushed in instead
     elif not callouts.get("countdown"):         # ten_seconds is optional: the count is 5..1 without it
         no("countdown", "The app does not know which of %(label)s's callouts count down, so the "
                         "game's own voice cannot count down.")
-    key = "%s-%s" % (game, version)
+    key = tkey
     stack_note = ""
     inserts_ok = _lamp_route(port) and key in LAMPS_PROVEN
     light_route = ""
@@ -1729,7 +2695,7 @@ def profile_from_port(path):
             no("lights", "The app has not found how %(label)s runs its light shows, so a mode "
                          "cannot sweep the playfield yet.")
     elif not values.get("light_lts"):
-        no("lights", "The app does not know a light show of %(label)s's to sweep a colour "
+        no("lights", "The app does not know a light show of %(label)s's to sweep a color "
                      "with.")
     hud = scenes.get("hud", "")
     if "screens" not in runtime:
@@ -1760,10 +2726,14 @@ def profile_from_port(path):
     elif not measured.get("clip_proven"):
         no("clip", "A clip added to %(label)s's video bank has not been seen on the screen in "
                    "the emulator yet.")
-    if "own-sound" not in runtime:
+    if arch == "a64" and not end_sound_carried(game, version, arch):
+        # PAD-1296: spike3_modes appends a mode's own sounds to the card's image.bin, swapped in on carriers
+        no("own_sound", "The app has not found spare sounds on %(label)s to carry a sound of the mode's own "
+                        "yet. The game's own callouts and sounds play.")
+    elif "own-sound" not in runtime:
         no("own_sound", "The app has not found how %(label)s looks up its sounds, so a sound of "
                         "the mode's own cannot play.")
-    elif not callouts.get("time_up") and not end_sound_carried(game, version):
+    elif not callouts.get("time_up") and not end_sound_carried(game, version, arch):
         no("own_sound", "The app does not know %(label)s's time-up callout, the one a sound of "
                         "the mode's own plays in place of.")
     if all(n in sites for n in STACK_NEEDS[0]) and all(data.get(n) for n in STACK_NEEDS[1]):
@@ -1780,6 +2750,8 @@ def profile_from_port(path):
     elif _stack_balls(sites) and key in STACK_BALLS_PROVEN and _stack_objects(data, values)             and key in STACK_OBJECTS_PROVEN:
         pass                                  # item 165: its modes too, from their own rule objects
     elif _stack_balls(sites) and key in STACK_BALLS_PROVEN:
+        if key in STACK_NOTE_WHY:
+            limits.append("stack")                 # PAD-479: Beatles' songs always run
         stack_note = (STACK_NOTE_WHY.get(key) or
                       "On %s a mode of yours waits only for the game's multiballs: the app cannot yet "
                       "see its other modes.") % label
@@ -1799,6 +2771,11 @@ def profile_from_port(path):
     cannot += list(_scoop_cannot(key, label, port))          # PAD-381
     cannot += list(_coils_cannot(key, label, port))          # PAD-381
     cannot += list(_shield_cannot(key, label, port))         # PAD-392
+    cannot += list(_building_cannot(key, label, port))       # PAD-589
+    cannot += list(_roster_cannot(key, label, port))         # PAD-589
+    cannot += list(_challenge_cannot(key, label, port))      # PAD-615
+    cannot += list(_place_cannot(key, label, port))          # PAD-710
+    cannot += list(_done_cannot(key, label, port))           # PAD-747
     cannot += list(_shaker_cannot(key, label, port))         # PAD-414
     cannot += list(_shows_cannot(label, port))               # PAD-418
     cannot += list(_wizards_cannot(key, label, port))        # PAD-436
@@ -1809,12 +2786,16 @@ def profile_from_port(path):
                      "drain.")
     proven =not any(UNPROVEN_MARK in line for line in port["header"])
     switch_note = ""
-    seen = SWITCH_EDGE_PROVEN if "switch_edge" in port["site"] else SWITCH_SHOTS_PROVEN
-    if switch_shots and "%s-%s" % (game, version) not in seen:
+    # PAD-645: the drain hands the switch lines on unless the port says it is there for the flipper
+    # buttons' sounds in attract alone (`value switch_edge_shots 0`, the runtime's switches_arm)
+    by_edge = ("switch_edge" in port["site"] and (port["value"].get("switch_edge_shots", 1) != 0
+                                                  or not any(s.startswith("switch_hit") for s in port["site"])))
+    seen = SWITCH_EDGE_PROVEN if by_edge else SWITCH_SHOTS_PROVEN
+    if switch_shots and tkey not in seen:
         switch_note = ("%s's shots from switches (%s) have not been seen reaching a mode in the "
                        "emulator yet." % (label, ", ".join(switch_shots)))
     return TitleProfile(
-        key="%s_%s" % (game, version.replace(".", "_")),
+        key=profile_key(game, version, arch),
         label=label,
         game_dir=game,
         shots=shots,
@@ -1826,7 +2807,8 @@ def profile_from_port(path):
         hud_scene=hud,
         bank_scene=bank,
         version=version,
-        port=path if os.path.dirname(os.path.abspath(path)) != os.path.abspath(PORTS_DIR) else base,
+        port=_port_name(path),
+        arch=arch,
         proven=proven,
         proven_note="" if proven else (
             "what the app knows of %s was drafted and has never run in the emulator, so a mode "
@@ -1839,14 +2821,20 @@ def profile_from_port(path):
         # item 147's events, as pad_mode_runtime.c's events_arm would arm them: a bus event
         # needs hook_dispatch, a site event its site. What each run measured is in the port.
         events=events,
-        sound_note=TITLE_SOUND_UNHEARD.get("%s-%s" % (game, version), ""),
+        sound_note=TITLE_SOUND_UNHEARD.get(tkey, ""),
         score_bits=32 if RUNTIME_CORE_32[0] in sites else 64,
         switch_shots=switch_shots,
         switch_shots_note=switch_note,
+        drain_shot=DRAIN_SHOT if DRAIN_SHOT in _internal_shots(port) else "",
         stack_note=stack_note,
+        limits=tuple(limits) + (("end_game",) if not callouts.get("time_up") and key in TIME_UP_NONE else ())
+        + (("own_music",) if own_music_none(game, version, arch) else ())
+        + (("magnet",) if key in MAGNET_GAME_LIMIT and key not in MAGNET_PROVEN else ()),   # PAD-475
         game_modes=_game_modes(port),
         game_rules=_game_rules(port),                        # PAD-398
         lamps=_lit_inserts(port) if key in LAMPS_PROVEN else 0,
+        inserts=_named_inserts(port) if key in LAMPS_PROVEN else (),       # PAD-503
+        white_shots=_white_shots(port) if key in LAMPS_PROVEN else (),     # PAD-733
         light_route=light_route,
         bank_tree=measured.get("bank_tree", "auto_loaded"),
         hud_tree=measured.get("hud_tree", "auto_loaded"),
@@ -1854,14 +2842,112 @@ def profile_from_port(path):
         held_coils=tuple((n, lab) for n, lab in _held_coils(port) if (key, n) in HELD_COILS_PROVEN),
         coil_caps=_coil_caps(port, [n for n, _l in _held_coils(port) if (key, n) in HELD_COILS_PROVEN]),   # PAD-420
         shield_rule=port["text"].get("shield_rule", "").strip(),             # PAD-392
+        building_rule=next((n for _i, n in _game_rules(port) if n in BUILDING_RULES), ""),   # PAD-589
+        roster=_roster(game, port) if not any(c[0] == "roster" for c in cannot) else (),   # PAD-589
+        roster_counts=bool(port and "battle_stop" in port["site"]),          # PAD-706
+        challenges=_challenges(port) if key in CHALLENGE_PROVEN and not any(c[0] == "challenge" for c in cannot) else (),   # PAD-615
+        challenge_menu=_challenge_menu(key, port) if not any(c[0] == "challenge" for c in cannot) else 0,
+        places=_places(port) if not any(c[0] == "place" for c in cannot) else (),   # PAD-710
+        done_modes=_done_modes(port) if not any(c[0] == "done" for c in cannot) else (),   # PAD-747
+        # PAD-619: not where a challenge is the game-play mode's index or a game-mode table's (Jaws, Godzilla, Venom:
+        # their Default Game Mode cannot select one) - only by its handler or its flag (Bond, Stranger Things, Rush)
+        challenge_by_default=bool(port) and not any(k.startswith(("challenge_mode_", "challenge_name_msg_"))
+                                                    for k in port["value"]),
         shakes=_shakes(port),                                                # PAD-414
         shake_max_ms=_shake_max_ms(port),                                    # PAD-414
         game_shows=_game_shows(port),                        # PAD-418
         # PAD-420: a machine part this build can do is never hidden, whatever MACHINE_HARDWARE read off its coils
-        absent=tuple(a for a in machine_absent(game) if a in dict(cannot)),
+        absent=tuple(a for a in machine_absent(game) if a in dict(cannot))
+        + (("wizard",) if game in NO_GAME_WIZARDS and not _game_wizards(port) else ()),    # PAD-473: a port's win
         game_wizards=_game_wizards(port),                    # PAD-436
         wizard_shot=port["text"].get("wizard_shot", "").strip(),
+        wizard_lights=_wizard_lights(port),                  # PAD-473
+        wizard_claims=_wizard_route(port) == 1 and "wizard_light" in port["site"],
+        status_bar=all(n in port["site"] for n in ("status_bar", "set_text", "string_new")),   # PAD-521
+        bond_women="bond_women_mult" in port["site"],                       # PAD-889
+        info_at=_info_at(port),                              # PAD-547
+        spare=_spare(port, key),                             # PAD-826
     )
+
+
+#: PAD-826: the builds whose spare inputs and outputs a mode used in the emulator (C:/tmp/PAD-826/spare_sweep_job.sh
+#: on the stock card, hidden, muted: the switch struct checked out, a spare input set through /dump/spare_in came to the
+#: mode as its shot in a game, and the spare output it then pulsed went out on the bus as [coildrive] node N coil O)
+SPARE_IO_PROVEN = frozenset({
+    "godzilla_pro-1.16",   # 2026-10-29 rig 1 spare_job.sh: 9:24 -> shot "Spare 9:24" -> 9:4 255/40 then 128/500 on the bus;
+                           # the trough (8:1) refused; a 4 s hold OFF at the mode's end with 2500 ms left; 5 s in 10 s held;
+                           # and as a Blocks mode (blocks_job.sh, the app's own C): 9:24 started it and drove 9:4 twice
+    # 2026-10-29 spare_sweep_job.sh (rigbatch sweep3 + the rerun of rig 2's ten, whose NVRAM refused every game start; the
+    # final runtime and shim, stock cards, hidden, muted): the struct checked out against every entry, the mode's own spare
+    # input (the first spare bit from 8 on the board with the most switches) closed by /dump/spare_in in a game came as its
+    # shot, and the spare output it then pulsed (1:1, the cabinet board's) went out as [coildrive] node 1 coil 1 200/30 ms;
+    # in 105 runs the game itself never sent that output anything
+    "aerosmith-1.16", "aerosmith_le-1.16", "avengers_infinity_le-1.10", "avengers_infinity_pro-1.10", "batman-1.14",
+    "beatles-1.29", "deadpool_le-1.14", "deadpool_le-1.16", "deadpool_pro-1.16", "dungeons_and_dragons_le-1.00",
+    "dungeons_and_dragons_le-1.10", "dungeons_and_dragons_pro-1.10", "elvira3-1.13", "foo_fighters_le-1.04",
+    "foo_fighters_pro-1.04", "godzilla_le-1.16", "godzilla_pro-1.15", "guardians-1.15", "guardians_le-1.15",
+    "iron_maiden_le-1.18", "iron_maiden_pro-1.18", "james_bond_60th_le-1.11", "james_bond_le-1.06",
+    "james_bond_pro-1.06", "jaws_le-1.02", "jaws_pro-1.02", "john_wick_le-1.01", "john_wick_le-1.02",
+    "john_wick_pro-1.02", "jurassic_park_le-1.16", "jurassic_park_pro-1.16", "jurassic_park_the_pin-1.05",
+    "king_kong_le-0.97", "king_kong_pro-0.97", "led_zeppelin_le-1.22", "led_zeppelin_pro-1.22", "mando_le-1.45",
+    "mando_pro-1.45", "metallica_spike-1.03", "metallica_spike-1.04", "munsters_le-1.28", "munsters_pro-1.28",
+    "rush_le-1.19", "rush_pro-1.19", "star_wars_elg-1.10", "star_wars_le-1.30", "star_wars_le-1.31",
+    "star_wars_pro-1.31", "stranger_things-1.13", "stranger_things_le-1.13", "sword_of_rage_le-1.19",
+    "sword_of_rage_pro-1.19", "turtles_le-1.59", "turtles_pro-1.59", "uncanny_xmen_le-0.98",
+    "uncanny_xmen_pro-0.98", "venom_le-1.07", "venom_pro-1.07",
+    # 2026-10-29 run 3, the OLDER framework (the listener table, the board table, the game's coil query; rerun.sh on rigs
+    # 1 and 4, the same job): each listener table checked out (93-110 switches, as each switch list), the spare input
+    # closing came as the mode's shot in a game and the spare output 1:1 went out on the bus; the game never drove it
+    "aerosmith_le-1.15", "avengers_infinity_le-1.09", "batman-1.13", "guardians_le-1.14", "iron_maiden_le-1.16",
+    "mando_le-1.44", "rush_le-1.18", "stranger_things_le-1.12", "sword_of_rage_le-1.18", "turtles_pro-1.58",
+    # PAD-1329, Spike 3 (64-bit: the switch struct's entries and node blocks of their own, the fire and OFF read off each
+    # program; tools/spike3_emu/proofs PROOF=spare, spare_sweep_mode.c, rig slot 97, hidden, muted, 2026-11-16):
+    "star_wars_elg-1.10/spike3",   # the struct checked out (69 switches), spare input 8:37 closed on the board came as
+                                   # the mode's shot twice; no spare output: the game uses all nine of its one driver board's
+    "fallout_le-0.82/spike3",      # struct 110 switches; input 8:15 -> shot twice; 9:1 on the bus as n9 40 01 c8 03 (200,
+                                   # 30 ms), a held 200/30 + 60/3000 command (.. 3c 2c 01), its OFF 1 s in (n9 4d 01);
+                                   # board 0's records (no node of the bus) refused: the fire answered 0
+    # the same run on rig slots 97-99: each struct checked out, its spare input closed twice came as the mode's shot
+    # twice, and the first spare output of every driver board went out as the pulse, the held command and its OFF;
+    # the game sent none of them anything
+    "pokemon_le-0.82/spike3",          # 98 switches; 8:13; outputs 1:1 9:1 10:0 13:1
+    "star_wars_2025_le-0.96/spike3",   # 87 switches; 9:15; outputs 1:1 8:6 9:0 13:0
+    "star_wars_2025_pro-0.84/spike3",  # 84 switches; 9:13; outputs 1:1 8:6 9:5
+    "transformers_mtmte_le-0.96/spike3",   # 96 switches; 9:14; outputs 1:1 9:0 13:1
+    "walking_dead_remastered_le-0.92/spike3",   # 90 switches; 8:12; output 1:1
+})
+
+#: PAD-1329: proven builds with no spare driver output at all (every output of every driver board is the game's), so a
+#: mode is never offered one: Star Wars ELG's Spike 3 program has one driver board (node 8) and uses outputs 0-8
+SPARE_NO_OUTPUTS = frozenset({"star_wars_elg-1.10/spike3"})
+
+
+def _spare(port, key):
+    """PAD-826: ("in", "out") as far as this build has them: the switch struct (`data sw_struct`), or on the older
+    framework the listener and board tables, for spare inputs; the node-bus fire (`site coil_frame`) with the OFF and the
+    coil table, or on the older framework the game's coil query (`site coil_used`), for spare outputs."""
+    if not port or key not in SPARE_IO_PROVEN:
+        return ()
+    out = ()
+    if (port["data"].get("sw_struct") and (not key.endswith("/spike3") or port["data"].get("sw_blocks"))) or (
+            port["data"].get("sw_listen") and port["data"].get("sw_boards")):
+        out += ("in",)                       # the struct (Spike 3's node blocks too, PAD-1329), or the older listeners
+    if key not in SPARE_NO_OUTPUTS and "coil_frame" in port["site"] and (
+            ("coil_off" in port["site"] and all(port["data"].get(n) for n in ("coil_table", "coil_count")))
+            or ("coil_used" in port["site"] and not port["data"].get("coil_table"))):   # the older framework
+        out += ("out",)
+    return out
+
+
+def _info_at(port):
+    """PAD-547: the port's ``text info_line_at <x> <y>`` (glass pixels, the middle of the line) as (x, y); () when the
+    port names none or a line that does not read as two numbers on the glass."""
+    words = port["text"].get("info_line_at", "").split("#")[0].replace(",", " ").split()
+    try:
+        x, y = (float(w) for w in words)
+    except ValueError:
+        return ()
+    return (x, y) if 0.0 <= x <= 4096.0 and 0.0 <= y <= 4096.0 else ()
 
 
 #: what pad_mode_runtime.c's lamps_arm needs besides the `lamp` lines before it lights an insert
@@ -1985,6 +3071,14 @@ LAMPS_PROVEN = frozenset((
     # in the LED view AND on the node bus - 13/13 RGB magenta, 94/94 single lit, none before or after; light_shots on
     # the bus only (the LED view showed none: the bulk frames it misses), 6/6 tied RGB inserts cyan, no untied one
     "jaws_pro-1.02",
+    # PAD-1283 2026-11-14 (the Spike 3 rig, slot 1, hidden, muted; the bridge's dump/padled): the Spike 3 card of Star
+    # Wars ELG 1.10 with the 64-bit runtime - a mode file's light_insert held DEATH STAR (X2), LEFT OUTLANE and RAMP 6
+    # blinking on the playfield board (board 8, indices 51 / 3 / 64) from its start to its end, LEFT OUTLANE and RAMP 6
+    # dark before and after, DEATH STAR (X2) back to the game's own blink; light_all ff00ff held all 67 named inserts at
+    # 255 for the whole 12 s (4 lit throughout before, 7 after); light_shots cyan blink blinked the three inserts tied to
+    # the mode's scoring shots at 255 (TOP LANE LEFT and YODA MYSTERY dark before and after, LEFT LUKE ARROW the game's
+    # own 192 blink before and after); the game's layer list (pm_lamp_layers) had the runtime's layer on top
+    "star_wars_elg-1.10/spike3",
 ))
 
 
@@ -2003,6 +3097,33 @@ def _lit_inserts(port):
             and all(n in port["value"] for n in values)):
         return 0
     return sum(1 for _name, _ids, mask in port.get("lamp", ()) if mask)
+
+
+def _named_inserts(port):
+    """PAD-503: the names of the port's `lamp` lines, shot or not, in the port's order, when the port has the lamp
+    layer (LAMP_NEEDS); else (). A name with a comma could not be named alone (pm_lamp_set takes a list)."""
+    sites, data, values = LAMP_NEEDS
+    if not (all(n in port["site"] for n in sites) and all(port["data"].get(n) for n in data)
+            and all(n in port["value"] for n in values)):
+        return ()
+    out = []
+    for name, _ids, _mask in port.get("lamp", ()):
+        if name and "," not in name and name not in out:
+            out.append(name)
+    return tuple(out)
+
+
+def _white_shots(port):
+    """PAD-733 (David: "For custom mode shots then, we should use shots that can be colored. Exceptions are for shots
+    that are named on the screen"): the port's shots whose inserts are all ONE light (a `lamp` line with one id) - a
+    mode's colour does not show on them, only a white light (Godzilla's Powerlines, Maser, Magna Grab). A shot no
+    insert names is not one of them (nothing of it is lit)."""
+    out = []
+    for name, mask in port.get("shot", ()):
+        lit = [ids for _n, ids, m in port.get("lamp", ()) if m & mask]
+        if lit and all(sum(1 for i in ids if i) < 2 for ids in lit) and name not in out:
+            out.append(name)
+    return tuple(out)
 
 
 def _game_modes(port):
@@ -2035,6 +3156,18 @@ def _game_rules(port):
     return tuple(sorted(out))
 
 
+#: PAD-690: the internal switch shot a drain closes (Godzilla Premium/LE: the trough's six positions)
+DRAIN_SHOT = "Trough"
+
+
+def _internal_shots(port):
+    """The port's code-only switch shots (`text internal_shots`), armed only through a switch site."""
+    if not ("switch_edge" in port["site"] or any(s.startswith("switch_hit") for s in port["site"])):
+        return set()
+    names = {n for _sw, _m, n in port.get("switch", ())}
+    return {n.strip() for n in port.get("text", {}).get("internal_shots", "").split(",") if n.strip()} & names
+
+
 def _shots_with_switches(port):
     """``(shots, switch_shot_names)``: the port's `shot` lines, then each `switch` line's name that
     is not a shot already, as the runtime's port reader adds them. Switch lines count only when the
@@ -2056,6 +3189,9 @@ def _shots_with_switches(port):
 
 def port_path(p):
     """The port file behind a profile, or "" when it has none."""
+    if p.port.startswith(SPIKE3_PORT_PREFIX):          # PAD-1277: a shipped Spike 3 port
+        from . import mode_runtime
+        return os.path.join(mode_runtime.spike3_ports_dir(), p.port[len(SPIKE3_PORT_PREFIX):])
     return os.path.join(PORTS_DIR, p.port) if p.port else ""
 
 
@@ -2069,11 +3205,21 @@ try:
         magnet_shot=_magnet_shot_name(_port_115),
         held_coils=tuple((n, lab) for n, lab in _held_coils(_port_115) if (_key_115, n) in HELD_COILS_PROVEN),
         game_shows=_game_shows(_port_115),
+        roster=_roster("godzilla_pro", _port_115) if not _roster_cannot(_key_115, _label_115, _port_115) else (),
+        roster_counts=bool(_port_115 and "battle_stop" in _port_115["site"]),   # PAD-706: not on Pro 1.15
+        places=_places(_port_115) if not _place_cannot(_key_115, _label_115, _port_115) else (),   # PAD-710
+        done_modes=_done_modes(_port_115) if not _done_cannot(_key_115, _label_115, _port_115) else (),   # PAD-747
+        spare=_spare(_port_115, _key_115),                   # PAD-826
         absent=machine_absent("godzilla_pro"),
         cannot=tuple(c for c in GODZILLA_PRO_1_15.cannot
-                     if c[0] not in ("magnet", "scoop", "coils", "shield", "shaker", "shows"))
+                     if c[0] not in ("magnet", "scoop", "coils", "shield", "building", "shaker", "shows", "roster",
+                                     "challenge", "place", "done"))
+        + _place_cannot(_key_115, _label_115, _port_115) + _done_cannot(_key_115, _label_115, _port_115)
         + _magnet_cannot(_key_115, _label_115, _port_115) + _scoop_cannot(_key_115, _label_115, _port_115)
         + _coils_cannot(_key_115, _label_115, _port_115) + _shield_cannot(_key_115, _label_115, _port_115)
+        + _building_cannot(_key_115, _label_115, _port_115)
+        + _roster_cannot(_key_115, _label_115, _port_115)
+        + _challenge_cannot(_key_115, _label_115, _port_115)
         + _shows_cannot(_label_115, _port_115)
         + _shaker_cannot(_key_115, _label_115, _port_115),
         shakes=_shakes(_port_115), shake_max_ms=_shake_max_ms(_port_115))
@@ -2104,6 +3250,8 @@ def profiles(ports_dir=None):
         for d in [x for x in mode_runtime.port_dirs()[1:] if os.path.abspath(x) != os.path.abspath(PORTS_DIR)]:
             out.update({k: p for k, p in _folder_profiles(d).items() if _is_listed(p, listed)})
         out.update({k: p for k, p in _folder_profiles(PORTS_DIR).items() if _is_listed(p, listed)})
+        out.update({k: p for k, p in _folder_profiles(mode_runtime.spike3_ports_dir()).items()
+                    if _is_listed(p, listed)})          # PAD-1277: keyed apart (SPIKE3_KEY)
         out.update(PROFILES)
         return out
     return _folder_profiles(ports_dir)
@@ -2112,8 +3260,11 @@ def profiles(ports_dir=None):
 def _folder_profiles(d):
     """{key: profile} of every usable port in one folder, cached until a file in it changes."""
     try:
-        names = sorted(n for n in os.listdir(d) if n.endswith(".port"))
-        stamp = tuple((n, os.path.getmtime(os.path.join(d, n))) for n in names)
+        # one listing carries the times (on Windows), not a stat per port
+        with os.scandir(d) as it:
+            times = {e.name: e.stat().st_mtime for e in it if e.name.endswith(".port")}
+        names = sorted(times)
+        stamp = tuple((n, times[n]) for n in names)
     except OSError:
         names, stamp = [], ()
     cached = _PROFILES_CACHE.get(d)
@@ -2147,22 +3298,46 @@ def version_key(version):
 _version_key = version_key
 
 
-def profile_for_card(game_dir, version, ports_dir=None):
+def profile_for_card(game_dir, version, ports_dir=None, arch="arm"):
     """The profile for a card of ``game_dir`` (``turtles_pro``) at ``version``
-    (``1.59.0`` or ``1.59``), or None when no port is for that build."""
+    (``1.59.0`` or ``1.59``), or None when no port is for that build. ``arch`` is the card's
+    machine (:func:`card_arch`; PAD-1277): a Spike 3 card of a build Spike 2 also has (Star
+    Wars ELG 1.10) takes its Spike 3 port's profile, never the Spike 2 one."""
     game, want = (game_dir or "").lower(), _version_key(version)
     if not game or not want:
         return None
     for p in profiles(ports_dir).values():
-        if p.game_dir == game and _version_key(p.version) == want:
+        if p.game_dir == game and _version_key(p.version) == want and p.arch == arch:
             return p
     if ports_dir is None:
         # a port derived on this machine or found by a card's read: the Modes tab, Write
         # and Try it all resolve a card's port here, so they agree on it
         for p in _machine_profiles().values():
-            if p.game_dir == game and _version_key(p.version) == want:
+            if p.game_dir == game and _version_key(p.version) == want and p.arch == arch:
                 return p
     return None
+
+
+#: card_arch()'s answers, by (path, size, mtime)
+_CARD_ARCH = {}
+
+
+def card_arch(image):
+    """``"a64"`` when ``image`` is a Spike 3 card, else ``"arm"``. A card on this computer is
+    told by its partition table (a few sectors, read once per file); one that is not (moved,
+    deleted) by Stern's name for it: ``..._spike3.Release...`` or ``....sdcard-secure.raw``."""
+    if not image:
+        return "arm"
+    try:
+        k = _probe_key(image)
+    except OSError:
+        n = file_name(image).lower()
+        return "a64" if ("_spike3." in n or n.endswith(".sdcard-secure.raw")) else "arm"
+    got = _CARD_ARCH.get(k)
+    if got is None:
+        from . import spike3
+        got = _CARD_ARCH[k] = "a64" if spike3.is_spike3_card(image) else "arm"
+    return got
 
 
 #: The tab's message for a card whose title and version have no port.
@@ -2305,11 +3480,10 @@ def probe_card_title(image):
                     entries = card.list_dir(part.index, "/spk/index")
                 except Exception:
                     continue
-                for e in entries:
-                    game, version = card_from_name(e.name)
-                    if game and not e.is_dir and e.name.lower().endswith(".sidx"):
-                        answer = (game, version)
-                        break
+                from .info import index_entries_name
+                game, version = card_from_name(index_entries_name(entries))     # PAD-1100
+                if game:
+                    answer = (game, version)
                 if answer[0]:
                     break
     except Exception:
@@ -2318,10 +3492,50 @@ def probe_card_title(image):
     return answer
 
 
+def known_game_dir(game):
+    """Is ``game`` (``uncanny_xmen_le``) a game directory the app knows: one a port is
+    shipped or was worked out for, or a Spike 2 title of :data:`.games.GAME_DB`? Reads
+    folder listings only."""
+    game = (game or "").lower()
+    if not game:
+        return False
+    from .games import GAME_DB
+    if any(game == k or game.startswith(k + "_") for k in GAME_DB):
+        return True
+    dirs = [PORTS_DIR, os.path.join(PORTS_DIR, "spike3")]     # PAD-1369: a Spike 3-only title (Fallout LE, ...) too
+    try:
+        from . import mode_runtime
+        dirs += list(mode_runtime.port_dirs())
+    except Exception:                                       # noqa: BLE001 - the shipped list still answers
+        pass
+    for d in dirs:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        if any(n.lower().startswith(game + "-") and n.lower().endswith(".port") for n in names):
+            return True
+    return any(p.game_dir == game for p in _REMEMBERED.values())
+
+
+def _name_game(image):
+    """PAD-720: ``card_from_name(image)``, unless the name is not to be trusted: a card file
+    renamed in Stern's form after its own build (``Silentcorp_Animated_Series_Xmen_LE-0_98_0
+    ...raw``) parses, but names a game no card has. When that file is on this computer, the
+    card's own index decides instead (:func:`probe_card_title`), so ``(None, None)``."""
+    game, version = card_from_name(image)
+    if game and not known_game_dir(game) and os.path.isfile(image):
+        probed = probed_card_title(image)
+        if probed is None or probed[0]:
+            return None, None          # not read yet, or the index names the real game
+    return game, version
+
+
 def _card_by_name_or_probe(image, exact="", source_from_record=False):
     """A :class:`ProjectCard` for *image* without opening it: its Stern name, else what
-    :func:`probe_card_title` has already read of it, else ``game_dir`` "" until a probe."""
-    game, version = card_from_name(image)
+    :func:`probe_card_title` has already read of it, else ``game_dir`` "" until a probe.
+    A Stern-formed name of a game the app does not know waits for the probe (PAD-720)."""
+    game, version = _name_game(image)
     if game:
         if exact and source_from_record:
             return ProjectCard(image, game, exact, "the extract's record of the card")
@@ -2344,13 +3558,107 @@ def project_card(project):
     card's index, off the UI thread (:func:`project_profile` with ``probe=True``). Before
     2026-09-22 a renamed record lost to the ``.pinproj`` anchor's stock image or Write
     original when one of those parsed, and a set could be prepared for a card the project
-    was never measured on. The anchor's paths are read only when the record is absent."""
+    was never measured on. The anchor's paths are read only when the record is absent.
+
+    PAD-623: a card whose game cannot be read - its file is not on this computer any more
+    (moved or deleted), or its own index was read and named no game - takes the game the
+    project's saved modes were made for (:func:`modes_title`), so the tab still knows it."""
+    card = _project_card(project)
+    if card is None or card.game_dir or not card.image:
+        return card
+    if os.path.isfile(card.image) and probed_card_title(card.image) != (None, None):
+        return card                    # not read yet: the probe answers first
+    made_for = modes_title(project)
+    if made_for is None:
+        return card
+    return ProjectCard(card.image, made_for.game_dir, made_for.version,
+                       MODES_TITLE_SOURCE if not os.path.isfile(card.image)
+                       else MODES_TITLE_UNREAD)
+
+
+def heal_card_record(project, card, game, version):
+    """PAD-1100: put right a project whose extract recorded another build than its card is.
+
+    Before PAD-1100 the extract of a compact multi-boot card (both games in p3, the second
+    under ``img1/``) could record the SECOND image's index (Brombomb's GZ 1.16 + Heisei card
+    became godzilla_pro 1.13), and Load modes / Copy to then asked for a port of that build.
+    ``game``/``version`` are what a read of the card's own primary index found (the Modes tab's
+    title read of ``card``, :func:`project_card`'s answer for ``project``). When ``card`` is the
+    card the extract recorded and names another build, the record is corrected: its
+    ``card_version``, and its stock stamp's index name, with the stamp's verdict dropped (it
+    was about the other image). Returns True when it changed the record."""
+    from ...core import extract_source
+    if card is None or not game or not version or not card.image:
+        return False
+    if card.game_dir == game and version_key(card.version) == version_key(version):
+        return False
+    rec = extract_source.read_extract_source(project) or {}
+    recorded = rec.get("input_path") or ""
+    if not recorded or os.path.normcase(os.path.abspath(recorded)) != os.path.normcase(
+            os.path.abspath(card.image)):
+        return False                  # not the extract's card (a Try it on card, the anchor's)
+    extra = {"card_version": version}
+    stock = rec.get("stock")
+    if card.game_dir != game and not isinstance(stock, dict):
+        return False                  # the game comes from the card's name: nothing here to fix
+    if isinstance(stock, dict):
+        name = "%s-%s.sidx" % (game, "_".join(version.split(".")))
+        if stock.get("sidx") != name:
+            extra["stock"] = {"sidx": name, "status": "unknown", "label": "", "text": ""}
+    extract_source.amend_extract_source(project, **extra)
+    return True
+
+
+#: PAD-720: where :func:`project_card` found the game when the extract recorded the card's index
+INDEX_SOURCE = "the card's own index"
+#: PAD-623: where :func:`project_card` found the game when the card file is gone
+MODES_TITLE_SOURCE = "the game this project's modes were made for; the card file is not there"
+#: ... and when the card is there but its index names no game
+MODES_TITLE_UNREAD = "the game this project's modes were made for; the card names none"
+
+
+def modes_title(project):
+    """PAD-623: the :class:`TitleProfile` every saved mode in ``project`` names as its game
+    (a mode.json's ``title``, a code or blocks mode's assets.json ``title`` when that is a
+    game this app has modes for - there it may also be the mode's screen title), or None
+    when none names one, or two name different games. Reads the modes' small files only."""
+    found = {}
+    d = modes_dir(project)
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return None
+    for slug in names:
+        for fname in (MODE_FILE, "assets.json"):
+            try:
+                with open(os.path.join(d, slug, fname), "r", encoding="utf-8") as f:
+                    key = (json.load(f) or {}).get("title")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if not isinstance(key, str) or not key.strip():
+                continue
+            try:
+                prof = profile(key.strip())
+            except ModeProjectError:
+                continue
+            found[prof.key] = prof
+    return next(iter(found.values())) if len(found) == 1 else None
+
+
+def _project_card(project):
     if not project or not os.path.isdir(project):
         return None
     from ...core import extract_source, project_file
     rec = extract_source.read_extract_source(project) or {}
     exact = rec.get("card_version") or ""
     recorded = rec.get("input_path") or rec.get("input_name")
+    stock = rec.get("stock")
+    sidx = stock.get("sidx") if isinstance(stock, dict) else ""
+    game, version = card_from_name(sidx) if isinstance(sidx, str) and sidx else (None, None)
+    if recorded and game:
+        # PAD-720: the extract read the card's own index (its .sidx name), and that names the
+        # game whatever the file is called, and wherever the file is now
+        return ProjectCard(str(recorded), game, exact or version, INDEX_SOURCE)
     if recorded:
         return _card_by_name_or_probe(str(recorded), exact, source_from_record=True)
     images = []
@@ -2366,7 +3674,7 @@ def project_card(project):
     if not images:
         return None
     for image in images:
-        game, version = card_from_name(image)
+        game, version = _name_game(image)
         if game:
             return ProjectCard(image, game, version, "the card's file name")
     return _card_by_name_or_probe(images[0])
@@ -2402,7 +3710,7 @@ def project_profile(project, probe=False):
         card = project_card(project)
     if card is None or not card.game_dir:
         return card, None
-    return card, profile_for_card(card.game_dir, card.version)
+    return card, profile_for_card(card.game_dir, card.version, arch=card_arch(card.image))
 
 
 # ---- a mode, as the person authors it ----------------------------------------------
@@ -2427,6 +3735,9 @@ class ModeSpec:
     title: str = GODZILLA_PRO_1_15.key
     start_shot: str = "Maser target"
     start_count: int = 3
+    # PAD-518: up to START_OR_MAX more shots whose hits count toward start_count with start_shot's, all together
+    # (three pop bumpers, 120 hits between them); [] = start_shot alone
+    start_or: list = field(default_factory=list)
     seconds: int = 30
     scoring_shots: list = field(default_factory=lambda: ["Left ramp", "Right ramp"])
     award: int = 1000000
@@ -2546,6 +3857,31 @@ class ModeSpec:
     # PAD-392: while it runs the shield targets face the player (Godzilla Premium/LE's platform turns 1.5 s after it
     # starts, is kept there, and turns back when it ends) - only while the game's own shield feature sees no shots
     shield: bool = False
+    # PAD-589: Godzilla Premium/LE's building to one of the game's own floors (BUILDING_FLOORS: 1-3; 0 = left alone),
+    # as it starts or on every hit of building_shot; the runtime puts it back where it was when the mode ends
+    building_floor: int = 0
+    building_shot: str = ""
+    # PAD-589: with starts_on "battle", the slot of the game's battle selection (the profile's roster) the mode takes:
+    # picking it there starts the mode instead of that battle; -1 = none
+    roster_slot: int = -1
+    # PAD-707: with it, the mode is a monster on MORE KAIJU, the list of monsters behind that slot (picking the slot
+    # opens the list's own selection screen; picking the mode there starts it), not the slot's battle itself
+    roster_more: bool = False
+    # PAD-615: with starts_on "challenge", the game's challenge (the profile's challenges, menu order) the mode takes the
+    # place of; CHALLENGE_NEW: a challenge of its own on the game's start menu, under its name (round 2)
+    # place of: a Player Challenge game with that pick starts the mode at its ball's start instead; -1 = none
+    challenge: int = -1
+    # PAD-643: with starts_on "challenge", who launches its ball and when: 0 the runtime, once the mode's start clip is
+    # over; -1 the player; a number of ms after the mode starts
+    challenge_launch: int = 0
+    # PAD-710: with starts_on "game_mode", the game's own mode (the profile's places: its id) the mode runs in the place
+    # of: when the game starts that mode, this one starts instead and, where the game's framework is known, counts as
+    # it; -1 = none
+    place_mode: int = -1
+    # PAD-747: with starts_on "completed", the mode starts once the player has completed done_count of the game's own
+    # modes in a game - the ones in done_modes (the profile's done_modes: their ids), [] = any of them
+    done_count: int = 4
+    done_modes: list = field(default_factory=list)
     # PAD-414: the cabinet's shaker: [[when, what, strength, shot]] - when "start", "shot" (on every hit of `shot` while it
     # runs) or "end" (left to run out after the end); what is a time in ms at `strength` (0 hard .. 3 soft) or the
     # name of one of the game's own shakes (the profile's shakes; strength then unused). Up to SHAKES_MAX
@@ -2554,6 +3890,9 @@ class ModeSpec:
     # game_shows); "" = none. The end's is skipped when the ball is ending (the game stops every show of its own then)
     show_start: str = ""
     show_end: str = ""
+    # PAD-642: and on each hit of a shot that scores (James Bond's lit-shot flash, as the game's own modes answer a lit
+    # shot); it takes the place of the shot's white flash
+    show_hit: str = ""
     # PAD-436: the game's own mini-wizard instead of a mode of its own, by the port's name for it (the profile's
     # game_wizards); "" = none. When it would start, the player is handed the game's mode - lit for the game's start
     # shot ("light") or started at once ("start") - and nothing of this mode's own runs (its clock, shots, screen,
@@ -2667,51 +4006,6 @@ def new_mode(project, name=None, spec=None):
     return slug, spec
 
 
-# ---- the examples -------------------------------------------------------------------
-def example_specs():
-    """The modes the tab offers ready-made, in menu order, as ``[(name, ModeSpec)]``.
-
-    The first is KAIJU RUSH exactly as it ran on a real Godzilla Premium 1.16
-    (2026-09-16: video, audio, scenes and scoring all working) - a mode that is known to
-    work, so a person can start from one. The others are variations on it that need no
-    file of their own (a generated panel and a title card each), so they build as they
-    are; item 143 is where footage from the films replaces the title cards."""
-    def make(name, **kw):
-        return name, ModeSpec(name=name, **kw)
-    return [
-        make("KAIJU RUSH", start_shot="Maser target", start_count=3, seconds=30,
-             scoring_shots=["Powerline left", "Powerline center", "Powerline right",
-                            "Left ramp", "Right ramp"],
-             award=1000000, screen=True, clip="title", clip_when="start",
-             countdown=True, lights=True, light_color="#00ff00"),
-        make("ATOMIC BREATH", start_shot="Godzilla target", start_count=2, seconds=25,
-             scoring_shots=["Building", "Left ramp", "Right ramp"], award=750000,
-             panel_color="#0b3d91", title_color="#7fe7ff", clip="title", clip_when="start",
-             light_color="#00c8ff"),
-        make("MOTHRA'S SONG", start_shot="Big loop", start_count=2, seconds=40,
-             scoring_shots=["Shield target left", "Shield target right", "Big loop"],
-             award=500000, panel_color="#6b4e00", title_color="#fff1a8", clip="title",
-             clip_when="end", light_color="#ffd200"),
-        make("MECHAGODZILLA", start_shot="Building", start_count=3, seconds=20,
-             scoring_shots=["Powerline center", "Maser target", "Godzilla target"],
-             award=1500000, panel_color="#3a3a3a", title_color="#ff3b3b", clip="title",
-             clip_when="start", light_color="#ff0000"),
-    ]
-
-
-#: PAD-414: the examples' shakes, where the game can shake its cabinet (:func:`examples_for`): MECHAGODZILLA starts big
-#: (the game's own multiball start) and every Godzilla target is a jackpot (the game's jackpot shake)
-EXAMPLE_SHAKES = {"MECHAGODZILLA": [["start", "multiball_start", 0, ""], ["shot", "jackpot", 0, "Godzilla target"]]}
-
-
-def example(name):
-    """The example called ``name``, or None."""
-    for n, spec in example_specs():
-        if n == name:
-            return spec
-    return None
-
-
 # ---- modes for any ported title (item 148) --------------------------------------------
 def _switch_off_what_it_cannot(spec, p):
     """Turn off the parts ``p`` cannot do, so a new mode starts buildable and honest."""
@@ -2735,24 +4029,76 @@ def _switch_off_what_it_cannot(spec, p):
         spec.coil_holds = []
     if not p.can("shield"):
         spec.shield = False
+    if not p.can("building"):
+        spec.building_floor, spec.building_shot = 0, ""
+    if not p.can("roster") and starts_on_battle(spec):
+        spec.starts_on, spec.roster_slot = "shot", -1
+    if starts_on_challenge(spec) and (not p.can("challenge")
+                                      or (spec.challenge == CHALLENGE_NEW and not getattr(p, "challenge_menu", 0))):
+        spec.starts_on, spec.challenge = "shot", -1
+    if starts_on_place(spec) and not p.can("place"):                 # PAD-710
+        spec.starts_on, spec.place_mode = "shot", -1
+    if starts_on_done(spec) and not p.can("done"):                   # PAD-747
+        spec.starts_on = "shot"
     if not p.can("shaker"):
         spec.shakes = []
     if not p.can("shows"):
-        spec.show_start = spec.show_end = ""
+        spec.show_start = spec.show_end = spec.show_hit = ""
     if not p.can("wizard"):
         spec.game_wizard = ""
     return spec
 
 
-def blank_spec(p, name="NEW MODE"):
+def start_shots_taken(project):
+    """PAD-666: the shots the project's modes already start on, as a set: a form mode's start shot and the shots
+    counted with it (``start_or``, ``start_also``, ``start_sequence``), and the shots a blocks mode watches while
+    it is not running or lights itself at. A new mode starts on a shot of none of these when the game has one."""
+    taken = set()
+    for _slug, spec in list_modes(project)[0] if project else ():
+        if (starts_on_event(spec) or starts_on_battle(spec) or starts_on_challenge(spec) or starts_on_place(spec)
+                or starts_on_done(spec)):
+            continue
+        shots = (spec.start_sequence if starts_on_sequence(spec) else start_shots(spec)) or []
+        taken.update(s for s in shots if isinstance(s, str) and s)
+        taken.update(s for s, _n in _also_rows(spec) or () if isinstance(s, str) and s)
+    from . import block_modes as BM
+    try:
+        slugs = sorted(os.listdir(modes_dir(project))) if project else []
+    except OSError:
+        slugs = []
+    for slug in slugs:
+        if not BM.is_blocks(project, slug):
+            continue
+        try:
+            program = BM.load(project, slug)
+        except (OSError, BM.BlocksError):
+            continue
+        for script in program.get("scripts") or ():
+            hat = script.get("hat") or {}
+            if hat.get("kind") == "shot" and hat.get("when") == "idle" and hat.get("shot"):
+                taken.add(hat["shot"])
+            for b in BM._walk(script.get("do") or []):
+                if b.get("op") == "light_mode" and b.get("shot"):
+                    taken.add(b["shot"])
+    return taken
+
+
+def blank_spec(p, name="NEW MODE", taken=()):
     """A new mode for title ``p``, valid as it stands. On Godzilla Pro 1.15 it is exactly
     ``ModeSpec(name=name)``; elsewhere the port's example start shot starts it, two of its
-    ramps (or its first shots) score, and the parts the title cannot do are off."""
+    ramps (or its first shots) score, and the parts the title cannot do are off.
+    ``taken`` (PAD-666): shots other modes of the project start on (:func:`start_shots_taken`);
+    when the start shot is one, the first playfield shot of none of them that is not a ramp
+    (the ramps score) starts it instead, else the first free one at all."""
     spec = ModeSpec(name=name, title=p.key)
     names = [n for n, _m in p.shots]
     if spec.start_shot not in names:
         spec.start_shot = p.example_start_shot if p.example_start_shot in names else names[0]
-    if not all(s in names for s in spec.scoring_shots):
+    if spec.start_shot in taken:
+        free = [n for n in playfield_shots(p) if n not in taken]
+        spec.start_shot = next((n for n in free if not n.lower().endswith("ramp")),
+                               free[0] if free else spec.start_shot)
+    if not all(s in names for s in spec.scoring_shots) or spec.start_shot in spec.scoring_shots:
         ramps = [n for n in names if n.lower().endswith("ramp") and n != spec.start_shot]
         others = [n for n in names if n not in ramps and n != spec.start_shot]
         spec.scoring_shots = (ramps + others)[:2]
@@ -2760,21 +4106,8 @@ def blank_spec(p, name="NEW MODE"):
 
 
 def examples_for(p):
-    """The ready-made modes for title ``p``, as ``[(name, ModeSpec)]``: Godzilla's four
-    (:func:`example_specs`) wherever every shot each one names exists, else one starter,
-    TARGET RUSH, built from the port's example start shot."""
-    names = {n for n, _m in p.shots}
-    out = []
-    for name, spec in example_specs():
-        if spec.start_shot in names and all(s in names for s in spec.scoring_shots):
-            spec.title = p.key
-            games = {n for n, _l in getattr(p, "shakes", ())}
-            shakes = EXAMPLE_SHAKES.get(name, [])                # PAD-414: where the game can shake its cabinet
-            if p.can("shaker") and all(r[1] in games and (not r[3] or r[3] in names) for r in shakes):
-                spec.shakes = [list(r) for r in shakes]
-            out.append((name, _switch_off_what_it_cannot(spec, p)))
-    if out:
-        return out
+    """The ready-made modes for title ``p``, as ``[(name, ModeSpec)]``: one starter on every title, TARGET RUSH,
+    built from the port's example start shot (PAD-691: no title has examples of its own)."""
     spec = blank_spec(p, "TARGET RUSH")
     return [(spec.name, spec)]
 
@@ -2801,7 +4134,7 @@ def family_of_key(key):
     """:func:`title_family` of a profile key (``godzilla_le_1_16`` -> ``godzilla``): a key
     is the game dir and the version with its dots as underscores, so the version comes off
     first. Answers for a title whose port this machine no longer has, too."""
-    return title_family(re.sub(r"(_\d+)+$", "", str(key or "")))
+    return title_family(re.sub(r"(_\d+)+$", "", _key_build(key)))
 
 
 def same_title(a, b):
@@ -2828,6 +4161,9 @@ def retarget(spec, p):
         out.start_shot = p.example_start_shot if p.example_start_shot in names else names[0]
     dropped += [s for s in out.scoring_shots if s not in names]
     out.scoring_shots = [s for s in out.scoring_shots if s in names]
+    if isinstance(out.start_or, list):               # PAD-518: matched by name, as the start shot
+        dropped += [s for s in out.start_or if isinstance(s, str) and s not in names and s not in dropped]
+        out.start_or = [s for s in out.start_or if s in names and s != out.start_shot]
     if isinstance(out.start_also, list):             # PAD-227: matched by name, as the start shot
         kept = []
         for row in out.start_also:
@@ -2854,16 +4190,17 @@ def retarget(spec, p):
 #: takes that model's own from ``models[<new model>]`` when it has been there before, else they are
 #: matched (:func:`_port_model`). Everything else - the name, clock, points, screen, clip, sounds,
 #: lights - is the same mode on every model.
-MODEL_FIELDS = ("start_shot", "start_also", "start_sequence", "scoring_shots", "shot_award", "end_shot",
+MODEL_FIELDS = ("start_shot", "start_or", "start_also", "start_sequence", "scoring_shots", "shot_award", "end_shot",
                 "add_ball_shot", "multiball_on_shot", "magnet_ms", "scoop_hold_ms", "coil_holds",
-                "shield", "shakes", "show_start", "show_end", "game_wizard")
+                "shield", "building_floor", "building_shot", "shakes", "show_start", "show_end", "show_hit",
+                "game_wizard")
 #: what each model word is called in the words
 MODEL_WORDS = {"pro": "Pro", "le": "Premium/LE", "premium": "Premium", "prem": "Premium"}
 
 
 def model_of_key(key):
     """The model word of a profile key (``godzilla_le_1_16`` -> ``le``, ``beatles_1_0`` -> ``""``)."""
-    g = re.sub(r"(_\d+)+$", "", str(key or "")).lower()
+    g = re.sub(r"(_\d+)+$", "", _key_build(key)).lower()
     for s in MODEL_SUFFIXES:
         if g.endswith(s) and len(g) > len(s):
             return s[1:]
@@ -2914,6 +4251,8 @@ def _map_shots(spec, fn):
         return out
 
     spec.start_shot = one(spec.start_shot)
+    if isinstance(spec.start_or, list):                # PAD-518
+        spec.start_or = uniq([one(s) for s in spec.start_or])
     if isinstance(spec.scoring_shots, list):
         spec.scoring_shots = uniq([one(s) for s in spec.scoring_shots])
     if isinstance(spec.start_sequence, list):
@@ -2929,12 +4268,13 @@ def _map_shots(spec, fn):
         spec.end_shot = one(spec.end_shot)
     spec.add_ball_shot = one(spec.add_ball_shot)
     spec.multiball_on_shot = one(spec.multiball_on_shot)
-    if isinstance(spec.coil_holds, list):
-        spec.coil_holds = [[r[0], r[1], one(r[2])] if isinstance(r, (list, tuple)) and len(r) == 3 else r
-                           for r in spec.coil_holds]
+    if isinstance(spec.coil_holds, list):              # PAD-621: [name, ms, shot] or [name, ms, shot, wait]
+        spec.coil_holds = [[r[0], r[1], one(r[2])] + list(r[3:]) if isinstance(r, (list, tuple)) and len(r) in (3, 4)
+                           else r for r in spec.coil_holds]
     if isinstance(spec.shakes, list):                  # PAD-414
         spec.shakes = [[r[0], r[1], r[2], one(r[3])] if isinstance(r, (list, tuple)) and len(r) == 4 else r
                        for r in spec.shakes]
+    spec.building_shot = one(spec.building_shot)       # PAD-589
 
 
 def _port_model(out, old_key, p):
@@ -2973,6 +4313,8 @@ def _port_model(out, old_key, p):
             out.scoop_hold_ms = 0
         if not p.can("shield"):
             out.shield = False
+        if not p.can("building"):
+            out.building_floor, out.building_shot = 0, ""
         if not p.can("shaker"):
             out.shakes = []
     return port
@@ -3014,10 +4356,12 @@ def port_words(old, new, p):
         gone.append("the scoop")
     if old.shield is True and not new.shield:
         gone.append("the shield platform")
+    if _int_or_none(old.building_floor) and not _int_or_none(new.building_floor):
+        gone.append("the building")
     if old.shakes and not new.shakes:
         gone.append("the shaker")
-    shows = [s for s in (old.show_start, old.show_end)
-             if isinstance(s, str) and s and s not in (new.show_start, new.show_end)]
+    shows = [s for s in dict.fromkeys((old.show_start, old.show_end, old.show_hit))
+             if isinstance(s, str) and s and s not in (new.show_start, new.show_end, new.show_hit)]
     if gone:
         words.append("%s does not hold %s, so %s left out there" % (
             now, " or ".join(gone), "it is" if len(gone) == 1 else "they are"))
@@ -3089,6 +4433,27 @@ def _retarget_advanced(out, old_key, p, names, dropped):
         for i, name, _on in getattr(p, "game_modes", ()):
             now.setdefault(name, []).append(i)
         out.block_modes = sorted({j for i in out.block_modes if isinstance(i, int) for j in now.get(was.get(i), ())})
+    if old_key != p.key and ((isinstance(out.done_modes, list) and out.done_modes) or starts_on_place(out)):
+        # PAD-747: the game's modes completed, and PAD-710's place, are numbers in THAT game's table: matched by name
+        try:
+            was_p = profile(old_key)
+        except ModeProjectError:
+            was_p = None
+        was_names = {i: name for i, name, _on in getattr(was_p, "game_modes", ())} if was_p is not None else {}
+        now_ids = {}
+        for i, name, _on in getattr(p, "game_modes", ()):
+            now_ids.setdefault(name, []).append(i)
+        if isinstance(out.done_modes, list) and out.done_modes:
+            was_done = {i: name for i, name in getattr(was_p, "done_modes", ())} if was_p is not None else {}
+            now_done = {}
+            for i, name in getattr(p, "done_modes", ()):
+                now_done.setdefault(name, []).append(i)
+            mapped = sorted({j for i in out.done_modes if isinstance(i, int) for j in now_done.get(was_done.get(i), ())})
+            if mapped:                               # none there: kept, and the checks say so (never "any of them")
+                out.done_modes = mapped
+        n = _int_or_none(out.place_mode)
+        if starts_on_place(out) and n is not None and was_names.get(n) in now_ids:
+            out.place_mode = now_ids[was_names[n]][0]
     if old_key != p.key and isinstance(out.keep_rules, list) and out.keep_rules:
         # PAD-398: kept by name; a feature the other game does not have is dropped
         have = {name for _n, name in getattr(p, "game_rules", ())}
@@ -3096,7 +4461,7 @@ def _retarget_advanced(out, old_key, p, names, dropped):
     if old_key != p.key:
         # PAD-418: a light show is the game's own, asked for by name: one the other game does not name is dropped
         have = {name for name, _k, _s in getattr(p, "game_shows", ())}
-        for f in ("show_start", "show_end"):
+        for f in ("show_start", "show_end", "show_hit"):
             if isinstance(getattr(out, f), str) and getattr(out, f) not in have:
                 setattr(out, f, "")
         # PAD-436: so is a mini-wizard
@@ -3713,6 +5078,9 @@ def validate(spec, folder=None):
         out.append("Pick the shot that starts the mode.")
     if int(spec.start_count) < 1:
         out.append("It has to take at least one shot to start.")
+    elif int(spec.start_count) > START_COUNT_MAX:
+        out.append("It can take up to %d shots to start." % START_COUNT_MAX)
+    out += validate_start_or(spec, names)
     if spec.game_wizard:                               # PAD-436: the game's mode, nothing of its own to check
         return out + validate_starts(spec) + _validate_starts_ends(spec, p, ends=False) + \
             validate_more_to_start(spec, p) + validate_wizard(spec, p)
@@ -3725,10 +5093,10 @@ def validate(spec, folder=None):
             out.append("%s has no shot called %r." % (p.label, s))
     if int(spec.award) < 1:
         out.append("The first shot has to be worth something.")
-    for label, value in (("panel colour", spec.panel_color), ("title colour", spec.title_color),
-                         ("light colour", spec.light_color)):
+    for label, value in (("panel color", spec.panel_color), ("title color", spec.title_color),
+                         ("light color", spec.light_color)):
         if not _COLOR.match(value or ""):
-            out.append("The %s is not a colour like #00ff00." % label)
+            out.append("The %s is not a color like #00ff00." % label)
     if spec.clip not in CLIP_KINDS:
         out.append("The clip is none, a title card, or a video file.")
     if spec.clip_when not in CLIP_WHEN:
@@ -3756,6 +5124,7 @@ def validate(spec, folder=None):
     out += validate_scoop(spec, p)                     # PAD-381
     out += validate_coils(spec, p)                     # PAD-381
     out += validate_shield(spec, p)                    # PAD-392
+    out += validate_building(spec, p)                  # PAD-589
     out += validate_shakes(spec, p)                    # PAD-414
     out += validate_shows(spec, p)                     # PAD-418
     out += validate_more_to_start(spec, p)
@@ -3951,7 +5320,7 @@ def validate_coils(spec, p):
             out.append("%s has no mechanism called %r a mode can hold." % (p.label, name))
             continue
         n = _int_or_none(ms)
-        top = min(COIL_MAX_MS, dict(getattr(p, "coil_caps", ()) or ()).get(name, COIL_MAX_MS))   # PAD-420: the game's own
+        top = coil_max_ms(p, name)              # PAD-420: the game's own longest; PAD-621: longer for a post it keeps up
         if n is None or not COIL_MIN_MS <= n <= top:
             out.append("The %s holds %g to %g seconds." % (label, COIL_MIN_MS / 1000, top / 1000))
         if shot and shot not in shots:
@@ -3962,14 +5331,16 @@ def validate_coils(spec, p):
 
 
 def coil_lines(spec, p):
-    """The runtime lines of the held mechanisms: ``coil_hold <name> <ms> [mask]``."""
+    """The runtime lines of the held mechanisms: ``coil_hold <name> <ms> [mask] [wait]`` (PAD-621: ``wait``, the
+    row's fourth item - the mode's clock stands still while it holds)."""
     if not p.can("coils"):
         return []
     held, out = dict(p.held_coils), []
     for row in spec.coil_holds or ():
-        name, ms, shot = (list(row) + ["", 0, ""])[:3]
+        name, ms, shot, wait = (list(row) + ["", 0, "", False])[:4]
         if name in held and _int_or_none(ms):
-            out.append("coil_hold      %s %d%s" % (name, int(ms), " 0x%08x" % p.mask([shot]) if shot else ""))
+            out.append("coil_hold      %s %d%s%s" % (name, int(ms), " 0x%08x" % p.mask([shot]) if shot else "",
+                                                     " wait" if wait else ""))
     return out
 
 
@@ -3996,6 +5367,40 @@ def validate_shield(spec, p):
 def shield_lines(spec, p):
     """The runtime line of the shield: nothing unless it turns the platform, and only where the title can."""
     return ["shield         toward"] if spec.shield is True and p.can("shield") else []
+
+
+# ---- PAD-589: the building to a floor -----------------------------------------------------
+def validate_building(spec, p):
+    """Every reason the building part cannot be built; nothing when the mode leaves the building alone. The
+    building moves only while the game's modes cannot start (``game_modes`` block) and its own building locks see
+    no shots, so the game never lights or makes a lock while the building is off the floor it keeps it on."""
+    floor = _int_or_none(spec.building_floor)
+    if floor is None or floor not in (0,) + tuple(BUILDING_FLOORS):
+        return ["The building goes to floor 1, 2 or 3 (0 leaves it where it is)."]
+    if not floor:
+        return []
+    if not p.can("building"):
+        return ["Moving the building is not on %s yet (Mode says why)." % p.label]
+    out = []
+    shot = spec.building_shot or ""
+    if shot and shot not in dict(p.shots):
+        out.append("%s has no shot called %r to move the building on." % (p.label, shot))
+    feature = p.building_rule or "building locks"
+    if (spec.game_modes or "block") != "block":
+        out.append("The building moves only while the game's modes cannot start: otherwise the game's own %s "
+                   "may want it." % feature)
+    elif p.building_rule and p.building_rule in (spec.keep_rules or []):
+        out.append("The building moves only while %s does not keep counting." % p.building_rule)
+    return out
+
+
+def building_lines(spec, p):
+    """The runtime line of the building: ``building <floor> [mask]``, only where the title can."""
+    floor = _int_or_none(spec.building_floor)
+    if not floor or floor not in BUILDING_FLOORS or not p.can("building"):
+        return []
+    shot = spec.building_shot or ""
+    return ["building       %d%s" % (floor, " 0x%08x" % p.mask([shot]) if shot else "")]
 
 
 # ---- PAD-414: the cabinet's shaker -----------------------------------------------------------
@@ -4056,16 +5461,16 @@ def validate_shows(spec, p):
     """Every reason the light-show part cannot be built; nothing when the mode plays none."""
     out = []
     have = {name for name, _k, _s in getattr(p, "game_shows", ())}
-    for f, when in (("show_start", "start"), ("show_end", "end")):
+    for f, when in (("show_start", "at its start"), ("show_end", "at its end"), ("show_hit", "on its shots")):
         v = getattr(spec, f)
         if v in ("", None):
             continue
         if not isinstance(v, str):
-            out.append("The light show at its %s is a show's name." % when)
+            out.append("The light show %s is a show's name." % when)
         elif not p.can("shows"):
             out.append("A light show of the game's is not on %s (Lights says why)." % p.label)
         elif v not in have:
-            out.append("%s has no light show called %r to play at the mode's %s." % (p.label, v, when))
+            out.append("%s has no light show called %r to play %s." % (p.label, v, when.replace("its", "the mode's")))
     return out
 
 
@@ -4074,7 +5479,8 @@ def show_lines(spec, p):
     if not p.can("shows"):
         return []
     have = {name for name, _k, _s in p.game_shows}
-    return ["%-14s %s" % (f, getattr(spec, f)) for f in ("show_start", "show_end") if getattr(spec, f) in have]
+    return ["%-14s %s" % (f, getattr(spec, f)) for f in ("show_start", "show_end", "show_hit")
+            if getattr(spec, f) in have]
 
 
 # ---- PAD-436: the game's own mini-wizard instead of a mode of its own -----------------------
@@ -4106,11 +5512,13 @@ def wizard_cfg(spec, slug, p):
     lines = [
         "# GENERATED by the Modes tab from modes/%s/mode.json - edit the mode there." % slug,
         "name           %s" % spec.name.strip(),
-        "trigger        0x%08x %d" % (p.mask([spec.start_shot]), int(spec.start_count)),
+        "trigger        0x%08x %d" % (p.mask(start_shots(spec)), int(spec.start_count)),
     ]
     lines += starts_cfg_lines(spec)
     lines += more_to_start_lines(spec, p)
-    lines.append("%-14s %s %s" % ("game_wizard", spec.wizard_how, hands_over(spec, p)))
+    name = hands_over(spec, p)
+    # PAD-473: one the game lights for no start shot of its own is started
+    lines.append("%-14s %s %s" % ("game_wizard", spec.wizard_how if name in p.wizard_lights else "start", name))
     return "\n".join(_starts_ends_lines(spec, lines, p, ends=False)) + "\n"
 
 
@@ -4161,6 +5569,39 @@ def starts_on_event(spec):
     return words[1] if len(words) >= 2 and words[0] == "event" else None
 
 
+def starts_on_battle(spec):
+    """True when the mode starts when the player picks its battle slot (``roster_slot``, PAD-589)."""
+    words = (spec.starts_on or "shot").split()
+    return bool(words) and words[0] == "battle"
+
+
+def starts_on_challenge(spec):
+    """True when a Player Challenge game with the mode's challenge picked starts it (``challenge``, PAD-615)."""
+    words = (spec.starts_on or "shot").split()
+    return bool(words) and words[0] == "challenge"
+
+
+def starts_on_place(spec):
+    """True when the game starting one of its own modes (``place_mode``) starts the mode in its place (PAD-710)."""
+    words = (spec.starts_on or "shot").split()
+    return bool(words) and words[0] == "game_mode"
+
+
+def starts_on_done(spec):
+    """True when the mode starts once the player has completed ``done_count`` of the game's own modes (PAD-747)."""
+    words = (spec.starts_on or "shot").split()
+    return bool(words) and words[0] == "completed"
+
+
+def done_ids(spec, p):
+    """PAD-747: the ids of *p*'s modes whose completion counts toward starting *spec*, in id order: its own list (the
+    ones *p* sees), else every one *p* sees."""
+    have = [i for i, _nm in getattr(p, "done_modes", ()) or ()]
+    picked = [i for i in spec.done_modes if isinstance(i, int) and not isinstance(i, bool)] \
+        if isinstance(spec.done_modes, list) else []
+    return sorted(set(picked) & set(have)) if picked else have
+
+
 def starts_on_sequence(spec):
     """True when the mode starts on its ``start_sequence`` made in order (PAD-314)."""
     words = (spec.starts_on or "shot").split()
@@ -4206,8 +5647,45 @@ def _validate_starts_ends(spec, p, ends=True):
     out = []
     words = (spec.starts_on or "shot").split()
     events = tuple(getattr(p, "events", ()) or ())
-    if words[0] not in ("shot", "event", "sequence"):
-        out.append("A mode starts on a shot, on shots made in order, or on one of the game's events.")
+    if words[0] not in ("shot", "event", "sequence", "battle", "challenge", "game_mode", "completed"):
+        out.append("A mode starts on a shot, on shots made in order, on one of the game's events, on a battle "
+                   "picked on the game's selection screen, as a challenge picked in the game's Challenge mode, "
+                   "in the place of one of the game's own modes, or once some of the game's modes are completed.")
+    elif words[0] == "completed":                   # PAD-747
+        have = {i for i, _nm in getattr(p, "done_modes", ()) or ()}
+        picked = spec.done_modes if isinstance(spec.done_modes, list) else None
+        n = _int_or_none(spec.done_count)
+        if not p.can("done"):
+            out.append("Starting once some of the game's own modes are completed is not on %s yet (Mode says why)."
+                       % p.label)
+        elif picked is None or not all(isinstance(i, int) and not isinstance(i, bool) for i in picked):
+            out.append("The game's modes that count toward starting it are a list of their numbers.")
+        elif [i for i in picked if i not in have]:
+            out.append("%s has no mode the app sees completed numbered %s." % (
+                p.label, ", ".join(str(i) for i in picked if i not in have)))
+        elif n is None or not 1 <= n <= len(done_ids(spec, p)):
+            out.append("It starts once 1 to %d of the game's modes ticked are completed." % len(done_ids(spec, p)))
+    elif words[0] == "game_mode":                   # PAD-710
+        n = _int_or_none(spec.place_mode)
+        if not p.can("place"):
+            out.append("Starting in the place of one of the game's own modes is not on %s yet (Mode says why)." % p.label)
+        elif n is None or n not in {i for i, _nm, _c in p.places}:
+            out.append("Pick the game's mode this one runs in the place of.")
+    elif words[0] == "challenge":                   # PAD-615
+        n = _int_or_none(spec.challenge)
+        if not p.can("challenge"):
+            out.append("Starting as one of the game's challenges is not on %s yet (Mode says why)." % p.label)
+        elif n == CHALLENGE_NEW and not getattr(p, "challenge_menu", 0):
+            out.append("A challenge of its own is not on %s: its start menu is not one the app can add to." % p.label)
+        elif n != CHALLENGE_NEW and (n is None or not 0 <= n < len(p.challenges)):
+            out.append("Pick the game's challenge the mode takes the place of.")
+    elif words[0] == "battle":                      # PAD-589
+        slot = _int_or_none(spec.roster_slot)
+        if not p.can("roster"):
+            out.append("Starting on a battle picked on the selection screen is not on %s yet (Mode says why)."
+                       % p.label)
+        elif slot is None or not 0 <= slot < len(p.roster):
+            out.append("Pick the battle on the selection screen that starts the mode.")
     elif words[0] == "sequence":                    # PAD-314
         seq = spec.start_sequence
         names = dict(p.shots)
@@ -4249,6 +5727,14 @@ def asset_names(slug):
     return {
         "screen_node": stem + "_Screen",
         "screen_text": stem + "_Screen." + stem + "_Screen_Words",
+        "info_node": stem + "_Info",                     # PAD-547: its info line ("SUPER JACKPOT = 53,200,000")
+        "info_text": stem + "_Info." + stem + "_Info_Words",
+        "total_name_node": stem + "_TotalName",           # PAD-574: its TOTAL as the game's own: the word...
+        "total_name_text": stem + "_TotalName." + stem + "_TotalName_Words",
+        "total_node": stem + "_Total",                   # ...and under it the number, large
+        "total_text": stem + "_Total." + stem + "_Total_Words",
+        "points_node": stem + "_Points",                 # PAD-709: a scored shot's number, large under its bar
+        "points_text": stem + "_Points." + stem + "_Points_Words",
         "clip": stem + "_Clip",
     }
 
@@ -4282,7 +5768,7 @@ def runtime_cfg(spec, slug, sound_key=None, own_sounds=None, own_sound_ms=None):
     lines = [
         "# GENERATED by the Modes tab from modes/%s/mode.json - edit the mode there." % slug,
         "name           %s" % spec.name.strip(),
-        "trigger        0x%08x %d" % (p.mask([spec.start_shot]), int(spec.start_count)),
+        "trigger        0x%08x %d" % (p.mask(start_shots(spec)), int(spec.start_count)),
         "seconds        %d" % int(spec.seconds),
         "shots          0x%08x" % p.mask(spec.scoring_shots),
         "award          %d" % int(spec.award),
@@ -4293,6 +5779,7 @@ def runtime_cfg(spec, slug, sound_key=None, own_sounds=None, own_sound_ms=None):
     lines += scoop_lines(spec, p)           # PAD-381: nothing unless it holds a ball in the scoop
     lines += coil_lines(spec, p)            # PAD-381: the other mechanisms it holds
     lines += shield_lines(spec, p)          # PAD-392: the shield targets toward the player while it runs
+    lines += building_lines(spec, p)        # PAD-589: the building to a floor as it starts or on a shot
     lines += shake_lines(spec, p)           # PAD-414: the cabinet's shaker
     lines += show_lines(spec, p)            # PAD-418: the game's own light shows at its start and end
     if spec.screen and p.can("screen"):
@@ -4330,7 +5817,41 @@ def runtime_cfg(spec, slug, sound_key=None, own_sounds=None, own_sound_ms=None):
     lines += display_light_lines(spec)
     lines += more_to_start_lines(spec, p)    # PAD-227: nothing unless the mode has them
     lines = _starts_ends_lines(spec, lines, p)
+    if starts_on_battle(spec) and p.can("roster") and getattr(spec, "roster_more", False):   # PAD-707
+        at = next((i for i, line in enumerate(lines) if line.startswith("roster_slot ")), len(lines) - 1)
+        lines.insert(at + 1, "roster_more    %s" % more_page(slug))
     return "\n".join(lines) + "\n"
+
+
+def more_page(slug):
+    """PAD-707: the stem of a new monster's nodes on the battle selection screen (the card build adds them)."""
+    from . import battle_select
+    return battle_select.page_of(slug)
+
+
+# ---- PAD-518: more than one shot counted toward its start --------------------------------
+#: the shots the `trigger` line's count may be made on besides the start shot (mode_file.c counts every hit of any
+#: shot in its bits, so this is the tab's own limit: three, the most a title's pop bumpers come to)
+START_OR_MAX = 2
+#: the most hits a start shot (or an "and also" shot) can ask for; mode_file.c's count is an unsigned int
+START_COUNT_MAX = 999
+
+
+def start_shots(spec):
+    """The shots whose hits count toward starting ``spec``: its start shot and its ``start_or`` ones, each once."""
+    out = [spec.start_shot]
+    for s in spec.start_or if isinstance(spec.start_or, list) else ():
+        if isinstance(s, str) and s and s not in out:
+            out.append(s)
+    return out
+
+
+def validate_start_or(spec, names):
+    """The reasons ``start_or`` cannot be built, as sentences (``names``: the title's shots)."""
+    rows = spec.start_or
+    if not isinstance(rows, list) or len(rows) > START_OR_MAX:
+        return ["A mode can count up to %d more shots toward its start." % START_OR_MAX]
+    return ["%r is not a shot this game has." % s for s in rows if s not in names]
 
 
 # ---- PAD-227: more than one thing to meet before it starts ---------------------------------
@@ -4363,8 +5884,8 @@ def validate_more_to_start(spec, p):
     for shot, count in rows:
         if shot not in names:
             out.append("%s has no shot called %r." % (p.label, shot))
-        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 20:
-            out.append("Each other shot it waits for is hit 1 to 20 times.")
+        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= START_COUNT_MAX:
+            out.append("Each other shot it waits for is hit 1 to %d times." % START_COUNT_MAX)
     after = spec.after if isinstance(spec.after, str) else None
     if after is None:
         out.append("The mode it starts after is a mode's name.")
@@ -4384,6 +5905,32 @@ def more_to_start_lines(spec, p):
     if isinstance(spec.after, str) and spec.after.strip():
         lines.append("%-14s %s %s" % ("after", spec.after_when, spec.after.strip()))
     return lines
+
+
+def own_challenge_problems(entries, room):
+    """PAD-615 round 3: ``{key: [sentence]}`` for the project's modes that are new challenges of their own on the
+    game's start menu. ``entries`` is ``[(key, name, what)]`` - one per such mode, form or blocks (``what``: "the
+    blocks mode" / "the form mode", for the sentence) - and ``room`` how many the menu holds. Two under one name would
+    be listed twice (the menu shows names in capitals, so case does not tell them apart); more than ``room`` would
+    leave some off the menu, which ones depending on the order the card loads them."""
+    out = {}
+    by_name = {}
+    for key, name, what in entries:
+        by_name.setdefault(name.strip().upper(), []).append((key, name.strip(), what))
+    for same in by_name.values():
+        if len(same) < 2:
+            continue
+        for key, name, _what in same:
+            others = ", ".join(w for k, _n, w in same if k != key)
+            out.setdefault(key, []).append(
+                "Another mode (%s) is also a new challenge of its own called %s: the game's start menu would list it "
+                "twice. One mode per challenge is enough: set the other one's start back, or delete it." % (others, name))
+    if room and len(entries) > room:
+        for key, _name, _what in entries:
+            out.setdefault(key, []).append(
+                "%d modes in this project are new challenges of their own, and the game's start menu has room for "
+                "%d: take one off." % (len(entries), room))
+    return out
 
 
 def after_problems(modes):
@@ -4424,7 +5971,7 @@ def validate_display_lights(spec):
         out.append("The display priority is 0 (none) to 255.")
     colour = spec.light_shots
     if colour and not (isinstance(colour, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", colour)):
-        out.append("The colour of the lit shots is not a colour like #ff6000.")
+        out.append("The color of the lit shots is not a color like #ff6000.")
     if spec.light_shots_pattern not in LIGHT_PATTERNS:
         out.append("The lit shots are solid, blink, pulse or chase.")
     return out
@@ -4478,6 +6025,9 @@ def own_sound_lines(spec, own_sounds, ms=None):
     # item 163: the carriers whose own record key the mode swaps for its appended record's
     lines += ["swap           %d %s %s" % (int(r), stock, ours)
               for r, stock, ours in own_sounds.get("swaps") or () if int(r) in carried]
+    # PAD-595: the carriers pointed at a sound id of a sound bank of the mode's own, per play
+    lines += ["sid            %d %d" % (int(r), int(sid))
+              for r, sid in own_sounds.get("sids") or () if int(r) in carried]
     return lines
 
 
@@ -4752,6 +6302,25 @@ def _starts_ends_lines(spec, lines, p, ends=True):
     if event:
         out = [line for line in out if not line.startswith("trigger ")]
         out.insert(2, "starts_on      event %s" % event)
+    elif starts_on_battle(spec) and p.can("roster"):   # PAD-589: only the pick starts it (no trigger line)
+        out = [line for line in out if not line.startswith("trigger ")]
+        out.insert(2, "roster_slot    %d" % int(spec.roster_slot))
+    elif starts_on_place(spec) and p.can("place"):   # PAD-710: only the game starting its mode starts it
+        out = [line for line in out if not line.startswith("trigger ")]
+        out.insert(2, "in_place_of    %d" % int(spec.place_mode))
+    elif starts_on_done(spec) and p.can("done"):     # PAD-747: the game's modes completed (no trigger line)
+        out = [line for line in out if not line.startswith("trigger ")]
+        ids = done_ids(spec, p)
+        everyone = len(ids) == len(getattr(p, "done_modes", ()) or ())
+        out.insert(2, ("starts_on      completed %d" % int(spec.done_count))
+                   + ("" if everyone else " " + " ".join(str(i) for i in ids)))
+    elif starts_on_challenge(spec) and p.can("challenge"):   # PAD-615: only the challenge game's pick starts it
+        out = [line for line in out if not line.startswith("trigger ")]
+        n = int(spec.challenge)
+        out.insert(2, "challenge      %s" % ("new" if n == CHALLENGE_NEW else n))
+        launch = _int_or_none(getattr(spec, "challenge_launch", 0)) or 0              # PAD-643
+        if launch:
+            out.insert(3, "challenge_launch %s" % ("player" if launch < 0 else max(1, min(60, launch // 1000))))
     elif starts_on_sequence(spec):
         out = [line for line in out if not line.startswith("trigger ")]
         seq = ["%-14s 0x%08x" % ("trigger_seq", p.mask([s])) for s in spec.start_sequence]

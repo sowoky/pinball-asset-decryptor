@@ -27,6 +27,7 @@ Store namespace ``video``:
              column_widths["video_web"]); the rest fit their content
   compare    {open, max, tiles: [{id, rel, side, sides, pane, look}]}: the
              Compare view's players (PAD-440), each with its colour steps
+  report_busy  the compare report CSV is being made (PAD-812)
 
 A row's RANDOM CLIPS (PAD-446): more clips for one slot, the game playing
 one of them at random each time it plays the slot's clip.  Kept in the
@@ -41,15 +42,19 @@ import os
 import queue as queue_mod
 import threading
 import time
+from dataclasses import replace
 
 from .. import compat
-from ...core.video_slots import LENGTH_FULL, LENGTH_STOCK, length_seconds
+from ...core.video_slots import (LENGTH_FULL, LENGTH_LOOP, LENGTH_STOCK,
+                                 LENGTH_STRETCH, length_seconds)
 from .. import look_switches
 from .. import video_helpers as vh
+from ..colour_save import ColourSaveMixin
 from ..video_best import BEST_TIP, BestQualityMixin
 from ..video_modes import ModesMixin
 from ..video_undo import UndoMixin, undoable
 from .base import TabService, rpc
+from ..testcard_tags import TestTagMixin
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +63,8 @@ _LABEL = "Replace Video"          # MainWindow._REPLACE_LABELS["video"]
 
 def _length_ok(choice):
     """A per-clip length choice worth keeping from a sidecar."""
-    return choice in (LENGTH_STOCK, LENGTH_FULL) or bool(
+    return choice in (LENGTH_STOCK, LENGTH_FULL, LENGTH_LOOP,
+                      LENGTH_STRETCH) or bool(
         length_seconds(choice))
 
 
@@ -74,6 +80,28 @@ def _variants_from(raw, by_rel):
             if keep:
                 out[rel] = keep
     return out
+
+
+def _clock(seconds):
+    """*seconds* as the players show it: 0:03, 4:56."""
+    s = int(round(seconds or 0))
+    return "%d:%02d" % (s // 60, s % 60)
+
+
+def _gap_words(mine, stock):
+    """PAD-1232: how a *mine*-second replacement compares with the
+    *stock*-second clip it replaces, for the Vs stock column: "−0.25 s •
+    2.5% slower" (the speed change that would make it run exactly as
+    long), "same length" within a frame or two."""
+    from ...core.video import speed_words
+    diff = mine - stock
+    if abs(diff) < 0.05:
+        return "same length"
+    n = abs(diff)
+    size = (("%.2f s" % n) if n < 10 else ("%.1f s" % n) if n < 60
+            else _clock(n))
+    return "%s%s • %s" % ("−" if diff < 0 else "+", size,
+                              speed_words(mine, stock))
 
 
 def _length_key(choice):
@@ -94,7 +122,16 @@ STOCK_ON_ORIG = ("no replacement assigned: the game's own clip, its color "
                  "profile is on the Original player")
 
 
-class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
+class VideoTab(TestTagMixin, ColourSaveMixin, ModesMixin, BestQualityMixin, UndoMixin,
+               TabService):
+    _tc_kind = "video"                # PAD-1279: a TEST tick puts the row on the test card
+
+    def _tc_project(self):
+        return self._assets_path()
+
+    def _tc_file(self, rel):
+        return self._cs_source(rel)
+
     ns = "video"
     key = "Replace Video"
     label = "Video"
@@ -116,6 +153,7 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         self.video_best_quality_var = self.var("best_quality", "bool", False)
         self._slots = []                 # [VideoSlot] from the last scan
         self._by_rel = {}                # rel -> VideoSlot
+        self._reveal_after_scan = ""     # PAD-1274: a jump waiting on the scan
         self._assign = {}                # rel -> replacement file path
         self._asis = {}                  # rel -> per-clip as-is override
         self._length = {}                # rel -> per-clip length choice
@@ -146,6 +184,9 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         self._foreign = set()
         self._twins = {}
         self._conv_cache = {}
+        # PAD-1232: seconds per file, {(path, size, mtime_ns): seconds}
+        self._secs = {}
+        self._secs_busy = set()
         self._conv_pass = 0
         self._conv_kick = False
         self._unplayable_warned = set()
@@ -162,6 +203,7 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         self._restoring = False
         self._pane_seq = 0
         self._cmp = []                   # the Compare players (PAD-440)
+        self._report_busy = False        # the compare report is being made (PAD-812)
         self._cmp_open = False
         self._cmp_ids = 0
         # PAD-448: the players' colour tables still to build ({path: steps}),
@@ -197,7 +239,8 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
                  best_tip=BEST_TIP, best_supported=False,
                  color_offered=False, color_stock=False,
                  compare={"open": False, "max": COMPARE_MAX, "tiles": []},
-                 widths=self._saved_widths())
+                 widths=self._saved_widths(), var_share=False,
+                 report_busy=False)
         threading.Thread(target=vh.prune_cache, daemon=True,
                          name="video-cache-prune").start()
 
@@ -257,10 +300,13 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
     def on_show(self):
         """<<NotebookTabChanged>> for Replace Video: the ffmpeg banner, the
         project folder defaulted from Extract, and the auto-scan."""
+        self._tc_publish()           # PAD-1279: the TEST column
         self._refresh_ffmpeg_warning()
         self._default_assets_from_extract()
         self._update_project()
         self._maybe_rescan()
+        if self._m_seen_changed():          # PAD-827: an Emulate run saw clips since
+            self._refresh_list()
         self.publish_look()
 
     # -- As on the machine on the players (PAD-329) ------------------------
@@ -446,7 +492,7 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
             try:
                 colour_profile.build_look_lut(steps)
             except Exception:                           # noqa: BLE001
-                log.exception("video colour table")
+                log.exception("video color table")
                 continue
             self.ctx.loop.post(self.publish_look)
 
@@ -634,6 +680,19 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         staged_changes.save(assets_dir, kept)
         self._u_reset()
 
+    def forget_reset(self, assets_dir, kinds):
+        """PAD-569 Reset…: forget the picks (and color switches) it resets, so a later save
+        of this tab cannot write them back over the sidecar the reset just cleared."""
+        if "videos" in kinds:
+            self._assign = {}
+            self._asis = {}
+            self._length = {}
+            self._variants = {}
+        if "colours" in kinds:
+            self._color = {}
+            self._color_stock = False
+            self._stock_on = set()
+
     def refresh_after_revert(self):
         """The video part of MainWindow.refresh_after_revert."""
         self._changed = set()
@@ -642,12 +701,27 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         if self._slots:
             self._start_change_scan()
 
+    def _reveal_pending(self, scan_id):
+        """PAD-1274: the slot a jump asked for while the scan ran."""
+        rel = getattr(self, "_reveal_after_scan", "")
+        if not rel or self._scan_id != scan_id:
+            return
+        self._reveal_after_scan = ""
+        if rel in self._by_rel:
+            self.reveal_video_slot(rel)
+
     def reveal_video_slot(self, rel):
         """MainWindow.reveal_video_slot (the Scenes window): show one slot
         on this tab, clearing any filter that would hide it."""
         self.window.select_tab(self.ns)
         if rel not in self._by_rel:
+            # PAD-1274: the tab's first scan is still running (it starts as the
+            # tab is shown): show the slot once it has its list
+            if self.get("scanning") or not self._slots:
+                self._reveal_after_scan = rel
+                return True
             return False
+        self._reveal_after_scan = ""
         i = self._index.get(rel)
         if i is None or i not in set(self.get("view") or []):
             self.video_search_var.set("")
@@ -674,10 +748,10 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         self._scan_id += 1
         t0, self._scan_t0 = self._scan_t0, None
         if t0 is not None:
-            self.log("%s scan cancelled after %.1f s."
+            self.log("%s scan canceled after %.1f s."
                      % (_SCAN_LABEL, time.monotonic() - t0), "info")
         self.set(scanning=False, rows=[], view=[],
-                 empty="Scan cancelled — click Scan to try again.")
+                 empty="Scan canceled — click Scan to try again.")
         self._rows = []
         self._index = {}
         return True
@@ -729,7 +803,12 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
             except Exception:                               # noqa: BLE001
                 exts = None
             try:
+                keep = mfr.slot_keep_dirs(path) if mfr else ()
+            except Exception:                           # noqa: BLE001
+                keep = ()
+            try:
                 slots = scan_video_slots(path, roots=roots, exts=exts,
+                                         keep_dirs=keep,
                                          probe=False)
             except Exception:                               # noqa: BLE001
                 slots = []
@@ -746,6 +825,7 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
                 return
             self.ctx.loop.post(self._populate_after_scan, slots, scan_id,
                                path, offer)
+            self.ctx.loop.post(self._reveal_pending, scan_id)
 
         self._set_scan_ui(True)
         threading.Thread(target=_work, daemon=True,
@@ -828,6 +908,7 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         # the modes the card's program names (read once per card; a card read
         # before publishes now, so the rows below carry them)
         self._m_kick(scan_dir)
+        self.set(var_share=self._var_offer is not None or bool(self._variants))
         self._refresh_list()
         # Default to the first clip so a poster frame shows on a fresh scan
         # (PAD-444: the row a copy was just made or dropped for, when it is listed)
@@ -848,6 +929,7 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
             self._load_track(first)
         self._start_change_scan()
         self._probe_metadata_async(scan_id)
+        self._screens_async(scan_id, scan_dir)
 
     def _load_staged(self, assets_dir):
         """MainWindow._load_staged_changes (plus the replacement-name
@@ -910,26 +992,102 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
                 'folder you pick and re-points every one of these at once.',
                 "info")
 
+    # ---- PAD-1115: the game's screens that show a clip for a fixed time ----
+    def _screens_async(self, scan_id, scan_dir):
+        """Read the card's game program on a worker for the screens that show a clip for a fixed time
+        (:mod:`.screen_time`), then flag their rows (the Length cell). Stern only; a card that cannot
+        be read flags nothing."""
+        self._screens = {}
+        if self._mfr_key() != "stern" or not scan_dir:
+            return
+        box = {}
+
+        def _work():
+            try:
+                from ...plugins.stern import screen_time as ST
+                box["found"] = ST.project_screens(scan_dir) or {}
+            except Exception:                               # noqa: BLE001 - no flags
+                box["found"] = {}
+
+        def _poll():
+            if self._scan_id != scan_id:
+                return
+            if "found" not in box:
+                self.ctx.loop.after(250, _poll)
+                return
+            self._screens = box["found"]
+            for rel, i in list(self._index.items()):
+                slot = self._by_rel.get(rel)
+                if slot is not None and self._screen_of(rel):
+                    self._put_row(i, self._row(slot))
+
+        threading.Thread(target=_work, name="video-screens", daemon=True).start()
+        self.ctx.loop.after(250, _poll)
+
+    def _screen_of(self, rel):
+        """The screens that show *rel*'s clip (its file name is the clip's name), ``[]`` for none."""
+        screens = getattr(self, "_screens", None) or {}
+        return screens.get(os.path.splitext(os.path.basename(rel))[0]) or []
+
+    def _scr_row(self, rel, s, rep, is_changed):
+        """The Length cell's screen-time tag and its words (PAD-1115)."""
+        found = self._screen_of(rel)
+        if not found:
+            return {}
+        from ...plugins.stern import screen_time as ST
+        clip_s = 0.0
+        if s.info is not None and (is_changed or not rep):
+            clip_s = float(getattr(s.info, "duration", 0) or 0)
+        got = ST.flag(found, clip_s, bool(rep) or is_changed)
+        if got is None:
+            return {}
+        tag, cls, head, lines = got
+        return {"scr": tag, "scr_cls": cls, "scr_head": head, "scr_tip": lines}
+
     # ---- metadata probe (MainWindow._run_probe_pass) -------------------
     def _probe_metadata_async(self, scan_id):
         """MainWindow._probe_video_metadata_async: ffprobe each slot on a
-        worker pool; a loop timer drains results in bounded batches."""
+        worker pool; a loop timer drains results in bounded batches.
+
+        The project's probe cache (core.video.PROBE_CACHE_FILE, PAD-797)
+        answers first: the slots it still answers for go straight to the
+        page, only the misses reach ffprobe, and the cache is written
+        back once at the end when a probe filled it (never in a capture
+        run).  The cache is read, looked up and saved on the coordinator
+        thread, so the loop never waits on a stat or a file."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        from ...core import video as video_mod
         from ...core.video import backend_for, detect_video_info
         pending = [s for s in self._slots
                    if s.info is None and backend_for(s.abs_path) is None]
         if not pending:
             return
+        folder = self._scan_dir
         q = queue_mod.SimpleQueue()
         done = threading.Event()
 
         def _coordinator():
+            cache, changed = {}, False
             try:
+                cache = video_mod.load_probe_cache(folder) if folder else {}
+                misses = []
+                for s in pending:
+                    if self._scan_id != scan_id:
+                        return
+                    hit = (video_mod.probe_cache_lookup(cache, s.rel_path,
+                                                        s.abs_path)
+                           if cache else None)
+                    if hit is not None:
+                        q.put((s.rel_path, hit))
+                    else:
+                        misses.append(s)
+                if not misses:
+                    return
                 workers = min(8, (os.cpu_count() or 4))
                 with ThreadPoolExecutor(max_workers=workers) as ex:
                     futs = {ex.submit(detect_video_info, s.abs_path): s
-                            for s in pending}
+                            for s in misses}
                     for fut in as_completed(futs):
                         if self._scan_id != scan_id:
                             for f in futs:
@@ -939,10 +1097,16 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
                             info = fut.result()
                         except Exception:                   # noqa: BLE001
                             info = None
-                        q.put((futs[fut].rel_path, info))
+                        slot = futs[fut]
+                        if video_mod.probe_cache_store(
+                                cache, slot.rel_path, slot.abs_path, info):
+                            changed = True
+                        q.put((slot.rel_path, info))
             except Exception:                               # noqa: BLE001
                 pass
             finally:
+                if changed and folder:
+                    video_mod.save_probe_cache(folder, cache)
                 done.set()
 
         def _drain():
@@ -1171,7 +1335,8 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
             return length
         secs = length_seconds(choice)
         word = ("%g s" % secs if secs else
-                "stock" if choice == LENGTH_STOCK else "full")
+                {LENGTH_STOCK: "stock", LENGTH_LOOP: "loop",
+                 LENGTH_STRETCH: "speed"}.get(choice, "full"))
         return "%s • %s" % (length, word)
 
     def _asis_for(self, rel):
@@ -1248,12 +1413,146 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
                 "len": self._length_cell(rel, length), "res": res,
                 "fmt": fmt, "fmt_bad": fmt.endswith("⚠"), "aud": aud,
                 "rep": rep_disp, "rep_cls": cls, "conv": conv,
+                **self._fit_row(rel, rep),
                 "conv_cls": self._conv_cls(conv),
                 "col": self._color_state(rel), "col_own": rel in self._color,
                 "col_lock": self._color_locked(rel),
                 "col_stock": bool(self._color_stock
                                   and not self._assign.get(rel)),
+                **self._scr_row(rel, s, rep, is_changed),
                 **self._m_row(rel)}
+
+    # -- Vs stock: the replacement's length against the stock clip's -----
+    @staticmethod
+    def _file_key(path):
+        try:
+            st = os.stat(path)
+        except (OSError, TypeError, ValueError):
+            return None
+        return (path, st.st_size, st.st_mtime_ns)
+
+    def _secs_of(self, path, probe=False):
+        """How long *path* runs, from the cache (None while unknown), or
+        probed now with *probe*.  0.0 for a file ffprobe can't read."""
+        key = self._file_key(path) if path else None
+        if key is None:
+            return None
+        secs = self._secs.get(key)
+        if secs is None and probe:
+            from ...core.video import probe_duration
+            try:
+                secs = float(probe_duration(path) or 0.0)
+            except Exception:                           # noqa: BLE001
+                secs = 0.0
+            self._secs[key] = secs
+        return secs
+
+    def _stock_secs(self, rel, probe=False):
+        """How long the game's own clip in *rel* runs: its ``.orig/``
+        snapshot once a build has staged over it (the slot then holds the
+        replacement), else the slot's own probe."""
+        snap = self._stock_path(rel)
+        if snap and os.path.isfile(snap):
+            return self._secs_of(snap, probe=probe)
+        slot = self._by_rel.get(rel)
+        if slot is None or (slot.info is None and not slot.probed):
+            return None
+        return slot.duration or 0.0
+
+    def _fit_secs(self, rel, rep):
+        """``(mine, stock)`` seconds of *rel*'s replacement *rep* and its
+        stock clip, from what is known already; None until both are."""
+        if not rep:
+            return None
+        mine = self._secs_of(rep)
+        stock = self._stock_secs(rel)
+        if not mine or not stock:
+            return None
+        return mine, stock
+
+    def _fit_row(self, rel, rep):
+        """PAD-1232 (DoomWalrus666): the Vs stock column, how much shorter
+        or longer the chosen file runs than the clip it replaces and the
+        speed change that would make it run exactly as long."""
+        if not rep:
+            return {"fit": "", "fit_tip": None, "fit_cls": ""}
+        got = self._fit_secs(rel, rep)
+        if got is None:
+            key = self._file_key(rep)
+            unread = key is not None and self._secs.get(key) == 0.0
+            return {"fit": "" if unread else "…", "fit_tip": None,
+                    "fit_cls": ""}
+        from ...core.video import speed_words
+        mine, stock = got
+        text = _gap_words(mine, stock)
+        same = text == "same length"
+        lines = ["Your file runs %.2f s and the stock clip %.2f s."
+                 % (mine, stock)]
+        on = self._length.get(rel) == LENGTH_STRETCH
+        if not same:
+            lines.append(
+                "To run exactly as long it would play %s. Right-click "
+                "→ This clip's length → Speed my file to the stock "
+                "clip's length does that." % speed_words(mine, stock))
+            if on:
+                lines.append("This clip is set to do that.")
+        return {"fit": text,
+                "fit_tip": {"head": "Your file against the stock clip",
+                            "lines": lines},
+                "fit_cls": ("on" if on and not same else
+                            "short" if mine < stock - 0.05 else "")}
+
+    def _fit_key(self, rel):
+        """Vs stock's sort: by how much longer the replacement runs (the
+        most short first ascending), rows with nothing to compare last."""
+        got = self._fit_secs(rel, self._assign.get(rel))
+        return (0, got[0] - got[1]) if got else (1, 0.0)
+
+    def _probe_secs_async(self):
+        """Read the lengths Vs stock needs off the loop: each chosen file's
+        and each staged slot's ``.orig/`` snapshot's, once per file."""
+        want = []
+        for rel, rep in sorted(self._assign.items()):
+            for path in (rep, self._stock_path(rel)):
+                if not path or path in self._secs_busy:
+                    continue
+                key = self._file_key(path)
+                if key is not None and key not in self._secs:
+                    want.append((rel, path))
+        if not want:
+            return
+        self._secs_busy.update(p for _r, p in want)
+
+        def _work():
+            from ...core.video import probe_duration
+            got = []
+            for rel, path in want:
+                key = self._file_key(path)
+                try:
+                    secs = float(probe_duration(path) or 0.0)
+                except Exception:                       # noqa: BLE001
+                    secs = 0.0
+                got.append((rel, path, key, secs))
+            self.ctx.loop.post(self._apply_secs, got)
+
+        threading.Thread(target=_work, daemon=True,
+                         name="video-lengths").start()
+
+    def _apply_secs(self, got):
+        rels = set()
+        for rel, path, key, secs in got:
+            self._secs_busy.discard(path)
+            if key is not None:
+                self._secs[key] = secs
+            rels.add(rel)
+        if self._sort and self._sort[0] == "fit":
+            self._refresh_list()
+            return
+        for rel in rels:
+            i = self._index.get(rel)
+            slot = self._by_rel.get(rel)
+            if i is not None and slot is not None:
+                self._put_row(i, self._row(slot))
 
     # -- the chosen-files colour profile (PAD-312) ------------------------
     def _per_file_colour(self):
@@ -1335,7 +1634,7 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
                 try:
                     fn()
                 except Exception:                       # noqa: BLE001
-                    log.exception("video colour %s.%s", ns, name)
+                    log.exception("video color %s.%s", ns, name)
 
     @rpc
     @undoable("the colors of %s")
@@ -1404,6 +1703,27 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
             if on is not None and (on or scope == "all"):
                 out[rel] = on
         return out
+
+    # ---- Save with color profile (PAD-604) -----------------------------
+    _cs_kind = "videos"
+    _cs_noun = ("clip", "clips")
+
+    def _cs_project(self):
+        return self._assets_path()
+
+    def _cs_profiled(self):
+        return self.color_targets("profiled")
+
+    def _cs_source(self, rel):
+        """The clip *rel*'s profile goes on: its replacement, else the
+        game's own (its snapshot where a build changed the slot)."""
+        rep = self._assign.get(rel)
+        if rep:
+            return rep if isinstance(rep, str) else None
+        slot = self._by_rel.get(rel)
+        if slot is None:
+            return None
+        return self._stock_path(rel) or slot.abs_path
 
     def put_color_switches(self, switches):
         """PAD-439: clips' own switches set at once (``True`` / ``False``,
@@ -1486,11 +1806,16 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
             if col == "aud":
                 a = s.info.audio_summary() if s.info else ""
                 return (a.lower(), s.rel_path.lower())
+            if col == "seen":                   # PAD-827: the seen clips first
+                c = self._m_seen_row(s.rel_path)["seen"]
+                return ((0, c.lower()) if c else (1, ""), s.rel_path.lower())
             if col == "rep":
                 rep = self._assign.get(s.rel_path)
                 if rep:
                     return (0, os.path.basename(rep).lower())
                 return (1, "") if s.rel_path in changed else (2, "")
+            if col == "fit":                    # PAD-1232
+                return self._fit_key(s.rel_path) + (s.rel_path.lower(),)
             if col == "conv":
                 mode = self._conv_cached(s.rel_path,
                                          self._assign.get(s.rel_path))
@@ -1551,6 +1876,7 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
             pass
         self._update_clear_all()
         self._probe_conv_async()
+        self._probe_secs_async()
         self._update_note()
         self._cmp_sync()
 
@@ -1779,6 +2105,7 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
                 return False
             self._m_publish()
         self._assign[rel] = path
+        self._offer_loop(rel, path)
         self._save_staged()
         note = vh.conversion_note(self._by_rel.get(rel), rel, path,
                                   self._asis_for(rel),
@@ -1821,12 +2148,55 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
             self._update_note(rel)
         return True
 
+    def _stock_seconds(self, rel):
+        """How long the game's own clip in *rel* runs: its ``.orig/``
+        snapshot once a build has staged over it, else the slot's probe."""
+        return self._stock_secs(rel, probe=True) or 0.0
+
+    def _offer_loop(self, rel, path):
+        """PAD-1226: a replacement shorter than the clip it replaces is
+        offered a loop to the stock clip's length, rather than holding its
+        last frame (or ending early).  Asked only when the clip has no
+        length of its own picked yet (or "match the stock clip"), and not
+        for a clip going on as-is, whose length can't be changed.  Not asked
+        for a file within a second of the stock clip either (Ben, both
+        3:20): looping that would only flash its opening at the end."""
+        choice = self._length.get(rel)
+        if choice not in (None, LENGTH_STOCK) or self._asis_for(rel):
+            return
+        mine = self._secs_of(path, probe=True) or 0.0
+        stock = self._stock_seconds(rel)
+        # A file only a few frames short (both read 3:20) would loop just a
+        # flash of its opening: ask only when it is a second or more short
+        # and the two lengths read differently.
+        if (not mine or not stock or stock - mine < 1.0
+                or _clock(mine) == _clock(stock)):
+            return
+        held = choice == LENGTH_STOCK or bool(self.video_trim_var.get())
+        if compat.messagebox.askyesno(
+                "Shorter than the clip it replaces",
+                "%s runs %s and the clip it replaces (%s) runs %s.\n\n"
+                "Loop your file so it plays over and over until it fills "
+                "the %s?\n\nNo: %s.  You can change this later: right-click "
+                "the clip → This clip's length."
+                % (os.path.basename(path), _clock(mine),
+                   os.path.basename(rel), _clock(stock), _clock(stock),
+                   "it plays once and holds its last frame to the end"
+                   if held else "it plays once, %s long" % _clock(mine))):
+            self._length[rel] = LENGTH_LOOP
+            self.log("Replace Video: %s will loop %s to fill the stock "
+                     "clip's %s." % (rel, os.path.basename(path),
+                                     _clock(stock)), "info")
+
     @rpc
     @undoable("the length of %s")
     def set_length(self, rel, value):
         """This clip's own length (PAD-215): None follows the Trim / pad
-        box, "stock" cuts or pads to the stock clip, "full" keeps the
-        replacement's own length, "custom" asks for a number of seconds."""
+        box, "stock" cuts or pads to the stock clip, "loop" cuts a longer
+        replacement to it and plays a shorter one over and over to fill it
+        (PAD-1226), "stretch" slows the replacement down or speeds it up to
+        run exactly the stock clip's length (PAD-1232), "full" keeps the replacement's own length, "custom"
+        asks for a number of seconds."""
         slot = self._by_rel.get(rel)
         if slot is None:
             return False
@@ -1846,10 +2216,14 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
             self._length.pop(rel, None)
             self.log("Replace Video: %s follows the Trim / pad box again."
                      % rel, "info")
-        elif value in (LENGTH_STOCK, LENGTH_FULL) or length_seconds(value):
+        elif _length_ok(value):
             self._length[rel] = value
             what = ("%g s" % value if length_seconds(value) else
                     "the stock clip's length" if value == LENGTH_STOCK
+                    else "the stock clip's length, your file looped to fill "
+                    "it" if value == LENGTH_LOOP
+                    else "the stock clip's length, your file %s to fit it"
+                    % self._speed_note(rel) if value == LENGTH_STRETCH
                     else "your file's own length")
             self.log("Replace Video: %s will run %s, whatever the Trim / "
                      "pad box says." % (rel, what), "info")
@@ -1864,7 +2238,17 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         self._refresh_list()
         if rel == self._current:
             self._update_note(rel)
+            self._reload_rep_pane(rel)  # PAD-1232: its player's speed
         return True
+
+    def _speed_note(self, rel):
+        """"played 2.5% slower" for a clip set to fit by speed (PAD-1232),
+        "slowed down or sped up" while its lengths aren't known."""
+        from ...core.video import speed_words
+        mine = self._secs_of(self._assign.get(rel), probe=True)
+        stock = self._stock_seconds(rel)
+        words = speed_words(mine, stock) if mine and stock else ""
+        return ("played " + words) if words else "slowed down or sped up"
 
     # ---- clearing (the shared Replace-tab clear, kind "video") ---------
     def _applied_rels(self, rels=None):
@@ -2166,7 +2550,7 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         from .. import tab_settings_ui
         folder = self._settings_dir()
         return tab_settings_ui.save_media(self, "video", folder, bool(folder),
-                                          self._save_staged_changes)
+                                          self._save_staged)
 
     @rpc
     def settings_load(self, path=None):
@@ -2176,7 +2560,7 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         return tab_settings_ui.load_media(
             self, "video", self._settings_dir(),
             set(self._by_rel) - set(self._m_virtual),
-            self._is_running(), self._save_staged_changes,
+            self._is_running(), self._save_staged,
             self._scan_async, path)
 
     # ---- Export CSV (MainWindow._video_export_csv) ----------------------
@@ -2221,6 +2605,148 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
                  % (len(self._slots), os.path.normpath(path)), "success")
         return True
 
+    # ---- Export compare report (PAD-812) ----------------------------------
+    def _report_stock(self, rel):
+        """The game's own clip *rel* stands in for: its pristine snapshot,
+        the shared clip's for a mode's own clip new to the card (PAD-444:
+        its file is a copy of that one, and a Write puts the replacement
+        over it), else the slot's file as the extract left it."""
+        snap = self._stock_path(rel)
+        if snap:
+            return rel, snap, None
+        of = self._m_of.get(rel)
+        on_card = rel in ((self._m_clips.name_of if self._m_clips else {})
+                          or {})
+        if of and (rel in self._m_virtual
+                   or (rel in self._m_copy and not on_card)):
+            snap = self._stock_path(of)
+            slot = self._by_rel.get(of)
+            if snap:
+                return of, snap, None
+            if slot is not None:
+                return of, slot.abs_path, slot.info
+        slot = self._by_rel.get(rel)
+        if slot is None:
+            return rel, "", None
+        return rel, slot.abs_path, slot.info
+
+    def compare_entries(self):
+        """Every clip the project plays in a slot's place, as
+        :class:`core.video_compare_report.Entry` items in list order: each
+        replacement, each random clip, and each mode's row of a shared clip
+        that plays another mode's replacement (PAD-444)."""
+        from ...core import video_compare_report as VR
+        by_rel, follow = {}, []
+        for s in sorted(self._m_slots(), key=lambda q: q.rel_path.lower()):
+            rel = s.rel_path
+            modes = ", ".join(self._m_label(m)
+                              for m in self._m_modes.get(rel) or ())
+            rep = self._assign.get(rel) or ""
+            if not rep and self._m_follow.get(rel):
+                follow.append((rel, modes))
+                continue
+            files = self._variants.get(rel) or []
+            if not rep and not files:
+                continue
+            stock_rel, stock_path, stock_info = self._report_stock(rel)
+            asis = self._asis_for(rel)
+            choice = self._length.get(rel)
+            if asis:
+                after = VR.AFTER_OWN
+            elif length_seconds(choice):
+                after = length_seconds(choice)
+            else:
+                after = VR.AFTER_STOCK if self._trim_for(rel) else VR.AFTER_OWN
+            base = dict(slot=rel, stock_rel=stock_rel, stock_path=stock_path,
+                        stock_info=stock_info, played_in=modes, after=after,
+                        asis=asis)
+            n = 1 + len(files)
+            got = []
+            if rep:
+                got.append(VR.Entry(
+                    what=("Replacement (%s's own clip)"
+                          % self._m_label(self._m_copy[rel]["mode"])
+                          if rel in self._m_copy else "Replacement")
+                    + (", random clip 1 of %d" % n if files else ""),
+                    file=rep, **base))
+            else:
+                got.append(VR.Entry(what="Game's own clip, random clip 1 of %d"
+                                    % n, file="", **base))
+            for k, f in enumerate(files, 2):
+                got.append(VR.Entry(what="Random clip %d of %d" % (k, n),
+                                    file=f, **base))
+            by_rel[rel] = got
+        # a mode's row of a shared clip with no replacement of its own plays
+        # whatever the lead mode's row plays (PAD-444): the same rows, its own
+        for rel, modes in follow:
+            lead = self._m_follow[rel]
+            for e in by_rel.get(self._m_of.get(rel) or "", ()):
+                by_rel.setdefault(rel, []).append(replace(
+                    e, slot=rel, played_in=modes,
+                    what="Same clip as %s: %s" % (self._m_label(lead),
+                                                  e.what[0].lower() + e.what[1:])))
+        out = []
+        for rel in sorted(by_rel, key=str.lower):
+            out.extend(by_rel[rel])
+        return out
+
+    @rpc
+    def export_compare(self, path=None):
+        """More > Export compare report (CSV)...: every replacement, random
+        clip and mode's shared-clip row beside the stock clip it stands in
+        for, its length to the hundredth of a second first (PAD-812). The
+        files are probed and the CSV written off the loop."""
+        from ...core import video_compare_report as VR
+        if not self._slots:
+            compat.messagebox.showinfo("Export compare report",
+                                       "Scan an assets folder first — the "
+                                       "video table is empty.")
+            return False
+        entries = self.compare_entries()
+        if not entries:
+            compat.messagebox.showinfo(
+                "Export compare report",
+                "No clip has a replacement or random clips yet, so there is "
+                "nothing to compare with the game's own clips.")
+            return False
+        if not path:
+            path = self.window.ask_save(
+                "video_csv", "Save the video compare report as CSV",
+                initialfile="video_compare.csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                defaultextension=".csv")
+        if not path:
+            return False
+        if self._report_busy:
+            self.log("Replace Video: the compare report is still being "
+                     "made.", "warning")
+            return False
+        self._report_busy = True
+        self.set(report_busy=True)
+        self.log("Replace Video: reading %d clip(s) for the compare report…"
+                 % len(entries), "info")
+
+        def _work():
+            try:
+                n, err = VR.write(path, entries), None
+            except OSError as e:
+                n, err = 0, e
+            self.ctx.loop.post(self._compare_done, path, n, err)
+
+        threading.Thread(target=_work, daemon=True,
+                         name="video-compare-report").start()
+        return True
+
+    def _compare_done(self, path, n, err):
+        self._report_busy = False
+        self.set(report_busy=False)
+        if err is not None:
+            compat.messagebox.showerror(
+                "Export compare report", "Couldn't write the CSV:\n%s" % err)
+            return
+        self.log("Video compare report exported: %d clip(s) → %s"
+                 % (n, os.path.normpath(path)), "success")
+
     # ==================================================================
     # the row menu
     # ==================================================================
@@ -2232,7 +2758,9 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         rows = [rel for rel in (rels or []) if rel in self._by_rel]
         if len(rows) >= 2:
             return {"multi": True, "rows": len(rows),
-                    "targets": len(self._targets(rows))}
+                    "targets": len(self._targets(rows)),
+                    "csave": (self._cs_menu_label(len(rows))
+                              if self._per_file_colour() else None)}
         if not rows:
             return None
         rel = rows[0]
@@ -2263,6 +2791,8 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
                                           None) is not None),
             # PAD-444: a mode's own clip an earlier build made plays the shared one again
             "back": (self._m_preview(rel) or {}).get("back") or "",
+            "csave": (self._cs_menu_label(1) if self._per_file_colour()
+                      else None),
         }
 
     # -- random clips (PAD-446) ---------------------------------------------
@@ -2386,6 +2916,113 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
                  "were taken off)." % rel, "info")
         self._variants_changed(rel)
         return True
+
+    # -- random clips as a file of their own (PAD-553) -----------------------
+    @rpc
+    def variants_save(self):
+        """More > Save the random clips to a file...: every slot's random clips, the clips
+        themselves too, in one file another project loads. Returns its path, or None."""
+        from ...plugins.stern import media_share as MS
+        project = self._assets_path()
+        if not project or not self._variants:
+            compat.messagebox.showinfo(
+                "Save the random clips",
+                "This project has no random clips to save: no clip plays one of several yet "
+                "(right-click a clip > Random clips).")
+            return None
+        self._save_staged()
+        path = self.window.ask_save(
+            "random_clips_file", "Save the random clips to a file",
+            initialfile="%s random clips.zip" % (os.path.basename(os.path.normpath(project))
+                                                 or "project"),
+            filetypes=[("PAD random clips", "*.zip")], defaultextension=".zip")
+        if not path:
+            return None
+        try:
+            got = MS.save_random_clips(project, path)
+        except (MS.ShareError, OSError) as e:
+            compat.messagebox.showinfo("Save the random clips", str(e))
+            return None
+        self.log("Replace Video: saved the random clips of %d clip(s) (%d file(s)) to %s."
+                 % (got["slots"], got["files"], path), "success")
+        if got["gone"]:
+            compat.messagebox.showinfo(
+                "Save the random clips", "Saved to %s.\n\nLeft out, no longer on this PC: %s."
+                % (os.path.basename(path), ", ".join(os.path.basename(f) for _r, f in got["gone"])))
+        return path
+
+    @rpc
+    @undoable("Load random clips")
+    def variants_load(self, path=None):
+        """More > Load random clips from a file...: a file Save the random clips to a file
+        wrote, here or on another PC, onto this project's clips (the same clip found by what it
+        is or where the card keeps it when this card names it otherwise). A clip's random clips
+        replace the ones it has (asked first). Returns the report, or None."""
+        from ...plugins.stern import media_share as MS
+        project = self._assets_path()
+        if not project or self._is_running():
+            return None
+        if not path:
+            path = self.window.ask_open("random_clips_file", "Load random clips from a file",
+                                        [("PAD random clips", "*.zip"), ("All files", "*.*")])
+            if isinstance(path, (list, tuple)):
+                path = path[0] if path else ""
+        if not path:
+            return None
+        try:
+            got = MS.load_random_clips(project, path)
+        except (MS.ShareError, OSError) as e:
+            compat.messagebox.showinfo("Load random clips", str(e))
+            return None
+        found = {rel: files for rel, files in got["variants"].items() if rel in self._by_rel}
+        left = list(got["left"]) + [(rel, "this project's scan does not list it")
+                                    for rel in got["variants"] if rel not in found]
+        if not found:
+            compat.messagebox.showinfo(
+                "Load random clips", "Nothing in %s could be loaded here:\n\n%s" % (
+                    os.path.basename(path), "\n".join("%s: %s" % (os.path.basename(r), w)
+                                                      for r, w in left[:12])))
+            return None
+        clash = sorted(rel for rel in found if self._variants.get(rel))
+        if clash and not compat.messagebox.askyesno(
+                "Load random clips",
+                "%d of the clips in %s already play other clips at random here (%s). Loading "
+                "replaces those.\n\nLoad the file?" % (
+                    len(clash), os.path.basename(path),
+                    ", ".join(os.path.basename(r) for r in clash[:6])
+                    + (", ..." if len(clash) > 6 else ""))):
+            return None
+        for rel, files in found.items():
+            self._variants[rel] = list(files)
+        self.set(var_share=True)
+        self._save_staged()
+        self._refresh_list()
+        if self._current in found:
+            self._update_note(self._current)
+        self._reselect(sorted(found)[:1])
+        self.log("Replace Video: loaded the random clips of %s: %d clip(s), the files in the "
+                 "\"%s\" folder." % (os.path.basename(path), len(found), MS.CLIPS_DIR), "success")
+        lines = ["%d clip(s) play one of several at random: %s." % (
+            len(found), ", ".join(os.path.basename(r) for r in sorted(found)[:6])
+            + (", ..." if len(found) > 6 else ""))]
+        made = (got["about"] or {}).get("label")
+        if made:
+            lines.append("The file was saved from a project of %s." % made)
+        for r, to, how in got["found"]:
+            self.log("Replace Video: %s from the file is %s here (%s)." % (
+                os.path.basename(r), os.path.basename(to), how), "info")
+        if got["found"]:
+            lines.append("%d clip(s) have another name on this card and were found by what "
+                         "they are (the log names them)." % len(got["found"]))
+        for r, why in left:
+            self.log("Replace Video: %s from the file is left out: %s." % (r, why), "warning")
+        if left:
+            more = len(left) - 6
+            lines.append("Left out: %s%s." % ("; ".join(
+                "%s (%s)" % (os.path.basename(r), w) for r, w in left[:6]),
+                " and %d more (the log names them)" % more if more > 0 else ""))
+        compat.messagebox.showinfo("Load random clips", "\n\n".join(lines))
+        return {"loaded": len(found), "found": len(got["found"]), "left": len(left)}
 
     def _scene_browser(self):
         for name in ("_open_scene_browser", "open_scene_browser"):
@@ -2625,6 +3262,10 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         if rpath and os.path.isfile(rpath):
             pane = self._pane("rep", "Replacement", rpath,
                               label=os.path.basename(rpath))
+            # PAD-1232: a clip set to fit by speed plays at that speed here,
+            # the page working the rate out from its own length
+            if self._length.get(rel) == LENGTH_STRETCH:
+                pane["fit_to"] = self._stock_seconds(rel) or None
         elif self._stock_coloured(rel):
             # built with its profile or not, it is the game's own clip
             pane = self._pane("rep", "Replacement", hint=STOCK_ON_ORIG)
@@ -2986,11 +3627,14 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
         pv = self.get("preview") or {}
         modes = self._m_preview(rel)
         sounds = self._m_sounds(rel)
-        if pv.get("note") != note or pv.get("modes") != modes or pv.get("sounds") != sounds:
+        seen = self._m_seen_preview(rel)        # PAD-827
+        if (pv.get("note") != note or pv.get("modes") != modes or pv.get("sounds") != sounds
+                or pv.get("seen") != seen):
             pv = dict(pv)
             pv["note"] = note
             pv["modes"] = modes
             pv["sounds"] = sounds
+            pv["seen"] = seen
             self.set(preview=pv)
 
     def _reselect(self, rels):
@@ -3177,7 +3821,8 @@ class VideoTab(ModesMixin, BestQualityMixin, UndoMixin, TabService):
     # content; the page fits the others, as _autosize_tree_columns did)
     # ==================================================================
     _WIDTHS_KEY = "video_web"
-    _WIDTH_COLS = ("rel", "len", "res", "fmt", "aud", "rep", "col", "conv")
+    _WIDTH_COLS = ("rel", "len", "res", "fmt", "aud", "rep", "fit", "col",
+                   "conv")
 
     def _all_widths(self):
         s = getattr(self.app, "_settings", None) if self.app else None

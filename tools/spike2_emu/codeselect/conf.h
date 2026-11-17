@@ -80,6 +80,15 @@
  *   machine_volume=<dir>|<sha1 hex>|<0-63>  with volume=machine: the store
  *                            (/data/nv/<title>/NVM), the record's key, and the
  *                            title's factory level for a machine with no store yet
+ *   edition=<dir>|<sha1 hex>|<n>  EDITIONS, NO MENU (PAD-495): every image is an
+ *                            edition of one game, in order, and the game's own
+ *                            EDITION setting (values 1..n, set in its operator
+ *                            menu) says which boots - read off the same
+ *                            /data/nv/<title>/NVM mirror as machine_volume=,
+ *                            before anything is drawn.  Edition k boots image
+ *                            k-1; no setting read, or one outside 1..n or past
+ *                            the image lines, boots image 0.  The menu never
+ *                            shows on such a card.
  *   mixer_volume=<0-63>      optional: apply the game's codec curve to the
  *                            ALSA 'PCM' selem (hardware only; untouched when absent)
  *   theme=<name>             the menu's colours: a built-in theme (themes.json;
@@ -105,8 +114,30 @@
  *   settings=<on|off>        the SETTINGS tile at the end of the menu (PAD-307):
  *                            'on' (the default) offers it whenever it has
  *                            something to set - today, any color_profile=
- *                            line; 'off' never does.  An unknown word is
+ *                            line or test= line; 'off' never does.  An unknown word is
  *                            warned about and read as 'on'
+ *   testcard=<on|off>        PAD-1279: 'on' makes this a TEST CARD - no menu
+ *                            and nothing to boot: the Settings screens (Color
+ *                            correction for its image= lines' color_profile=,
+ *                            Test pictures) from power-up to power-off, with
+ *                            no way back to a menu and no idle exit
+ *   test=<file>|<label>      one of the card's own test items (PAD-1279), up
+ *                            to CONF_MAX_TESTS: a PNG, an animated GIF or a
+ *                            WAV in the media directory, shown or played by
+ *                            Settings > Test pictures after the built-in
+ *                            patterns (testpics.h).  The label defaults to the
+ *                            file name; a name with a '/' is dropped
+ *   test_dir=<dir>           PAD-1279: where the test files are, when not with
+ *                            the media - a TEST CARD keeps them on its own p3
+ *                            (/games, which fstab mounts before the menu runs),
+ *                            sized to them, as the system partition has no room
+ *   test_image=<file>|<label>  the TEST CARD's own lists (PAD-1279, DragonRR:
+ *   test_video=<file>|<label>  "DEFAULT PAD TEST CARD / IMAGES / VIDEOS /
+ *   test_scene=<file>|<label>  SCENES / SOUNDS"): the same as test= with the
+ *   test_sound=<file>|<label>  list it goes in said.  An image or scene is a
+ *                            PNG, a video a .padv (video.h) or a GIF, a sound
+ *                            a WAV; test= puts a .png under IMAGES, a .gif or
+ *                            .padv under VIDEOS and a .wav under SOUNDS
  *   key_left=<byte>.<bit>    JJP only (--input jjpio): where the LEFT flipper
  *   key_right=<byte>.<bit>   / RIGHT flipper / START / Volume+ / Volume- sit
  *   key_start=<byte>.<bit>   in the I/O board's 64-byte frame, active low.
@@ -251,6 +282,17 @@ struct conf_colour {
     char name[64];
 };
 
+/* ONE OF THE CARD'S OWN TEST ITEMS (PAD-1279): a media file name and what
+ * Settings > Test pictures calls it */
+#define CONF_MAX_TESTS 64
+/* the TEST CARD menu's lists (TK_NONE: the file is not one any list takes) */
+enum { TK_NONE, TK_IMAGE, TK_VIDEO, TK_SCENE, TK_SOUND };
+struct conf_test {
+    char file[CONF_STR];
+    char label[CONF_STR];
+    int kind;                        /* TK_* */
+};
+
 struct conf {
     struct conf_image img[CONF_MAX_IMAGES];
     int n;
@@ -260,6 +302,9 @@ struct conf {
     int ncards;                      /* the settings tile included, when there is one */
     struct conf_colour colour[CONF_MAX_IMAGES];
     int ncolour;                     /* images with a usable color_profile= line */
+    struct conf_test test[CONF_MAX_TESTS];   /* test= lines, in order (PAD-1279) */
+    int ntest;
+    int testcard;                    /* testcard=on: a TEST CARD, no menu, nothing boots (PAD-1279) */
     int settings;                    /* settings=: 1 = offer the tile when it has something to set */
     int settings_card;               /* the tile's card index (always the last), or -1 */
     struct conf_image settings_face; /* what the tile draws */
@@ -286,6 +331,7 @@ struct conf {
                                     * empty one can mean that (PAD-190, heading='s rule) */
     char font[CONF_STR];
     char media[CONF_STR];          /* media= ("" when absent) */
+    char test_dir[CONF_STR];       /* test_dir= (PAD-1279): where test files are, "" = media */
     char sound_move[CONF_STR];     /* "" when absent */
     char sound_confirm[CONF_STR];  /* "" when absent */
     int volume;        /* volume= 0..100 (-1 when absent; the program defaults to 50) */
@@ -294,6 +340,10 @@ struct conf {
     unsigned char mv_key[20];      /* ...the record's SHA1 key... */
     int mv_key_set;                /* ...(1 when a valid one was given)... */
     int mv_default;                /* ...and the title's factory level (-1 when absent) */
+    char ed_store[CONF_STR];       /* edition= the store dir ("" when absent)... */
+    unsigned char ed_key[20];      /* ...EDITION's SHA1 key... */
+    int ed_key_set;                /* ...(1 when a valid one was given)... */
+    int ed_values;                 /* ...and how many editions (0 = not an editions card) */
     int mixer_volume;  /* mixer_volume= 0..63 (-1 when absent = leave the mixer alone) */
     int volume_max;    /* volume_max= 0..100 (-1 when absent = the build's ceiling) */
     char theme[CONF_STR];          /* theme= ("" when absent = the default) */

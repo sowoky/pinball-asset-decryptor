@@ -14,6 +14,7 @@ import pathlib
 import pytest
 
 from pinball_decryptor.plugins.stern import mode_project as MP
+from tests.mode_examples import form as MX  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 PROVEN = REPO / "tools" / "spike2_emu" / "modes" / "kaiju_rush_own_clip.mode"
@@ -64,23 +65,23 @@ def test_the_examples_build_as_they_are_and_the_first_is_the_proven_mode(tmp_pat
     accepts; KAIJU RUSH, the first, is the mode that ran on a real machine, so it must
     generate exactly what the proven mode file carries. new_mode copies an example
     rather than handing out the shared instance."""
-    names = [n for n, _ in MP.example_specs()]
+    names = [n for n, _ in MX.example_specs()]
     assert names[0] == "KAIJU RUSH" and len(names) == len(set(names))
-    for name, spec in MP.example_specs():
+    for name, spec in MX.example_specs():
         assert spec.name == name
         assert MP.validate(spec, None) == [], name
         text = MP.runtime_cfg(spec, MP.slugify(name))
         assert len(text.encode()) < 4096
-    kaiju, proven = _keys(MP.runtime_cfg(MP.example("KAIJU RUSH"), "kaiju_rush")), _keys(PROVEN.read_text(encoding="utf-8"))
+    kaiju, proven = _keys(MP.runtime_cfg(MX.example("KAIJU RUSH"), "kaiju_rush")), _keys(PROVEN.read_text(encoding="utf-8"))
     for key in ("name", "seconds", "award", "light_on", "light_off", "callout_at"):
         assert kaiju[key] == proven[key], key
     assert int(kaiju["shots"], 0) == int(proven["shots"], 0)
-    assert MP.example("no such mode") is None
+    assert MX.example("no such mode") is None
 
-    slug, spec = MP.new_mode(str(tmp_path), spec=MP.example("KAIJU RUSH"))
-    assert slug == "kaiju_rush" and spec is not MP.example("KAIJU RUSH")
+    slug, spec = MP.new_mode(str(tmp_path), spec=MX.example("KAIJU RUSH"))
+    assert slug == "kaiju_rush" and spec is not MX.example("KAIJU RUSH")
     spec.award = 5
-    assert MP.example("KAIJU RUSH").award == 1000000            # the example is untouched
+    assert MX.example("KAIJU RUSH").award == 1000000            # the example is untouched
     assert MP.load(os.path.join(MP.mode_folder(str(tmp_path), slug), MP.MODE_FILE)).name == "KAIJU RUSH"
 
 
@@ -129,7 +130,7 @@ def test_validate_names_every_problem(tmp_path):
                        clip="file", clip_file="", screen_art="missing.png")
     problems = " ".join(MP.validate(spec, str(tmp_path)))
     for words in ("needs a name", "starts the mode", "at least one shot", "at least a second",
-                  "'Flipper'", "worth something", "panel colour", "video file", "missing.png"):
+                  "'Flipper'", "worth something", "panel color", "video file", "missing.png"):
         assert words in problems, words
     assert MP.validate(_kaiju(), str(tmp_path)) == []
     with pytest.raises(MP.ModeProjectError):
@@ -345,7 +346,7 @@ def test_stack_no_is_written_only_when_asked_and_round_trips(tmp_path):
     after = MP.runtime_cfg(spec, "kaiju_rush")
     assert _keys(after)["stack"] == "no"
     assert after == before + "stack          no\n"
-    assert "stack" not in _keys(MP.runtime_cfg(MP.example("KAIJU RUSH"), "kaiju_rush"))
+    assert "stack" not in _keys(MP.runtime_cfg(MX.example("KAIJU RUSH"), "kaiju_rush"))
 
     project = str(tmp_path)
     slug, s = MP.new_mode(project, "Waits Its Turn")
@@ -370,7 +371,7 @@ def test_advanced_parameters_at_their_defaults_change_no_byte():
     for key in ("award_ladder", "shot_award", "end_shot", "clip_end"):
         assert key not in _keys(text)
     assert _keys(text)["restore_after"] == "6"
-    assert MP.runtime_cfg(MP.example("KAIJU RUSH"), "kaiju_rush") == text
+    assert MP.runtime_cfg(MX.example("KAIJU RUSH"), "kaiju_rush") == text
 
 
 def test_advanced_parameters_generate_the_runtime_lines():
@@ -528,7 +529,7 @@ def test_a_display_priority_and_lit_shots_write_their_lines_and_nothing_at_the_d
     ("priority", 256, "display priority is 0 (none) to 255"),
     ("priority", -1, "display priority is 0 (none) to 255"),
     ("priority", "high", "display priority is 0 (none) to 255"),
-    ("light_shots", "orange", "not a colour like #ff6000"),
+    ("light_shots", "orange", "not a color like #ff6000"),
     ("light_shots_pattern", "strobe", "solid, blink, pulse or chase"),
 ])
 def test_a_bad_display_priority_or_lit_shots_value_is_named(field, value, words):
@@ -558,13 +559,10 @@ def test_version_key_is_one_tuple_of_ints_for_every_spelling():
 @pytest.mark.usefixtures("preview_modes_on")
 def test_the_no_project_sentence_is_one_for_the_family():
     assert MP.NO_PROJECT_HELP.startswith("Open or extract a card project first (Extract tab).")
-    from pinball_decryptor.plugins.stern import code_modes as CM
     from pinball_decryptor.plugins.stern import mode_tryit as MT
     from pinball_decryptor.plugins.stern import mode_write as MW
     with pytest.raises(MT.TryItError, match="Extract tab"):
         MT.new_code_mode("", "Blitz")
-    with pytest.raises(CM.CodeModeError, match="Extract tab"):
-        CM.add_example("", CM.EXAMPLES[0]["name"])
     with pytest.raises(MW.ModeWriteError, match="Extract tab"):
         MW.build_tryit_set("", "card.raw", "base")
 
@@ -615,6 +613,66 @@ def test_the_extract_record_wins_over_the_anchor_even_when_its_name_does_not_par
     card = MP.project_card(project)
     assert (card.game_dir, card.version) == ("turtles_pro", "1.58.0")
     assert card.source == "the card's file name"
+
+
+RENAMED_XMEN = "silentcorp_ANIMATED_SERIES_xmen_le-0_98_0.raw"
+
+
+def test_the_records_card_index_names_the_game_of_a_renamed_moved_card(tmp_path, monkeypatch):
+    """PAD-720: a modified X-Men LE 0.98 card saved as ``silentcorp_ANIMATED_SERIES_xmen_le-0_98_0.raw``
+    parses as a Stern name, of a game no card has, so a project made from it - its card no longer where
+    the record says - told "Modes of your own can't be made for Silentcorp Animated Series Xmen LE 0.98
+    yet". The extract recorded the card's own index name (``stock.sidx``): that names the game, without
+    opening anything, wherever the file is now."""
+    project = str(tmp_path)
+
+    def never(path):
+        raise AssertionError("project_card must not open an image")
+    monkeypatch.setattr(MP, "probe_card_title", never)
+    with open(os.path.join(project, ".extract_source.json"), "w", encoding="utf-8") as f:
+        json.dump({"input_path": "E:\\gone\\" + RENAMED_XMEN, "input_name": RENAMED_XMEN,
+                   "card_version": "0.98.0",
+                   "stock": {"status": "modified", "label": "Uncanny Xmen LE 0.98",
+                             "sidx": "uncanny_xmen_le-0_98_0.sidx", "text": "..."}}, f)
+    card = MP.project_card(project)
+    assert (card.game_dir, card.version, card.source) == ("uncanny_xmen_le", "0.98.0",
+                                                          MP.INDEX_SOURCE)
+    assert card.image.endswith(RENAMED_XMEN)
+    prof = MP.profile_for_card(card.game_dir, card.version)
+    assert prof is not None and prof.label == "Uncanny X-Men LE 0.98"
+    # a record without the index (an older extract) keeps the file name, as before
+    _record(project, RENAMED_XMEN, "0.98.0", input_path="E:\\gone\\" + RENAMED_XMEN)
+    assert MP.project_card(project).game_dir == "silentcorp_animated_series_xmen_le"
+
+
+def test_a_stern_formed_name_of_an_unknown_game_waits_for_the_cards_own_index(tmp_path, monkeypatch):
+    """PAD-720: when that renamed card IS on this computer and the record has no index, its name is not
+    taken: ``game_dir`` is "" until the probe has read the card's index (off the UI thread), which then
+    names the game. A real game's Stern name is still taken at once, and a card whose index names no
+    game keeps its file name."""
+    project = str(tmp_path)
+    renamed = str(tmp_path / RENAMED_XMEN)
+    with open(renamed, "wb") as f:
+        f.write(bytes(64))
+    _record(project, RENAMED_XMEN, "0.98.0", input_path=renamed)
+    assert not MP.known_game_dir("silentcorp_animated_series_xmen_le")
+    assert MP.known_game_dir("uncanny_xmen_le") and MP.known_game_dir("godzilla_pro")
+    monkeypatch.setattr(MP, "_PROBED", {})
+    card = MP.project_card(project)
+    assert (card.image, card.game_dir, card.version) == (renamed, "", "0.98.0")
+    monkeypatch.setitem(MP._PROBED, MP._probe_key(renamed), ("uncanny_xmen_le", "0.98.0"))
+    card = MP.project_card(project)
+    assert (card.game_dir, card.version, card.source) == ("uncanny_xmen_le", "0.98.0",
+                                                          "the card's own index")
+    monkeypatch.setitem(MP._PROBED, MP._probe_key(renamed), (None, None))
+    assert MP.project_card(project).game_dir == "silentcorp_animated_series_xmen_le"
+    # the "Try it on" card the same way
+    monkeypatch.setitem(MP._PROBED, MP._probe_key(renamed), ("uncanny_xmen_le", "0.98.0"))
+    assert MP.project_cards(project, renamed)[1].game_dir == "uncanny_xmen_le"
+    stern = str(tmp_path / "godzilla_pro-1_15_0_spike2.raw")
+    with open(stern, "wb") as f:
+        f.write(bytes(64))
+    assert MP.project_cards(project, stern)[1].game_dir == "godzilla_pro"
 
 
 def test_project_cards_names_the_two_roles_without_opening_an_image(tmp_path, monkeypatch):

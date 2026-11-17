@@ -47,12 +47,13 @@
 #include "art.h"
 #include "audio.h"
 #include "nvm.h"
+#include "scores.h"
 #include "codec.h"
 #include "log.h"
 #include "colour.h"
 #include "settings.h"
 
-#define VERSION "3.1"
+#define VERSION "3.2"
 
 /* the card's paths.  Stern's unless the build says otherwise: the JJP build
  * (make PLATFORM=jjp) puts the selector under /jjpe/gen1/padselect and its
@@ -126,6 +127,20 @@
  * button: see draw_menu(). They are named constants on their own lines so
  * anything outside this program that has to quote the footer (the GUI's
  * Multi-boot preview) can lift the text from here instead of retyping it. */
+#ifdef SEL_COIN_DOOR
+/* A Stern Spike 3 machine (PAD-1263, make PLATFORM=s3 and its preview build):
+ * the menu reads only the coin door's NEXT / PREVIOUS / SELECT (stubs_s3.c) -
+ * the flippers and START are node-bus switches only the game brings up - so
+ * its own words name those buttons. */
+#define FOOT_START   "NEXT / PREVIOUS: choose      SELECT: boot"
+#define FOOT_ACTION  FOOT_START
+#define FOOT_SETTINGS        "NEXT / PREVIOUS: choose      SELECT: settings"
+#define FOOT_SETTINGS_ACTION FOOT_SETTINGS
+#define PRESS_START  "press SELECT to boot "
+#define PRESS_ACTION PRESS_START
+#define PRESS_SETTINGS        "press SELECT for the settings"
+#define PRESS_SETTINGS_ACTION PRESS_SETTINGS
+#else
 #define FOOT_START   "LEFT / RIGHT FLIPPER: choose      START: boot"
 #define FOOT_ACTION  "LEFT / RIGHT FLIPPER: choose      START or ACTION: boot"
 /* ...and the menu's own footer while the SETTINGS tile is highlighted, which
@@ -137,6 +152,7 @@
 /* ...and the same line on the SETTINGS tile, which boots nothing (PAD-307) */
 #define PRESS_SETTINGS        "press START for the settings"
 #define PRESS_SETTINGS_ACTION "press START or ACTION for the settings"
+#endif
 /* ...and the line across the top, which images.conf's heading= replaces. Same
  * reason it is a named constant here: the GUI offers it as the field's
  * placeholder rather than retyping it. */
@@ -155,7 +171,11 @@ struct opts {
      * --apply-color --image N --program PATH --to OUT */
     const char *colour_file, *apply_program, *apply_to;
     int apply_colour, apply_image;
-    /* --snapshot --screen settings|color [--screen-row N] [--screen-edit]:
+    /* PAD-1194: the boot hook's high-score hand-over, no conf needed:
+     * --scores-save --store DIR --to FILE | --scores-load --from FILE --store DIR */
+    int scores_op;                      /* 0, 1 = save, 2 = load */
+    const char *scores_store, *scores_from;
+    /* --snapshot --screen settings|color|test [--screen-row N] [--screen-edit]:
      * a settings screen instead of the menu (tests, the preview, screenshots) */
     const char *screen;
     int screen_row, screen_edit;
@@ -199,8 +219,9 @@ static void usage(FILE *f)
         "codeselect " VERSION " - Spike 2 boot-time code selector\n"
         "  --conf PATH        images.conf (default " DEF_CONF ")\n"
         "  --out PATH         choice file, one line '<index>' (default " DEF_OUT ")\n"
-        "  --input hw|padsw|jjpio|fast|none   button source (default hw; jjpio = a JJP machine's I/O\n"
-        "                     board; fast = a Barrels of Fun machine's FAST Neuron)\n"
+        "  --input hw|padsw|jjpio|fast|pipe|none   button source (default hw; jjpio = a JJP machine's I/O\n"
+        "                     board; fast = a Barrels of Fun machine's FAST Neuron; pipe =\n"
+        "                     \"sw L|R|S 1|0\" lines on stdin, a Dutch Pinball machine's dpprocsw)\n"
         "  --nodebus DEV      node bus tty (default /dev/ttymxc1)\n"
         "  --spi DEV          cabinet spidev, 'none' disables (default /dev/spidev1.0)\n"
         "  --jjpio DEV        jjpio: the I/O board node (default /dev/jjpio100, then /dev/jjpio0)\n"
@@ -245,11 +266,15 @@ static void usage(FILE *f)
         "                     first of the --frames K run\n"
         "  --audio-dump FILE  raw s16le 44100 Hz stereo of everything mixed\n"
         "  --color-file PATH  the color correction set on this machine (default " DEF_COLOUR_FILE ")\n"
-        "  --screen settings|color  --snapshot only: draw that settings screen instead of the menu,\n"
+        "  --screen settings|color|test  --snapshot only: draw that settings screen instead of the menu,\n"
         "                     --screen-row N highlighted (--screen-edit: being changed)\n"
         "  --apply-color --image N --program PATH --to OUT   the boot hook's step: when the values\n"
         "                     file sets image N's colors, write a copy of PATH with them in its\n"
         "                     shaders to OUT; exit 0 = written, 1 = nothing to do, 2 = refused\n"
+        "  --scores-save --store DIR --to FILE   the boot hook's step (PAD-1194): the high-score\n"
+        "                     table of the store DIR (/data/nv/<title>) to FILE; --scores-load\n"
+        "                     --from FILE --store DIR puts FILE's table into DIR as a new LKRAM\n"
+        "                     generation; both: exit 0 = done, 1 = nothing to do, 2 = refused\n"
         "exit status: 0 = a choice was written, 2 = no choice\n", ANIM_MAX_FRAMES, DEF_VOLUME,
         VOLUME_CEILING);
 }
@@ -346,10 +371,14 @@ static int parse_args(struct opts *o, int argc, char **argv)
         ARG("--color-file", colour_file)
         ARG("--program", apply_program)
         ARG("--to", apply_to)
+        ARG("--store", scores_store)
+        ARG("--from", scores_from)
         ARG("--screen", screen)
 #undef ARG
         if (!strcmp(a, "--learn")) { o->learn = 1; continue; }
         if (!strcmp(a, "--apply-color")) { o->apply_colour = 1; continue; }
+        if (!strcmp(a, "--scores-save")) { o->scores_op = 1; continue; }
+        if (!strcmp(a, "--scores-load")) { o->scores_op = 2; continue; }
         if (!strcmp(a, "--image")) { if (!v) goto missing; o->apply_image = atoi(v); i++; continue; }
         if (!strcmp(a, "--screen-row")) { if (!v) goto missing; o->screen_row = atoi(v); i++; continue; }
         if (!strcmp(a, "--screen-edit")) { o->screen_edit = 1; continue; }
@@ -375,8 +404,8 @@ missing:
         return -1;
     }
     if (strcmp(o->input, "hw") && strcmp(o->input, "padsw") && strcmp(o->input, "jjpio")
-        && strcmp(o->input, "fast") && strcmp(o->input, "none")) {
-        fprintf(stderr, "codeselect: --input must be hw, padsw, jjpio, fast or none\n");
+        && strcmp(o->input, "fast") && strcmp(o->input, "pipe") && strcmp(o->input, "none")) {
+        fprintf(stderr, "codeselect: --input must be hw, padsw, jjpio, fast, pipe or none\n");
         return -1;
     }
     if (strcmp(o->codec, "auto") && strcmp(o->codec, "off")) {
@@ -427,6 +456,11 @@ missing:
     }
     if (o->apply_colour && (o->apply_image < 0 || !o->apply_program || !o->apply_to)) {
         fprintf(stderr, "codeselect: --apply-color needs --image N, --program PATH and --to OUT\n");
+        return -1;
+    }
+    if (o->scores_op && (!o->scores_store || (o->scores_op == 1 ? !o->apply_to : !o->scores_from))) {
+        fprintf(stderr, "codeselect: --scores-save needs --store DIR and --to FILE, "
+                "--scores-load --from FILE and --store DIR\n");
         return -1;
     }
     if (o->screen && !o->snapshot) {
@@ -1548,6 +1582,41 @@ static int home_card(const struct conf *c, int opened)
     return k >= 0 ? k : 0;
 }
 
+/* EDITIONS, NO MENU (PAD-495, images.conf edition=): every image is an edition
+ * of one game and the game's own EDITION setting picks, off the NVM mirror the
+ * machine wrote when the operator last accepted it.  Nothing is drawn and no
+ * button is read: the operator chose in the game's menu, and this boot is the
+ * next power-up.  Whatever cannot be read boots edition 1, which is what the
+ * game's own default says too.  Exit 0 with the choice written, as a confirm. */
+static int edition_boot(const struct opts *o, const struct conf *c)
+{
+    char why[400] = "", from[600] = "";
+    struct conf_bags bags;
+    int v = -1, boot = 0;
+    memset(&bags, 0, sizeof bags);
+    if (nvm_read_value(c->ed_store, c->ed_key, &v, from, sizeof from, why, sizeof why) == 0) {
+        if (v >= 1 && v <= c->ed_values && v <= c->n) {
+            boot = v - 1;
+            sel_log("edition: the machine's EDITION is %d of %d (%s)", v, c->ed_values, from);
+        } else {
+            sel_log("edition: the machine's EDITION reads %d, not one of 1-%d on this card (%s); "
+                    "edition 1 boots", v, c->ed_values < c->n ? c->ed_values : c->n, from);
+        }
+    } else {
+        sel_log("edition: no EDITION setting read (%s); edition 1 boots", why[0] ? why : "no store");
+    }
+    if (c->ed_values != c->n)
+        sel_log("edition: the conf names %d editions and %d image line(s)", c->ed_values, c->n);
+    if (conf_write_last(o->last, boot, -1, &bags) < 0)
+        sel_log("cannot write %s: %s (continuing)", o->last, strerror(errno));
+    if (conf_write_choice(o->out, boot) < 0) {
+        sel_say("error: cannot write %s: %s", o->out, strerror(errno));
+        return 2;
+    }
+    sel_say("chose %d %s (edition %d, by the machine's EDITION setting)", boot, c->img[boot].title, boot + 1);
+    return 0;
+}
+
 /* --apply-color (PAD-307): the boot hook's step, once image N is mounted.
  * 0 = a copy of the program with the operator's numbers was written to --to
  * (bind it), 1 = nothing to do (the image is not adjustable, or nothing is
@@ -1824,6 +1893,15 @@ int main(int argc, char **argv)
     sel_log("codeselect " VERSION " starting (conf %s, input %s%s)", o.conf, o.input,
             o.snapshot ? ", snapshot" : o.headless ? ", headless" : "");
 
+    if (o.scores_op) {
+        char smsg[1600];
+        rc = o.scores_op == 1 ? scores_save(o.scores_store, o.apply_to, smsg, sizeof smsg)
+                              : scores_load(o.scores_from, o.scores_store, smsg, sizeof smsg);
+        sel_say("%s", smsg);
+        sel_log("exit %d", rc);
+        sel_log_close();
+        return rc;
+    }
     if (conf_load(&c, o.conf, err, sizeof err) < 0) {
         sel_say("error: %s", err);
         return 2;
@@ -1846,6 +1924,15 @@ int main(int argc, char **argv)
     }
     if (c.ngroups)
         sel_log("conf: %d image line(s) in %d card(s), %d group(s)", nimg, n, c.ngroups);
+    /* PAD-495: an editions card has no menu - the game's EDITION setting
+     * picks.  The preview (--snapshot) still draws the cards, so the tab can
+     * show what is on the card. */
+    if (c.ed_values > 0 && !o.snapshot) {
+        rc = edition_boot(&o, &c);
+        sel_log("exit %d", rc);
+        sel_log_close();
+        return rc;
+    }
     timeout = o.timeout >= 0 ? o.timeout : c.timeout >= 0 ? c.timeout : DEF_TIMEOUT;
     /* THE MENU'S VOLUME, most specific first: --volume, then the level the
      * machine's own Volume+/- buttons last set (jjpio is the only backend with
@@ -2015,6 +2102,8 @@ int main(int argc, char **argv)
         if (!L.th_known) sel_log("theme: '%s' is not a theme, using %s", c.theme, THEME_DEFAULT);
         sel_log("theme: %s (%d of %d colours set by the conf%s)", L.th.name, L.th_set, TH_N, bad);
     }
+    /* a test card's picture is its own menu (settings_snapshot draws it) */
+    if (snapshot && !o.screen && c.testcard) o.screen = "settings";
     if (snapshot && o.screen) {
         struct settings_env se;
         char why[200];
@@ -2024,7 +2113,9 @@ int main(int argc, char **argv)
         se.th = &L.th;
         se.c = &c;
         se.colour_file = o.colour_file;
+        se.media_dir = *c.test_dir ? c.test_dir : media_dir(&o, &c);
         se.first_image = hlimg;
+        se.testcard = c.testcard;
         if (settings_snapshot(&se, o.screen, o.screen_row, o.screen_edit, why, sizeof why) < 0) {
             sel_say("error: %s", why);
             rc = 2;
@@ -2131,6 +2222,7 @@ int main(int argc, char **argv)
     else if (!strcmp(o.input, "padsw")) in = input_padsw_open(&icfg);
     else if (!strcmp(o.input, "jjpio")) in = input_jjpio_open(&icfg);
     else if (!strcmp(o.input, "fast")) in = input_fast_open(&icfg);
+    else if (!strcmp(o.input, "pipe")) in = input_pipe_open(&icfg);
 
     /* THE AUDIO SECTION, in the game's order (0x1fa9c8 then 0x1fb2a8): the
      * codecs as found go in the log; the amplifiers are muted in the cabinet
@@ -2207,6 +2299,42 @@ int main(int argc, char **argv)
             c.countdown_word_set ? c.countdown_word : DEF_COUNTDOWN_WORD,
             !c.footer_set ? "the menu's own"
             : *c.footer ? "the conf's own" : "off");
+
+    /* A TEST CARD (PAD-1279): no menu and nothing to boot - the Settings
+     * screens from power-up until the machine is switched off */
+    if (c.testcard) {
+        struct settings_env se;
+        memset(&se, 0, sizeof se);
+        pctx.g = &g;
+        pctx.egl = &egl;
+        pctx.headless = headless;
+        pctx.invert = invert;
+        se.g = &g;
+        se.font = font;
+        se.th = &L.th;
+        se.c = &c;
+        se.in = in;
+        se.au = au;
+        se.move = media.move;
+        se.colour_file = o.colour_file;
+        se.media_dir = *c.test_dir ? c.test_dir : media.dir;
+        se.first_image = 0;
+        se.present = present_cb;
+        se.ctx = &pctx;
+        se.stop = &g_stop;
+        se.testcard = 1;
+        /* THE SCREEN TEXTURE FIRST. The menu creates it just before its own
+         * loop, below this branch, and every present() after that is only a
+         * sub-rect upload INTO it - so a test card that went straight to the
+         * settings loop uploaded every frame into no texture and the glass
+         * stayed black (the emulator showed it; --headless never makes one,
+         * so the snapshot tests could not). */
+        if (!headless) egl_stern_texture(&egl, w, h, gfx_pixels(&g, invert));
+        gfx_clean(&g);
+        sel_say("testcard: nothing boots: the test card menu until power-off");
+        while (!g_stop) settings_run(&se);
+        goto testcard_done;
+    }
 
     start = sel_now_ms();
     last_key = start;
@@ -2316,6 +2444,7 @@ int main(int argc, char **argv)
             se.au = au;
             se.move = media.move;
             se.colour_file = o.colour_file;
+            se.media_dir = *c.test_dir ? c.test_dir : media.dir;
             se.first_image = lastimg;
             se.present = present_cb;
             se.ctx = &pctx;
@@ -2460,6 +2589,7 @@ int main(int argc, char **argv)
 
     /* a level the buttons changed in the last moments before START is kept too */
     if (vol_touched) remember_volume(vol_file, volume, vol_conf, &vol_saved);
+testcard_done:
 
     if (chosen >= 0) {
         /* WHAT THE CARD ACTUALLY BOOTS.  A plain card boots its own image; a

@@ -35,12 +35,15 @@ button there.
 """
 
 import base64
+import contextlib
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 from . import runtime
 
@@ -339,6 +342,28 @@ def _title_from_filename(s):
 _UUID8_RE = re.compile(r"^[0-9a-f]{8}$")
 
 
+#: Jersey Jack's extract / write scratch (plugins/jjp/pipeline.py).  The
+#: other ``jjp_*`` names in /var/tmp are the JJP EMULATOR's: its restored
+#: machine image per ISO (``jjp_<iso>``, tools/jjp_emu/padpath.sh - a cache,
+#: treated like an unpacked game), the run's jail and overlay, its logs and
+#: its settings (jjp_devices.json).  Only these are leftovers.
+JJP_SCRATCH = ("jjp_raw_", "jjp_iso_", "jjp_chunks_", "jjp_debugfs_",
+               "jjp_ssd_", "jjp_sys_", "jjp_verify_", "jjp_orig_",
+               "jjp_encrypt", "jjp_decrypt", "jjp_capture", "jjp_manifest",
+               "jjp_replacements", "jjp_mnt", "jjp_dev_capture", "jjp_diag")
+#: The JJP emulator's own fixed names, never an image of a title.
+JJP_EMU_FIXED = ("jjp_current", "jjp_run", "jjp_ovl", "jjp_ovlb",
+                 "jjp_image")
+_JJP_IMAGE_RE = re.compile(r"^/var/tmp/(jjp_[A-Za-z0-9._-]+)$")
+
+
+def is_jjp_image(path):
+    """``/var/tmp/jjp_<iso>``: the JJP emulator's restored machine (PAD-613)."""
+    m = _JJP_IMAGE_RE.match(path)
+    return bool(m) and not m.group(1).startswith(JJP_SCRATCH) \
+        and m.group(1) not in JJP_EMU_FIXED
+
+
 def _jjp_detail(base):
     """Pull the game title out of a `jjp_*` staging name.
 
@@ -364,7 +389,12 @@ def _jjp_detail(base):
             if head and _UUID8_RE.match(tail):
                 return f"{_title_from_filename(head)} ({role})"
             return role  # bare-uuid form -- no title in the path
-    return "extract / write staging"
+    if base.startswith(JJP_SCRATCH):
+        return "extract / write staging"
+    if base in JJP_EMU_FIXED or re.search(r"\.(log|json|pid|[cho]|sh|so)$",
+                                          base):
+        return "the emulator's own files"
+    return "Emulator image: %s" % _title_from_filename(base[len("jjp_"):])
 
 
 def _bof_detail(base):
@@ -452,6 +482,11 @@ RIG_MAKERS = {
     "pad_proc": "P-ROC board", "pad_spooky": "Spooky Pinball",
     "pad_spkproc": "Spooky Pinball", "pad_spkproc_decomp": "Spooky Pinball",
 }
+#: The multi-boot builder's own cache (tools/bof_emu/mkbofmulti.py): each
+#: entry is a .fun unpacked once, beside its ``.media`` pictures.  Flat, with
+#: no ``cache/`` level, so the scan saw its entries as leftovers.
+BOFMULTI_ROOT = "pad_bofmulti_cache"
+RIG_MAKERS[BOFMULTI_ROOT] = "Barrels of Fun"
 #: Roots that are a second rig of the same maker: said beside each entry.
 RIG_VARIANTS = {"pad_apav": "A/V rig", "pad_spkproc": "P-ROC rig",
                 "pad_pbio": "I/O-board rig", "pad_cgcpf": "playfield rig"}
@@ -461,8 +496,11 @@ _RIG_ENVS = ("py27", "py3", "mamba", "env", "bin", "site")
 #: points and scratch too small to matter.
 _RIG_KEEP_RE = re.compile(r"^(nv\d*|home|lower|loctmp)$")
 _RIG_MIN_BYTES = 1 << 20
+#: ``+`` is in the name class because rigs join several sources with it: Dutch
+#: Pinball's ``TBL_justin_113_v10+TBL-v1.15`` (a 3.8 GB game) and the PB I/O
+#: board's ``build-pbap141+pbap145`` were never listed without it (PAD-613).
 _RIG_PATH_RE = re.compile(
-    r"^/var/tmp/(pad_[a-z0-9_]+)/(cache/)?([A-Za-z0-9_.\- ]+)$")
+    r"^/var/tmp/(pad_[a-z0-9_]+)/(cache/)?([A-Za-z0-9_.+\- ]+)$")
 
 # One pass as root: for each rig root, whether a game of it is running (a
 # live pid in any of its *.pid files, or a process whose command line names
@@ -514,6 +552,10 @@ true
 
 def _rig_detail(root, sub, name):
     """(what it is, kind) for one entry of a rig's root."""
+    if root == BOFMULTI_ROOT:
+        if name.endswith(".media"):
+            return "Multi-boot pictures: %s" % name[:-len(".media")], "game"
+        return "Unpacked for a multi-boot image: %s" % name, "game"
     if root == "pad_spkproc_decomp":
         return "Leftover: decompiled %s" % name, "leftover"
     if sub:
@@ -747,14 +789,150 @@ def vhdx_info():
     return info
 
 
+# ---------------------------------------------------------------------------
+# Holding WSL down while its disk file is worked on (PAD-739)
+# ---------------------------------------------------------------------------
+# `wsl --shutdown` stops the VM, but the next wsl.exe anyone runs boots it again
+# and it takes the .vhdx back - and the app itself runs wsl.exe every few seconds
+# (the Emulate tab's status, the rig pills, the clean-up's checks).  So Reclaim
+# shut WSL down, the app started it again, and diskpart answered "The process
+# cannot access the file because it is being used by another process" - a user
+# saw exactly that, run as Administrator, with 209 GB waiting to come back.
+# While the disk is worked on, no wsl.exe starts from this process except the
+# working thread's own: anything else gets an OSError, which every caller
+# already handles as "WSL did not answer", and runs normally afterwards.
+
+_paused = threading.Event()
+_own = threading.local()
+
+
+def _is_wsl_cmd(args):
+    argv = [args] if isinstance(args, (str, bytes)) else list(args or [])
+    if not argv:
+        return False
+    first = argv[0].decode() if isinstance(argv[0], bytes) else str(argv[0])
+    if isinstance(args, str):
+        first = first.strip().split()[0] if first.strip() else ""
+    name = os.path.basename(first.strip('"')).lower()
+    return name in ("wsl", "wsl.exe", "wslg.exe")
+
+
+def wsl_is_paused():
+    return _paused.is_set()
+
+
+@contextlib.contextmanager
+def wsl_paused():
+    """No wsl.exe starts from this process meanwhile, except from the calling
+    thread (it shuts WSL down and works on its disk)."""
+    real = subprocess.Popen
+
+    class _Gate(real):
+        def __init__(self, args, *a, **kw):
+            if (_paused.is_set() and not getattr(_own, "ok", False)
+                    and _is_wsl_cmd(args)):
+                raise OSError("WSL is paused while its virtual disk is "
+                              "compacted or resized")
+            super().__init__(args, *a, **kw)
+
+    subprocess.Popen = _Gate
+    _paused.set()
+    _own.ok = True
+    try:
+        yield
+    finally:
+        _own.ok = False
+        _paused.clear()
+        if subprocess.Popen is _Gate:
+            subprocess.Popen = real
+
+
+def _file_locked(path):
+    """True while another process holds *path* open (the WSL VM holds its
+    disk): an exclusive open is refused with a sharing violation.  False when
+    it can be had, or off Windows."""
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                wintypes.DWORD, wintypes.LPVOID,
+                                wintypes.DWORD, wintypes.DWORD,
+                                wintypes.HANDLE]
+    h = k32.CreateFileW(path, 0x80000000, 0, None, 3, 0x80, None)
+    if h in (None, wintypes.HANDLE(-1).value):
+        return ctypes.get_last_error() in (32, 33)   # sharing / lock violation
+    k32.CloseHandle(h)
+    return False
+
+
+def _shutdown():
+    try:
+        subprocess.run(["wsl", "--shutdown"], capture_output=True,
+                       timeout=180, creationflags=_CREATE_FLAGS)
+    except Exception as e:                              # noqa: BLE001
+        raise WslDiskError(f"Could not shut down WSL: {e}")
+
+
+#: How long WSL gets to let go of its disk after a shutdown, and how often the
+#: shutdown is asked again meanwhile (something outside the app may start it).
+RELEASE_WAIT_S = 60
+RESHUTDOWN_EVERY_S = 15
+
+_IN_USE_HELP = (
+    "WSL kept its virtual disk open: something started it again as soon as "
+    "it was shut down. Close anything else that uses WSL (Docker Desktop, "
+    "Ubuntu or other Linux terminal windows, VS Code, Windows Terminal tabs "
+    "running Linux), then try Reclaim again.")
+
+
+def _shutdown_until_free(vhdx, progress=None, sleep=time.sleep,
+                         clock=time.monotonic):
+    """Shut WSL down and wait until its disk file is free.  Raises
+    :class:`WslDiskError` when it stays held."""
+    if progress:
+        progress("Shutting down WSL…")
+    _shutdown()
+    start = last = clock()
+    while _file_locked(vhdx):
+        now = clock()
+        if now - start >= RELEASE_WAIT_S:
+            raise WslDiskError(_IN_USE_HELP)
+        if now - last >= RESHUTDOWN_EVERY_S:
+            if progress:
+                progress("WSL is still holding its disk - shutting it down "
+                         "again…")
+            _shutdown()
+            last = clock()
+        sleep(1)
+
+
+def _trim():
+    """Hand the blocks deleted inside the distro back to its disk file before
+    it is compacted (a distro mounted without `discard` keeps them mapped and
+    a compact then returns nothing).  Best effort: WSL down, no fstrim, or a
+    root denied all leave the compact to do what it can."""
+    try:
+        _wsl_bash("fstrim -v / 2>&1 || true", timeout=600)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
 def reclaim(progress=None):
-    """Shut WSL down and compact the default distro's ``.vhdx``.
+    """Shut WSL down and compact the app distro's ``.vhdx``.
 
     Returns ``bytes_reclaimed`` (the drop in the ``.vhdx`` file size).  Raises
     :class:`WslDiskError` with a user-facing message on any failure -- the most
     common being "not running as Administrator" (``diskpart``'s ``compact
     vdisk`` needs elevation).  This terminates *all* WSL activity, so the GUI
     must confirm before calling and must not have a pipeline running.
+
+    PAD-739: WSL is held down for the whole compact (:func:`wsl_paused`), the
+    disk file is waited for until WSL has really let go of it, and a compact
+    that still meets "being used by another process" shuts WSL down and tries
+    again before it gives up with what to close.
 
     *progress* is an optional ``callable(message)`` for step narration.
     """
@@ -781,12 +959,8 @@ def reclaim(progress=None):
         raise WslDiskError(f"Cannot read the virtual disk: {e}")
 
     if progress:
-        progress("Shutting down WSL…")
-    try:
-        subprocess.run(["wsl", "--shutdown"], capture_output=True,
-                       timeout=120, creationflags=_CREATE_FLAGS)
-    except Exception as e:
-        raise WslDiskError(f"Could not shut down WSL: {e}")
+        progress("Trimming the Linux filesystem…")
+    _trim()
 
     # diskpart compacts an attached-read-only vdisk in place.  It's present on
     # every Windows install (unlike the Hyper-V Optimize-VHD cmdlet), and
@@ -798,34 +972,57 @@ def reclaim(progress=None):
         f"detach vdisk\n"
     )
     sf = None
-    try:
-        with tempfile.NamedTemporaryFile(
-                "w", suffix=".txt", delete=False, encoding="ascii") as f:
-            f.write(script)
-            sf = f.name
-        if progress:
-            progress("Compacting the virtual disk (this can take a few "
-                     "minutes)…")
-        proc = subprocess.run(
-            ["diskpart", "/s", sf], capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=1800,
-            creationflags=_CREATE_FLAGS)
-        if proc.returncode != 0:
-            out = (proc.stdout or "") + (proc.stderr or "")
-            raise WslDiskError(
-                "diskpart could not compact the disk:\n" + out.strip())
-    finally:
-        if sf:
-            try:
-                os.remove(sf)
-            except OSError:
-                pass
+    with wsl_paused():
+        try:
+            with tempfile.NamedTemporaryFile(
+                    "w", suffix=".txt", delete=False, encoding="ascii") as f:
+                f.write(script)
+                sf = f.name
+            out = ""
+            for attempt in (1, 2, 3):
+                _shutdown_until_free(vhdx, progress)
+                if progress:
+                    progress("Compacting the virtual disk (this can take a "
+                             "few minutes)…")
+                proc = subprocess.run(
+                    ["diskpart", "/s", sf], capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=1800,
+                    creationflags=_CREATE_FLAGS)
+                if proc.returncode == 0:
+                    break
+                out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+                if "used by another process" not in out:
+                    raise WslDiskError(
+                        "diskpart could not compact the disk:\n" + out)
+                # a half-done attach must not stay attached for the retry
+                _diskpart_detach(vhdx)
+            else:
+                raise WslDiskError(_IN_USE_HELP + "\n\ndiskpart said:\n" + out)
+        finally:
+            if sf:
+                try:
+                    os.remove(sf)
+                except OSError:
+                    pass
 
     try:
         after = os.path.getsize(vhdx)
     except OSError:
         after = before
     return max(0, before - after)
+
+
+def _diskpart_detach(vhdx):
+    try:
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".txt", delete=False, encoding="ascii") as f:
+            f.write(f'select vdisk file="{vhdx}"\ndetach vdisk\n')
+            sf = f.name
+        subprocess.run(["diskpart", "/s", sf], capture_output=True,
+                       timeout=120, creationflags=_CREATE_FLAGS)
+        os.remove(sf)
+    except Exception:                                   # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -911,35 +1108,38 @@ def resize_disk(new_size_bytes, progress=None):
     # succeeds -- the documented "run it twice" behaviour.  So shut WSL down and
     # try up to twice, surfacing the error only if the retry also fails.
     last_out = ""
-    for attempt in (1, 2):
-        if progress:
-            progress("Shutting down WSL…")
-        try:
-            subprocess.run(["wsl", "--shutdown"], capture_output=True,
-                           timeout=120, creationflags=_CREATE_FLAGS)
-        except Exception as e:  # noqa: BLE001
-            raise WslDiskError(f"Could not shut down WSL: {e}")
+    # PAD-739: the app's own wsl.exe calls restart WSL between the shutdown
+    # and the resize; hold them off meanwhile (see wsl_paused).
+    with wsl_paused():
+        for attempt in (1, 2):
+            if progress:
+                progress("Shutting down WSL…")
+            try:
+                subprocess.run(["wsl", "--shutdown"], capture_output=True,
+                               timeout=120, creationflags=_CREATE_FLAGS)
+            except Exception as e:  # noqa: BLE001
+                raise WslDiskError(f"Could not shut down WSL: {e}")
 
-        if progress:
-            progress("Resizing the virtual disk (this can take a few "
-                     "minutes)…" if attempt == 1
-                     else "Filesystem journal recovered — retrying the "
-                          "resize…")
-        try:
-            proc = subprocess.run(
-                ["wsl", "--manage", name, "--resize", f"{mb}MB"],
-                capture_output=True, timeout=1800, creationflags=_CREATE_FLAGS)
-        except subprocess.TimeoutExpired as e:
-            raise WslDiskError("The resize timed out after 30 minutes.") from e
-        if proc.returncode == 0:
-            break
-        last_out = (_decode_wsl(proc.stdout) + _decode_wsl(proc.stderr)).strip()
-    else:
-        raise WslDiskError(
-            "WSL could not resize the disk:\n"
-            + (last_out or "wsl --manage failed twice.")
-            + "\n\nClose anything using WSL (terminals, Docker Desktop, "
-              "VS Code), then try again.")
+            if progress:
+                progress("Resizing the virtual disk (this can take a few "
+                         "minutes)…" if attempt == 1
+                         else "Filesystem journal recovered — retrying the "
+                              "resize…")
+            try:
+                proc = subprocess.run(
+                    ["wsl", "--manage", name, "--resize", f"{mb}MB"],
+                    capture_output=True, timeout=1800, creationflags=_CREATE_FLAGS)
+            except subprocess.TimeoutExpired as e:
+                raise WslDiskError("The resize timed out after 30 minutes.") from e
+            if proc.returncode == 0:
+                break
+            last_out = (_decode_wsl(proc.stdout) + _decode_wsl(proc.stderr)).strip()
+        else:
+            raise WslDiskError(
+                "WSL could not resize the disk:\n"
+                + (last_out or "wsl --manage failed twice.")
+                + "\n\nClose anything using WSL (terminals, Docker Desktop, "
+                  "VS Code), then try again.")
 
     # `--manage --resize` grows the .vhdx, but on some WSL builds it does NOT
     # grow the ext4 filesystem inside to fill the enlarged disk (RTS: resized to

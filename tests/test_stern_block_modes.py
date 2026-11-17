@@ -19,6 +19,7 @@ import sys
 import pytest
 
 from pinball_decryptor.plugins.stern import block_modes as BM
+from pinball_decryptor.plugins.stern import blocks_sim as BS
 from pinball_decryptor.plugins.stern import code_modes as CM
 from pinball_decryptor.plugins.stern import mode_project as MP
 from pinball_decryptor.plugins.stern import mode_tryit as MT
@@ -77,7 +78,7 @@ def test_problems_name_what_is_missing():
                   "sets a variable that is not there",
                   "not a whole number",
                   "has an empty number slot",
-                  "lights a shot in no colour",
+                  "lights a shot in no color",
                   "a block this version does not know",
                   "which this card's game does not report",
                   "Script 3 starts with no When block",
@@ -285,7 +286,7 @@ def test_a_newer_or_broken_blocks_file_is_refused(tmp_path):
 
 
 # ---- the ARM build ---------------------------------------------------------------------------------
-@pytest.mark.parametrize("which", ["starter", "own clips and sounds", "light shows"])   # PAD-374, PAD-376
+@pytest.mark.parametrize("which", ["starter", "own clips and sounds", "light shows", "lights by name"])   # PAD-598
 def test_the_starter_builds_with_build_mode_sh(tmp_path, which):
     if os.name == "nt":
         pytest.skip("build_mode.sh runs under bash with arm-linux-gnueabihf-gcc (WSL or Linux)")
@@ -293,7 +294,7 @@ def test_the_starter_builds_with_build_mode_sh(tmp_path, which):
         pytest.skip("no arm-linux-gnueabihf-gcc here")
     src = tmp_path / "ramp_frenzy.c"
     program = {"starter": lambda: BM.starter("RAMP FRENZY", SHOTS), "own clips and sounds": _media_prog,
-               "light shows": _lights_prog}[which]()
+               "light shows": _lights_prog, "lights by name": _lights_by_name_prog}[which]()
     program.update(game_modes="block", block_modes=[21, 23])      # PAD-373
     src.write_text(BM.to_c(program, "ramp_frenzy"), encoding="utf-8")
     out = tmp_path / "mode.so"
@@ -498,6 +499,7 @@ def play_many(tmp_path, programs, *args):
         srcs.append(str(src))
     exe = tmp_path / "harness"
     r = subprocess.run([cc, "-std=gnu17", "-Wall", "-Wextra", "-Wno-unused-parameter", "-I", SDK,
+                        "-I", os.path.join(SDK, "examples"),           # PAD-658: modes with a HUD (the kit)
                         "-o", str(exe), os.path.join(SDK, "examples", "desk_harness.c")] + srcs,
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
@@ -559,8 +561,8 @@ def test_a_start_waits_out_a_multiball_and_the_next_one_after_it_starts_it(tmp_p
     ], seconds=0, wait_multiball=True)
     out = play(tmp_path, p, "balls", 2, "shot", "Left ramp", "multiball", 1, "balls", 1, "shot", "Left ramp",
                "multiball", 0, "shot", "Left ramp")
+    # PAD-680: through the multiball its idle scripts run on (they count, note and show); only the start waits it out
     assert out.count("] cannot\n") == 2 and out.count("] can\n") == 1
-    assert out.count("still ready") == 1                          # said once in 10 s, not at every shot
     assert out.count("START (a block)") == 1
     assert out.index("START (a block)") > out.index(">> multiball 0")
     # without the option a multiball does not stop it
@@ -572,12 +574,19 @@ def test_a_start_waits_out_a_multiball_and_the_next_one_after_it_starts_it(tmp_p
 def test_the_display_priority_is_held_while_it_runs_and_back_at_a_drain(tmp_path):
     p = prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [{"op": "start_mode"}]}],
              seconds=5, priority=190)
-    out = play(tmp_path, p, "shot", "Left ramp", "secs", 6, "shot", "Left ramp", "secs", 1, "ball_end")
+    out = play(tmp_path, p, "shot", "Left ramp", "secs", 6, "shot", "Left ramp", "secs", 1, "ball_end", "secs", 1)
     assert out.count("DISPLAY 190 TEST MODE") == 2
     assert "END (time ran out)" in out and "END (ball ended)" in out
-    # the clock running out keeps it for the total on its screen; a drain gives it back at once
+    # the clock running out keeps it for the total on its screen
     assert _at_any(out, "DISPLAY lingers TEST MODE 3000 ms") == _at_any(out, r"END \(time ran out\)")
-    assert _at_any(out, "DISPLAY 0 TEST MODE") == _at_any(out, r"END \(ball ended\)") == _at_any(out, ">> ball_end")
+    # PAD-622: so does a drain, for its TOTAL as long as the game's own mini-wizards show theirs, the end of ball waiting
+    drain = _at_any(out, ">> ball_end")
+    assert _at_any(out, "DISPLAY lingers TEST MODE 6000 ms") == _at_any(out, r"END \(ball ended\)") == drain
+    assert 5900 <= _at_any(out, r"DISPLAY released TEST MODE") - drain <= 6100
+    assert 5900 <= _at_any(out, "BALL END goes on") - drain <= 6100
+    # a tilted ball gives it back at once, as before
+    out = play(tmp_path, p, "shot", "Left ramp", "secs", 1, "tilt", "ball_end", "secs", 1)
+    assert _at_any(out, "DISPLAY 0 TEST MODE") == _at_any(out, r"END \(ball ended\)") == _at_any(out, "BALL END goes on")
     assert "DISPLAY" not in play(tmp_path, dict(p, priority=0), "shot", "Left ramp", "secs", 6)
 # ---- PAD-374: the mode's own clips and sounds ------------------------------------------------------
 def _media_prog(**kw):
@@ -660,13 +669,102 @@ def test_own_clip_and_sound_problems_and_notes(tmp_path):
     assert "Script 3 falls back on a callout that is not one." in got
     many = _media_prog()
     many["clips"] = [{"name": "c%d" % i, "file": "c.mp4"} for i in range(BM.MAX_CLIPS + 1)]
-    assert "13 clips of its own: 12 at most." in BM.problems(many, SHOTS)
+    assert "33 clips of its own: 32 at most." in BM.problems(many, SHOTS)
     # once behind the HUD needs a loop to play in
     noloop = _media_prog()
     noloop["scripts"][1]["do"] = noloop["scripts"][1]["do"][:1]
     assert any(t.startswith("A clip behind the HUD, once, plays in the place of the mode's loop")
                for t in BM.notes(noloop))
     assert not any("behind the HUD" in t for t in BM.notes(_media_prog()))
+
+
+def test_a_clip_past_the_limit_stops_the_build_instead_of_going_missing(tmp_path):
+    """PAD-1030: a Bond owner's 13th clip (a loop behind the HUD, added last) never played: assets.json kept the
+    first 12 and Try it built the mode without it. The limit is 32 now (13 build), assets.json carries every clip,
+    and a mode past the limit is refused by the build in the words the editor shows, never built short."""
+    from pinball_decryptor.plugins.stern import mode_assets as MA
+    assert BM.MAX_CLIPS == CM.MAX_CLIPS == 32
+    project = _card(tmp_path)
+    slug, _path = BM.new_blocks_mode(project, "Diamond", shots=SHOTS)
+    p = _media_prog()
+    p["clips"] += [{"name": "c%d" % i, "file": "c.mp4"} for i in range(13 - len(p["clips"]))]
+    p["clips"][-1] = {"name": "background2", "file": "bg.mp4"}
+    BM.save(project, slug, p)
+    spec = CM.load(project, slug)
+    assert len(spec.clips) == 13 and spec.clips["background2"] == "bg.mp4"
+    assert not [t for t in CM.validate(spec) if "of its own" in t]
+    assert not [t for t in BM.problems(p, SHOTS) if "of its own" in t]
+    # past the limit
+    p["clips"] += [{"name": "d%d" % i, "file": "c.mp4"} for i in range(BM.MAX_CLIPS + 1 - len(p["clips"]))]
+    p["sounds"] += [{"name": "s%d" % i, "file": "s.wav", "priority": 4}
+                    for i in range(BM.MAX_SOUNDS + 1 - len(p["sounds"]))]
+    BM.save(project, slug, p)
+    spec = CM.load(project, slug)
+    assert len(spec.clips) == 33 and len(spec.calls) == 17
+    got = CM.validate(spec)
+    assert "TEST MODE: 33 clips of its own: 32 at most." in got
+    assert any(t.endswith(": 17 calls of its own: 16 at most.") for t in got)
+    code = MT.code_modes_with_assets(project)
+    with pytest.raises(MA.ModeAssetError, match="33 clips of its own: 32 at most"):
+        MA.build(project, "", "", str(tmp_path / "out"), code=code)
+
+
+def test_a_build_carries_the_clips_an_older_app_left_out_of_assets_json(tmp_path):
+    """PAD-1030 round 2: the owner's modes file (v1.351.1, "still the circles"): blocks.json had 13 clips, the loop
+    behind the HUD last, but assets.json - written only at a save, and their last save was on v1.351.0 - still held
+    the 12 it kept then, so Try it and Write built every mode without its loop. A build's refresh brings assets.json
+    up to the blocks as it brings the C; an assets.json already up to date is not written again."""
+    project = _card(tmp_path)
+    slug, _path = BM.new_blocks_mode(project, "Diamond Death Threat", shots=SHOTS)
+    p = _media_prog()
+    p["clips"] = [{"name": "crem%d" % i, "file": "crem%d.mp4" % i} for i in range(11, 23)]
+    p["clips"].append({"name": "background2", "file": "background2.mp4"})
+    BM.save(project, slug, p)
+    path = os.path.join(MP.mode_folder(project, slug), CM.ASSETS_FILE)
+    with open(path, encoding="utf-8") as f:
+        old = json.load(f)
+    old["clips"] = dict(list(old["clips"].items())[:12])     # as v1.351.0 wrote it
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(old, f, indent=2)
+    assert "background2" not in CM.load(project, slug).clips
+    code = dict(MT.code_modes_with_assets(project))          # what Try it and Write build from
+    assert code[slug].clips["background2"] == "background2.mp4" and len(code[slug].clips) == 13
+    with open(path, "rb") as f:
+        now = f.read()
+    stamp = os.stat(path).st_mtime_ns
+    assert BM.refresh(project) == []
+    with open(path, "rb") as f:
+        assert f.read() == now
+    assert os.stat(path).st_mtime_ns == stamp
+
+
+def test_the_clip_limit_is_the_runtimes_and_its_file_fits_the_read():
+    """PAD-1030: MAX_CLIPS is pad_mode_assets.h's PA_CLIPS_MAX, and a mode's .assets file with every clip, call,
+    bed and swap at its longest still fits the buffer pa_load reads it into (PA_FILE_MAX, its 0 included)."""
+    h = open(os.path.join(os.path.dirname(__file__), "..", "tools", "spike2_emu", "modes", "sdk",
+                          "pad_mode_assets.h"), encoding="utf-8").read()
+    num = lambda n: int(re.search(r"#define %s\s+(\d+)" % n, h).group(1))
+    assert num("PA_CLIPS_MAX") == BM.MAX_CLIPS == CM.MAX_CLIPS
+    assert num("PA_CALLS_MAX") == BM.MAX_SOUNDS == CM.MAX_CALLS and num("PA_BEDS_MAX") == BM.MAX_BEDS
+    slug = "m" * 26                                          # a 24-letter name, then _2 for a second of it
+    cue = lambda c, i: (c + "%02d" % i).ljust(15, "x")
+    spec = CM.CodeAssets(screen=True)
+    spec.name = "N" * 24
+    spec.block_modes = list(range(128))
+    spec.clips = {cue("c", i): "c.mp4" for i in range(BM.MAX_CLIPS)}
+    spec.calls = {cue("s", i): {"wav": "s.wav", "priority": 4} for i in range(BM.MAX_SOUNDS)}
+    spec.music = "m.wav"
+    spec.beds = {cue("b", i): "b.wav" for i in range(BM.MAX_BEDS)}
+    key = "f" * 32
+    own = [{"slug": slug, "key": CM.call_key(c), "request": 99999, "ms": 99999, "stock_key": key, "our_key": key}
+           for c in spec.calls]
+    own.append({"slug": slug, "key": "music", "request": 99999, "sid": 99999})
+    own += [{"slug": slug, "key": "music:" + b, "request": 99999, "sid": 99999, "stock_key": key, "our_key": key}
+            for b in spec.beds]
+    text = CM.runtime_text(slug, spec, None, own_sounds=own, screen=True, clip=True)
+    assert text.count("\nclip ") == BM.MAX_CLIPS
+    assert all(len(CM.clip_name(slug, c)) < num("PA_NAME") for c in spec.clips)
+    assert len(text.encode("utf-8")) < num("PA_FILE_MAX") - 1, len(text)
 
 
 def test_media_names_come_from_the_files():
@@ -745,6 +843,77 @@ def test_own_clips_and_sounds_play_where_the_blocks_say(tmp_path, monkeypatch):
     assert 500 <= _at(out, "CLIP PadMode_blk_Won") - end <= 600
 
 
+def test_a_clip_asked_as_it_ends_keeps_its_total_after_it(tmp_path, monkeypatch):
+    """PAD-733 (David, v29: "when the final mode video plays the scene text plays after that but only for a very
+    brief portion of a second"): KING CAESAR's final blow asked its clip and then ended - its TOTAL's 3 s ran out under
+    the clip. And at a drain the end of ball waited 6 s, 5.7 of them the lost clip. Either way the clip now comes
+    first and the TOTAL has its 3 s after it, as at a clock's end with a clip in When the mode ends."""
+    _cc()
+
+    def prog_(**kw):        # no start clip: the harness's clips play until stopped, so one would count here
+        q = _media_prog(priority=180, **kw)
+        q["scripts"][1]["do"] = q["scripts"][1]["do"][1:]
+        return q
+
+    p = prog_()
+    p["scripts"][2]["do"] = [{"op": "clip", "clip": "sever", "where": "full"}, {"op": "end_mode"}]
+    p["scripts"][3]["do"] = p["scripts"][3]["do"][:1]                      # When the mode ends plays no clip
+    dump = _assets(tmp_path, "blk", p, [])
+    monkeypatch.setenv("HARNESS_DUMP", dump)
+    out = play(tmp_path, p, "shot", "Building", "secs", 1, "shot", "Left ramp", "secs", 12)
+    end = _at(out, r"\[TEST MODE\] END \(a block\)")
+    assert _at(out, "DISPLAY lingers TEST MODE 10000 ms") == end          # 3000 + the clip's 7000
+    assert 500 <= _at(out, "CLIP PadMode_blk_Sever") - end <= 600
+    # at a drain: the end of ball waits for the clip and then the TOTAL's 3 s
+    hud = dict(BM.normalize({})["hud"], on=True)
+    out = play(tmp_path, prog_(hud=hud), "shot", "Building", "secs", 2, "ball_end", "secs", 12)
+    drain = _at(out, ">> ball_end")
+    assert _at(out, "BALL END HOLD 10000 TEST MODE") == drain
+    assert 500 <= _at(out, "CLIP PadMode_blk_Won") - drain <= 600
+    assert 9900 <= _at(out, "BALL END goes on") - drain <= 10100
+    # without a clip at its end, the drain's 6 s as before
+    q = prog_(hud=hud)
+    q["scripts"][3]["do"] = q["scripts"][3]["do"][:1]
+    out = play(tmp_path, q, "shot", "Building", "secs", 2, "ball_end", "secs", 8)
+    assert _at(out, "BALL END HOLD 6000 TEST MODE") == _at(out, ">> ball_end")
+
+
+def test_take_the_extra_balls_away_only_while_more_than_one_is_up(tmp_path):
+    """PAD-733 (David, MINILLA: "just kill the flippers and show that the mode is ended, then instead of ending the ball,
+    give a ball back in the plunger lane"): the block asks the runtime to drain to one ball (pm_drain_to_one) when its
+    multiball still has more than one ball up as the mode ends; with one ball nothing is asked."""
+    p = prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [{"op": "start_mode"}]},
+              {"hat": {"kind": "mode_start"}, "do": [{"op": "multiball", "balls": 2, "save": 0}]},
+              {"hat": {"kind": "shot", "shot": "Building", "when": "running"}, "do": [{"op": "end_mode", "won": True}]},
+              {"hat": {"kind": "mode_end"}, "do": [{"op": "drain_to_one"}]}], seconds=30)
+    assert BM.problems(p, SHOTS) == []
+    assert "if (run.on && pm_balls_in_play() > 1 && !pm_drain_to_one())" in BM.to_c(p, "blk")
+    out = play(tmp_path, p, "shot", "Left ramp", "secs", 2, "shot", "Building", "secs", 1)
+    assert _at_any(out, "DRAIN TO ONE") == _at_any(out, r"END \(a block\)")
+    out = play(tmp_path, p, "shot", "Left ramp", "secs", 2, "balls", 1, "shot", "Building", "secs", 1)
+    assert "DRAIN TO ONE" not in out and "END (a block)" in out
+
+
+def test_a_loop_asked_as_it_ends_goes_behind_its_total(tmp_path, monkeypatch):
+    """PAD-733 (David: MINILLA "it doesn't make sense to go from summer to winter and back during the mode"): his
+    winter fall played full screen, then the TOTAL showed over the mode's sunny loop again. A clip looped in When the
+    mode ends now goes behind its TOTAL in the loop's place (after the full-screen clip); without one, the loop as
+    before."""
+    _cc()
+    p = _media_prog(priority=180, hud=dict(BM.normalize({})["hud"], on=True))
+    p["scripts"][3]["do"].append({"op": "clip", "clip": "sever", "where": "loop"})
+    dump = _assets(tmp_path, "blk", p, [])
+    monkeypatch.setenv("HARNESS_DUMP", dump)
+    out = play(tmp_path, p, "shot", "Building", "secs", 12)
+    end = _at(out, r"\[TEST MODE\] END \(time ran out\)")
+    assert _at(out, "BACKDROP PadMode_blk_Sever") == end
+    assert "own clip sever (PadMode_blk_Sever) behind its TOTAL" in out and "not looped" not in out
+    assert 500 <= _at(out, "CLIP PadMode_blk_Won") - end <= 600              # the full-screen clip first, as ever
+    q = _media_prog(priority=180, hud=dict(BM.normalize({})["hud"], on=True))
+    out = play(tmp_path, q, "shot", "Building", "secs", 12)
+    assert "BACKDROP PadMode_blk_Sever" not in out and "behind its TOTAL" not in out
+
+
 def test_without_its_file_the_blocks_still_play_the_games_own(tmp_path, monkeypatch):
     _cc()
     dump = tmp_path / "empty"
@@ -787,12 +956,60 @@ def test_give_way_waits_for_the_games_mode_and_ends_when_one_begins(tmp_path):
     out = play(tmp_path, prog(GATE, seconds=0, game_modes="give_way"),
                "battle", 1, "shot", "Building", "battle", 0, "balls", 2, "shot", "Building", "balls", 1,
                "shot", "Building", "shot", "Maser target", "timed", 1, "secs", 0.5, "shot", "Maser target")
-    assert "not started (a block): a battle is running" in out
+    assert "not started" in out                                  # PAD-680: the battle's Building counts, then waits
     assert out.count("START (a block)") == 1                     # the third Building: none running
     assert "gives way - one of the game's modes starting ends it" in out
     assert "END (the game's own mode began)" in out
     assert scores(out) == [5]                                     # the Maser after it ended pays nothing
     assert "BLOCK" not in out
+
+
+# ---- PAD-675/680: counting through the game's modes, starting after them; a switch hit counts -----------------
+COUNT = [{"hat": {"kind": "shot", "shot": "Building", "when": "idle"}, "do": [
+    {"op": "change", "var": "n", "by": num(1)},
+    {"op": "if", "cond": {"k": "cmp", "op": ">=", "a": {"k": "var", "name": "n"}, "b": num(2)},
+     "then": [{"op": "start_mode"}], "else": None}]}]
+NV = [{"name": "n", "reset": "game"}]
+
+
+def test_a_mode_that_waits_the_games_modes_out_counts_through_one_and_starts_after_it(tmp_path):
+    # David's machine (PAD-680): with nothing counted in a battle, and on Godzilla one runs most of a ball, no mode
+    # ever showed its progress. Two Buildings in the battle count (the start waits it out); after it, one starts it
+    out = play(tmp_path, prog(COUNT, NV, seconds=5, game_modes="block"),
+               "battle", 1, "shot", "Building", "shot", "Building", "secs", 1, "battle", 0, "secs", 1,
+               "shot", "Building", "secs", 1)
+    assert "still ready" in out
+    assert out.count("START (a block)") == 1 and out.index("START (a block)") > out.index(">> battle 0")
+    out = play(tmp_path, prog(COUNT, NV, seconds=5, game_modes="block"),
+               "battle", 1, "shot", "Building", "battle", 0, "secs", 1, "shot", "Building", "shot", "Building")
+    assert out.count("START (a block)") == 1
+
+
+def test_a_mode_that_stacks_still_counts_through_the_games_modes(tmp_path):
+    out = play(tmp_path, prog(COUNT, NV, seconds=5), "battle", 1, "shot", "Building", "shot", "Building")
+    assert "START (a block)" in out
+
+
+def test_a_lit_mode_is_dark_while_the_games_mode_runs(tmp_path):
+    lit = [{"hat": {"kind": "shot", "shot": "Building", "when": "idle"}, "do": [
+        {"op": "light_mode", "shot": "Left ramp", "color": "#ff0000", "pattern": "blink"}]}]
+    out = play(tmp_path, prog(lit, seconds=5, game_modes="block"),
+               "shot", "Building", "secs", 1, "battle", 1, "secs", 1, "battle", 0, "secs", 1)
+    seq = [ln.split(None, 1)[1] for ln in out.splitlines() if "LEFT RAMP" in ln or ">> battle" in ln]
+    assert seq == ["LAMP LEFT RAMP ff0000 blink 500 TEST MODE", ">> battle 1", "LAMP OFF LEFT RAMP TEST MODE",
+                   ">> battle 0", "LAMP LEFT RAMP ff0000 blink 500 TEST MODE"]
+
+
+def test_a_switch_hit_counts_toward_a_start(tmp_path):
+    sw = [{"hat": {"kind": "switch", "when": "idle"}, "do": [
+        {"op": "change", "var": "n", "by": num(1)},
+        {"op": "if", "cond": {"k": "cmp", "op": ">=", "a": {"k": "var", "name": "n"}, "b": num(50)},
+         "then": [{"op": "start_mode"}], "else": None}]}]
+    out = play(tmp_path, prog(sw, NV, seconds=5, game_modes="block"), "switches", 49, "secs", 1)
+    assert "START" not in out
+    out = play(tmp_path, prog(sw, NV, seconds=5, game_modes="block"), "switches", 48, "shot", "Building", "secs", 1,
+               "shot", "Left ramp")
+    assert "START (a block)" in out                  # a shot is its switch's hit too
 
 
 def test_block_holds_the_ticked_modes_off_while_it_runs(tmp_path):
@@ -824,7 +1041,7 @@ def test_start_mode_now_does_not_wait_for_the_games_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("HARNESS_DUMP", str(dump))
     out = play(tmp_path, prog(GATE, seconds=0, game_modes="give_way"), "timed", 1, "shot", "Building",
                "trigger", "blk.start", "secs", 1)
-    assert "not started (a block): a stock mode is running" in out
+    assert "not started" in out                                  # PAD-680: the Building counts, its start waits
     assert "START (trigger file)" in out
 
 
@@ -865,11 +1082,11 @@ def test_light_show_and_pace_problems():
            _step("burst", 100, "white", "#000000"), _step("burst", 100, "#ffffff", "#000000", at="moon"),
            _step("spin", 100, "#ffffff", "#000000", rate=9000), _step("spin", 100, "#ffffff", "#000000", gi="x")]
     said = " ".join(probs({"op": "show", "show": "own", "steps": bad}))
-    for words in ("step 1, has no pattern", "step 2, lasts 50 to 10000 ms", "step 3, has a colour missing",
+    for words in ("step 1, has no pattern", "step 2, lasts 50 to 10000 ms", "step 3, has a color missing",
                   "step 4, has no place", "step 5, has a pace of 0 to 2000", "step 6, says nothing"):
         assert words in said, words
-    eleven = {"op": "show", "show": "own", "steps": [GHIDORAH_START[0]] * 11}
-    assert any("11 steps: 10 at most" in t for t in probs(eleven))
+    many = {"op": "show", "show": "own", "steps": [GHIDORAH_START[0]] * (BM.SHOW_STEPS + 1)}   # PAD-646: 32 now
+    assert any("%d steps: %d at most" % (BM.SHOW_STEPS + 1, BM.SHOW_STEPS) in t for t in probs(many))
     assert any("pace of 20 to 5000 ms" in t for t in probs(_light("Building", rate=5)))
     assert any("empty number slot" in t for t in probs(_light("Building", rate={"k": "nope"})))
     # a solid light's pace is not asked for
@@ -888,8 +1105,8 @@ def test_the_light_show_c_only_calls_what_the_header_declares_and_only_when_used
     used = set(re.findall(r"\b(pm_[a-z_]+)\s*\(", src))
     assert used <= _header_calls(), used - _header_calls()
     assert "static const struct fx_step SHOW_0[] = {" in src and "SHOW_1[]" in src
-    assert "{ FX_BOLTS, 1500, 0xffb000u, 0x000000u, 150, 330, 190, GI_DARK }" in src
-    assert 'show_start(SHOW_1, 3, "rainbow");' in src
+    assert "{ FX_BOLTS, 1500, 0xffb000u, 0x000000u, 150, 330, 190, GI_DARK, 0 }" in src
+    assert 'show_start(SHOW_1, 3, "rainbow", 1);' in src
     assert "light(0, 0xffb000u, PM_LAMP_BLINK, (long long)secs_left(), 0);" in src
     assert "light(1, 0xffb000u, PM_LAMP_BLINK, 0LL, 1);" in src
     plain = BM.to_c(BM.starter("RAMP FRENZY", SHOTS), "ramp_frenzy")
@@ -911,7 +1128,7 @@ def test_king_ghidoras_start_show_and_a_blink_that_quickens_in_blocks(tmp_path, 
     ], seconds=15)
     out = play(tmp_path, p, "shot", "Building", "secs", 22)
     start = _at(out, r"\[TEST MODE\] START")
-    assert "show its own: 4 step(s) over 18 placed inserts, 2 GI string(s)" in out
+    assert "show its own: 4 step(s) over 36 placed inserts, 2 GI string(s)" in out
     # the show has the playfield: the Building's light waits for it to end (3.2 s), then comes on
     over = _at(out, r"\[TEST MODE\] show its own: over")
     assert 3200 <= over - start <= 3250
@@ -994,6 +1211,9 @@ def test_the_hud_is_the_examples_hud_in_the_assets_file(tmp_path):
     assert BM.hud_spec(q) == {"title": "TEST MODE", "line": " ", "counters": [[], ["B", "0", " "]],
                               "timer": {"label": "TEST MODE", "icon": "xilien"}}
     assert BM.hud_spec(prog([])) == {}
+    # PAD-690: no timer, but the progress panel wears its badge: its label and icon go as "badge"
+    r = prog([], hud={"on": True, "timer": {"on": False, "label": "", "icon": "rose"}})
+    assert BM.hud_spec(r)["badge"] == {"label": "TEST MODE", "icon": "rose"} and "timer" not in BM.hud_spec(r)
     # saved: the assets file carries it (the build draws it) and the kit sits beside the C
     project = _card(tmp_path)
     slug, path = BM.new_blocks_mode(project, "Maser", shots=SHOTS)
@@ -1006,6 +1226,13 @@ def test_the_hud_is_the_examples_hud_in_the_assets_file(tmp_path):
         assert f.read() == g.read()
     with open(path, encoding="utf-8") as f:
         assert '#include "intricate_kit.h"' in f.read()
+    # PAD-680: an app whose kit alone changed gives it to the mode before a build, its C unchanged
+    with open(os.path.join(folder, BM.KIT_FILE), "w", encoding="utf-8") as f:
+        f.write("/* an older app's kit */\n")
+    assert BM.refresh(project) == []
+    with open(os.path.join(folder, BM.KIT_FILE), encoding="utf-8") as f, \
+            open(os.path.join(SDK, "examples", BM.KIT_FILE), encoding="utf-8") as g:
+        assert f.read() == g.read()
     # switched off: no HUD in the assets, and the C no longer includes the kit
     p["hud"]["on"] = False
     BM.save(project, slug, p)
@@ -1049,7 +1276,7 @@ def test_the_hud_c_calls_only_the_header_and_the_kit():
     assert kit_used and kit_used <= kit, kit_used - kit
     assert 'static struct kit_hud hud = { .slug = "maser" };' in src
     # a HUD with no priority of its own takes a mode's 180 (PAD-377's choice wins when made)
-    assert re.search(r"#define DISPLAY_PRIORITY 180\b", src) and "pm_end_holding(ENDING_MS)" in src
+    assert re.search(r"#define DISPLAY_PRIORITY 180\b", src) and "pm_end_holding(ENDING_HOLD_MS + total_due" in src
     p = maser_hud()
     p["priority"] = 190
     assert re.search(r"#define DISPLAY_PRIORITY 190\b", BM.to_c(p, "maser"))
@@ -1091,8 +1318,8 @@ def test_the_hud_follows_the_blocks_and_ends_with_the_total(tmp_path):
     assert "1.00M" in _hud_words(out, "C3_Value")         # short enough for the counter (kit_short)
     # the award for its two seconds, the badge counting the clock, the chain gauge lit 1, 2, then 0
     award = _hud_words(out, "Award")
-    assert award[:3] == [" ", "BARRAGE 1", " "]
-    assert "MULTIPLIER UP" in _hud_words(out, "AwardSub")
+    assert award[:3] == [" ", "BARRAGE", " "]                 # PAD-658: the words big, the number under them
+    assert "1  -  MULTIPLIER UP" in _hud_words(out, "AwardSub")
     timer = _hud_words(out, "Timer_Num")
     assert timer[0] == "20" and "10" in timer
     lit = re.findall(r"SHOW \S+_Hud_G(\d)_On 1", out)
@@ -1124,11 +1351,15 @@ def test_the_hud_steps_aside_for_the_games_modes_and_displays(tmp_path):
     back = out[out.index(">> battle 0"):out.index(">> ball_end")]
     assert "back in its places" in back and "Hud_C1_Label: MULTIPLIER" in back
     assert "SHOW PadMode_maser_Screen 1" in back
-    # a drain: down at once, the display given back in the same tick
+    # a drain: its TOTAL as long as the game's own mini-wizards show theirs, the end of ball waiting (PAD-622); then
+    # down, the display given back as the end of ball goes on
     drain = out[out.index(">> ball_end"):]
     t = int(re.search(r"^\s*(\d+) >> ball_end", out, re.M).group(1))
-    assert re.search(r"^\s*%d SHOW PadMode_maser_Hud 0" % t, drain, re.M)
-    assert re.search(r"^\s*%d DISPLAY 0 TEST MODE" % t, drain, re.M)
+    on = _at_any(out, "BALL END goes on")
+    assert 5900 <= on - t <= 6100
+    assert "Hud_Title: TEST MODE TOTAL" in drain
+    assert [x for x in map(int, re.findall(r"^\s*(\d+) SHOW PadMode_maser_Hud 0", drain, re.M)) if t < x <= on + 40]
+    assert 5900 <= _at_any(drain, r"DISPLAY (0|released) TEST MODE") - t <= 6100
 
 
 def test_an_award_before_the_mode_runs_is_a_note(tmp_path):
@@ -1138,9 +1369,57 @@ def test_an_award_before_the_mode_runs_is_a_note(tmp_path):
          "seconds": 2}]})
     out = play(tmp_path, p, "shot", "Big loop", "secs", 3, slug="maser")
     note = out[out.index(">> shot Big loop"):]
-    assert "Hud_Award: MASER 1" in note and "Hud_AwardSub: TEST MODE" in note
+    # PAD-680: a note is in the award line, in the middle, as the code modes' were (PAD-658 had it in the title place)
+    assert "Hud_Award: MASER" in note and "Hud_AwardSub: 1  -  TEST MODE" in note
     assert "SHOW PadMode_maser_Hud 1" in note and "SHOW PadMode_maser_Hud 0" in note
-    assert "Hud_Title:  " in note                  # a note is the award line alone
+    assert "Hud_Title: MASER" not in note
+
+
+def test_keep_at_least_puts_the_clock_up_only_when_it_is_under(tmp_path):
+    """PAD-658 (David: "successful shots reset the countdown timer to 15 seconds (if it's below 15)"): Keep at least N
+    seconds on the clock - one block, the clock up to N when under it, left alone when over it."""
+    p = maser_hud()                                     # its clock: 20 s
+    p["scripts"].append({"hat": {"kind": "shot", "shot": "Big loop", "when": "running"}, "do": [
+        {"op": "set_time", "seconds": num(15), "at_least": True}]})
+    src = BM.to_c(p, "maser")
+    assert "if (run.on && RUN_SECONDS && secs_left() < ((15LL))) set_time((15LL));" in src
+    out = play(tmp_path, p, "shot", "Maser target", "secs", 2, "shot", "Big loop", "secs", 8, "shot", "Big loop",
+               "secs", 1, slug="maser")
+    first = _hud_words(out[out.index(">> shot Big loop"):], "Timer_Num")[0]
+    assert first in ("18", "17")                            # 18 s left: left alone
+    assert _hud_words(out[out.rindex(">> shot Big loop"):], "Timer_Num")[0] == "15"   # 10 s left: up to 15
+
+
+def test_a_note_shows_at_once_over_a_display_of_the_games(tmp_path):
+    """PAD-680 (David, after PAD-658's notes waited out the game's displays: "i almost never saw on-screen progress
+    towards modes"): the game puts a screen up for nearly every shot, so a note shows at once, over it, for its time."""
+    p = maser_hud()
+    p["scripts"].append({"hat": {"kind": "shot", "shot": "Big loop", "when": "idle"}, "do": [
+        {"op": "hud_award", "text": "MASER", "value": {"k": "hits", "shot": "Big loop"}, "sub": "",
+         "seconds": 2}]})
+    out = play(tmp_path, p, "covered", 1, "shot", "Big loop", "secs", 4, "covered", 0, "secs", 3, slug="maser")
+    under = out[out.index(">> shot Big loop"):out.index(">> covered 0")]
+    assert "its words wait while a display" not in under
+    assert "Hud_Award: MASER" in under
+    shot = _at(out, ">> shot Big loop")
+    hidden = [int(t) for t in re.findall(r"^\s*(\d+) SHOW PadMode_maser_Hud 0", under, re.M)]
+    assert hidden and 1900 <= hidden[0] - shot <= 2100, (shot, hidden)
+
+
+def test_a_clip_behind_the_hud_as_the_mode_ends_plays_full_screen(tmp_path, monkeypatch):
+    """PAD-658 (run meltdown_r4: the game's screen showed, not the clip): the loop ends with the mode, so a clip
+    behind the HUD in When the mode ends plays full screen."""
+    _cc()
+    p = _media_prog()
+    p["scripts"][3]["do"][1]["where"] = "behind"
+    assert any(t.startswith("A clip behind the HUD in When the mode ends plays full screen") for t in BM.notes(p))
+    dump = _assets(tmp_path, "blk", p, [])
+    monkeypatch.setenv("HARNESS_DUMP", dump)
+    out = play(tmp_path, p, "shot", "Building", "secs", 12)
+    end = _at(out, r"\[TEST MODE\] END \(time ran out\)")
+    assert "own clip won: the mode is ending - played full screen, not behind the HUD" in out
+    assert "BACKDROP ONCE PadMode_blk_Won" not in out
+    assert 500 <= _at(out, "CLIP PadMode_blk_Won") - end <= 600
 
 
 def test_the_hud_with_a_light_show_and_its_own_clips_builds_and_plays(tmp_path, monkeypatch):
@@ -1163,9 +1442,182 @@ def test_the_hud_with_a_light_show_and_its_own_clips_builds_and_plays(tmp_path, 
     assert "SHOW PadMode_blk_Hud 1" in out and "Hud_Award: GO" in out
     assert _at(out, "CLIP PadMode_blk_Intro") >= start
     assert "show its own: 4 step(s)" in out
-    t = _at(out, ">> ball_end")
-    assert re.search(r"^\s*%d SHOW PadMode_blk_Hud 0" % t, out, re.M)
+    t = _at(out, "BALL END goes on")                        # PAD-622: after its TOTAL at the drain
+    assert t - _at(out, ">> ball_end") >= 5900
+    assert [x for x in map(int, re.findall(r"^\s*(\d+) SHOW PadMode_blk_Hud 0", out, re.M)) if t - 100 <= x <= t + 40]
     assert "END lamps held 0, display priority 0" in out
+
+
+def _hud_media_prog():
+    p = _media_prog()
+    p["hud"] = maser_hud()["hud"]
+    p["vars"] = [{"name": "step"}, {"name": "mult"}, {"name": "barrages"}]
+    return p
+
+
+def test_the_loop_stays_behind_the_total_it_holds(tmp_path, monkeypatch):
+    """PAD-658 (run meltdown_r4, md_16_end: MELTDOWN TOTAL over the live city's RAID and TANKS labels): the mode's loop
+    stays behind its TOTAL while the TOTAL holds the screen, and goes with it."""
+    _cc()
+    p = _hud_media_prog()
+    monkeypatch.setenv("HARNESS_DUMP", _assets(tmp_path, "blk", p, []))
+    out = play(tmp_path, p, "shot", "Building", "secs", 22)
+    end = _at(out, r"\[TEST MODE\] END \(time ran out\)")
+    assert 0 <= _at(out, "BACKDROP KEPT behind TEST MODE's ending") - end <= 20
+    off = _at(out, r"BACKDROP OFF \(its ending is over\)")
+    assert 9900 <= off - end <= 10100                    # the won clip full screen: the TOTAL held 7 s more
+    hidden = [int(t) for t in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Hud 0", out, re.M)]
+    assert any(abs(t - off) <= 40 for t in hidden), (off, hidden)
+
+
+def test_a_drain_takes_the_loop_with_its_total(tmp_path, monkeypatch):
+    _cc()
+    p = _hud_media_prog()
+    monkeypatch.setenv("HARNESS_DUMP", _assets(tmp_path, "blk", p, []))
+    out = play(tmp_path, p, "shot", "Building", "secs", 2, "ball_end", "secs", 8)
+    on = _at(out, "BALL END goes on")
+    assert abs(_at(out, "BACKDROP OFF") - on) <= 40
+
+
+def _noting_prog():
+    p = maser_hud()
+    p["scripts"].append({"hat": {"kind": "shot", "shot": "Big loop", "when": "idle"}, "do": [
+        {"op": "change", "var": "loops", "by": num(1)},
+        {"op": "hud_award", "text": "LOOPS", "value": var("loops"), "sub": "TO GO", "seconds": 3}]})
+    p["vars"].append({"name": "loops", "reset": "game"})
+    return p
+
+
+def test_a_note_asked_for_in_the_games_battle_shows_at_once(tmp_path):
+    """PAD-680 (David's card: no "3 more for KING KONG" - the game's own modes had the middle 39% of a game, and PAD-390
+    held every note through them): a note shows at once during the game's battles and modes too, as before PAD-390."""
+    out = play(tmp_path, _noting_prog(), "battle", 1, "secs", 0.5, "shot", "Big loop", "secs", 4,
+               "shot", "Big loop", "secs", 1, "battle", 0, "secs", 1)
+    battle = out[out.index(">> battle 1"):out.index(">> battle 0")]
+    assert "Hud_AwardSub: 1  -  TO GO" in battle and "Hud_AwardSub: 2  -  TO GO" in battle
+    assert "its note waits" not in out and "SHOW PadMode_blk_Hud 1" in battle
+
+
+def test_a_progress_note_also_stands_on_the_progress_panel(tmp_path):
+    """PAD-680 (David's Premium: the game's timed modes held the middle 39% of a game and every note waited or
+    went): a mode's latest note stands on the pack's progress panel (PadMode_Progress, built into the HUD scene)
+    as one line, its number after it, until the mode starts; the panel is down during the game's battles and
+    while one of ours runs, and a game over clears it. PAD-733 (David: "these HUD indicators need to duck when in
+    super train loops"): down while any mode of the game's runs, a timed one as a battle."""
+    out = play(tmp_path, _noting_prog(), "shot", "Big loop", "secs", 4, "shot", "Big loop", "secs", 1,
+               "battle", 1, "secs", 1, "battle", 0, "secs", 1, "timed", 1, "secs", 1, "timed", 0, "secs", 1,
+               "shot", "Maser target", "secs", 1)
+    assert "progress panel found: 16 badge slot(s)" in out
+    assert "SHOW PadMode_Progress.PadMode_Progress_S1.PadMode_Progress_S1_blk 0" in out[:out.index(">> shot Big loop")]     # its badges hidden at the find
+    first = out[out.index(">> shot Big loop"):out.rindex(">> shot Big loop")]
+    assert "SHOW PadMode_Progress.PadMode_Progress_S1.PadMode_Progress_S1_blk 1" in first and "WORDS PadMode_Progress_S1_Num: 1" in first
+    assert "SHOW PadMode_Progress 1" in first
+    assert "WORDS PadMode_Progress_S1_Num: 2" in out[out.rindex(">> shot Big loop"):]   # its badge, its newest note
+    battle = out[out.index(">> battle 1"):out.index(">> battle 0")]
+    assert "SHOW PadMode_Progress 0" in battle and "progress panel down for now" in battle
+    assert "SHOW PadMode_Progress 1" in out[out.index(">> battle 0"):out.index(">> timed 1")]
+    timed = out[out.index(">> timed 1"):out.index(">> timed 0")]
+    assert "SHOW PadMode_Progress 0" in timed and "progress panel down for now" in timed
+    assert "SHOW PadMode_Progress 1" in out[out.index(">> timed 0"):out.index(">> shot Maser target")]
+    started = out[out.index(">> shot Maser target"):]
+    assert "START (a block)" in started and "SHOW PadMode_Progress 0" in started
+    assert "SHOW PadMode_Progress.PadMode_Progress_S1.PadMode_Progress_S1_blk 0" in started and "WORDS PadMode_Progress_S1_Num:  " in started
+
+
+def test_the_progress_panel_number_follows_every_hit_with_no_note(tmp_path):
+    """PAD-690 (David: KING CAESAR's badge "only updating every 5 ... all values on the hud indicators need to update
+    live"): a Progress panel block puts the count on the mode's badge at once, with no note in the middle."""
+    p = maser_hud()
+    p["scripts"].append({"hat": {"kind": "shot", "shot": "Big loop", "when": "idle"}, "do": [
+        {"op": "change", "var": "loops", "by": num(1)},
+        {"op": "hud_progress", "value": {"k": "op", "op": "-", "a": num(10), "b": var("loops")}}]})
+    p["vars"].append({"name": "loops", "reset": "game"})
+    assert BM.problems(p, SHOTS) == []
+    out = play(tmp_path, p, "shot", "Big loop", "secs", 1, "shot", "Big loop", "secs", 1, "shot", "Big loop", "secs", 1)
+    for n in (9, 8, 7):
+        assert "WORDS PadMode_Progress_S1_Num: %d" % n in out
+    assert "Hud_Award" not in out[out.index(">> shot Big loop"):]                   # no note
+    # a mode with its own corner meter stays off the panel (its meter says it); PAD-733: the count done still blinks
+    # the shots that start it (this one's Maser target)
+    src = BM.to_c(p, "blk")
+    prog_fn = src[src.index("static void hud_progress(long long value)"):]
+    prog_fn = prog_fn[:prog_fn.index("\n}\n")]
+    assert "if (run.on) return;" in prog_fn and "ready_set(value <= 0);" in prog_fn
+    assert prog_fn.index("ready_set(") < prog_fn.index("if (HUD_METER) return;") < prog_fn.index("kit_prog_set(")
+
+
+def test_a_ball_save_block_asks_the_runtime_for_one(tmp_path):
+    """PAD-690 (David: GODZILLA ANGRY's drain with locks "ended the game immediately"; the C kept a ball save of its own
+    from the first lock): a Ball save block asks pm_ball_save while the mode runs."""
+    p = maser_hud()
+    p["scripts"].append({"hat": {"kind": "mode_start"}, "do": [{"op": "ball_save", "seconds": 15}]})
+    assert BM.problems(p, SHOTS) == []
+    assert BM.problems(dict(p, scripts=p["scripts"] + [{"hat": {"kind": "mode_start"}, "do": [
+        {"op": "ball_save", "seconds": 500}]}]), SHOTS) != []
+    out = play(tmp_path, p, "shot", "Maser target", "secs", 2)
+    start = out[out.index("START"):]
+    assert re.search(r"BALL ?SAVE 15", start, re.I), start[:600]
+
+
+def test_a_ball_in_the_trough_is_a_hat_of_its_own(tmp_path):
+    """PAD-690: When a ball goes into the trough - the port's Trough switch shot (PAD-416, code modes only until now),
+    the moment a ball drains even when a ball save serves it back; a card with no trough says so."""
+    p = maser_hud()
+    p["scripts"].append({"hat": {"kind": "drain", "when": "running"}, "do": [{"op": "log", "text": "IN THE TROUGH"}]})
+    le, pro = BM.card_checks(MP.profile("godzilla_le_1_16")), BM.card_checks(MP.profile("godzilla_pro_1_16"))
+    assert le["drain"] and not pro["drain"]
+    assert not [x for x in BM.problems(p, **le) if "trough" in x]
+    assert [x for x in BM.problems(p, **pro) if "trough" in x]
+    c = BM.to_c(p, "blk")
+    assert '"Trough"' in c and "IN THE TROUGH" in c
+
+
+def test_every_note_under_a_display_of_the_games_shows_at_once(tmp_path):
+    """PAD-680 (emulator, the same shots on the 2026-10-07 code-mode card and on the blocks card: a note after 8 of 15
+    shots against 4): each note shows at once over the game's shot screen, the second as the first."""
+    out = play(tmp_path, _noting_prog(), "covered", 1, "shot", "Big loop", "secs", 4, "covered", 0, "secs", 1,
+               "covered", 1, "shot", "Big loop", "secs", 1, "covered", 0, "secs", 1)
+    first = out[out.index(">> shot Big loop"):out.index(">> covered 0")]
+    second = out[out.rindex(">> covered 1"):out.rindex(">> covered 0")]
+    assert "Hud_AwardSub: 1  -  TO GO" in first and "Hud_AwardSub: 2  -  TO GO" in second
+    assert "its words wait while a display" not in out
+
+
+def test_a_note_shows_over_the_modes_loop(tmp_path, monkeypatch):
+    """PAD-658 (run bedfix_pro_r1, bf_ready_c: HE JOINS THE NEXT BATTLE over the live city's TANKS 0/10): a note shows
+    over the mode's own loop, as the game's feedback screens show over a clip of theirs; it goes with the note, and a
+    start on it keeps it as the run's own."""
+    _cc()
+    p = _hud_media_prog()
+    p["scripts"].append({"hat": {"kind": "shot", "shot": "Big loop", "when": "idle"}, "do": [
+        {"op": "hud_award", "text": "READY", "value": None, "sub": "", "seconds": 2}]})
+    assert "#define COVER_CLIP \"loop\"" in BM.to_c(p, "blk")
+    assert "note_loop" not in BM.to_c(_media_prog(), "blk")            # no HUD: no note
+    monkeypatch.setenv("HARNESS_DUMP", _assets(tmp_path, "blk", p, []))
+    out = play(tmp_path, p, "shot", "Big loop", "secs", 4)
+    assert "own clip loop (PadMode_blk_Loop) behind its note" in out
+    assert 1900 <= _at(out, "BACKDROP OFF") - _at(out, "BACKDROP PadMode_blk_Loop") <= 2100
+    # the mode started while its note shows: the loop is its run's now, never taken away between
+    out = play(tmp_path, p, "shot", "Big loop", "secs", 0.5, "shot", "Building", "secs", 3)
+    assert "BACKDROP PadMode_blk_Loop" in out and "BACKDROP OFF" not in out
+    assert "[TEST MODE] START" in out
+
+
+def test_with_no_loop_its_start_clip_covers_its_note_and_its_total(tmp_path, monkeypatch):
+    """PAD-658 (run loopfix_r1, lf_an_note_b: ANGUIRUS IS READY over TANKS - he has no loop of his own): a mode with no
+    clip over and over shows its notes and its TOTAL over the first clip it starts with."""
+    _cc()
+    p = _hud_media_prog()
+    p["scripts"][1]["do"] = p["scripts"][1]["do"][:1]                   # its intro, and no loop
+    p["scripts"].append({"hat": {"kind": "shot", "shot": "Big loop", "when": "idle"}, "do": [
+        {"op": "hud_award", "text": "READY", "value": None, "sub": "", "seconds": 2}]})
+    assert "#define COVER_CLIP \"intro\"" in BM.to_c(p, "blk")
+    monkeypatch.setenv("HARNESS_DUMP", _assets(tmp_path, "blk", p, []))
+    out = play(tmp_path, p, "shot", "Big loop", "secs", 3, "shot", "Building", "secs", 14)
+    assert "own clip intro (PadMode_blk_Intro) behind its note" in out
+    end = _at(out, r"\[TEST MODE\] END \(time ran out\)")
+    assert "own clip intro (PadMode_blk_Intro) behind its TOTAL" in out
+    assert 0 <= _at(out, "BACKDROP KEPT behind TEST MODE's ending") - end <= 20
 
 
 def test_a_hud_mode_that_gives_way_takes_its_hud_down_when_a_game_mode_begins(tmp_path):
@@ -1229,7 +1681,9 @@ def test_the_mechanism_c_calls_only_the_header_and_only_when_a_block_holds():
     # every coil a block names is let go by Let go of everything; nothing fires a coil by number
     lets = re.search(r"static void let_go_all\(void\)\n\{(.*?)\n\}", src, re.S).group(1)
     assert [m for m in re.findall(r'pm_coil_release\("(\w+)"\)', lets)] == ["magnet", "bridge", "mg_magnet"]
-    assert "if (ms > 5000) ms = 5000;" in src and "if (ms > 10000) ms = 10000;" in src
+    # PAD-621: the C clamps a hold to the longest any mechanism allows (Bond's right return up post, 14 s); the
+    # runtime keeps each one's own limit (5 s for these)
+    assert "if (ms > 14000) ms = 14000;" in src and "if (ms > 10000) ms = 10000;" in src
     assert "pm_coil_hold" not in BM.to_c(BM.starter("RAMP FRENZY", SHOTS), "ramp_frenzy")
     assert "scoop_tick" not in BM.to_c(BM.starter("RAMP FRENZY", SHOTS), "ramp_frenzy")
 
@@ -1319,3 +1773,923 @@ def test_its_screens_total_gives_way_when_another_mode_begins(tmp_path):
     assert _at_any(out, r"END \(time ran out\)") < began
     assert "[TEST MODE] its total gives way - another mode began" in out
     assert hides(out, began) and hides(out, began)[0] - began <= 40              # the next tick
+
+
+# ---- PAD-503: the mode lit at a shot, as the game lights one of its mini-wizards ------------------------------------
+LIT = {"op": "light_mode", "shot": "Right ramp", "insert": "MASER READY", "color": "#ffd000", "pattern": "blink"}
+
+
+def _lit_prog(**kw):
+    """Lit by the skill shot (a film done, on Bond); its Right ramp pays while it runs."""
+    return prog([{"hat": {"kind": "event", "event": "skill_shot", "when": "any"}, "do": [dict(LIT)]},
+                 {"hat": {"kind": "shot", "shot": "Right ramp", "when": "running"},
+                  "do": [{"op": "score", "points": num(1000)}]},
+                 {"hat": {"kind": "ball_end"}, "do": [
+                     {"op": "if", "cond": {"k": "lit"}, "then": [{"op": "log", "text": "still lit"}], "else": None}]}],
+                **dict({"seconds": 5}, **kw))
+
+
+def test_light_the_mode_at_a_shot_is_checked():
+    """A Bond owner's own mini-wizards for the two films without one (PAD-503): lit at the Right ramp with the film's
+    villain, as the game's four are. The shot, the insert (any the card's game names), the colour and the pattern."""
+    p = _lit_prog()
+    assert BM.problems(p, SHOTS, GZ.events, inserts=["MASER READY", "RIGHT RAMP"]) == []
+    assert not any("No block starts the mode" in n for n in BM.notes(p))       # the lit shot starts it
+    assert BM.problems(p, SHOTS, GZ.events, inserts=[]) == []      # no insert a mode can light here: lit without it
+    bad = prog([{"hat": {"kind": "event", "event": "skill_shot", "when": "any"}, "do": [
+        dict(LIT, shot="Moon ramp", insert="BLOFELD", color="gold", pattern="hurry"),
+        dict(LIT, insert=["A"]), dict(LIT, insert="X" * 40)]}])
+    assert BM.problems(bad, SHOTS, GZ.events, inserts=["MASER READY"]) == [
+        "Script 1's Light the mode at names Moon ramp, a shot this card does not have.",
+        "Script 1 lights the mode in no color.",
+        "Script 1 lights the mode in no pattern.",
+        "Script 1 lights the insert BLOFELD, which this card's game does not have.",
+        "Script 1 lights an insert that is not one."]                       # both: said once
+    # a mode with no such block makes the C it always made: no lit-at code in it
+    assert "lit_" not in BM.to_c(BM.starter("RAMP FRENZY", SHOTS), "ramp_frenzy")
+
+
+def test_the_lit_c_only_calls_what_the_header_declares():
+    src = BM.to_c(_lit_prog(), "lit")
+    used = set(re.findall(r"\b(pm_[a-z_]+)\s*\(", src))
+    assert used <= _header_calls(), used - _header_calls()
+    assert '{ 0, "MASER READY", 0xffd000u, PM_LAMP_BLINK, 500u, "", 0x000000u },   /* Right ramp */' in src
+    # the same block twice is one row; "the mode is lit" with no such block is never lit
+    two = prog([{"hat": {"kind": "event", "event": "skill_shot", "when": "any"}, "do": [dict(LIT), dict(LIT)]}])
+    assert BM.to_c(two, "lit").count("PM_LAMP_BLINK, 500u, ") == 1
+    asked = prog([{"hat": {"kind": "ball_end"}, "do": [
+        {"op": "if", "cond": {"k": "lit"}, "then": [{"op": "log", "text": "x"}], "else": None}]}])
+    assert "static int lit_now(void) { return 0; }" in BM.to_c(asked, "asked")
+
+
+BOND_VILLAINS = "DR. NO-RIGHT RAMP,ROSA KLEBB,GOLDFINGER-RIGHT RAMP,LARGO,BLOFELD,MR. HENDERSON"
+
+
+def test_a_lit_mode_cycles_several_inserts_and_holds_one_solid_as_the_games_own():
+    """The Bond owner (PAD-521): their own mini-wizards should look like the game's own - while one is qualified the
+    Right ramp's villain inserts cycle and the film's insert is solid. Light the mode at names several inserts (a chase
+    runs across them, as pm_lamp_set takes a list) and one more held solid in its own colour."""
+    ok = prog([{"hat": {"kind": "event", "event": "skill_shot", "when": "any"}, "do": [
+        dict(LIT, insert=BOND_VILLAINS, pattern="chase", solid="Y.O.L.T.", solid_color="#ffffff")]}])
+    bond = BOND_VILLAINS.split(",") + ["Y.O.L.T.", "RIGHT RAMP ARROW"]
+    assert BM.problems(ok, SHOTS, GZ.events, inserts=bond) == []
+    assert BM.lit_inserts(" A, B ,A,, ") == ["A", "B"] and BM.lit_inserts("") == [] and BM.lit_inserts(3) is None
+    src = BM.to_c(ok, "lit")
+    assert ('{ 0, "%s", 0xffd000u, PM_LAMP_CHASE, 150u, "Y.O.L.T.", 0xffffffu },   /* Right ramp */' % BOND_VILLAINS
+            in src)
+    assert "pm_lamp_set(LIT_AT[k].solid, LIT_AT[k].solid_rgb, PM_LAMP_SOLID, 0);" in src
+    assert "pm_lamp_release(LIT_AT[k].solid);" in src
+    bad = prog([{"hat": {"kind": "event", "event": "skill_shot", "when": "any"}, "do": [
+        dict(LIT, insert=",".join("I%d" % i for i in range(9)), solid="FILM, TWO"),
+        dict(LIT, solid="NOPE"), dict(LIT, solid="Y.O.L.T.", solid_color="white")]}])
+    assert BM.problems(bad, SHOTS, GZ.events, inserts=bond + ["MASER READY"] + ["I%d" % i for i in range(9)]) == [
+        "Script 1 lights more than 8 inserts.",
+        "Script 1 holds an insert solid that is not one.",
+        "Script 1 holds the insert NOPE solid, which this card's game does not have.",
+        "Script 1 holds an insert solid in no color."]
+
+
+def test_a_lit_mode_chases_its_inserts_and_holds_the_solid_one_on_the_harness(tmp_path):
+    lit = dict(LIT, insert="MASER READY,TANK 2,HEAT RAY", pattern="chase", solid="SKILL SHOT", solid_color="#ffffff")
+    p = prog([{"hat": {"kind": "event", "event": "skill_shot", "when": "any"}, "do": [lit]}], seconds=5)
+    out = play(tmp_path, p, "event", "skill_shot", "secs", 0.2, "lamps", "shot", "Right ramp", "secs", 0.2, "lamps")
+    held = re.findall(r"HELD (RIGHT RAMP|MASER READY|TANK 2|HEAT RAY|SKILL SHOT|none)( \w+ \w+)?", out)
+    assert [h for h, _c in held] == ["RIGHT RAMP", "MASER READY", "SKILL SHOT", "TANK 2", "HEAT RAY", "none"]
+    assert "LAMP MASER READY ffd000 chase 150 TEST MODE" in out and "LAMP SKILL SHOT ffffff solid 0 TEST MODE" in out
+    assert "START (its lit shot): player 1" in out
+    assert "LAMP OFF SKILL SHOT TEST MODE" in out and "LAMP OFF HEAT RAY TEST MODE" in out
+
+
+def test_the_bond_le_offers_its_villains_inserts():
+    p = MP.profile("james_bond_le_1_06")
+    assert {"BLOFELD", "MR. HENDERSON", "LARGO", "ROSA KLEBB", "RIGHT RAMP ARROW"} <= set(p.inserts)
+    assert "Right ramp exit opto" in [n for n, _m in p.shots] and p.wizard_shot == "Right ramp"
+
+
+BOND_CHAPTERS = ["Dr No's Lair", "Orient Express", "Oddjob Battles Bond", "Cut Bond in Half", "Mr Osato",
+                 "Professor Dent", "Mr Wint & Mr Kidd", "Feeding Frenzy", "Fiona Volpe", "Under Water Fight",
+                 "Training Grounds", "Diamond Death Ray"]
+
+
+@pytest.mark.parametrize("key", ["james_bond_le_1_06", "james_bond_pro_1_06"])
+def test_both_bonds_can_hold_off_the_games_henchman_and_villain_modes(key):
+    """PAD-526: an owner wanted none of the game's modes to start during theirs, the henchman and villain modes too.
+    The LE 1.06 offered its twelve (the story's chapters, ids 16..27); the Pro 1.06 offered none, though its program
+    has the same chapter table (0x629018) and the same starts. Both now tick them by default, each refused with 0."""
+    p = MP.profile(key)
+    names = {i: n for i, n, _on in p.game_modes}
+    assert [names.get(i) for i in range(16, 28)] == BOND_CHAPTERS
+    assert all(on for i, _n, on in p.game_modes if i >= 16)               # ticked: held off unless unticked
+    port = open(os.path.join(SDK, "ports", key.replace("_1_06", "-1.06") + ".port"), encoding="utf-8").read()
+    assert all(re.search(r"^value block_ret_%d\s+0$" % i, port, re.M) for i in range(16, 28))
+
+
+@pytest.mark.parametrize("key", ["james_bond_le_1_06", "james_bond_pro_1_06"])
+def test_both_bonds_can_hold_off_jetpack_and_bird_one_multiball(key):
+    """PAD-578: an owner's mode was killed by Jetpack Multiball, started mid-mode; Bird One Multiball the same. A
+    multiball's start is never refused (balls held for it), so each is the game's own LOCK-OPEN check instead (ids
+    28, 29), refused with 0 - the lock closed as the game closes it for its own gadget modes - ticked by default."""
+    p = MP.profile(key)
+    names = {i: n for i, n, _on in p.game_modes}
+    assert (names.get(28), names.get(29)) == ("Jetpack Multiball", "Bird One Multiball")
+    assert all(on for i, _n, on in p.game_modes if i in (28, 29))
+    port = open(os.path.join(SDK, "ports", key.replace("_1_06", "-1.06") + ".port"), encoding="utf-8").read()
+    assert all(re.search(r"^value block_ret_%d\s+0$" % i, port, re.M) for i in (28, 29))
+    # the sites are c_port_tool's LOCKS, each opening `push {r3, lr}; bl <the game's in-the-way check>`
+    tool = open(os.path.join(SDK, "cstarts", "c_port_tool.py"), encoding="utf-8").read()
+    for i in (28, 29):
+        addr, w0, w1 = re.search(r"^site block_start_%d\s+(0x\w+) (0x\w+) (0x\w+)$" % i, port, re.M).groups()
+        assert w0 == "0xe92d4008" and int(w1, 16) >> 24 == 0xEB
+        assert '("%s", 0x%x)' % (names[i], int(addr, 16)) in tool
+
+
+def test_a_mode_lit_at_a_shot_starts_from_it_ball_after_ball_and_per_player(tmp_path):
+    out = play(tmp_path, _lit_prog(),
+               "shot", "Right ramp",                                # not lit yet: nothing
+               "event", "skill_shot", "secs", 0.2, "lamps",          # lit for player 1
+               "ball_end", "secs", 0.2, "lamps",                     # still lit the next ball
+               "player", 2, "secs", 0.2, "lamps", "shot", "Right ramp",   # player 2 is not lit
+               "player", 1, "secs", 0.2, "lamps",
+               "shot", "Right ramp", "lamps",                        # starts it, and the light goes out
+               "shot", "Right ramp", "secs", 6,                      # pays while it runs; its clock ends it
+               "secs", 0.2, "lamps", "shot", "Right ramp")           # not lit again: nothing
+    assert out.count("[TEST MODE] lit at Right ramp for player 1") == 1
+    held = re.findall(r"HELD (RIGHT RAMP|MASER READY|none)", out)
+    assert held == ["RIGHT RAMP", "MASER READY", "RIGHT RAMP", "MASER READY", "none", "RIGHT RAMP", "MASER READY",
+                    "none", "none"]
+    assert "LAMP RIGHT RAMP ffd000 blink 500 TEST MODE" in out and "LAMP MASER READY ffd000 blink 500 TEST MODE" in out
+    assert out.count("START (") == 1 and "START (its lit shot): player 1" in out
+    assert out.index("START (its lit shot)") > out.index("HELD none")       # player 2's shot started nothing
+    assert scores(out) == [1000]                                     # the shot that starts it pays nothing
+    assert "END (time ran out)" in out and "still lit" in out
+    assert "lamps held 0" in out
+
+
+def test_a_lit_mode_waits_lit_while_the_game_is_busy_and_a_new_game_puts_it_out(tmp_path):
+    out = play(tmp_path, _lit_prog(game_modes="give_way"),
+               "event", "skill_shot", "battle", 1, "shot", "Right ramp", "secs", 0.2, "lamps",   # in the way: stays lit
+               "battle", 0, "shot", "Right ramp")                                                # now it starts
+    assert re.search(r"not started \(its lit shot\): .+ is running - still ready", out)
+    # PAD-675 (David's machine: a lit mode's inserts flashed through a battle): its light is dark while it waits
+    assert re.findall(r"HELD (RIGHT RAMP|MASER READY|none)", out) == ["none"]
+    assert out.count("START (its lit shot)") == 1 and out.index("START (its lit shot)") > out.index(">> battle 0")
+    out = play(tmp_path, _lit_prog(), "event", "skill_shot", "secs", 0.2, "game_over", "secs", 0.2, "lamps",
+               "new_game", "secs", 0.2, "shot", "Right ramp")
+    assert "HELD none" in out and "START (" not in out
+
+
+def test_a_hold_in_play_is_not_a_new_game(tmp_path):
+    """The Bond owner, on v1.169.0: Diamonds Are Forever lit their mode while the mode that won its last part still ran,
+    and once that mode was over the Right ramp was dark. James Bond holds play at the end of each of its modes and
+    multiballs (mode mask busy bits 0x202: pm_in_game() is 0 for a moment), and the blocks took pm_in_game() rising
+    for a new game - the light, the "each game" values and the timers were wiped. A new game is the SDK's witness
+    now (player 1's score back to 0, or pm_in_game() rising while it is 0)."""
+    p = _lit_prog(vars=[{"name": "films", "reset": "game"}], timers=[{"name": "window"}])
+    p["scripts"][0]["do"] += [{"op": "change", "var": "films", "by": num(1)},
+                              {"op": "timer_start", "timer": "window", "ms": num(4000)}]
+    p["scripts"] += [{"hat": {"kind": "mode_start"}, "do": [
+                         {"op": "score", "points": {"k": "op", "op": "*", "a": {"k": "var", "name": "films"},
+                                                    "b": num(7)}}]},
+                     {"hat": {"kind": "timer_done", "timer": "window"}, "do": [{"op": "log", "text": "window over"}]}]
+    out = play(tmp_path, p, "points", 250000, "event", "skill_shot", "secs", 0.2,
+               "hold", 2.5, "secs", 0.2, "lamps",           # the game's mode is won: play held, then on
+               "secs", 2, "shot", "Right ramp")
+    assert re.findall(r"HELD (RIGHT RAMP|MASER READY|none)", out) == ["RIGHT RAMP", "MASER READY"]
+    assert "START (its lit shot): player 1" in out
+    assert 7 in scores(out)                                         # films was still 1
+    assert "[TEST MODE] window over" in out                         # the timer ran on
+    # a real new game still puts the light out (player 1's score back to 0)
+    out = play(tmp_path, p, "points", 250000, "event", "skill_shot", "secs", 0.2, "game_over", "secs", 0.2,
+               "new_game", "secs", 0.2, "lamps", "shot", "Right ramp")
+    assert "HELD none" in out and "START (" not in out
+
+
+def test_a_lit_mode_waits_out_the_games_own_modes_as_its_mini_wizards_do(tmp_path):
+    """The Bond owner's next game (PAD-503): Mr Osato, a henchman mode of the game's, completed You Only Live Twice and
+    lit their mode; the game's own mini-wizards do not start while such a mode runs (its check 0x110b90), and the port's
+    flags do not show it, so a Right ramp in the middle of Mr Osato started theirs. The lit shot waits on the game's own
+    check (pm_game_wizard_way), whatever the mode says about the game's modes ("may start" here)."""
+    out = play(tmp_path, _lit_prog(), "event", "skill_shot", "way", 0, "shot", "Right ramp", "secs", 0.2, "lamps",
+               "way", 1, "shot", "Right ramp")
+    assert "not started (its lit shot): one of the game's own modes is in its way - still lit" in out
+    assert re.findall(r"HELD (RIGHT RAMP|MASER READY|none)", out) == ["none"]        # PAD-556: its light waits too
+    assert out.count("START (its lit shot)") == 1 and out.index("START (its lit shot)") > out.index(">> way 1")
+    # a Start the mode that gives way waits on it too; one that runs beside the game's modes does not
+    p = prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [{"op": "start_mode"}]}],
+             seconds=5, game_modes="give_way")
+    out = play(tmp_path, p, "way", 0, "shot", "Left ramp", "way", 1, "shot", "Left ramp")
+    assert "still ready" in out                                  # PAD-680: the shot counts, its start waits
+    assert out.count("START (a block)") == 1 and out.index("START (a block)") > out.index(">> way 1")
+    out = play(tmp_path, dict(p, game_modes="stack"), "way", 0, "shot", "Left ramp")
+    assert "START (a block)" in out
+
+
+def test_a_lit_mode_chases_only_once_the_games_own_mode_is_over(tmp_path):
+    """The Bond owner (PAD-556): Blofeld, the game's villain mode, won You Only Live Twice's last part, and the villain
+    inserts began to rove at once - though the mode cannot start until Blofeld is over, and the game's own mini-wizards
+    rove only then. While the game's own check says something is in the way, only the solid insert (the film's) is
+    held; the shot and the chase come once it is clear, and go again if the game's next mode gets in the way."""
+    lit = dict(LIT, insert="MASER READY,TANK 2,HEAT RAY", pattern="chase", solid="SKILL SHOT", solid_color="#ffffff")
+    p = prog([{"hat": {"kind": "event", "event": "skill_shot", "when": "any"}, "do": [lit]}], seconds=5)
+    out = play(tmp_path, p, "way", 0, "event", "skill_shot", "secs", 0.2, "lamps",      # film won mid-Blofeld
+               "way", 1, "secs", 0.2, "lamps",                                          # Blofeld over: it roves
+               "way", 0, "secs", 0.2, "lamps",                                          # the game's next mode
+               "way", 1, "secs", 0.2, "shot", "Right ramp")
+    held = re.findall(r"HELD (RIGHT RAMP|MASER READY|TANK 2|HEAT RAY|SKILL SHOT|none)", out)
+    assert held == ["SKILL SHOT",
+                    "RIGHT RAMP", "MASER READY", "SKILL SHOT", "TANK 2", "HEAT RAY",
+                    "SKILL SHOT"]
+    assert out.index("LAMP MASER READY ffd000 chase 150") > out.index(">> way 1")
+    assert "LAMP OFF MASER READY TEST MODE" in out
+    assert "START (its lit shot): player 1" in out
+
+
+def test_a_lit_mode_claims_its_shot_while_it_would_start_there(tmp_path):
+    """The owner on v1.169.3: film done, the ramp lit, the film's last mode played out - and the Right ramp started one
+    of the game's villains, again and again. On James Bond the Right ramp is where the game starts its henchman and
+    villain modes, and the game handles a shot before the modes hear of it, so the lit mode always found one running.
+    It claims its shot now (pm_lit_claim) while it would start there: the runtime then holds the game's own starts off
+    while the game handles that switch (proven on the rig; MODE_SDK.md). The claim follows the mode's own state."""
+    out = play(tmp_path, _lit_prog(), "secs", 0.2, "event", "skill_shot", "secs", 0.2, "way", 0, "secs", 0.2,
+               "way", 1, "secs", 0.2, "shot", "Right ramp", "secs", 0.2)
+    # lit; the game's own mode in the way; clear again; it started
+    assert re.findall(r"LITCLAIM (\w+) TEST MODE", out) == ["200000", "0", "200000", "0"]
+    assert "START (its lit shot)" in out
+
+
+# ---- PAD-521: the game's own status bar (James Bond: the coloured bar under the TV) ---------------------------------
+def test_the_bar_is_off_unless_ticked_and_keeps_a_colour():
+    p = BM.normalize({"name": "X"})
+    assert p["bar"] == {"on": False, "color": "#00c040"}
+    assert BM.normalize({"bar": {"on": 1, "color": "blue"}})["bar"] == {"on": True, "color": "#00c040"}
+    assert "pm_status_bar" not in BM.to_c(BM.starter("RAMP FRENZY", SHOTS), "ramp_frenzy")
+    src = BM.to_c(prog([], bar={"on": True, "color": "#1060ff"}), "blk")
+    assert "#define BAR_RGB          0x1060ffu" in src
+    used = set(re.findall(r"\b(pm_[a-z_]+)\s*\(", src))
+    assert used <= _header_calls(), used - _header_calls()
+
+
+def test_the_bar_shows_the_name_and_its_clock_then_the_total_then_goes(tmp_path):
+    """The Bond owner (PAD-521): the game's own mini-wizards show their name in a coloured bar under the TV, the clock
+    draining along it, kept through the total. Started, it is full; the clock runs it down; at the end it is full again
+    for the total's 3 s, then given back. A drain keeps it through its TOTAL, the end of ball waiting (PAD-622)."""
+    p = prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [{"op": "start_mode"}]}],
+             seconds=4, bar={"on": True, "color": "#00c040"}, name="YOLT WIZARD")
+    out = play(tmp_path, p, "shot", "Left ramp", "secs", 2, "secs", 2.5, "secs", 3.5)
+    bars = re.findall(r"^\s*(\d+) STATUSBAR (-?\d+|OFF) ?(\w*)", out, re.M)
+    pcts = [int(b[1]) for b in bars if b[1] not in ("OFF",)]
+    running = [x for x in pcts if x >= 0]
+    assert pcts[0] == 100 and pcts[-1] == -1                           # full at the start; full (no wipe) at the end
+    assert running == sorted(running, reverse=True) and min(running) <= 5   # it drained with the clock
+    assert bars[-1][1] == "OFF"
+    end = _at_any(out, r"END \(time ran out\)")
+    off = int(bars[-1][0])
+    assert 2900 <= off - end <= 3200                                   # through the total
+    assert "STATUSBAR 100 00c040 YOLT WIZARD" in out
+    out = play(tmp_path, p, "shot", "Left ramp", "secs", 1, "ball_end", "secs", 0.2)
+    bars = re.findall(r"^\s*(\d+) STATUSBAR (-?\d+|OFF)", out, re.M)
+    assert bars[-1][1] == "OFF" and 0 <= int(bars[-1][0]) - _at_any(out, "BALL END goes on") <= 40
+    assert int(bars[-1][0]) - _at_any(out, r"END \(ball ended\)") >= 5900
+    out = play(tmp_path, p, "shot", "Left ramp", "secs", 1, "tilt", "ball_end", "secs", 0.2)   # a tilt: at once
+    bars = re.findall(r"^\s*(\d+) STATUSBAR (-?\d+|OFF)", out, re.M)
+    assert bars[-1][1] == "OFF" and int(bars[-1][0]) - _at_any(out, r"END \(ball ended\)") <= 40
+
+
+def test_the_bar_can_fill_with_a_value_out_of_another():
+    """PAD-721: the Bond owner wanted the bar to fill as shots are made, as the game's own mini-wizards fill theirs
+    (10-12 shots each), not drain with the clock. Ticked, it fills with the shots the mode has scored out of 10 unless
+    said; an emptied slot stays empty for problems to name; the clock is the bar's as ever without it."""
+    assert BM.normalize({"bar": {"on": 1, "fill": "value"}})["bar"] == {
+        "on": True, "color": "#00c040", "fill": "value", "value": {"k": "scored"}, "of": {"k": "num", "v": 10}}
+    assert "fill" not in BM.normalize({"bar": {"on": 1, "fill": "clock"}})["bar"]
+    p = prog([], bar={"on": True, "fill": "value", "value": None, "of": {"k": "num", "v": 12}})
+    assert any("The bar's value has an empty number slot" in t for t in BM.problems(p, SHOTS, GZ.events))
+    p = prog([], vars=[{"name": "hits", "reset": "mode"}], timers=[{"name": "window"}],
+             bar={"on": True, "fill": "value", "value": {"k": "var", "name": "nope"}, "of": {"k": "num", "v": 12}})
+    assert any("The bar's value uses a variable that is not there" in t for t in BM.problems(p, SHOTS, GZ.events))
+    assert "#define BAR_FILLS 0" in BM.to_c(prog([], bar={"on": True}), "blk")
+
+
+def test_the_bar_fills_as_shots_are_made_and_stays_through_the_total(tmp_path):
+    """PAD-721: 4 shots of 4: empty at the start, a quarter a shot, full at the last, and kept as it was (not the
+    clock's full bar) through its total. A value naming a timer builds too (the bar's C comes after timer_left)."""
+    p = prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [{"op": "start_mode"}]},
+              {"hat": {"kind": "shot", "shot": "Right ramp", "when": "running"},
+               "do": [{"op": "score", "points": {"k": "num", "v": 1000}}]}],
+             seconds=20, name="YOLT WIZARD",
+             bar={"on": True, "color": "#00c040", "fill": "value", "value": {"k": "scored"}, "of": {"k": "num", "v": 4}})
+    out = play(tmp_path, p, "shot", "Left ramp", "secs", 1, "shot", "Right ramp", "secs", 1, "shot", "Right ramp",
+               "secs", 1, "shot", "Right ramp", "secs", 1, "shot", "Right ramp", "secs", 1, "shot", "Right ramp",
+               "secs", 25)
+    pcts = [int(b) for b in re.findall(r"^\s*\d+ STATUSBAR (-?\d+) ", out, re.M)]
+    assert pcts[0] == 0 and 100 in pcts
+    seen = [x for i, x in enumerate(pcts) if not i or x != pcts[i - 1]]
+    assert seen == [0, 25, 50, 75, 100], seen                          # never past full, never the clock's -1
+    assert re.findall(r"^\s*\d+ STATUSBAR (\S+)", out, re.M)[-1] == "OFF"
+    p["timers"] = [{"name": "window"}]
+    p["bar"]["value"] = {"k": "timer_left", "timer": "window"}
+    play(tmp_path, p, "secs", 1)
+
+
+def test_the_bar_fills_with_its_progress_shot_alone(tmp_path):
+    """PAD-721 round 2: the owner's mini-wizards score on drops and other shots too, but only the Right ramp is
+    progress; "times it has scored" filled the bar on every one. Hits of a shot since it started counts that shot
+    alone, made while it runs (not the shot that started it), from none at each start."""
+    p = prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [{"op": "start_mode"}]},
+              {"hat": {"kind": "shot", "shot": "Right ramp", "when": "any"},
+               "do": [{"op": "score", "points": {"k": "num", "v": 1000}}]},
+              {"hat": {"kind": "shot", "shot": "Building", "when": "running"},
+               "do": [{"op": "score", "points": {"k": "num", "v": 500}}]}],
+             seconds=20, name="YOLT WIZARD",
+             bar={"on": True, "fill": "value", "value": {"k": "mode_hits", "shot": "Right ramp"},
+                  "of": {"k": "num", "v": 4}})
+    assert BM.problems(p, SHOTS, GZ.events) == []
+    out = play(tmp_path, p, "shot", "Right ramp", "shot", "Left ramp", "secs", 1, "shot", "Building", "secs", 1,
+               "shot", "Right ramp", "secs", 1, "shot", "Building", "shot", "Building", "secs", 1,
+               "shot", "Right ramp", "secs", 1)
+    pcts = [int(b) for b in re.findall(r"^\s*\d+ STATUSBAR (-?\d+) ", out, re.M)]
+    seen = [x for i, x in enumerate(pcts) if not i or x != pcts[i - 1]]
+    assert seen == [0, 25, 50], seen        # the Right ramp before it started and the Buildings move nothing
+    sim = BS.Sim(BM.normalize(p))
+    for s in ("Right ramp", "Left ramp", "Building", "Right ramp", "Right ramp"):
+        sim.shot(s)
+    assert sim.val({"k": "mode_hits", "shot": "Right ramp"}) == 2 and sim.val({"k": "hits", "shot": "Right ramp"}) == 3
+
+
+def test_only_a_title_whose_port_names_the_bar_offers_it():
+    assert MP.profile("james_bond_le_1_06").status_bar is True
+    assert MP.profile("godzilla_le_1_16").status_bar is False
+
+
+# ---- PAD-521: its own screen as words alone, over the game's video ---------------------------------------------------
+def test_words_alone_is_a_screen_style_and_reaches_the_assets(tmp_path):
+    assert BM.normalize({})["screen_style"] == "panel"
+    assert BM.normalize({"screen_style": "words"})["screen_style"] == "words"
+    assert BM.normalize({"screen_style": "big"})["screen_style"] == "panel"
+    project = str(tmp_path)
+    slug, _c = BM.new_blocks_mode(project, "YOLT WIZARD")
+    BM.save(project, slug, BM.normalize({"name": "YOLT WIZARD", "screen": True, "screen_style": "words",
+                                         "scripts": []}))
+    from pinball_decryptor.plugins.stern import code_modes as CM, mode_assets as MA
+    spec = CM.load(project, slug)
+    assert spec.screen_style == "words"
+    scr = MA.code_screen(project, slug, spec)
+    assert scr["words"] == "YOLT WIZARD" and scr["words_rgba"] == (1.0, 1.0, 1.0, 1.0)
+    assert scr["art_rgba"].shape == (200, 920, 4) and not scr["art_rgba"].any()   # clear: no panel
+    assert (scr["x"], scr["y"]) == MA.WORDS_AT and scr["words_scale"] == 2.0
+    BM.save(project, slug, BM.normalize({"name": "YOLT WIZARD", "screen": True, "scripts": []}))
+    assert CM.load(project, slug).screen_style == ""                               # the panel again
+
+
+def test_words_alone_show_the_name_then_a_line_then_the_total(tmp_path):
+    """The Bond owner (PAD-521): the game letters a mode's name over its intro and its TOTAL over its end picture, and
+    shows nothing of the kind in between. Words alone: the name at the start for 4 s, a Words block's line for 3 s,
+    the TOTAL at the end for 3 s - each then hidden."""
+    p = prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [{"op": "start_mode"}]},
+              {"hat": {"kind": "shot", "shot": "Right ramp", "when": "running"},
+               "do": [{"op": "score", "points": num(500)}, {"op": "words", "text": "JACKPOT"}]}],
+             seconds=12, screen=True, screen_style="words")
+    out = play(tmp_path, p, "shot", "Left ramp", "secs", 5, "shot", "Right ramp", "secs", 12)
+    shows = [(int(t), int(on)) for t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Screen (\d)$", out, re.M)]
+    start = _at_any(out, r"START \(a block\)")
+    shot = _at_any(out, r"WORDS PadMode_blk_Screen_Words: JACKPOT")
+    end = _at_any(out, r"END \(time ran out\)")
+    on_at = [t for t, on in shows if on]
+    off_at = [t for t, on in shows if not on]
+    assert any(abs(t - start) <= 40 for t in on_at)
+    assert any(3900 <= t - start <= 4100 for t in off_at)                         # the name, 4 s
+    assert any(abs(t - shot) <= 40 for t in on_at) and any(2900 <= t - shot <= 3100 for t in off_at)
+    # PAD-574: the TOTAL as the game's own modes end: its two screens under the bar, the words screen hidden
+    assert re.search(r"WORDS PadMode_blk_Total_Words: 500", out) and re.search(r"WORDS PadMode_blk_TotalName_Words: TOTAL", out)
+    assert not re.search(r"WORDS PadMode_blk_Screen_Words: TOTAL", out)
+    tot = [(int(t), int(on)) for t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Total (\d)$", out, re.M)]
+    assert any(abs(t - end) <= 40 for t, on in tot if on) and any(2900 <= t - end <= 3200 for t, on in tot if not on)
+    assert any(abs(t - end) <= 40 for t in off_at)
+    # the panel stays up all along, as ever
+    out = play(tmp_path, dict(p, screen_style="panel"), "shot", "Left ramp", "secs", 6)
+    assert not [t for t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Screen (\d)$", out, re.M) if on == "0"
+                and int(t) > 100]
+
+
+# ---- PAD-574: an Award on its own screen, and the TOTAL after it ---------------------------------------------------
+def _award(**kw):
+    """The Bond owner's ending (PAD-574): the last Right ramp scores, awards its SUPER JACKPOT and ends the mode; When
+    the mode ends awards TOTAL and its points. No HUD: the Awards go on its own screen."""
+    return prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [{"op": "start_mode"}]},
+                 {"hat": {"kind": "shot", "shot": "Right ramp", "when": "running"},
+                  "do": [{"op": "score", "points": num(700)},
+                         {"op": "hud_award", "text": "SUPER JACKPOT", "value": num(3500), "sub": "", "seconds": 2},
+                         {"op": "end_mode"}]},
+                 {"hat": {"kind": "mode_end"},
+                  "do": [{"op": "hud_award", "text": "TOTAL", "value": {"k": "total"}, "sub": "", "seconds": 2}]}],
+                seconds=30, screen=True, **kw)
+
+
+def test_an_award_ending_the_mode_shows_then_the_next_then_the_total(tmp_path):
+    out = play(tmp_path, _award(screen_style="words"), "shot", "Left ramp", "secs", 2, "shot", "Right ramp", "secs", 10)
+    end = _at_any(out, r"END \(a block\)")
+    # PAD-709: words alone: each Award's number large under the bar (its words small over it), not over the video
+    assert abs(_at_any(out, r"WORDS PadMode_blk_Points_Words: 3,500") - end) <= 40
+    assert abs(_at_any(out, r"WORDS PadMode_blk_TotalName_Words: SUPER JACKPOT") - end) <= 40
+    assert 1900 <= _at_any(out, r"WORDS PadMode_blk_Points_Words: 700") - end <= 2100          # its own turn, 2 s on
+    assert not re.search(r"WORDS PadMode_blk_Screen_Words: (SUPER JACKPOT|TOTAL)", out)
+    assert 3900 <= _at_any(out, r"WORDS PadMode_blk_Total_Words: 700") - end <= 4100            # then the TOTAL
+    pts = [(int(t), int(on)) for t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Points (\d)$", out, re.M)]
+    assert pts[-1][1] == 0 and 3900 <= pts[-1][0] - end <= 4100                              # gone for the TOTAL
+    tot = [(int(t), int(on)) for t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Total (\d)$", out, re.M)]
+    assert any(3900 <= t - end <= 4100 for t, on in tot if on) and any(6900 <= t - end <= 7200 for t, on in tot if not on)
+    assert "has no HUD" not in BM.to_c(_award(screen_style="words"), "blk")
+    assert BM.problems(_award(screen_style="words")) == [] and not [t for t in BM.notes(_award(screen_style="words")) if "HUD" in t]
+    # PAD-622: a drain while they wait: the end of ball waits them out (the game's own mini-wizards' way), then they go
+    out = play(tmp_path, _award(screen_style="words"), "shot", "Left ramp", "secs", 2, "shot", "Right ramp",
+               "ball_end", "secs", 6)
+    end, on = _at_any(out, r"END \(a block\)"), _at_any(out, "BALL END goes on")
+    assert 1900 <= _at_any(out, r"WORDS PadMode_blk_Points_Words: 700") - end <= 2100
+    assert 3900 <= _at_any(out, r"WORDS PadMode_blk_Total_Words: 700") - end <= 4100
+    assert 6900 <= on - end <= 7100
+    tot = [(int(t), int(on)) for t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Total (\d)$", out, re.M)]
+    assert tot[-1][1] == 0 and 0 <= tot[-1][0] - on <= 40
+    # a tilted ball: nothing of it stays
+    out = play(tmp_path, _award(screen_style="words"), "shot", "Left ramp", "secs", 2, "shot", "Right ramp",
+               "tilt", "ball_end", "secs", 6)
+    assert not re.search(r"WORDS PadMode_blk_Total_Words", out)
+    pts = re.findall(r"^\s*(\d+) SHOW PadMode_blk_Points (\d)$", out, re.M)
+    assert pts[-1][1] == "0" and int(pts[-1][0]) - _at_any(out, ">> ball_end") <= 40
+    # PAD-709: a card built before the bar's number: the Awards over the video, as PAD-574 made them
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HARNESS_NO_NODE", "_Points")
+        out = play(tmp_path, _award(screen_style="words"), "shot", "Left ramp", "secs", 2, "shot", "Right ramp", "secs", 10)
+    end = _at_any(out, r"END \(a block\)")
+    assert abs(_at_any(out, r"WORDS PadMode_blk_Screen_Words: SUPER JACKPOT 3,500") - end) <= 40
+    assert 1900 <= _at_any(out, r"WORDS PadMode_blk_Screen_Words: TOTAL 700") - end <= 2100
+    assert 3900 <= _at_any(out, r"WORDS PadMode_blk_Total_Words: 700") - end <= 4100
+
+
+# ---- PAD-709: a scored number under the bar, large, as the game's own mini-wizards show a shot's -------------------
+def _scored(**kw):
+    """The Bond owner's mini-wizard (PAD-709): each Right ramp scores 1,000,000 and a Words block shows it; the info line
+    shows the super jackpot under the bar."""
+    return prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [{"op": "start_mode"}]},
+                 {"hat": {"kind": "mode_start"}, "do": [{"op": "set", "var": "superjackpot", "value": num(18000000)}]},
+                 {"hat": {"kind": "shot", "shot": "Right ramp", "when": "running"},
+                  "do": [{"op": "score", "points": num(1000000)}, {"op": "words", "text": "", "value": num(1000000)}]},
+                 {"hat": {"kind": "shot", "shot": "Building", "when": "running"},
+                  "do": [{"op": "words", "text": "JACKPOT", "value": num(2500000)}]}],
+                vars=[{"name": "superjackpot", "reset": "mode"}], seconds=10, screen=True,
+                info={"on": True, "text": "SUPER JACKPOT", "value": var("superjackpot")}, **dict({"screen_style": "words"}, **kw))
+
+
+def test_a_scored_number_goes_under_the_bar_not_over_the_video(tmp_path):
+    """The Bond owner (PAD-709): the game's own mini-wizards pop a scored shot's points up large under the bar; his own
+    put them over the movie. Now a Words block's number, while a words-alone mode runs, shows on its own screen under
+    the bar for 3 s with the info line (SUPER JACKPOT = ...) hidden meanwhile, then the line comes back; its words, if
+    any, go small over it on the TOTAL's word line. Nothing of it over the video; its name still is, at its start."""
+    out = play(tmp_path, _scored(), "shot", "Left ramp", "secs", 5, "shot", "Right ramp", "secs", 4,
+               "shot", "Building", "secs", 6)
+    start, shot = _at_any(out, r"START \(a block\)"), _at_any(out, r">> shot Right ramp")
+    assert abs(_at_any(out, r"WORDS PadMode_blk_Screen_Words: TEST MODE") - start) <= 40       # its name, as ever
+    assert abs(_at_any(out, r"WORDS PadMode_blk_Points_Words: 1,000,000") - shot) <= 40
+    assert not re.search(r"WORDS PadMode_blk_Screen_Words: .*\d", out)                       # no number over the video
+    pts = [(int(t), int(on)) for t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Points (\d)$", out, re.M)]
+    info = [(int(t), int(on)) for t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Info (\d)$", out, re.M)]
+    assert any(abs(t - shot) <= 40 for t, on in pts if on) and any(2900 <= t - shot <= 3100 for t, on in pts if not on)
+    assert any(abs(t - shot) <= 40 for t, on in info if not on)                              # the line makes way...
+    assert any(2900 <= t - shot <= 3200 for t, on in info if on)                             # ...and comes back
+    # its words small over the number, on the TOTAL's word line; gone with it
+    jp = _at_any(out, r">> shot Building")
+    assert abs(_at_any(out, r"WORDS PadMode_blk_Points_Words: 2,500,000") - jp) <= 40
+    assert abs(_at_any(out, r"WORDS PadMode_blk_TotalName_Words: JACKPOT") - jp) <= 40
+    names = [(int(t), int(on)) for t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_TotalName (\d)$", out, re.M)]
+    end = _at_any(out, r"END \(time ran out\)")
+    assert any(abs(t - jp) <= 40 for t, on in names if on) and any(abs(t - end) <= 40 for t, on in names if not on)
+    # the mode's end takes a number still up with it: the TOTAL in its place
+    out = play(tmp_path, _scored(), "shot", "Left ramp", "secs", 9, "shot", "Right ramp", "secs", 4)
+    end = _at_any(out, r"END \(time ran out\)")
+    pts = [(int(t), int(on)) for t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Points (\d)$", out, re.M)]
+    assert pts[-1] == (end, 0) and abs(_at_any(out, r"WORDS PadMode_blk_Total_Words: 1,000,000") - end) <= 40
+    # under a display of the game's: out of its way, back after it
+    out = play(tmp_path, _scored(), "shot", "Left ramp", "secs", 5, "shot", "Right ramp", "covered", 1, "secs", 1,
+               "covered", 0, "secs", 3)
+    pts = [int(on) for _t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Points (\d)$", out, re.M)]
+    assert pts[-3:] == [0, 1, 0]
+    # a card built before it: over the video, as before
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HARNESS_NO_NODE", "_Points")
+        out = play(tmp_path, _scored(), "shot", "Left ramp", "secs", 5, "shot", "Right ramp", "secs", 4)
+    assert re.search(r"WORDS PadMode_blk_Screen_Words: 1,000,000", out)
+    # a panel keeps its words on itself
+    out = play(tmp_path, _scored(screen_style="panel"), "shot", "Left ramp", "secs", 5, "shot", "Right ramp", "secs", 4)
+    assert re.search(r"WORDS PadMode_blk_Screen_Words: 1,000,000", out) and "PadMode_blk_Points" not in out
+    assert "POINTS_NODE" not in BM.to_c(_scored(screen_style="panel"), "blk")
+    src = BM.to_c(_scored(), "blk")
+    used = set(re.findall(r"\b(pm_[a-z_]+)\s*\(", src))
+    assert used <= _header_calls(), used - _header_calls()
+
+
+def test_a_words_screen_builds_its_scored_number_under_the_bar(tmp_path):
+    project = str(tmp_path)
+    slug, _c = BM.new_blocks_mode(project, "BOND VS SUMO")
+    BM.save(project, slug, BM.normalize({"name": "BOND VS SUMO", "screen": True, "screen_style": "words", "scripts": []}))
+    from pinball_decryptor.plugins.stern import mode_assets as MA
+    prof = MP.profile("james_bond_le_1_06")
+    names = MP.asset_names(slug)
+    assert names["points_node"] == "PadMode_%s_Points" % slug
+    got = {s["name"]: s for s in MA._code_screens(project, [(slug, CM.load(project, slug))], prof)}
+    pts = got[names["points_node"]]
+    h, w = pts["art_rgba"].shape[:2]
+    cx, cy = prof.info_at
+    assert pts["words"] == " " and not pts["art_rgba"].any()                  # built blank: the mode writes it
+    assert (pts["x"] + w / 2.0, pts["y"] + h / 2.0) == (cx, cy + MA.POINTS_DY)
+    assert pts["words_scale"] == MA.POINTS_SCALE > got[names["total_node"]]["words_scale"]   # larger than the TOTAL
+    assert names["points_text"] == names["points_node"] + "." + pts["words_name"]
+    # laid out in the Scenes editor (its points_layout), as its screen and its info line are
+    spec = CM.load(project, slug)
+    spec.points_layout = {"y": 560.0, "words_scale": 5.0}
+    CM.save(project, slug, spec)
+    BM.save(project, slug, BM.normalize({"name": "BOND VS SUMO", "screen": True, "screen_style": "words", "scripts": []}))
+    spec = CM.load(project, slug)
+    assert spec.points_layout == {"y": 560.0, "words_scale": 5.0}             # a blocks save keeps it
+    pts = {s["name"]: s for s in MA._code_screens(project, [(slug, spec)], prof)}[names["points_node"]]
+    assert pts["y"] == 560.0 and pts["words_scale"] == 5.0 and pts["x"] == cx - w / 2.0
+    BM.save(project, slug, BM.normalize({"name": "BOND VS SUMO", "screen": True, "scripts": []}))      # a panel: none
+    assert names["points_node"] not in {s["name"] for s in MA._code_screens(project, [(slug, CM.load(project, slug))], prof)}
+
+
+def test_a_drain_while_it_runs_shows_its_total_and_the_end_of_ball_waits(tmp_path):
+    """PAD-622 (the Bond owner): a drain in one of the game's own mini-wizards shows its TOTAL before the bonus; his
+    own modes went straight on. Now a drain ends it as its clock would - TOTAL under the bar, the bar kept - and the
+    game's end of ball waits the 6 s the game's own TOTAL shows (measured: Goldfinger's Jackpot, LE 1.06)."""
+    p = prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [{"op": "start_mode"}]},
+              {"hat": {"kind": "shot", "shot": "Right ramp", "when": "running"}, "do": [{"op": "score", "points": num(500)}]}],
+             seconds=30, screen=True, screen_style="words", bar={"on": True, "color": "#00c040"})
+    out = play(tmp_path, p, "shot", "Left ramp", "secs", 5, "shot", "Right ramp", "secs", 1, "ball_end", "secs", 2)
+    drain, on = _at_any(out, ">> ball_end"), _at_any(out, "BALL END goes on")
+    assert _at_any(out, r"END \(ball ended\): 1 scores, total 500") == drain
+    assert _at_any(out, "BALL END HOLD 6000 TEST MODE") == drain
+    assert _at_any(out, r"WORDS PadMode_blk_Total_Words: 500") == drain
+    assert 5900 <= on - drain <= 6100
+    tot = [(int(t), int(v)) for t, v in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Total (\d)$", out, re.M)]
+    assert (drain, 1) in tot and tot[-1][1] == 0 and 0 <= tot[-1][0] - on <= 40
+    assert 0 <= _at_any(out, "STATUSBAR OFF") - on <= 40                       # the bar through it, as the game's
+    # a tilted ball, or a mode the drain does not end: no wait
+    out = play(tmp_path, p, "shot", "Left ramp", "secs", 2, "tilt", "ball_end", "secs", 1)
+    assert "BALL END HOLD" not in out and _at_any(out, "BALL END goes on") == _at_any(out, ">> ball_end")
+    out = play(tmp_path, dict(p, ends_on_drain=False), "shot", "Left ramp", "secs", 2, "ball_end", "secs", 1)
+    assert "BALL END HOLD" not in out and "END (ball ended)" not in out
+    # with a HUD, its TOTAL there for the same 6 s
+    out = play(tmp_path, dict(p, screen=False, hud=dict(BM.normalize({})["hud"], on=True)),
+               "shot", "Left ramp", "secs", 2, "ball_end", "secs", 1)
+    assert 5900 <= _at_any(out, "BALL END goes on") - _at_any(out, ">> ball_end") <= 6100
+
+
+def test_an_award_on_a_panel_and_with_no_screen(tmp_path):
+    out = play(tmp_path, _award(screen_style="panel"), "shot", "Left ramp", "secs", 2, "shot", "Right ramp", "secs", 8)
+    end = _at_any(out, r"END \(a block\)")
+    assert abs(_at_any(out, r"WORDS PadMode_blk_Screen_Words: SUPER JACKPOT 3,500") - end) <= 40
+    totals = [int(t) - end for t in re.findall(r"^\s*(\d+) WORDS PadMode_blk_Screen_Words: TOTAL 700$", out, re.M)]
+    assert len(totals) == 2 and 1900 <= totals[0] <= 2100 and 3900 <= totals[1] <= 4100   # its Award, then the TOTAL
+    assert "PadMode_blk_Total" not in out                                     # a panel keeps its TOTAL on itself
+    off = dict(_award(), screen=False)
+    assert "/* hud_award: the mode has no HUD */" in BM.to_c(off, "off")
+    assert any("An Award shows on its HUD or its own screen" in t for t in BM.notes(off))
+
+
+def test_a_words_screen_builds_its_total_where_the_game_puts_its_own(tmp_path):
+    project = str(tmp_path)
+    slug, _c = BM.new_blocks_mode(project, "BON APPETIT")
+    BM.save(project, slug, BM.normalize({"name": "BON APPETIT", "screen": True, "screen_style": "words", "scripts": []}))
+    from pinball_decryptor.plugins.stern import code_modes as CM, mode_assets as MA, mode_project as MP
+    spec = CM.load(project, slug)
+    prof = MP.profile("james_bond_le_1_06")
+    names = MP.asset_names(slug)
+    got = {s["name"]: s for s in MA._code_screens(project, [(slug, spec)], prof)}
+    word, number = got[names["total_name_node"]], got[names["total_node"]]
+    cx, cy = prof.info_at
+    for s, dy in ((word, MA.TOTAL_NAME_DY), (number, MA.TOTAL_DY)):
+        h, w = s["art_rgba"].shape[:2]
+        assert s["words"] == " " and not s["art_rgba"].any()               # built blank: the mode writes them
+        assert (s["x"] + w / 2.0, s["y"] + h / 2.0) == (cx, cy + dy)
+    assert number["words_scale"] > word["words_scale"]
+    assert names["total_text"] == names["total_node"] + "." + number["words_name"]
+    BM.save(project, slug, BM.normalize({"name": "BON APPETIT", "screen": True, "scripts": []}))      # a panel: none
+    assert names["total_node"] not in {s["name"] for s in MA._code_screens(project, [(slug, CM.load(project, slug))], prof)}
+
+
+# ---- PAD-547: an info line under its name ("SUPER JACKPOT = 53,200,000") --------------------------------------------
+def _jackpot(info=None, **kw):
+    """A Bond owner's mini-wizard (PAD-547): each Right ramp grows the super jackpot by 1,000 while it runs, and its info
+    line follows it."""
+    return prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [{"op": "start_mode"}]},
+                 {"hat": {"kind": "mode_start"}, "do": [{"op": "set", "var": "superjackpot", "value": num(5000)}]},
+                 {"hat": {"kind": "shot", "shot": "Right ramp", "when": "running"},
+                  "do": [{"op": "change", "var": "superjackpot", "by": num(1000)}]}],
+                vars=[{"name": "superjackpot", "reset": "mode"}], seconds=6,
+                info=info if info is not None else {"on": True, "text": "SUPER JACKPOT", "value": var("superjackpot")},
+                **kw)
+
+
+def test_the_info_line_is_off_unless_ticked_and_needs_words_or_a_value():
+    assert BM.normalize({})["info"] == {"on": False, "text": "", "value": None}
+    assert BM.normalize({"info": {"on": 1, "text": "  super jackpot ", "value": 3}})["info"] == {
+        "on": True, "text": "super jackpot", "value": None}
+    assert "INFO_NODE" not in BM.to_c(BM.starter("RAMP FRENZY", SHOTS), "ramp_frenzy")
+    assert BM.problems(_jackpot(), SHOTS, GZ.events) == []
+    assert any("info line has no words" in m for m in BM.problems(_jackpot({"on": True}), SHOTS, GZ.events))
+    bad = BM.problems(_jackpot({"on": True, "text": "X", "value": var("nope")}), SHOTS, GZ.events)
+    assert any(m.startswith("The info line uses a variable that is not there") for m in bad), bad
+    src = BM.to_c(_jackpot(), "blk")
+    assert '#define INFO_NODE    "PadMode_blk_Info"' in src
+    assert '#define INFO_FORMAT  "SUPER JACKPOT = %s"' in src
+    assert '#define INFO_FORMAT  "100%% = %s"' in BM.to_c(_jackpot({"on": True, "text": "100%", "value": num(1)}), "blk")
+    assert '#define INFO_FORMAT  "SHOOT THE RAMP"' in BM.to_c(_jackpot({"on": True, "text": "SHOOT THE RAMP"}), "blk")
+    used = set(re.findall(r"\b(pm_[a-z_]+)\s*\(", src))
+    assert used <= _header_calls(), used - _header_calls()
+
+
+def test_the_info_line_follows_its_value_while_it_runs_then_goes(tmp_path):
+    """The Bond owner (PAD-547): the game's own mini-wizards show SUPER JACKPOT = <value> under the bar, growing as shots
+    are made. Hidden until the mode starts; shown at its start with the value; written again only when it changes;
+    hidden at its end (time up) and at once at a drain."""
+    out = play(tmp_path, _jackpot(), "secs", 1, "shot", "Left ramp", "secs", 1, "shot", "Right ramp", "secs", 0.5,
+               "shot", "Right ramp", "secs", 1, "secs", 5)
+    shows = [(int(t), int(on)) for t, on in re.findall(r"^\s*(\d+) SHOW PadMode_blk_Info (\d)$", out, re.M)]
+    words = re.findall(r"^\s*(\d+) WORDS PadMode_blk_Info_Words: (.*)$", out, re.M)
+    start = _at_any(out, r"START \(a block\)")
+    end = _at_any(out, r"END \(time ran out\)")
+    assert shows[0][1] == 0 and shows[0][0] < start                   # found and hidden before it ran
+    assert [w for _t, w in words] == ["SUPER JACKPOT = 5,000", "SUPER JACKPOT = 6,000", "SUPER JACKPOT = 7,000"]
+    assert abs(int(words[0][0]) - start) <= 40
+    assert [on for t, on in shows if t >= start] == [1, 0] and abs(shows[-1][0] - end) <= 40
+    out = play(tmp_path, _jackpot(), "secs", 1, "shot", "Left ramp", "secs", 1, "ball_end", "secs", 0.2)
+    shows = re.findall(r"^\s*(\d+) SHOW PadMode_blk_Info (\d)$", out, re.M)
+    assert shows[-1][1] == "0" and int(shows[-1][0]) - _at_any(out, r"END \(ball ended\)") <= 40
+
+
+def test_the_info_line_reaches_the_assets_and_goes_where_the_port_says(tmp_path):
+    from pinball_decryptor.plugins.stern import mode_assets as MA
+    project = str(tmp_path)
+    slug, _c = BM.new_blocks_mode(project, "DAF WIZARD")
+    BM.save(project, slug, BM.normalize(dict(_jackpot(), name="DAF WIZARD")))
+    spec = CM.load(project, slug)
+    assert spec.info_line is True
+    bond, gz = MP.profile("james_bond_le_1_06"), MP.profile("godzilla_le_1_16")
+    assert bond.info_at == (679.0, 510.0) and gz.info_at == ()
+    scr = MA._code_screens(project, [(slug, spec)], bond)[-1]
+    names = MP.asset_names(slug)
+    assert scr["name"] == names["info_node"] == "PadMode_%s_Info" % slug
+    assert scr["words_name"] == "PadMode_%s_Info_Words" % slug and scr["words_rgba"] == (1.0, 1.0, 1.0, 1.0)
+    w, h = MA.INFO_ART
+    assert scr["art_rgba"].shape == (h, w, 4) and not scr["art_rgba"].any()     # clear: the words alone
+    assert (scr["x"] + w / 2.0, scr["y"] + h / 2.0) == (679.0, 510.0)          # its middle on the port's place
+    scr = MA._code_screens(project, [(slug, spec)], gz)[-1]
+    assert (scr["x"] + w / 2.0, scr["y"] + h / 2.0) == MA.INFO_AT_DEFAULT      # a port that names none
+    BM.save(project, slug, BM.normalize(dict(_jackpot({"on": False}), name="DAF WIZARD")))
+    spec = CM.load(project, slug)
+    assert spec.info_line is False
+    assert not [s for s in MA._code_screens(project, [(slug, spec)], bond) if s["name"] == names["info_node"]]
+
+
+# ---- PAD-600: one target qualified at a time - Set the hits of, Put out the light of ---------------------------------
+TARGETS = ["Powerline left", "Powerline center", "Powerline right", "Big loop"]
+
+
+def _say_hits(shot, most):
+    """Blocks that write "hits N" in the log: a shot's hits as this mode sees them, 0 to ``most``."""
+    return [{"op": "if", "cond": {"k": "cmp", "op": "=", "a": {"k": "hits", "shot": shot}, "b": num(k)},
+             "then": [{"op": "log", "text": "hits %d" % k}], "else": None} for k in range(most + 1)]
+
+
+def _target_mode(n):
+    """The Beatles owner's (PAD-600): mode n lit at its target by 3 hits of it; the other targets' hits back to 0 and
+    their modes' lights out, so only one is ready at a time (Batman's villains). In TARGET 2 the Building writes the
+    hits of the first target as it sees them, so a test can read the count across modes."""
+    me = TARGETS[n - 1]
+    others = [t for t in TARGETS if t != me]
+    then = [{"op": "light_mode", "shot": me, "insert": "", "color": "#00c040", "pattern": "pulse"}]
+    then += [{"op": "set_hits", "shot": t, "value": num(0)} for t in others]
+    then += [{"op": "unlight_mode", "mode": "t%d" % (TARGETS.index(t) + 1)} for t in others]
+    scripts = [{"hat": {"kind": "shot", "shot": me, "when": "idle"}, "do": [
+        {"op": "if", "cond": {"k": "cmp", "op": ">=", "a": {"k": "hits", "shot": me}, "b": num(3)}, "then": then}]}]
+    if n == 2:
+        scripts.append({"hat": {"kind": "shot", "shot": "Building", "when": "any"}, "do": _say_hits(TARGETS[0], 4)})
+    return prog(scripts, name="TARGET %d" % n, seconds=5)
+
+
+def test_set_the_hits_and_put_out_the_light_are_checked():
+    p = _target_mode(1)
+    assert BM.problems(p, SHOTS, GZ.events, modes=["t1", "t2", "t3", "t4"]) == []
+    assert BM.problems(p, SHOTS, GZ.events) == []                  # no project known: any slug is taken
+    bad = prog([{"hat": {"kind": "mode_start"}, "do": [
+        {"op": "set_hits", "shot": "Moon ramp", "value": num(0)}, {"op": "set_hits", "shot": "Building", "value": None},
+        {"op": "unlight_mode", "mode": "Not A Slug"}, {"op": "unlight_mode", "mode": "gone"},
+        {"op": "unlight_mode", "mode": ""}]}])
+    assert BM.problems(bad, SHOTS, GZ.events, modes=["t1"]) == [
+        "Script 1's Set the hits of names Moon ramp, a shot this card does not have.",
+        "Script 1 has an empty number slot.",
+        "Script 1 puts out the light of a mode that is not one.",
+        "Script 1 puts out the light of a mode that is not in this project (gone): pick it again."]
+    src = BM.to_c(p, "t1")
+    used = set(re.findall(r"\b(pm_[a-z_]+)\s*\(", src))
+    assert used <= _header_calls(), used - _header_calls()
+    assert '__attribute__((weak, visibility("hidden"))) long long pad_hits_powerline_center[5];' in src
+    assert '__attribute__((weak, visibility("hidden"))) int pad_lit_t1[5];' in src           # its own light
+    assert '__attribute__((weak, visibility("hidden"))) int pad_lit_t2[5];' in src           # another's
+    assert "static const struct pm_mode t1_mode" in src or "PM_REGISTER(" in src
+    assert "pad_hits_" not in re.search(r"static const struct pm_mode (\w+)", src).group(1)
+    # this mode's own light put out with no Light the mode at block: nothing to put out
+    own = prog([{"hat": {"kind": "mode_start"}, "do": [{"op": "unlight_mode", "mode": ""}]}])
+    assert "static void unlight_mode(void) { }" in BM.to_c(own, "own")
+    # a mode that never sets or reads hits makes the C it always made
+    assert "pad_hits_" not in BM.to_c(_lit_prog(), "lit") and "hits_of" not in BM.to_c(_lit_prog(), "lit")
+
+
+def test_only_one_target_is_qualified_at_a_time_across_modes(tmp_path):
+    """Four modes built together as a card's are: the target that qualifies takes the others' hits back and puts
+    their lights out; a target hit after that counts from 0 again, for its own mode too."""
+    modes = {"t%d" % n: _target_mode(n) for n in (1, 2, 3, 4)}
+    hit = lambda t, k=1: ["shot", t] * k + ["secs", 0.1]                 # noqa: E731
+    out = play_many(tmp_path, modes,
+                    *hit("Powerline left", 3), "lamps",                 # TARGET 1 lit
+                    *hit("Powerline center", 2), *hit("Building"),      # hits of target 1 as TARGET 2 sees them: 3
+                    *hit("Powerline center"), "lamps",                  # TARGET 2 lit, TARGET 1 out, its hits 0
+                    *hit("Building"),                                   # ... as TARGET 2 sees them: 0
+                    *hit("Powerline left"), *hit("Building"),           # 1: not lit again, not started
+                    *hit("Powerline left", 2), "lamps",                 # 3: TARGET 1 lit again, TARGET 2 out
+                    *hit("Powerline left"))                             # its lit shot starts it
+    assert re.findall(r"\[TARGET 2\] (hits \d)", out) == ["hits 3", "hits 0", "hits 1"]
+    held = re.findall(r"HELD (POWERLINE LEFT|POWERLINE CENTER|none)", out)
+    assert held == ["POWERLINE LEFT", "POWERLINE CENTER", "POWERLINE LEFT"], held
+    assert out.count("[TARGET 1] START (its lit shot)") == 1
+    assert "[TARGET 2] START" not in out
+    assert "[TARGET 2] put out the light of t1 for player 1" in out          # mode.log says who put it out
+    assert "[TARGET 1] put out the light of t2 for player 1" in out
+    assert "LAMP OFF POWERLINE LEFT TARGET 1" in out and "LAMP OFF POWERLINE CENTER TARGET 2" in out
+
+
+def test_set_hits_counts_from_the_value_and_a_new_ball_clears_it(tmp_path):
+    p = prog([{"hat": {"kind": "shot", "shot": "Left ramp", "when": "any"}, "do": [
+                  {"op": "set_hits", "shot": "Right ramp", "value": num(5)}]},
+              {"hat": {"kind": "shot", "shot": "Building", "when": "any"}, "do": _say_hits("Right ramp", 6) + [
+                  {"op": "set_hits", "shot": "Right ramp", "value": num(-4)}]}])
+    out = play(tmp_path, p, "shot", "Right ramp", "shot", "Left ramp", "shot", "Right ramp", "shot", "Building",
+               "shot", "Building", "shot", "Left ramp", "ball_end", "shot", "Right ramp", "shot", "Building")
+    # 5 set, one more hit: 6; then -4 reads as 0 (never below); a ball ending puts it back to its own count: 1
+    assert re.findall(r"\[TEST MODE\] (hits \d)", out) == ["hits 6", "hits 0", "hits 1"]
+
+
+def test_the_four_target_modes_build_into_one_object_with_one_count_and_one_light_each(tmp_path):
+    if os.name == "nt":
+        pytest.skip("build_mode.sh runs under bash with arm-linux-gnueabihf-gcc (WSL or Linux)")
+    if not shutil.which("bash") or not shutil.which("arm-linux-gnueabihf-gcc"):
+        pytest.skip("no arm-linux-gnueabihf-gcc here")
+    srcs = []
+    for n in (1, 2, 3, 4):
+        srcs.append(tmp_path / ("t%d.c" % n))
+        srcs[-1].write_text(BM.to_c(_target_mode(n), "t%d" % n), encoding="utf-8")
+    out = tmp_path / "mode.so"
+    r = subprocess.run(["bash", os.path.join(SDK, "build_mode.sh"), "-o", str(out)] + [str(s) for s in srcs]
+                       + [os.path.join(SDK, "mode_file.c")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "warning" not in (r.stdout + r.stderr).lower()
+    nm = shutil.which("arm-linux-gnueabihf-nm")
+    if nm:
+        syms = subprocess.run([nm, str(out)], capture_output=True, text=True).stdout
+        for sym in ("pad_hits_powerline_left", "pad_hits_big_loop", "pad_lit_t1", "pad_lit_t4"):
+            assert len(re.findall(r"\b%s$" % sym, syms, re.M)) == 1, sym     # one for all four modes
+
+
+# ---- PAD-598: a Light block lights one of the game's own lights by name (an insert, a GI string, a flasher) --------
+# An owner lit their mode at Target 4 with RINGO SPINNER pulsing, and wanted that insert to change as the mode started;
+# the Light block could only pick a shot. It picks a shot's lights or one of the game's lights (the port's lamp lines).
+def _lights_by_name_prog():
+    return prog([{"hat": {"kind": "event", "event": "skill_shot", "when": "any"}, "do": [dict(LIT)]},
+                 {"hat": {"kind": "mode_start"}, "do": [_light_insert("MASER READY"), _light_insert("HEAT RAY", "hurry")]},
+                 {"hat": {"kind": "mode_end"}, "do": [{"op": "lights_off", "insert": "HEAT RAY"}]}])
+
+
+def _light_insert(name, pattern="solid", color="#ff2000"):
+    return {"op": "light_shot", "insert": name, "color": color, "pattern": pattern, "rate": None}
+
+
+def test_a_light_block_names_one_of_the_games_lights_and_is_checked():
+    lamps = ["MASER READY", "RIGHT RAMP", "LOWER PLAYFIELD GI 1"]
+    p = prog([{"hat": {"kind": "mode_start"}, "do": [
+        _light_insert("MASER READY"), _light_insert("LOWER PLAYFIELD GI 1", "blink"),
+        {"op": "lights_off", "insert": "MASER READY"}, {"op": "lights_off", "shot": "*"}]}])
+    assert BM.problems(p, SHOTS, GZ.events, inserts=lamps) == []
+    assert BM.problems(p, SHOTS, GZ.events) == []                       # no list of the game's lights: not checked
+    bad = prog([{"hat": {"kind": "mode_start"}, "do": [
+        _light_insert("MOON"), {"op": "lights_off", "insert": "A,B"}, dict(_light_insert("MASER READY"), color="red")]}])
+    assert BM.problems(bad, SHOTS, GZ.events, inserts=lamps) == [
+        "Script 1 names the light MOON, which this card's game does not have.",
+        "Script 1 lights an insert that is not one.",
+        "Script 1 lights a shot in no color."]
+    # a game with no lights a mode can hold: none can be named
+    assert BM.problems(prog([{"hat": {"kind": "mode_start"}, "do": [_light_insert("MASER READY")]}]),
+                       SHOTS, GZ.events, inserts=[]) == [
+        "Script 1 names the light MASER READY, which this card's game does not have."]
+
+
+def test_a_light_block_on_one_of_the_games_lights_holds_it_by_name_in_the_c():
+    p = prog([{"hat": {"kind": "mode_start"}, "do": [
+        _light_insert("MASER READY", "pulse"), {"op": "light_shot", "shot": "Building", "color": "#00ff00",
+                                                "pattern": "solid"},
+        _light_insert("HEAT RAY", "blink"), {"op": "lights_off", "insert": "MASER READY"}]}])
+    src = BM.to_c(p, "blk")
+    used = set(re.findall(r"\b(pm_[a-z_]+)\s*\(", src))
+    assert used <= _header_calls(), used - _header_calls()
+    assert 'LAMP_NAMES[2] = {"MASER READY", "HEAT RAY"};' in src and "#define N_LIGHTS  (N_SHOTS + 2)" in src
+    assert "light(N_SHOTS + 0, 0xff2000u, PM_LAMP_PULSE, 1600LL, 0);" in src
+    assert "light(0, 0x00ff00u, PM_LAMP_SOLID, 0LL, 0);" in src             # the shot keeps its own slot
+    assert "unlight(N_SHOTS + 0);" in src
+    plain = BM.to_c(BM.starter("RAMP FRENZY", SHOTS), "ramp_frenzy")
+    assert "#define N_LIGHTS  (N_SHOTS + 0)" in plain and "LAMP_NAMES[1] = {0};" in plain
+
+
+def test_a_light_block_lights_one_off_held_dark(tmp_path):
+    """PAD-601: a Light block may light an insert "off": held dark, its color and pace ignored (Hand back lets the
+    game's own light show through instead)."""
+    off = dict(_light_insert("RINGO SPINNER", "off"), color="", rate={"k": "num", "v": 5})
+    p = prog([{"hat": {"kind": "mode_end"}, "do": [off, {"op": "light_shot", "shot": "Building", "pattern": "off"}]}])
+    assert BM.problems(p, SHOTS, GZ.events, inserts=["RINGO SPINNER"]) == []
+    src = BM.to_c(p, "blk")
+    assert "light(N_SHOTS + 0, 0x000000u, PM_LAMP_SOLID, 0LL, 0);" in src
+    assert len(re.findall(r"light\([^;]*, 0x000000u, PM_LAMP_SOLID, 0LL, 0\);", src)) == 2   # the shot's too
+    assert BM.normalize(p)["scripts"][0]["do"][0]["pattern"] == "off"
+
+
+def test_the_insert_a_mode_is_lit_with_changes_as_it_starts_on_the_harness(tmp_path):
+    """The owner's case: lit at the Right ramp with MASER READY pulsing; When the mode starts lights MASER READY solid
+    red. Starting puts the lit light out, and MASER READY stays the mode's, red, until it ends: then the game has it."""
+    lit = dict(LIT, pattern="pulse", color="#40c040")
+    p = prog([{"hat": {"kind": "event", "event": "skill_shot", "when": "any"}, "do": [lit]},
+              {"hat": {"kind": "mode_start"}, "do": [_light_insert("MASER READY")]},
+              {"hat": {"kind": "shot", "shot": "Building", "when": "running"},
+               "do": [{"op": "lights_off", "insert": "MASER READY"}]}], seconds=5)
+    out = play(tmp_path, p, "event", "skill_shot", "secs", 0.2, "lamps",       # lit: pulsing green
+               "shot", "Right ramp", "secs", 0.5, "lamps",                     # started: red, solid, and held
+               "secs", 1, "lamps",
+               "shot", "Building", "secs", 0.2, "lamps",                       # handed back by name
+               "secs", 6)
+    held = re.findall(r"HELD (RIGHT RAMP|MASER READY|none)(?: (\w+) (\w+))?", out)
+    assert held[:2] == [("RIGHT RAMP", "40c040", "pulse"), ("MASER READY", "40c040", "pulse")]
+    assert held[2:] == [("MASER READY", "ff2000", "solid"), ("MASER READY", "ff2000", "solid"), ("none", "", "")]
+    assert "START (its lit shot): player 1" in out
+    assert "LAMP MASER READY ff2000 solid 0 TEST MODE" in out and "LAMP OFF MASER READY TEST MODE" in out
+    assert "lamps held 0" in out
+
+
+def test_a_light_held_by_name_comes_back_after_a_light_show_and_goes_at_the_end_on_the_harness(tmp_path, monkeypatch):
+    _cc()
+    monkeypatch.setenv("HARNESS_PLACES", "1")
+    p = prog([{"hat": {"kind": "event", "event": "skill_shot", "when": "idle"}, "do": [{"op": "start_mode"}]},
+              {"hat": {"kind": "mode_start"}, "do": [_light_insert("HEAT RAY", "blink"), {"op": "show", "show": "burst"}]}],
+             seconds=5)
+    out = play(tmp_path, p, "event", "skill_shot", "secs", 6)
+    sent = re.findall(r"^\s*\d+ LAMP HEAT RAY ff2000 blink (\d+)", out, re.M)
+    assert len(sent) == 2 and sent[0] == sent[1]                        # lit, then again once the show is over
+    assert "END lamps held 0" in out
+
+
+def rage_meter():
+    """PAD-658: GODZILLA ANGRY's RAGE meter in blocks (David: "we somehow lost our godzilla rage meter in the top right
+    of the HUD. it should always be shown (whenever the HUD is shown)"): a corner bar that follows a percent, shown
+    while the mode is not running too."""
+    return prog([
+        {"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"}, "do": [
+            {"op": "change", "var": "rage", "by": num(25)}]},
+        {"hat": {"kind": "shot", "shot": "Building", "when": "idle"}, "do": [{"op": "start_mode"}]},
+    ], vars=[{"name": "rage", "reset": "game"}], seconds=5,
+        hud={"on": True, "line": "SHOOT THE BUILDING", "counters": [{"label": "RAGE", "value": var("rage")}],
+             "timer": {"on": False},
+             "gauge": {"on": True, "kind": "bar", "count": 20, "words": ["GODZILLA", "RAGE"], "full": "ANGRY!",
+                       "meter": True, "value": var("rage")}})
+
+
+def test_a_corner_meter_shows_before_its_mode_starts_and_hides_while_another_mode_runs(tmp_path):
+    p = rage_meter()
+    assert BM.problems(p, SHOTS) == []
+    assert BM.hud_spec(p, "rage")["gauge"] == {"label": " ", "kind": "bar", "count": 20, "icon": "rage",
+                                               "words": ["GODZILLA", "RAGE"]}
+    src = BM.to_c(p, "rage")
+    assert '.slug = "rage", .beside = 1' in src and "#define HUD_METER  1" in src
+    other = maser_hud()
+    out = play_many(tmp_path, {"rage": p, "maser": other},
+                    "secs", 1, "shot", "Left ramp", "secs", 1, "shot", "Left ramp", "secs", 1,
+                    "shot", "Maser target", "secs", 2,                         # the other mode runs: its HUD up
+                    "shot", "Left ramp", "secs", 1, "shot", "Left ramp", "secs", 22,   # nothing counts; it times out
+                    "shot", "Left ramp", "secs", 1, "shot", "Left ramp", "secs", 1,
+                    "shot", "Building", "secs", 7)                             # the rage mode itself
+    # in a game, before anything: the bar at 0%, then 25%, 50%
+    assert _hud_words(out, "Gauge_Label")[:3] == ["0%", "25%", "50%"]
+    gauge = re.compile(r"SHOW \S*PadMode_rage_Hud_Gauge (\d)")
+    assert "SHOW PadMode_rage_Hud 1" in out and gauge.findall(out)[0] == "1"
+    during = out[out.index(">> shot Maser target"):out.index("] END (time ran out)")]
+    after = out[out.index("] END (time ran out)"):out.index(">> shot Building")]
+    # PAD-675: the other mode runs alone - the bar is taken down and counts nothing; after it, it fills on to ANGRY!
+    assert "SHOW PadMode_maser_Hud 1" in during and "SHOW PadMode_rage_Hud 0" in during
+    assert "75%" not in _hud_words(during, "Gauge_Label")
+    assert "75%" in _hud_words(after, "Gauge_Label") and "ANGRY!" in _hud_words(after, "Gauge_Label")
+    # its own mode: the bar stays up and full until its end
+    mine = out[out.index(">> shot Building"):]
+    assert "0" not in gauge.findall(mine[:mine.index("] END")])

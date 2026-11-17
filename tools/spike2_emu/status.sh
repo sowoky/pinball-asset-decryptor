@@ -9,7 +9,12 @@
 #   rss=<mb>           guest resident memory
 #   host_cpu=<pct>     renderer CPU
 #   state=<word>       off | booting | techalerts | running
+#   boot_pct=<n>       0-100 through the boot, while booting (bootprog.py)
+#   boot_words=<text>  what that step is, in words
 #   fps=<n>            renderer frames per second, blank if not reported yet
+#   gl_fallback=<why>  the renderer lost the GPU and draws in SOFTWARE; why is
+#                      watch.sh's verdict (gpulost, loader, surface, unknown...)
+#                      - absent on a GPU run and on software by request
 #   pcm=<frames>       PCM frames actually played out to the speakers
 #   drop=<frames>      PCM frames dropped (should stay 0)
 #   log=<path>
@@ -79,7 +84,14 @@ fi
 # wanted more than ten; that count only ever exceeded ten because the video bug
 # was rebuilding the pipeline 25 times a second, and a whole run now makes
 # eight. See gamestate.sh for the full story - do not reinvent the count here.
-echo "state=$(gs_state "$LOG")"
+ST=$(gs_state "$LOG")
+echo "state=$ST"
+# HOW FAR THROUGH THE BOOT (PAD-744): the steps inside Boot and Node boards,
+# from bootprog.py - the playfield window reads the same module, so the two
+# say the same thing. Only while booting: it reads the whole log.
+if [ "$ST" != attract ]; then
+    python3 "$S/bootprog.py" "$(dirname "$LOG")" 2>/dev/null
+fi
 
 # Whether the auto-advance helper is still working on it. The tab uses this to
 # say "advancing on its own" rather than "press a switch yourself", which is
@@ -116,6 +128,14 @@ fi
 # The renderer prints its rate every 2 s; take the most recent.
 f=$(grep -ao '[0-9.]* fps' "$PAD_LOGDIR/padglhost.log" 2>/dev/null | tail -1)
 [ -n "$f" ] && echo "fps=${f% fps}"
+
+# WHY THE RENDERER IS IN SOFTWARE, when it fell there (PAD-497). David saw the
+# stutter; the run log said only "eglInitialize failed" and "TRYING THE
+# RENDERER AGAIN IN SOFTWARE", and this row of the tab said "200% CPU, 30 fps"
+# with no word that it used to draw on the GPU at 7.5%. watch.sh writes the
+# file only after a GPU attempt failed.
+g=$(head -1 "$PAD_LOGDIR/padglhost.log.fallback" 2>/dev/null | tr -cd 'a-z')
+[ -n "$g" ] && echo "gl_fallback=$g"
 
 # Audio comes from the PAD_AUDIO_DUMP line, which watch.sh only emits when
 # PAD_AUDIO_DUMP is set; blank is "not being sampled", not "no audio".

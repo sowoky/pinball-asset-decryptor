@@ -1,7 +1,8 @@
 """A stock rule's shot logic rewritten in C (item 161): the desk-checkable parts. The header's
 calls are in the runtime, both Godzilla ports carry the lines the accessors read, the example
 registers Ebirah's rule, the project side finds a rewrite among the code modes and makes one from
-the template, and Write's words name what it replaces. Nothing here runs the game."""
+the template, and Write's words name what it replaces. Nothing here runs the game. PAD-691: the app
+ships no template; Ebirah's is test material (tests/mode_examples/c/), handed to the module here."""
 import os
 import re
 
@@ -17,8 +18,17 @@ from pinball_decryptor.plugins.stern import stock_rewrite as SW
 SDK = MR.sdk_dir()
 HEADER = os.path.join(SDK, "pad_stock.h")
 RUNTIME = os.path.join(SDK, "pad_mode_runtime.c")
-EXAMPLE = os.path.join(SDK, "examples", "ebirah_rewrite.c")
+EXAMPLE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mode_examples", "c", "ebirah_rewrite.c")
 _CALL = re.compile(r"^(?:[A-Za-z_][\w \*]*?\s\*?)(pm_[a-z_0-9]+)\s*\(", re.M)
+
+
+@pytest.fixture
+def ebirah_template(monkeypatch):
+    """PAD-691: the app ships no template (Ebirah's was Godzilla's demo); the tests give it the one kept as test
+    material, so the template path is still proven."""
+    from pinball_decryptor.plugins.stern import stock_rewrite as SW
+    monkeypatch.setattr(SW, "TEMPLATES", {12: "ebirah_rewrite.c"})
+    monkeypatch.setattr(SW, "TEMPLATE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "mode_examples", "c"))
 
 
 def _read(path):
@@ -35,7 +45,7 @@ def test_every_call_the_header_declares_is_defined_in_the_runtime():
         assert re.search(r"^[A-Za-z_][\w \*]*?\b%s\s*\(" % re.escape(c), runtime, re.M), c
     # the section walk and the wrap's two branches
     assert "__start_pm_stock" in runtime and "stock161_attach();" in runtime
-    assert "if (x->in_original) return x->orig(" in runtime and "stock161_first(x, &shot, s0)" in runtime
+    assert "if (x->in_original) return x->orig(" in runtime and "stock161_first(x, &shot, s0f)" in runtime
     assert '"pad_stock.h"' in runtime
 
 
@@ -90,13 +100,27 @@ def _project(tmp_path, image_name="godzilla_le-1_16_0.raw"):
     return str(proj)
 
 
-def test_rows_and_a_new_rewrite_from_the_template(tmp_path):
+def test_the_app_ships_no_template(tmp_path):
+    """PAD-691: no rule of any title has a template in the app: every row says to write one against pad_stock.h."""
+    proj = _project(tmp_path)
+    port = MP.port_path(MP.profile_for_card("godzilla_le", "1.16"))
+    assert SW.TEMPLATES == {} and SW.template_path(12) is None
+    rows = SW.rows(proj, port)
+    assert len(rows) == 26 and {r["id"]: r["template"] for r in rows}[12] == "" and {r["id"]: r["template"] for r in rows}[4] == ""
+    assert all("no template" in r["status"] for r in rows)
+    with pytest.raises(SW.StockRewriteError, match="no template"):
+        SW.new_rewrite(proj, 12, port)
+    assert not os.path.isfile(os.path.join(SDK, "examples", "ebirah_rewrite.c"))
+
+
+def test_rows_and_a_new_rewrite_from_the_template(tmp_path, ebirah_template):
     proj = _project(tmp_path)
     port = MP.port_path(MP.profile_for_card("godzilla_le", "1.16"))
     rows = SW.rows(proj, port)
-    assert [(r["id"], r["slug"], r["template"]) for r in rows] == [(12, "", "ebirah_rewrite.c"), (4, "", "")]
-    assert rows[0]["status"].startswith("the game's own (a template is ready")
-    assert "no template" in rows[1]["status"]
+    by = {r["id"]: r for r in rows}           # PAD-699: the port names all 26 of the game's own modes
+    assert (by[12]["slug"], by[12]["template"]) == ("", "ebirah_rewrite.c") and (by[4]["slug"], by[4]["template"]) == ("", "")
+    assert by[12]["status"].startswith("the game's own (a template is ready")
+    assert "no template" in by[4]["status"]
     with pytest.raises(SW.StockRewriteError, match="no template"):
         SW.new_rewrite(proj, 4, port)
     with pytest.raises(SW.StockRewriteError, match="names no rule 99"):
@@ -109,7 +133,8 @@ def test_rows_and_a_new_rewrite_from_the_template(tmp_path):
     spec = CM.load(proj, slug)
     assert spec.name.startswith("EBIRAH") and not spec.has_assets()
     rows = SW.rows(proj, port)
-    assert rows[0]["slug"] == "ebirah_rewrite" and rows[0]["status"] == "rewritten by modes/ebirah_rewrite/ebirah_rewrite.c"
+    by = {r["id"]: r for r in rows}
+    assert by[12]["slug"] == "ebirah_rewrite" and by[12]["status"] == "rewritten by modes/ebirah_rewrite/ebirah_rewrite.c"
     with pytest.raises(SW.StockRewriteError, match="already rewritten"):
         SW.new_rewrite(proj, 12, port)
     # a second folder for the same rule is not what the tab makes, but the scan keeps the first
@@ -118,7 +143,7 @@ def test_rows_and_a_new_rewrite_from_the_template(tmp_path):
     assert SW.describe_suffix(proj, slug) == " - replaces the shots of rule 12 (the game's own rule plays its shots through this code)"
 
 
-def test_write_carries_a_rewrite_as_a_code_mode_and_says_what_it_replaces(tmp_path):
+def test_write_carries_a_rewrite_as_a_code_mode_and_says_what_it_replaces(tmp_path, ebirah_template):
     proj = _project(tmp_path)
     port = MP.port_path(MP.profile_for_card("godzilla_le", "1.16"))
     slug, path = SW.new_rewrite(proj, 12, port)

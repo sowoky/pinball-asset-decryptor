@@ -920,6 +920,7 @@ struct kit_hud {
     unsigned tries;
     int found, up, timer_up, timer2_up, gauge_up, n_pips, pip_lit[KIT_HUD_PIPS];
     int aside;                             /* PAD-347: the kind of the game's mode it stepped aside for, 0 = none */
+    int words;                             /* PAD-662: stepped aside for a screen of the game's (pm_game_words) */
     char w_title[KIT_HUD_WORDS], w_line[KIT_HUD_WORDS], w_award[KIT_HUD_WORDS], w_awardsub[KIT_HUD_WORDS];
     char w_timer[8], w_timer2[8], w_glabel[24], w_c[3][3][24];
     /* what is wanted (written to the glass when found and up) */
@@ -931,8 +932,10 @@ struct kit_hud {
     int noting;                            /* up only for a qualification note */
     int metering;                          /* PAD-379: up only for a meter (kit_hud_meter) */
     int off;                               /* PAD-353: its words wait for a display of the game's */
+    unsigned long note_left, off_since;    /* PAD-658: a note's time still to show, held while it waits */
     unsigned long checked_at;              /* PAD-390: the last look at the scene's HUD group */
     unsigned begun;                        /* PAD-413: pm_begun() when its mode last ran, or it was last down */
+    int beside;                            /* PAD-658: its meter is a corner bar - up BESIDE another pack HUD */
 };
 
 /* The pack's HUD that is up now: a HUD coming up takes the place of the one showing (a mode's TOTAL
@@ -1023,6 +1026,7 @@ static KIT_UNUSED void kit_hud_show(struct kit_hud *h, int on)
         o->hide_at = 0;
         o->noting = 0;
         o->metering = 0;
+        o->off = 0;
         if (o->group) pm_show(o->group, 0);
     }
     if (on) kit_hud_up = h;
@@ -1035,6 +1039,10 @@ static KIT_UNUSED void kit_hud_show(struct kit_hud *h, int on)
         h->noting = 0;
         h->metering = 0;
         h->aside = 0;                      /* PAD-347: said again the next time it is up beside a game mode */
+        /* PAD-680: and its words waiting is looked at afresh. A note hidden while a display of the game's covered
+         * it left this set, and the next note, shown under the game's battle TOTAL, never waited it out: its 3 s
+         * ran under the TOTAL (emulator, KING KONG's ramps note after GODZILLA VS DESTROYAH) */
+        h->off = 0;
     }
     if (h->group) pm_show(h->group, on);
 }
@@ -1086,6 +1094,171 @@ static KIT_UNUSED void kit_hud_gauge(struct kit_hud *h, int level, const char *l
     if (label) kit_copy(h->want_glabel, sizeof h->want_glabel, label);
 }
 
+/* ---- PAD-680: the progress panel - every mode's latest progress note as a standing badge --------------------
+ * David's Premium, 2026-10-22: a progress note flashes for 3 s, and the game's own screens, its timed modes (the
+ * middle of the screen 39% of a game, 50-70 s at a time) and its battles had it hidden or held most of the
+ * time - "i almost never saw on-screen progress towards modes". So every progress note ALSO goes on a panel of
+ * KIT_PROG_SLOTS badges at the right edge, built once into the HUD scene (mode_hud.build_huds: PadMode_Progress):
+ * each slot holds every mode's badge (the one its timer wears - its label on the panel, its icon on the disc),
+ * hidden; the kit shows the badge of the mode whose note is newest in slot 1, the next in slot 2, and writes the
+ * slot's number: the shots the mode still needs, the number its note's sub line starts with ("4  -  SHOOT THE
+ * LEFT RAMP" -> 4; a code mode's "5 RAMPS TO BIOLLANTE" -> 5; a note with none, READY, shows 0), for the player up, until that mode starts or the game
+ * ends. Up through the game's shot screens; down while one of ours runs or has its TOTAL up, and while any mode of
+ * the game's runs (pm_aside: a battle's RIGHT spins, a timed mode's TIME LEFT sit where it is - PAD-733, David's
+ * v24 Emulate: "these HUD indicators need to duck when in super train loops (or whenever another mode has
+ * indication that is here)"; a battle alone stepped it down before). Shared by every mode of the pack: weak, as
+ * kit_hud_up. A card built before PAD-680 has no panel: nothing. PAD-690: the panel has up to 7 slots, the badges
+ * scaled to fill the column (mode_hud.progress_layout); the kit uses the slots the panel has, up to KIT_PROG_SLOTS
+ * (a PAD-680 card has 4), the newest notes in them, older ones dropping off. PAD-733 (David: "Ideally the HUD
+ * indicator would show which shot to hit in small text where the number was"): at 0 a badge built with a READY
+ * picture (the shot that starts the mode, kit_prog_ready) shows it in the number's place. */
+#define KIT_PROG_SLOTS 16
+struct kit_prog_row {
+    char slug[32];                         /* the mode's folder: the key; "" = a free row */
+    char num[8];                           /* the shots still needed, as its note said */
+    unsigned player;
+    unsigned long at;                      /* pm_ms() of its latest note: the order */
+};
+struct kit_prog_slot {
+    void *num, *badge;                     /* the slot's number text; the badge shown in it (0 = none) */
+    char slug[32], written[8];
+};
+struct kit_prog {
+    struct kit_prog_row row[KIT_PROG_SLOTS];
+    struct kit_prog_slot slot[KIT_PROG_SLOTS];
+    void *group;
+    int found, up;                         /* up: what the glass was last told (-1 = nothing yet) */
+    unsigned slots;                        /* the slots the panel has (PAD-690) */
+    unsigned tries;
+    void *ready[KIT_PROG_SLOTS];           /* PAD-733: each slot's badge's READY picture (0 = none); after the rest, so a
+                                            * mode built with an older kit shares the fields before it */
+    signed char ready_on[KIT_PROG_SLOTS];  /* shown now: 1, 0, -1 = not said yet */
+};
+__attribute__((weak, visibility("hidden"))) struct kit_prog kit_prog;
+
+static KIT_UNUSED void kit_prog_set(const char *slug, const char *big, const char *sub)
+{
+    char num[8];
+    unsigned n = 0, i, k = KIT_PROG_SLOTS, p = pm_player();
+    if (!slug || !big || !big[0] || p < 1 || p > 4) return;
+    for (i = 0; sub && sub[i] && ((sub[i] >= '0' && sub[i] <= '9') || sub[i] == ',') && n < sizeof num - 1; i++)
+        if (sub[i] != ',') num[n++] = sub[i];
+    for (i = 0; !n && big[i] >= '0' && big[i] <= '9' && n < sizeof num - 1; i++)   /* a code mode's "5 RAMPS TO ..." */
+        num[n++] = big[i];
+    if (!n) num[n++] = '0';
+    num[n] = 0;
+    for (i = 0; i < KIT_PROG_SLOTS; i++)       /* its own row, else a free one, else the oldest */
+        if (kit_prog.row[i].slug[0] && kit_prog.row[i].player == p && kit_same(kit_prog.row[i].slug, slug)) k = i;
+    if (k == KIT_PROG_SLOTS)
+        for (i = 0; i < KIT_PROG_SLOTS; i++)
+            if (!kit_prog.row[i].slug[0]) { k = i; break; }
+    if (k == KIT_PROG_SLOTS) {
+        k = 0;
+        for (i = 1; i < KIT_PROG_SLOTS; i++)
+            if ((long)(kit_prog.row[i].at - kit_prog.row[k].at) < 0) k = i;
+    }
+    kit_copy(kit_prog.row[k].slug, sizeof kit_prog.row[k].slug, slug);
+    kit_copy(kit_prog.row[k].num, sizeof kit_prog.row[k].num, num);
+    kit_prog.row[k].player = p;
+    kit_prog.row[k].at = pm_ms() ? pm_ms() : 1;
+}
+
+static KIT_UNUSED void kit_prog_clear(const char *slug)        /* the mode started (or 0: a game ended): its badge goes */
+{
+    unsigned i;
+    for (i = 0; i < KIT_PROG_SLOTS; i++)
+        if (kit_prog.row[i].slug[0] && (!slug || kit_same(kit_prog.row[i].slug, slug))) kit_prog.row[i].slug[0] = 0;
+}
+
+static KIT_UNUSED void *kit_prog_badge(unsigned k, const char *slug)
+{
+    char path[160];
+    pm_snprintf(path, sizeof path, "PadMode_Progress.PadMode_Progress_S%u.PadMode_Progress_S%u_%s", k + 1, k + 1, slug);
+    return pm_node("hud", path);
+}
+
+/* PAD-733: the badge's READY picture - the shot that starts the mode, in small letters where the number is, shown
+ * at 0 in the number's place (mode_hud.progress_group: a mode whose start shot the build knows); 0 = none */
+static KIT_UNUSED void *kit_prog_ready(unsigned k, const char *slug)
+{
+    char path[200];
+    pm_snprintf(path, sizeof path, "PadMode_Progress.PadMode_Progress_S%u.PadMode_Progress_S%u_%s.PadMode_Progress_S%u_%s_Ready",
+                k + 1, k + 1, slug, k + 1, slug);
+    return pm_node("hud", path);
+}
+
+/* every tick, from every mode of the pack (the same answer from each; `mine` is the caller's folder, whose badges
+ * it hides once when the panel is found - a built badge is visible until a mode hides it): find the panel, keep
+ * its slots the player up's newest first, and show it when nothing of ours and no mode of the game's has the
+ * glass */
+static KIT_UNUSED void kit_prog_tick(const char *mine)
+{
+    static int hid_mine;
+    unsigned i, j, n = 0, p = pm_player();
+    unsigned order[KIT_PROG_SLOTS];
+    int up;
+    if (!pm_can(PM_CAN_SCREENS)) return;
+    if (!kit_prog.found) {
+        char path[96];
+        if ((kit_prog.tries++ % KIT_POLL) != 0) return;
+        kit_prog.group = pm_node("hud", "PadMode_Progress");
+        if (!kit_prog.group) return;
+        for (i = 0; i < KIT_PROG_SLOTS; i++) {
+            pm_snprintf(path, sizeof path, "PadMode_Progress.PadMode_Progress_S%u.PadMode_Progress_S%u_Num", i + 1, i + 1);
+            kit_prog.slot[i].num = pm_text("hud", path);
+            kit_prog.slot[i].badge = 0;
+            kit_prog.slot[i].slug[0] = kit_prog.slot[i].written[0] = 0;
+            if (!kit_prog.slot[i].num) break;
+        }
+        kit_prog.slots = i;
+        kit_prog.found = 1;
+        kit_prog.up = -1;
+        pm_log("progress panel found: %u badge slot(s) at the right edge", kit_prog.slots);
+    }
+    if (!hid_mine && mine) {
+        for (i = 0; i < kit_prog.slots; i++) {
+            void *b = kit_prog_badge(i, mine);
+            if (b) pm_show(b, 0);
+        }
+        hid_mine = 1;
+    }
+    if (!pm_in_game()) kit_prog_clear(0);
+    for (i = 0; i < KIT_PROG_SLOTS; i++) {
+        if (!kit_prog.row[i].slug[0] || kit_prog.row[i].player != p) continue;
+        for (j = n; j > 0 && (long)(kit_prog.row[order[j - 1]].at - kit_prog.row[i].at) < 0; j--) order[j] = order[j - 1];
+        order[j] = i;
+        n++;
+    }
+    up = n > 0 && pm_in_game() && !pm_running() && !pm_other_running()
+         && !(kit_hud_up && !kit_hud_up->noting && !kit_hud_up->metering)
+         && !pm_aside();
+    if (up != kit_prog.up) {
+        pm_show(kit_prog.group, up);
+        if (kit_prog.up >= 0) pm_log("progress panel %s", up ? "up" : (n ? "down for now" : "empty"));
+        kit_prog.up = up;
+    }
+    for (i = 0; i < kit_prog.slots; i++) {
+        struct kit_prog_slot *s = &kit_prog.slot[i];
+        const char *slug = i < n ? kit_prog.row[order[i]].slug : "";
+        const char *num = i < n ? kit_prog.row[order[i]].num : " ";
+        int ready;
+        if (!kit_same(s->slug, slug)) {         /* another mode's badge in this slot (or none) */
+            if (s->badge) pm_show(s->badge, 0);
+            s->badge = slug[0] ? kit_prog_badge(i, slug) : 0;
+            if (s->badge) pm_show(s->badge, 1);
+            kit_prog.ready[i] = slug[0] ? kit_prog_ready(i, slug) : 0;
+            kit_prog.ready_on[i] = -1;          /* built visible: said once either way */
+            kit_copy(s->slug, sizeof s->slug, slug);
+        }
+        ready = kit_prog.ready[i] && kit_same(num, "0");
+        if (kit_prog.ready[i] && ready != kit_prog.ready_on[i]) {
+            pm_show(kit_prog.ready[i], ready);
+            kit_prog.ready_on[i] = (signed char)ready;
+        }
+        kit_hud_text(s->num, s->written, sizeof s->written, ready ? " " : num);
+    }
+}
+
 /* a big line and a smaller one under it, for `ms` (a jackpot, a head severed) */
 static KIT_UNUSED void kit_hud_award(struct kit_hud *h, unsigned ms, const char *big, const char *sub)
 {
@@ -1094,19 +1267,20 @@ static KIT_UNUSED void kit_hud_award(struct kit_hud *h, unsigned ms, const char 
     h->award_until = pm_ms() + ms;
 }
 
-/* A QUALIFICATION note on a HUD the mode is not using ("POWERLINES 2 OF 3"): the award line alone for
- * `ms`, then hidden. Polite: while another of the pack's HUDs is up (a mode running, or the total of
+/* A QUALIFICATION note on a HUD the mode is not using ("POWERLINES 2 OF 3"): its two lines for `ms`, then hidden,
+ * lettered in the title and line places above the score panel (PAD-658: not the award line over the game's own). Polite: while another of the pack's HUDs is up (a mode running, or the total of
  * one that just ended) nothing is shown - a METER of another mode (kit_hud_meter) gives way to it. On a HUD
  * showing its own meter the note goes in the award line and the meter stays. 1 = shown. */
 static KIT_UNUSED int kit_hud_note(struct kit_hud *h, unsigned ms, const char *big, const char *sub)
 {
     int k;
+    if (!h->metering) kit_prog_set(h->slug, big, sub);   /* PAD-680: on the progress panel whatever becomes of the note */
     if (kit_hud_up && kit_hud_up != h && !kit_hud_up->metering) return 0;
-    /* PAD-390 (David's Premium, 2026-10-05: MELTDOWN IS READY during the game's multiball, a SPACEGODZILLA lock
-     * while one of the game's modes ran): a note's line IS the award line, in the middle, so it has no place to
-     * step aside to - while the game's mode or multiball has the middle it is not shown (a meter's gauge at the
-     * edge stays; a note already up waits in kit_hud_tick) */
-    if (pm_aside() && !h->metering) return 0;
+    /* PAD-390 held a note while one of the game's modes or multiballs had the middle (its line IS the award line, in
+     * the middle, with no place to step aside to). PAD-680 takes that back: on David's Premium the game's own timed
+     * modes had the middle 39% of a game, 50-70 s at a time, and a note held through them was progress never seen.
+     * A note shows at once, over whatever the game has up, as the code modes' did before PAD-390 - David: "it used
+     * to work pretty well before we did the change to remove overlapping text" */
     if (h->up && !h->noting) return 0;
     h->want_title[0] = h->want_line[0] = 0;
     for (k = 0; k < 3; k++) kit_hud_counter(h, k, 0, 0, 0);
@@ -1114,6 +1288,10 @@ static KIT_UNUSED int kit_hud_note(struct kit_hud *h, unsigned ms, const char *b
     if (!h->metering) h->want_gauge = -1;
     kit_hud_award(h, ms, big, sub);
     if (!h->up) kit_hud_show(h, 1);
+    else if (h->beside && kit_hud_up != h) {        /* PAD-658: a corner meter's note has the middle for its time */
+        if (kit_hud_up) kit_hud_show(kit_hud_up, 0);
+        kit_hud_up = h;
+    }
     h->noting = 1;
     h->hide_at = h->metering ? 0 : pm_ms() + ms;
     return 1;
@@ -1124,7 +1302,11 @@ static KIT_UNUSED int kit_hud_note(struct kit_hud *h, unsigned ms, const char *b
  * edge, `level` pips lit, and its label, nothing in the middle. Call it every tick while it should show, and
  * with level -1 to take it down. It is the politest thing on the glass: it waits while another pack HUD is up (a
  * mode, a total, a note), a note or a mode of the pack takes its place at once, and it comes back by itself once
- * they are gone. A note of its own (kit_hud_note) goes in the award line above it and the meter stays. */
+ * they are gone. A note of its own (kit_hud_note) goes in the award line above it and the meter stays.
+ * PAD-658: a corner bar (`beside`, the top-right POWERUP-style meter, PAD-416) shares the glass instead (David:
+ * "it should always be shown (whenever the HUD is shown)"): it comes up beside another pack HUD without taking its
+ * place, nothing of another HUD's covers it, and only its own notes make it the pack's HUD (for their time). With
+ * its own mode's HUD up (the mode, its TOTAL) a corner meter's level and label still follow. */
 static KIT_UNUSED void kit_hud_meter(struct kit_hud *h, int level, const char *label)
 {
     int k;
@@ -1137,8 +1319,11 @@ static KIT_UNUSED void kit_hud_meter(struct kit_hud *h, int level, const char *l
         }
         return;
     }
-    if (h->up && !h->noting) return;                 /* the mode itself has its HUD */
-    if (kit_hud_up && kit_hud_up != h) return;       /* another pack HUD is up: wait for it */
+    if (h->up && !h->noting) {                       /* the mode itself has its HUD */
+        if (h->beside) kit_hud_gauge(h, level, label);   /* PAD-658: a corner meter follows on (its TOTAL) */
+        return;
+    }
+    if (kit_hud_up && kit_hud_up != h && !h->beside) return;   /* another pack HUD is up: wait for it */
     h->want_gauge = level;
     if (label) kit_copy(h->want_glabel, sizeof h->want_glabel, label);
     if (h->up && h->metering) return;
@@ -1148,7 +1333,11 @@ static KIT_UNUSED void kit_hud_meter(struct kit_hud *h, int level, const char *l
     if (!h->up) {
         h->want_award[0] = h->want_awardsub[0] = 0;
         h->award_until = 0;
-        kit_hud_show(h, 1);
+        if (h->beside) {                             /* PAD-658: up beside whatever else is, in no one's place */
+            h->up = 1;
+            h->hide_at = 0;
+            if (h->group) pm_show(h->group, 1);
+        } else kit_hud_show(h, 1);
     }
     h->noting = 1;
     h->metering = 1;
@@ -1205,13 +1394,17 @@ static KIT_UNUSED void kit_hud_recheck(struct kit_hud *h)
     for (k = 0; k < h->n_pips; k++) h->pip_lit[k] = -1;
 }
 
+#define KIT_NOTE_WAIT_MS 8000
+
 /* every tick: find, expire the award, and send the glass what changed */
 static KIT_UNUSED void kit_hud_tick(struct kit_hud *h)
 {
-    int k, j, aside, low, off, covered;
+    int k, j, aside, low, off, covered, words;
     const char *title, *line, *award, *awardsub;
     kit_hud_find(h);
     kit_hud_recheck(h);
+    kit_prog_tick(h->slug);                            /* PAD-680: the pack's progress panel */
+    if (h->up && !h->noting && !h->metering) kit_prog_clear(h->slug);   /* the mode is running: its badge goes */
     if (kit_gives_way(h->up && !h->metering, &h->begun)) {   /* a meter waits its turn by itself */
         pm_log("hud %s: another mode began - its %s gives way", h->slug, h->noting ? "note" : "ending");
         kit_hud_show(h, 0);
@@ -1224,6 +1417,7 @@ static KIT_UNUSED void kit_hud_tick(struct kit_hud *h)
     if (h->award_until && pm_ms() >= h->award_until) {
         h->award_until = 0;
         h->want_award[0] = h->want_awardsub[0] = 0;
+        if (h->beside && h->metering && kit_hud_up == h) kit_hud_up = 0;   /* PAD-658: its note is over, the bar stays */
     }
     if (!h->found || !h->up) return;
     /* PAD-353: a display of the game's has the screen (an award, a mode's start screen): its words are where
@@ -1232,7 +1426,27 @@ static KIT_UNUSED void kit_hud_tick(struct kit_hud *h)
      * is the award line already, so it has nowhere to step aside to */
     aside = pm_aside();
     covered = pm_display_covered();
-    off = covered || (h->noting && aside);
+    /* PAD-662: a screen of the game's own under the HUD (any one: Mechagodzilla's SHOOT TARGETS TO DISABLE BARRIER sat
+     * under SUPER X2's line, PAD-658 run kiryu_r2 k15) letters its words in the title, line and counter places - ours
+     * step aside as they do for the game's modes: the lines in the award line, the counters hidden; a note goes in the
+     * award line, which those screens keep clear */
+    words = !aside && pm_game_words();
+    /* PAD-680: a progress note shows at once, over the game's own shot screens, as the code modes' did (David: "i
+     * almost never saw on-screen progress towards modes ... that I used to"). The game puts a screen up for nearly
+     * every shot, and a note that waited them out ran out behind them: the emulator, the same 32 shots, showed a
+     * note after 8 of the first 15 on the 2026-10-07 card and 4 on the one that waited */
+    if (h->noting && !h->metering) covered = 0;
+    off = covered || (h->noting && h->metering && aside);   /* PAD-680: a note is never off; a meter's is (PAD-390) */
+    if (h->noting && !h->metering && h->hide_at) {
+        /* PAD-658: a note WAITS out a display of the game's (run agm_pro_r3: ANGUIRUS IS READY over the Pro's MASER
+         * CANNON CHARGING), then shows for the time it had left; held up to KIT_NOTE_WAIT_MS, then let go */
+        unsigned long now = pm_ms();
+        if (off && !h->off) {
+            h->note_left = h->hide_at > now ? h->hide_at - now : 0;
+            h->off_since = now;
+        }
+        if (off && now - h->off_since < KIT_NOTE_WAIT_MS) h->hide_at = h->award_until = now + h->note_left;
+    }
     if (off != h->off) {
         pm_log("hud %s: %s", h->slug, !off ? "its words are back"
                : covered ? "its words wait while a display of the game's has the screen"
@@ -1241,13 +1455,29 @@ static KIT_UNUSED void kit_hud_tick(struct kit_hud *h)
     }
     if (h->noting) aside = 0;                    /* a qualification note is in the award line already */
     kit_hud_aside_note(h, aside);
+    if (words != h->words) {
+        pm_log("hud %s: %s", h->slug, words ? (h->noting ? "a screen of the game's has its words up - the note in the award line"
+                                                : "a screen of the game's has its words up - its lines in the award line, its counters hidden")
+                                      : "the game's words are gone - back in its places");
+        h->words = words;
+    }
     title = h->want_title;
     line = h->want_line;
     award = h->want_award;
     awardsub = h->want_awardsub;
     if (off) {
         title = line = award = awardsub = "";
-    } else if (aside) {
+    } else if (h->noting && !h->metering) {
+        /* PAD-680: a progress note is in the award line, in the middle, as the code modes' were: the place PAD-658
+         * moved it to, above the score panel, is where the game letters the words of its own shot screens */
+    } else if (h->noting && words) {
+        /* PAD-662: the award line, clear of the game's screen's words */
+    } else if (h->noting) {
+        /* PAD-658: a corner meter's note goes where the game letters its own mode titles, above the score panel */
+        title = award;
+        line = awardsub;
+        award = awardsub = "";
+    } else if (aside || words) {
         if (!award[0] && !awardsub[0]) {
             award = title;
             awardsub = line;
@@ -1260,7 +1490,7 @@ static KIT_UNUSED void kit_hud_tick(struct kit_hud *h)
     kit_hud_text(h->t_awardsub, h->w_awardsub, sizeof h->w_awardsub, awardsub);
     for (k = 0; k < 3; k++)
         for (j = 0; j < 3; j++)
-            kit_hud_text(h->t_c[k][j], h->w_c[k][j], sizeof h->w_c[k][j], aside || off ? "" : h->want_c[k][j]);
+            kit_hud_text(h->t_c[k][j], h->w_c[k][j], sizeof h->w_c[k][j], aside || words || off ? "" : h->want_c[k][j]);
     low = aside == (int)PM_STOCK_BATTLE;          /* the game's BATTLE badge has the top slot */
     if (h->timer) {
         int up = h->want_timer >= 0 && !low;
@@ -1281,7 +1511,11 @@ static KIT_UNUSED void kit_hud_tick(struct kit_hud *h)
         }
     }
     if (h->gauge) {
-        int up = h->want_gauge >= 0;
+        /* PAD-707 (David: "our rage meter is taking up space that is used for showing high scores for modes"): the
+         * game letters its mode's MODE CHAMPION - HIGH SCORE / YOUR SCORE - top right, where a corner meter is, for as
+         * long as one of its own modes or battles runs (emulator run26: up through a battle, not in plain play) - the
+         * corner meter steps aside then */
+        int up = h->want_gauge >= 0 && !(h->beside && pm_aside());
         if (up != h->gauge_up) { pm_show(h->gauge, up); h->gauge_up = up; }
         if (up) {
             kit_hud_text(h->t_glabel, h->w_glabel, sizeof h->w_glabel, h->want_glabel);

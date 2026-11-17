@@ -43,6 +43,7 @@ def _between(src, start, end):
 _EDGE = r"""
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #define N_SWITCH_IDS 256
 #define SYS_GETTID 224
 static long fake_syscall(long n) { (void)n; return 7; }
@@ -51,7 +52,15 @@ static void say(const char *fmt, ...) { (void)fmt; }
 static int in_game = 1;
 int pm_in_game(void) { return in_game; }
 static volatile unsigned switch_fired[N_SWITCH_IDS];
+static void lit_hold_check(unsigned id) { (void)id; }    /* PAD-503's, not under test here */
+static volatile int att_live;                            /* PAD-641's, not under test here */
+static volatile int gms_live;                            /* PAD-945's, not under test here */
 @EDGE@
+static void att_edge(unsigned id, unsigned level, unsigned flags, unsigned polarity, unsigned mask) {}
+static void gms_edge(unsigned id, unsigned level, unsigned flags, unsigned polarity) {}
+static void coop_edge(unsigned id, unsigned level, unsigned flags, unsigned polarity) {}   /* PAD-1031's */
+static unsigned hide_id;                                 /* PAD-1051: the switch a hider wants (0: none) */
+static int coop_hides(unsigned id) { return hide_id && id == hide_id; }
 
 /* generation B: 0x20-byte records (level byte at +0x18) pointing at 0x28-byte descriptors from +8 */
 static unsigned char recs_b[16][0x20] __attribute__((aligned(8)));
@@ -105,6 +114,7 @@ int main(int argc, char **argv)
     edge.desc_via = gen_a ? -1 : 8;
     edge.flags_at = gen_a ? 0x1e : 0x1a;
     edge.polarity_at = gen_a ? 0x20 : 0x1c;
+    edge_shots = 1;                                  /* switches_arm's: the drain's edges are shots (PAD-645) */
     for (i = 1; i < 16; i++) {
         unsigned flags = i == 5 ? 0x400 : i == 6 ? 0x800 : i == 7 ? 0xc00 : i == 9 ? 0x1400 : 0;
         unsigned pol = i == 7 ? 4 : 0;
@@ -148,7 +158,7 @@ def test_a_switch_edge_is_a_hit_on_the_edge_the_game_acts_on(tmp_path, gen):
 # ---- maps_has across contiguous mappings -------------------------------------------------------------
 def test_a_range_may_cross_contiguous_mappings_never_a_hole(tmp_path):
     src = _src()
-    maps = _between(src, "#define N_MAPS", "/* ---- rule 2:")
+    maps = _between(src, "#define N_MAPS", "#if !PM_A64\n/* ---- rule 2:")   # PAD-1269: rule 2 is Spike 2's
     code = r"""
 #include <stdio.h>
 #include <string.h>

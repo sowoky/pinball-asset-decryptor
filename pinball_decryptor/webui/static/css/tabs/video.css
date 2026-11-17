@@ -47,6 +47,11 @@
 .vid-repcell .vid-rep { flex: 0 1 auto; min-width: 0; }
 .vid-var { flex: none; display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; border-radius: 9px; background: var(--info-soft); color: var(--info); font-size: 12px; line-height: 18px; cursor: default; }
 .vid-var .i { width: 13px; height: 13px; }
+/* PAD-1115: the time a game screen shows the clip for (amber: it freezes on its last frame or is cut) */
+.vid-lencell { display: inline-flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.vid-scr { flex: none; display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; border-radius: 9px; background: var(--info-soft); color: var(--info); font-size: 12px; line-height: 18px; cursor: default; }
+.vid-scr.warn { background: var(--warn-soft); color: var(--warn); }
+.vid-scr .i { width: 13px; height: 13px; }
 
 /* the two players */
 .vid-preview { flex: 0 0 auto; border-top: 1px solid var(--line); padding: 12px 16px 14px; display: flex; flex-direction: column; gap: 10px; }
@@ -150,12 +155,44 @@ html.bp-1020 .vcm-grid.n2, html.bp-1020 .vcm-grid.n3, html.bp-1020 .vcm-grid.n4 
    each mode of a clip two modes share, and the clips the game never plays */
 .vid-card .toolbar .vid-modefilter { flex: 0 1 230px; width: 230px; min-width: 150px; }
 .vid-modes-busy { display: inline-flex; align-items: center; gap: 6px; }
+.vid-modes-why { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .vid-modes-cell { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
 .vid-modes-cell.pair { color: var(--accent); }
 .vid-modes-cell.unplayed, .vid-modes-cell.other { color: var(--ink-3); font-style: italic; }
+.vid-seen-cell { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }   /* PAD-827 */
 .vid-modes .note { align-items: center; }
 .vid-sound-list { margin: 4px 0 2px; padding-left: 18px; }
 .vid-sound-list li { overflow-wrap: anywhere; }
+.vid-sound-list.maybe { list-style: circle; }
+.vid-sound-play { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+  margin-right: 4px; padding: 0; border: 1px solid var(--line); border-radius: 4px; background: transparent;
+  color: var(--ink-2); vertical-align: middle; cursor: pointer; }
+.vid-sound-play:hover { color: var(--ink); background: var(--panel); }
+.vid-sound-play .i { width: 12px; height: 12px; }
+a.vid-sound-go { color: var(--ink); text-decoration: underline dotted; text-underline-offset: 3px; }
+a.vid-sound-go:hover { color: var(--accent); }
+.vid-song-sync { margin: 2px 0 4px; }
+/* PAD-1266 (Ben): a clip's song is one row - label, song(s), the Play-along box */
+.vid-sounds.inline .note { padding: 5px 12px; align-items: center; }
+.vid-sounds.inline .note > .i { margin-top: 0; }
+.vid-song-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; white-space: normal; }
+.vid-song-label { color: var(--ink-2); cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
+.vid-sound-list.inline { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 0; padding: 0; list-style: none; }
+.vid-song-row .vid-song-sync { margin: 0; }
 /* a mode's own row of a clip another mode plays too, under that mode's row */
 .vid-pairmark { color: var(--accent); margin-right: 6px; }
 .vid-rep.follow { color: var(--ink-3); font-style: italic; }
+
+/* PAD-1191 (Ben): a player full screen, as on YouTube - the clip fills the window (the app takes
+   the window full screen with it) and its bar sits along the bottom; a still pointer over a
+   playing clip hides the bar and the pointer.  Under menus (60), toasts and tooltips. */
+.vid-pane.vid-full, .vcm-tile.vid-full { position: fixed; inset: 0; z-index: 58; margin: 0; padding: 0; gap: 0;
+  border: 0; border-radius: 0; box-shadow: none; background: #000; display: flex; flex-direction: column; }
+.vid-full .vid-screen { flex: 1 1 auto; height: auto; min-height: 0; border: 0; border-radius: 0; background: #000; }
+.vid-full .vid-transport { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; padding: 22px 16px 10px;
+  background: linear-gradient(to top, rgba(0, 0, 0, .85), rgba(0, 0, 0, .55) 60%, rgba(0, 0, 0, 0));
+  transition: opacity .25s ease; }
+.vid-full .vid-transport .muted { color: #d0d4d9; }
+.vid-full.vid-idle { cursor: none; }
+.vid-full.vid-idle .vid-screen { cursor: none; }
+.vid-full.vid-idle .vid-transport { opacity: 0; }

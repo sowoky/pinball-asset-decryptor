@@ -30,8 +30,16 @@
 # out to (sudo, unlock-root, reboot, avrdude, timedatectl...) are no-ops
 # first on the game's PATH, logged to $SPK_RIG/shell.log.
 # Switches: sw.py.  Picture: shot.sh.  Stop: killgame.sh.
+#
+# SPK_MACHINE=1 (machine_sim.sh, the multi-boot proof, PAD-980): the game is
+# INSTALLED in the slot's /game ($NV/game/code/...) the way a machine's own
+# update install leaves it, and nothing is bound over /game/code - one file
+# system, as on the cabinet, so the multi-boot launcher's renames between
+# /game/code and /game/pad are the machine's.  <build> still names the stock
+# build the title's rig settings come from.
 set -u
 . "$(dirname "$0")/spkpath.sh"
+ARGS=("$@")             # a start again on the CPU runs this script again
 BUILD=${1:-}; shift 2>/dev/null || true
 VISIBLE=0; AUDIO=0
 while [ $# -gt 0 ]; do
@@ -144,8 +152,8 @@ fi
 echo "$DISP" > "$SPK_RIG/display"
 echo "${W}x${H}" > "$SPK_RIG/window"
 
-if [ $AUDIO = 1 ] && [ -S /mnt/wslg/PulseServer ]; then
-    AUDIO_ENV="PULSE_SERVER=unix:/mnt/wslg/PulseServer"; GODOT_AUDIO=PulseAudio
+if [ $AUDIO = 1 ] && [ -S "$SPK_PULSE" ]; then
+    AUDIO_ENV="PULSE_SERVER=unix:$SPK_PULSE"; GODOT_AUDIO=PulseAudio
 else
     AUDIO_ENV="PULSE_SERVER=unix:/nonexistent SDL_AUDIODRIVER=dummy"; GODOT_AUDIO=Dummy
 fi
@@ -169,16 +177,21 @@ fi
 # drew the game at a crawl on the desktop.  WSL gives Linux the Windows GPU
 # (/dev/dxg + /usr/lib/wsl/lib/libd3d12.so) and Mesa's d3d12 driver renders
 # OpenGL on it - on WSLg's desktop and on a hidden Xvfb alike.  SPK_GL=
-# llvmpipe forces the CPU (a machine without a usable GPU does that anyway:
-# Mesa falls back).  The frame rate: Mesa's HUD samples it, draws nothing
-# (GALLIUM_HUD_VISIBLE=false) and appends it to $SPK_RIG/hud/fps; status.sh
-# reports the latest.
+# llvmpipe forces the CPU.  Mesa does NOT fall back by itself: with d3d12
+# named and a GPU it cannot use, every GL context is refused ("glx: failed
+# to create drisw screen", X_GLXCreateContext BadValue) and the game dies
+# before attract - so a start that died that way runs again on llvmpipe
+# (PAD-917, the end of this script).  The frame rate: Mesa's HUD samples
+# it, draws nothing (GALLIUM_HUD_VISIBLE=false) and appends it to
+# $SPK_RIG/hud/fps; status.sh reports the latest.
 GL=${SPK_GL:-auto}
 if [ "$GL" = auto ]; then
     GL=llvmpipe
     [ -e /dev/dxg ] && [ -e /usr/lib/wsl/lib/libd3d12.so ] && GL=d3d12
 fi
 echo "$GL" > "$SPK_RIG/gl"
+# What a refused GL context leaves in the logs (Mesa/X for Unity, Godot's own).
+SPK_GL_REFUSED='glx: failed|X_GLXCreateContext|libGL error|Unable to create .*context|Your video card drivers seem not to support'
 mkdir -p "$SPK_RIG/hud"; chown "$SPK_USER": "$SPK_RIG/hud"
 GL_ENV="GALLIUM_DRIVER=$GL GALLIUM_HUD=fps GALLIUM_HUD_VISIBLE=false GALLIUM_HUD_PERIOD=1 GALLIUM_HUD_DUMP_DIR=$SPK_RIG/hud"
 # libd3d12 lives in /usr/lib/wsl/lib; it joins $LIBS (a Godot title's
@@ -187,20 +200,39 @@ if [ "$GL" = d3d12 ]; then
     if [ -n "$LIBS" ]; then LIBS="$LIBS:/usr/lib/wsl/lib"; else LIBS="LD_LIBRARY_PATH=/usr/lib/wsl/lib"; fi
 fi
 
+# PAD-1309: the multi-boot launcher puts padmenu.so in front of the game (BACK held 3 s (Hold BACK, back_hold=)
+# restarts the machine into the menu).  A real reboot from the rig is never right, so every
+# run hands it a stand-in that leaves $SPK_RIG/tmp/padmenu.restart (/game/tmp in the run).
+# SPK_MENU_SO=<padmenu.so> with SPK_MENU_PROTO=warden|pinotaur and SPK_MENU_SWITCH=<n>
+# tries the object on any title (no launcher in the way).
+printf '#!/bin/sh\n: > /game/tmp/padmenu.restart\n' > "$SPK_RIG/padmenu_reboot"
+chmod 755 "$SPK_RIG/padmenu_reboot"
+rm -f "$SPK_RIG/tmp/padmenu.restart"
+MENU_PRE=""
+MENU_ENV="CODESELECT_REBOOT=$SPK_RIG/padmenu_reboot"
+if [ -n "${SPK_MENU_SO:-}" ] && [ -f "$SPK_MENU_SO" ]; then
+    cp -f "$SPK_MENU_SO" "$SPK_RIG/padmenu.so" && chmod 755 "$SPK_RIG/padmenu.so"
+    MENU_PRE="$SPK_RIG/padmenu.so:"
+    MENU_ENV="$MENU_ENV PADMENU_PROTO=${SPK_MENU_PROTO:-warden} PADMENU_SWITCH=${SPK_MENU_SWITCH:-94}"
+    echo "run_game.sh: holding BACK ($SPK_MENU_PROTO switch $SPK_MENU_SWITCH) 5 s asks for a restart"
+fi
+
 cat > "$SPK_RIG/ns.sh" <<EOF
 hostname pad-rig-$SPK_SLOT
 mkdir -p /game && mount --bind "$NV/game" /game || exit 1
 mkdir -p /game/code/uptest /game/code/assets /game/logs /game/tmp /game/media \\
     /game/backup /game/update /game/vosk
-mount --bind "$UPTEST" /game/code/uptest
-[ -d "$G/assets" ] && [ "$LAYOUT" = code ] && mount --bind "$G/assets" /game/code/assets
+if [ "${SPK_MACHINE:-0}" != 1 ]; then
+    mount --bind "$UPTEST" /game/code/uptest
+    [ -d "$G/assets" ] && [ "$LAYOUT" = code ] && mount --bind "$G/assets" /game/code/assets
+fi
 for d in logs tmp media backup update; do mount --bind "$SPK_RIG/\$d" /game/\$d; done
 chown "$SPK_USER": /game /game/code /game/vosk
 cd /game/code/uptest || exit 1
 exec runuser -u $SPK_USER -- env -i PATH=$SPK_RIG/bin:/usr/local/bin:/usr/bin:/bin \\
     HOME=$NV/home USER=$SPK_USER LANG=C.UTF-8 DISPLAY=$DISP $AUDIO_ENV \\
     SPK_MARK=$SPK_RIG LP_NUM_THREADS=${SPK_LP_THREADS:-4} $GL_ENV \\
-    SPK_WARDEN=$TTY LD_PRELOAD=$SPK_RIG/spkshim.so $LIBS \\
+    SPK_WARDEN=$TTY LD_PRELOAD=$MENU_PRE$SPK_RIG/spkshim.so $MENU_ENV $LIBS \\
     $RUN
 EOF
 # Detached whole (setsid -f, stdin closed): a child of runuser dies with the
@@ -210,8 +242,8 @@ setsid -f unshare -m -u --propagation private bash "$SPK_RIG/ns.sh" \
 # The app's Volume / Mute, live, as on the AP rig: spkvol.py holds this
 # slot's stream at the level in the control file every Emulate tab writes.
 # It waits for the game, and ends with it.
-if [ $AUDIO = 1 ] && [ -n "${PAD_AUDIO_CTL:-}" ] && [ -S /mnt/wslg/PulseServer ]; then
-    setsid -f python3 "$SPK_TOOLS/spkvol.py" --ctl "$PAD_AUDIO_CTL" --rig "$SPK_RIG" \
+if [ $AUDIO = 1 ] && [ -n "${PAD_AUDIO_CTL:-}" ] && [ -S "$SPK_PULSE" ]; then
+    setsid -f python3 "$SPK_TOOLS/spkvol.py" --ctl "$PAD_AUDIO_CTL" --rig "$SPK_RIG" --pulse "unix:$SPK_PULSE" \
         < /dev/null >> "$SPK_RIG/spkvol.log" 2>&1
 fi
 for _ in $(seq 1 50); do
@@ -230,7 +262,9 @@ for i in $(seq 1 3000); do
 done
 if spk_game_alive && spk_attract; then
     echo "Ready: $(basename "$BUILD"), slot $SPK_SLOT, display $DISP"
-    rigboard_post spooky "$SPK_SLOT" "$(spk_game_pid)" "$(basename "$BUILD")" "${PAD_TITLE:-$(tget name)}" "$VISIBLE" "$AUDIO"
+    # the rig folder rides the record (PAD-952): a Visual Pinball table's
+    # controller finds the board's vpxhw.state there (spkbridge.py)
+    RIGBOARD_ROOT=$SPK_RIG rigboard_post spooky "$SPK_SLOT" "$(spk_game_pid)" "$(basename "$BUILD")" "${PAD_TITLE:-$(tget name)}" "$VISIBLE" "$AUDIO"
     # The playfield window's keys in the game's own window too (PAD-313),
     # except the keys the game already acts on there (spktitles own_keys):
     # on the desktop (PAD_GAMEKEYS=1 forces it on a hidden run, for tests).
@@ -242,6 +276,15 @@ if spk_game_alive && spk_attract; then
             --skip "$(tget own_keys 2>/dev/null)" \
             < /dev/null > "$SPK_RIG/gamekeys.log" 2>&1
     fi
+elif [ "$GL" = d3d12 ] && [ "${SPK_GL:-auto}" = auto ] && ! spk_game_alive &&
+     grep -qsE "$SPK_GL_REFUSED" "$SPK_RIG/player.log" "$SPK_RIG/game.out"; then
+    # The GPU path refused a GL context (PAD-917: Evil Dead and Ultraman on
+    # a PC whose d3d12 would not start, every start "exit 6").  The GPU is
+    # only faster; the CPU still plays.  Once: SPK_GL=llvmpipe is no "auto".
+    echo "run_game.sh: the GPU renderer (d3d12) would not start on this PC; starting again on the CPU (llvmpipe):" >&2
+    grep -hsE "$SPK_GL_REFUSED" "$SPK_RIG/player.log" "$SPK_RIG/game.out" | head -n 3 >&2
+    bash "$SPK_TOOLS/killgame.sh" >/dev/null 2>&1
+    SPK_GL=llvmpipe exec bash "$SPK_TOOLS/run_game.sh" "${ARGS[@]}"
 else
     echo "run_game.sh: the game did not reach attract:" >&2
     # each log on its own: `tail -20 a b` is refused outright ("option used

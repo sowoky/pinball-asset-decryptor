@@ -124,7 +124,7 @@ _LUMA = (0.299, 0.587, 0.114)
 #: so this is a starting point to tune against the test card, not a
 #: calibration.
 DEFAULT_TEXT = """\
-# Pinball Asset Decryptor colour profile
+# Pinball Asset Decryptor color profile
 #
 # Corrects colors for a pinball machine's screen.  Load it on a project's
 # Color profile tab and every build of that project applies it (on Spike 2,
@@ -133,9 +133,9 @@ DEFAULT_TEXT = """\
 # Edit the numbers, save, and Load it again.  Three numbers = red green blue.
 #
 #   gamma       above 1 darkens the mid tones, below 1 brightens them
-#   gain        multiplies the channel (0.9 = 10% less of that colour)
+#   gain        multiplies the channel (0.9 = 10% less of that color)
 #   lift        raises the darkest values (0.05 = black becomes 13 of 255)
-#   saturation  1 = unchanged, below 1 = less colour, above 1 = more
+#   saturation  1 = unchanged, below 1 = less color, above 1 = more
 #   brightness  1 = unchanged, 1.2 = 20% brighter, 0.8 = 20% darker
 #   contrast    1 = unchanged, above 1 = more, below 1 = less
 #
@@ -623,7 +623,7 @@ class Profile:
         return out
 
     def label(self):
-        return self.name or "colour profile"
+        return self.name or "color profile"
 
     # -- the maths ----------------------------------------------------------
     def matrix(self):
@@ -1251,10 +1251,11 @@ def file_profile(assets_dir, kind, rel):
     return own if own is not None else asset_profile(assets_dir)
 
 
-def asset_resolver(assets_dir, data=None):
+def asset_resolver(assets_dir, data=None, identity=False):
     """``fn(kind, rel) -> Profile or None``: what is baked into file *rel*
     with its switch on (its own profile, else the project's), ``None`` where
-    that changes nothing.  The sidecar is read once."""
+    that changes nothing (*identity*: that profile too, No change, PAD-528).
+    The sidecar is read once."""
     if not assets_dir:
         return lambda kind, rel: None
     owns = _own_parsed(assets_dir, data)
@@ -1262,7 +1263,8 @@ def asset_resolver(assets_dir, data=None):
 
     def _shared():
         if not shared:
-            shared.append(asset_active(assets_dir))
+            shared.append(asset_profile(assets_dir) if identity
+                          else asset_active(assets_dir))
         return shared[0]
 
     def _rec():
@@ -1276,7 +1278,7 @@ def asset_resolver(assets_dir, data=None):
             prof = _rec()
         if prof is None:
             return _shared()
-        return None if prof.is_identity() else prof
+        return None if prof.is_identity() and not identity else prof
     return resolve
 
 
@@ -1445,6 +1447,51 @@ def drop_text_slots(assets_dir):
     data = staged_changes.load(assets_dir)
     if data.pop(TEXT_SLOTS_KEY, None) is not None:
         staged_changes.save(assets_dir, data)
+
+
+#: PAD-525 (DragonRR): the game's own pictures' and lines' switches while the
+#: unlock box is off, ``{"images": {rel: bool}, "text": {text_rel: bool}}``,
+#: so ticking it again puts them back (he had Black and white on 6,668 of
+#: them, and one untick to try something lost every one).
+LOCKED_SWITCHES_KEY = "color_locked_switches"
+
+
+def lock_switches(data, images):
+    """The unlock box went off: in sidecar *data* (changed in place), the
+    game's own pictures' switches *images* (``{rel: bool}``, taken out of
+    their slots by the caller) and the game lines' switches are put aside for
+    the next time it is ticked.  Locked, none of them counts."""
+    kept = {}
+    images = {str(r): bool(v) for r, v in (images or {}).items()}
+    if images:
+        kept["images"] = images
+    lines = data.pop(TEXT_SLOTS_KEY, None)
+    if isinstance(lines, dict) and lines:
+        kept["text"] = {str(r): bool(v) for r, v in lines.items()}
+    if kept:
+        data[LOCKED_SWITCHES_KEY] = kept
+    else:
+        data.pop(LOCKED_SWITCHES_KEY, None)
+
+
+def unlock_switches(data):
+    """The unlock box was ticked: the game lines' switches :func:`lock_switches`
+    put aside go back into sidecar *data* (changed in place); returns the game
+    pictures' (``{rel: bool}``) for the caller to put back where it keeps them
+    (a picture picked or built since is the user's own and keeps its own)."""
+    kept = data.pop(LOCKED_SWITCHES_KEY, None)
+    if not isinstance(kept, dict):
+        return {}
+    lines = kept.get("text")
+    if isinstance(lines, dict) and lines:
+        m = data.get(TEXT_SLOTS_KEY)
+        m = dict(m) if isinstance(m, dict) else {}
+        for r, v in lines.items():
+            m.setdefault(str(r), bool(v))
+        data[TEXT_SLOTS_KEY] = m
+    images = kept.get("images")
+    return ({str(r): bool(v) for r, v in images.items()}
+            if isinstance(images, dict) else {})
 
 
 def text_lines_on(assets_dir, data=None):
@@ -2190,8 +2237,8 @@ EXTRAS_HELP = """
 #   range = hue width soft shift saturation brightness protect
 #           one band of hues (degrees: 0 red, 120 green, 240 blue), its
 #           width and soft edge, the hue shift, saturation and brightness
-#           (1 = unchanged) and how much colour a pixel needs before it is
-#           touched (0.15 = greys and near-greys left alone)
+#           (1 = unchanged) and how much color a pixel needs before it is
+#           touched (0.15 = grays and near-grays left alone)
 #   curve_rgb / curve_red / curve_green / curve_blue = in out, in out, ...
 #           points 0..255; curve_rgb first, then each color's own
 """
@@ -2339,7 +2386,7 @@ SCREEN_PRESET_TIPS = {
         "turn richer, red sits a little low. A phone photo is not a color "
         "meter: nudge it until Scenes matches your machine."),
     "none": "The machine shows colors exactly as your PC does.",
-    "bw": "A screen that shows everything in greys, the game's own art too.",
+    "bw": "A screen that shows everything in grays, the game's own art too.",
     "follow": ("The individual files profile, undone: the screen that "
                "correction was made for."),
 }
@@ -2347,8 +2394,8 @@ SCREEN_PRESET_TIPS = {
 PRESET_TIPS = {
     "recommended": (
         "Made from photos of a display test card on a real Stern Spike 2 "
-        "machine (a Godzilla). The card's grey steps and color patches "
-        "were measured in the photos: a mid grey (128, 128, 128) came out "
+        "machine (a Godzilla). The card's gray steps and color patches "
+        "were measured in the photos: a mid gray (128, 128, 128) came out "
         "around (164, 187, 226), far too bright and most of all in blue, "
         "then green, while white stayed white. This profile darkens each "
         "color's middle shades to pull that back (red 10%, green 20%, blue "
@@ -2356,7 +2403,7 @@ PRESET_TIPS = {
         "photo is not a color meter, so treat it as a starting point and "
         "tune it against your own machine."),
     "none": "Leaves every color as you made it.",
-    "bw": ("Every picture and video in greys, for a black-and-white "
+    "bw": ("Every picture and video in grays, for a black-and-white "
            "playfield edition. Nothing else is changed."),
 }
 

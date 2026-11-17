@@ -43,6 +43,13 @@ def _require_engine():
 _CARD_CLASS = re.compile(r"(?<![\w.\\/-])(8|16|32)G(?![\w\\/-]|\.\w)")
 
 
+def _not_a_card(path, words):
+    """A Detect refusal's words: the plain ones when *path* is a disk tool's
+    backup of a card (a Macrium ``.mrimgx``, PAD-659), else *words*."""
+    from ...core.backup_image import reason
+    return reason(path) or words
+
+
 def card_class_words(text):
     """*text*, a card_size.py or engine sentence about the SD card size a
     build is for, with each card class code ("16G") in the words the Write
@@ -84,6 +91,23 @@ def _category_flags(cats):
         do_images=bool(cats.get("images", True)),
         do_text=bool(cats.get("text", True)),
     )
+
+
+def _read_back(card, output_dir, flags, log, parts=None, open_disk=None):
+    """PAD-553: the music modes and random clips a card this app wrote carries, back in the
+    project an extract of it made (:func:`.media_share.readback`). Never stops the extract."""
+    if not (flags.get("do_audio") or flags.get("do_video")):
+        return
+    try:
+        from . import media_share, mode_from_card
+        try:
+            padmode = mode_from_card.read_padmode(card, parts=parts, open_disk=open_disk)
+        except Exception:                               # noqa: BLE001 - no system partition to read
+            padmode = {}
+        media_share.readback(card, output_dir, log, padmode=padmode)
+    except Exception as e:                              # noqa: BLE001
+        log("Music modes and random clips: could not be read back from this card (%s)." % e,
+            "warning")
 
 
 def _extract_summary(n, output_dir, flags, *, source=""):
@@ -274,10 +298,7 @@ def _audio_mode_note(mode):
     kind, why = mode
     if kind == "blip-free":
         return ("\n\nBlip-free callouts: applied — replaced sounds play your "
-                "audio for their whole length. This setting is experimental "
-                "and not known to boot: if the machine loops through its "
-                "startup screen, clear the box in Advanced Audio Options and "
-                "rebuild the card from your original image.")
+                "audio for their whole length.")
     return ("\n\nBlip-free callouts: NOT applied — %s. Each replaced sound "
             "keeps a brief scrap of the original at two points in its slot, "
             "which can be heard as a quick double click on quiet "
@@ -324,12 +345,12 @@ class SternExtractPipeline(BasePipeline):
         self._log("Detecting Stern Spike card...", "info")
         key = detect_game(self.input_path)
         if key is None:
-            raise PipelineError(
-                "Detect",
+            raise PipelineError("Detect", _not_a_card(
+                self.input_path,
                 "Not a recognized Stern Spike card image (need a raw .img/.bin "
                 "with the Spike partition layout).\n\n"
                 "If the file was just copied here, the copy may still have "
-                "been in progress — wait for it to finish, then try again.")
+                "been in progress — wait for it to finish, then try again."))
         self._log(f"Detected: {display_for_key(key, self.input_path)}", "success")
         self._check_cancel()
 
@@ -373,6 +394,7 @@ class SternExtractPipeline(BasePipeline):
                            progress_cb=self._progress,
                            cancel=lambda: self._cancelled)
         self._check_cancel()
+        _read_back(self.input_path, self.output_dir, flags, self._log)
         self._done(True, _extract_summary(n, self.output_dir, flags))
 
 
@@ -431,7 +453,8 @@ class SternWritePipeline(BasePipeline):
         self._set_phase(0)  # Detect
         key = detect_game(self.original_path)
         if key is None:
-            raise PipelineError("Detect", "Original is not a Spike card image.")
+            raise PipelineError("Detect", _not_a_card(
+                self.original_path, "Original is not a Spike card image."))
         # A multi-boot original builds a multi-boot card with its FIRST image
         # changed and the rest copied through (PAD-122) — say so in the log
         # the user keeps, not only in the confirm they clicked past.
@@ -466,6 +489,11 @@ class SternWritePipeline(BasePipeline):
                 self._log(msg, "error")
                 self.card_size_refusal = e
             raise PipelineError("Re-encode", msg) from e
+        except getattr(engine, "SoundRoomError", ()) as e:
+            # (PAD-880: so is the longer sounds' refusal, the same way; a stand-in
+            # engine without the class matches nothing here)
+            self._log(str(e), "error")
+            raise PipelineError("Re-encode", str(e)) from e
         self._set_phase(3)  # Patch image
         # Item 149: the modes this build put on the card, from its record.
         try:
@@ -556,6 +584,8 @@ class SternDirectSsdExtractPipeline(BasePipeline):
                            progress_cb=self._progress,
                            cancel=lambda: self._cancelled)
         self._check_cancel()
+        _read_back(self.device_path, self.output_dir, flags, self._log, parts=parts,
+                   open_disk=lambda: RawDeviceFile(self.device_path, writable=False))
         self._done(True, _extract_summary(n, self.output_dir, flags,
                                           source=" from the SD card"))
 
@@ -661,7 +691,7 @@ class SternFlashImagePipeline(BasePipeline):
 
     def __init__(self, image_path, device_path,
                  log_cb, phase_cb, progress_cb, done_cb, menu_only=False,
-                 verify=True):
+                 verify=True, keep_data=False):
         super().__init__(log_cb, phase_cb, progress_cb, done_cb)
         self.image_path = image_path
         self.device_path = device_path
@@ -672,6 +702,10 @@ class SternFlashImagePipeline(BasePipeline):
         #: machine's own /data and /dump.  See rawdevice.flash_menu_to_device,
         #: which refuses outright if the card is not that card.
         self.menu_only = bool(menu_only)
+        #: Write the whole image but keep the card's own /data - the
+        #: machine's settings, audits and high scores (PAD-736).  See
+        #: rawdevice.card_data_overlay, which refuses a card with none.
+        self.keep_data = bool(keep_data) and not self.menu_only
 
     def _run(self):
         self._set_phase(0)  # Check card
@@ -696,17 +730,18 @@ class SternFlashImagePipeline(BasePipeline):
                 log=self._log, progress=self._progress,
                 cancel=lambda: self._cancelled, verify=self.verify,
                 on_verify_start=lambda: self._set_phase(2),  # Verify card
-                menu_only=self.menu_only)
+                menu_only=self.menu_only,
+                **({"keep_data": True} if self.keep_data else {}))
         except FlashCancelled:
             # The card is now partially written — surface it as a cancel, but
             # make clear the card is no longer usable until re-flashed.  A
             # menu write leaves the GAMES intact whatever happens: only p2 is
             # half written, and writing the menu again finishes the job.
             self._log(
-                "Menu write cancelled — the card's menu is half written; "
+                "Menu write canceled — the card's menu is half written; "
                 "write it again. The games on the card are untouched."
                 if self.menu_only else
-                "Flash cancelled — the card is incomplete and must be "
+                "Flash canceled — the card is incomplete and must be "
                 "re-flashed before use.", "error")
             self._check_cancel()   # raises PipelineError("Cancelled", ...)
             return
@@ -719,6 +754,9 @@ class SternFlashImagePipeline(BasePipeline):
                           "the games and the machine's own settings and "
                           "scores were left alone."
                           if self.menu_only else
+                          "Flashed %s onto the SD card (%s), keeping the "
+                          "machine's settings, audits and high scores."
+                          if self.keep_data else
                           "Flashed %s onto the SD card (%s).")
                    % (format_size(written), self.device_path))
 
@@ -731,9 +769,11 @@ class SternFlashImagePipeline(BasePipeline):
 # numpy (for the Write's resample/level fit).
 
 class Spike1ExtractPipeline(BasePipeline):
-    """Decode every sound in a Spike 1 card image (.iso) to a per-sound WAV."""
+    """Decode every sound in a Spike 1 card image (.iso) to a per-sound WAV,
+    and every DMD picture, font glyph and animation frame to a PNG."""
 
-    PHASES = ("Detect", "Locate partitions", "Decode audio", "Checksums")
+    PHASES = ("Detect", "Locate partitions", "Decode audio",
+              "Decode pictures", "Checksums")
 
     def __init__(self, input_path, output_dir,
                  log_cb, phase_cb, progress_cb, done_cb,
@@ -741,6 +781,7 @@ class Spike1ExtractPipeline(BasePipeline):
         super().__init__(log_cb, phase_cb, progress_cb, done_cb)
         self.input_path = input_path
         self.output_dir = output_dir
+        self.extract_categories = extract_categories
         self.duration_names = duration_names
 
     def _run(self):
@@ -752,12 +793,12 @@ class Spike1ExtractPipeline(BasePipeline):
         self._log("Detecting Stern Spike 1 card...", "info")
         key = detect_spike1_game(self.input_path)
         if key is None:
-            raise PipelineError(
-                "Detect",
+            raise PipelineError("Detect", _not_a_card(
+                self.input_path,
                 "Not a recognized Stern Spike 1 card image (need a raw "
                 ".iso/.img with the Spike 1 partition layout).\n\n"
                 "If the file was just copied here, the copy may still have "
-                "been in progress — wait for it to finish, then try again.")
+                "been in progress — wait for it to finish, then try again."))
         self._log("Detected: %s"
                   % spike1_display_for_key(key, self.input_path), "success")
         self._check_cancel()
@@ -774,6 +815,7 @@ class Spike1ExtractPipeline(BasePipeline):
         self._check_cancel()
 
         os.makedirs(self.output_dir, exist_ok=True)
+        flags = _category_flags(self.extract_categories)
         try:
             result = spike1.extract_all(
                 self.input_path, parts, self.output_dir,
@@ -781,12 +823,14 @@ class Spike1ExtractPipeline(BasePipeline):
                 progress=self._progress,
                 cancel=lambda: self._cancelled,
                 phase=self._set_phase,
-                duration_names=self.duration_names)
+                duration_names=self.duration_names,
+                do_text=flags["do_text"],
+                do_images=flags["do_images"])
         except spike1.Spike1Error as e:
             raise PipelineError("Decode audio", str(e))
         self._check_cancel()
 
-        self._set_phase(3)  # Checksums
+        self._set_phase(4)  # Checksums
         discard_snapshots(self.output_dir)
         self._log("Generating checksums...", "info")
         self._progress(0, 0, "Generating checksums...")
@@ -794,11 +838,17 @@ class Spike1ExtractPipeline(BasePipeline):
                            progress_cb=self._progress,
                            cancel=lambda: self._cancelled)
         self._check_cancel()
+        pics = result.get("pictures")
+        pictures = ""
+        if pics:
+            pictures = (", %d DMD picture(s), %d font glyph(s) and %d "
+                        "animation frame(s) as PNGs"
+                        % (pics["pictures"], pics["glyphs"], pics["frames"]))
         self._done(True,
                    "Extracted %d Spike 1 sound(s) (%d WAV(s), %.1f minutes "
-                   "of audio) -> %s"
+                   "of audio)%s -> %s"
                    % (result["sounds"], result["tracks"],
-                      result["seconds"] / 60.0, self.output_dir))
+                      result["seconds"] / 60.0, pictures, self.output_dir))
 
 
 class Spike1WritePipeline(BasePipeline):
@@ -824,8 +874,8 @@ class Spike1WritePipeline(BasePipeline):
 
         self._set_phase(0)  # Detect
         if detect_spike1_game(self.original_path) is None:
-            raise PipelineError(
-                "Detect", "Original is not a Spike 1 card image.")
+            raise PipelineError("Detect", _not_a_card(
+                self.original_path, "Original is not a Spike 1 card image."))
         self._check_cancel()
 
         self._set_phase(1)  # Stage (diff vs baseline happens inside)
@@ -844,9 +894,17 @@ class Spike1WritePipeline(BasePipeline):
         skipped = ""
         if result["skipped"]:
             skipped = " (%d skipped — see log)" % len(result["skipped"])
+        parts = []
         if result["audio"]:
-            summary = "Wrote %d replaced sound(s)%s to %s" \
-                % (result["audio"], skipped, self.output_path)
+            parts.append("%d replaced sound(s)" % result["audio"])
+        if result.get("images"):
+            parts.append("%d DMD picture(s)" % result["images"])
+        if result.get("text"):
+            parts.append("%d line(s) of text" % result["text"])
+        if parts:
+            what = parts[0] if len(parts) == 1 else \
+                ", ".join(parts[:-1]) + " and " + parts[-1]
+            summary = "Wrote %s%s to %s" % (what, skipped, self.output_path)
         else:
             summary = ("No changed audio found — %s is an unmodified copy "
                        "of the original image%s" % (self.output_path, skipped))
@@ -895,6 +953,316 @@ class Spike1RevertPipeline(BasePipeline):
             raise PipelineError("Read source", str(e))
         self._set_phase(1)  # Restore
         msg = "Restored %d original file(s) from the card." % len(reverted)
+        if failed:
+            msg += (" %d could not be restored (re-extract to reset those)."
+                    % len(failed))
+        self._done(True, msg)
+
+
+# --------------------------------------------------------------------------
+# SAM (2006-2014 DMD generation)
+# --------------------------------------------------------------------------
+# A SAM game is one .bin code update; its sounds are IMA ADPCM samples the
+# game's own script engine plays (sam_audio.py, pinmame_classic/sam_sound.py),
+# so Extract and Write need nothing but numpy.
+
+def _sam_game_line(path):
+    from ..pinmame_classic import sam
+    m = sam.identify(path)
+    if m is None:
+        return None
+    info = sam.SAM_GAME_DB[m.key]
+    return "%s (%s)" % (info["display"], m.title if m.exact
+                        else "a version PinMAME has no copy of")
+
+
+def _sam_extracted(result, output_dir):
+    """An extract's summary line (whole sentences: the page translates
+    each as one)."""
+    minutes = result["seconds"] / 60.0
+    pics = result.get("pictures")
+    if pics:
+        line = ("Extracted %d SAM sound(s) (%.1f minutes of audio), %d "
+                "picture(s) and %d font glyph(s) in %d font(s) -> %s"
+                % (result["samples"], minutes, pics["pictures"],
+                   pics["glyphs"], pics["fonts"], output_dir))
+    else:
+        line = ("Extracted %d SAM sound(s) (%.1f minutes of audio) -> %s"
+                % (result["samples"], minutes, output_dir))
+    if result.get("frames"):
+        line += ("\nAnd %d DMD animation frame(s), in animations/."
+                 % result["frames"])
+    if result.get("songs"):
+        line += ("\nAnd %d whole song(s), stitched from their pieces, in "
+                 "music/." % result["songs"])
+    return line
+
+
+class SamExtractPipeline(BasePipeline):
+    """Decode every sound in a SAM code update to a per-sound WAV, every
+    still picture and font glyph to a PNG (PAD-583), and every DMD
+    animation frame to a PNG (PAD-584)."""
+
+    PHASES = ("Detect", "Decode audio", "Decode pictures",
+              "Decode animations", "Checksums")
+
+    def __init__(self, input_path, output_dir,
+                 log_cb, phase_cb, progress_cb, done_cb,
+                 extract_categories=None, duration_names=False):
+        super().__init__(log_cb, phase_cb, progress_cb, done_cb)
+        self.input_path = input_path
+        self.output_dir = output_dir
+        self.duration_names = duration_names
+
+    def _extract(self):
+        """Phases 0-3; returns the engines' summary (``pictures`` is None
+        when the file's pictures can't be read, ``frames`` 0 when its
+        animations can't: the sounds still are)."""
+        from . import sam_anim_assets, sam_audio, sam_images
+
+        self._set_phase(0)  # Detect
+        game = _sam_game_line(self.input_path)
+        if game is None:
+            raise PipelineError(
+                "Detect",
+                "Not a Stern SAM game file (the .bin code update, or a zip "
+                "holding one).")
+        self._log("Detected: SAM, %s" % game, "success")
+        self._check_cancel()
+
+        self._set_phase(1)  # Decode audio
+        os.makedirs(self.output_dir, exist_ok=True)
+        log = lambda msg, level="info": self._log(msg, level)  # noqa: E731
+        try:
+            result = sam_audio.extract_all(
+                self.input_path, self.output_dir, log=log,
+                progress=self._progress,
+                cancel=lambda: self._cancelled,
+                duration_names=self.duration_names)
+        except sam_audio.SamAudioCancelled:
+            self._cancelled = True
+            self._check_cancel()   # raises PipelineError("Cancelled", ...)
+            raise
+        except sam_audio.SamAudioError as e:
+            raise PipelineError("Decode audio", str(e))
+        self._check_cancel()
+
+        self._set_phase(2)  # Decode pictures
+        data = None
+        try:
+            data, _match = sam_audio.read_image(self.input_path)
+            result["pictures"] = sam_images.extract_all(
+                data, self.output_dir, log=log, progress=self._progress,
+                cancel=lambda: self._cancelled)
+        except sam_images.SamImagesCancelled:
+            self._cancelled = True
+            self._check_cancel()
+            raise
+        except (sam_images.SamImagesError, sam_audio.SamAudioError) as e:
+            self._log("  ! %s - extracting the sounds only" % e, "warning")
+            result["pictures"] = None
+        self._check_cancel()
+
+        self._set_phase(3)  # Decode animations
+        result["frames"] = 0
+        if data is not None:
+            try:
+                result["frames"] = sam_anim_assets.extract_all(
+                    data, self.output_dir, log=log, progress=self._progress,
+                    cancel=lambda: self._cancelled)
+            except Exception as e:                       # noqa: BLE001
+                self._check_cancel()   # a cancel raises PipelineError
+                self._log("  ! %s - the animations are left out" % e,
+                          "warning")
+        return result
+
+    def _run(self):
+        result = self._extract()
+        self._check_cancel()
+        self._set_phase(4)  # Checksums
+        discard_snapshots(self.output_dir)
+        self._log("Generating checksums...", "info")
+        self._progress(0, 0, "Generating checksums...")
+        generate_checksums(self.output_dir, log_cb=self._log,
+                           progress_cb=self._progress,
+                           cancel=lambda: self._cancelled)
+        self._check_cancel()
+        self._done(True, _sam_extracted(result, self.output_dir))
+
+
+class SamExtractPlusCapturePipeline(BasePipeline):
+    """The sounds, then the PinMAME capture of the DMD animations, into the
+    same folder (the Extract tab's Basic + Capture boxes both ticked).  The
+    capture's own last step checksums the whole folder, WAVs included."""
+
+    PHASES = ("Detect", "Decode audio", "Decode pictures",
+              "Decode animations", "Probe libpinmame",
+              "Capture (attract mode)", "Segment + render", "Cleanup")
+
+    def __init__(self, input_path, output_dir,
+                 log_cb, phase_cb, progress_cb, done_cb, **capture_kwargs):
+        super().__init__(log_cb, phase_cb, progress_cb, done_cb)
+        self.input_path = input_path
+        self.output_dir = output_dir
+        self.capture_kwargs = capture_kwargs
+        self._inner = None
+
+    def cancel(self):
+        super().cancel()
+        if self._inner is not None:
+            self._inner.cancel()
+
+    # run(), not _run(): the capture pipeline fires the one done_cb.
+    def run(self):
+        try:
+            self._do_work()
+        except PipelineError as e:
+            self._done(False, e.message)
+        except Exception as e:
+            self._done(False, "Unexpected error: %s" % e)
+
+    def _do_work(self):
+        from ..pinmame_classic import capture as _capture
+
+        sounds = SamExtractPipeline(
+            self.input_path, self.output_dir, self._log, self._set_phase,
+            self._progress, lambda ok, msg: None)
+        self._inner = sounds
+        result = sounds._extract()
+        self._inner = None
+        self._check_cancel()
+        head = ("Sounds: %d WAV(s), %.1f minutes of audio, in audio/.\n"
+                % (result["samples"], result["seconds"] / 60.0))
+        if result.get("songs"):
+            head += ("Music: %d whole song(s), stitched from their pieces, "
+                     "in music/.\n" % result["songs"])
+        pics = result.get("pictures")
+        if pics:
+            head += ("Pictures: %d, and %d font glyph(s) in %d font(s), in "
+                     "images/.\n" % (pics["pictures"], pics["glyphs"],
+                                     pics["fonts"]))
+        if result.get("frames"):
+            head += ("Animations: %d frame(s) as PNGs, in animations/.\n"
+                     % result["frames"])
+        head += "\n"
+
+        def remap(i):
+            # the capture's Detect is ours; its later phases follow ours
+            if i:
+                self._set_phase(i + 3)
+
+        cap = _capture.SamCapturePipeline(
+            self.input_path, self.output_dir, self._log, remap,
+            self._progress, lambda ok, msg: self._done(ok, head + msg),
+            **self.capture_kwargs)
+        self._inner = cap
+        cap.run()
+
+
+class SamWritePipeline(BasePipeline):
+    """Re-encode edited WAVs into a copy of a SAM code update: each fit to
+    its slot's rate and length and loudness-matched to the original -- and
+    the edited pictures, each fit to its own (PAD-583) -- and the file's
+    checksums moved with it, so it updates a machine by USB."""
+
+    PHASES = ("Detect", "Stage", "Encode audio", "Write file")
+
+    def __init__(self, original_path, assets_dir, output_path,
+                 log_cb, phase_cb, progress_cb, done_cb):
+        super().__init__(log_cb, phase_cb, progress_cb, done_cb)
+        self.original_path = original_path
+        self.assets_dir = assets_dir
+        self.output_path = output_path
+
+    def _run(self):
+        from . import sam_audio
+
+        self._set_phase(0)  # Detect
+        game = _sam_game_line(self.original_path)
+        if game is None:
+            raise PipelineError(
+                "Detect", "Original is not a Stern SAM game file.")
+        self._log("Original: SAM, %s" % game, "info")
+        self._check_cancel()
+
+        self._set_phase(1)  # Stage (diff vs baseline happens inside)
+        try:
+            result = sam_audio.write_image(
+                self.original_path, self.assets_dir, self.output_path,
+                log=lambda msg, level="info": self._log(msg, level),
+                progress=self._progress,
+                cancel=lambda: self._cancelled,
+                phase=self._set_phase)
+        except sam_audio.SamAudioCancelled:
+            self._cancelled = True
+            self._check_cancel()   # raises PipelineError("Cancelled", ...)
+            return
+        except sam_audio.SamAudioError as e:
+            raise PipelineError("Write file", str(e))
+        skipped = ""
+        if result["skipped"]:
+            skipped = " (%d skipped - see log)" % len(result["skipped"])
+        sounds, pictures = result["audio"], result.get("images", 0)
+        frames = result.get("animations", 0)
+        usb = ("  Copy it to a USB stick and update the game from its service "
+               "menu, the same way as Stern's own file.")
+        # whole sentences, each its own in the translations
+        if sounds and pictures:
+            summary = ("Wrote %d replaced sound(s) and %d replaced picture(s)"
+                       "%s to %s." % (sounds, pictures, skipped,
+                                      self.output_path))
+        elif sounds:
+            summary = ("Wrote %d replaced sound(s)%s to %s."
+                       % (sounds, skipped, self.output_path))
+        elif pictures:
+            summary = ("Wrote %d replaced picture(s)%s to %s."
+                       % (pictures, skipped, self.output_path))
+        elif frames:
+            summary = ("Wrote %d animation frame(s)%s to %s."
+                       % (frames, skipped, self.output_path))
+        else:
+            summary = None
+        if summary is None:
+            summary = ("No changed audio, pictures or animations found - %s "
+                       "is an unmodified copy of the original%s"
+                       % (self.output_path, skipped))
+        else:
+            if frames and (sounds or pictures):
+                summary += "  And %d animation frame(s)." % frames
+            summary += usb
+        self._done(True, summary)
+
+
+class SamRevertPipeline(BasePipeline):
+    """Re-decode pristine WAVs for specific slots from the source file - the
+    no-``.orig``-snapshot Revert fallback."""
+
+    def __init__(self, source, assets_dir, rels,
+                 log_cb, phase_cb, progress_cb, done_cb,
+                 is_device=False, partition_override=None):
+        super().__init__(log_cb, phase_cb, progress_cb, done_cb)
+        self.source = source
+        self.assets_dir = assets_dir
+        self.rels = list(rels)
+
+    def _run(self):
+        from . import sam_audio
+
+        self._set_phase(0)  # Read source
+        if not self.rels:
+            self._done(True, "Nothing to restore from the source file.")
+            return
+        try:
+            reverted, failed = sam_audio.revert_assets(
+                self.source, self.assets_dir, self.rels,
+                log=lambda msg, level="info": self._log(msg, level),
+                progress=self._progress,
+                cancel=lambda: self._cancelled)
+        except sam_audio.SamAudioError as e:
+            raise PipelineError("Read source", str(e))
+        self._set_phase(1)  # Restore
+        msg = "Restored %d original file(s) from the game file." \
+            % len(reverted)
         if failed:
             msg += (" %d could not be restored (re-extract to reset those)."
                     % len(failed))

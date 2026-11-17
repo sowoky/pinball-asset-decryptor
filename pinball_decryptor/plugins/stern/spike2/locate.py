@@ -81,11 +81,23 @@ class _FwView:
 # instruction / const primitives
 # --------------------------------------------------------------------------
 def _decode_movw_movt(w):
-    """ARM A1 MOVW/MOVT -> ('movw'|'movt', Rd, imm16), else None."""
+    """ARM A1 MOVW/MOVT -> ('movw'|'movt', Rd, imm16), else None.
+
+    A ``mov rd, #imm`` (rotated immediate, no S) whose value fits 16 bits
+    reads as a ``movw``: the compiler picks it for a low half it can encode
+    that way, and a ``movt`` after it builds the constant just the same
+    (Avengers Pro 1.10's sound-bank CRC seed: ``mov r0,#0x3940 ; movt
+    r0,#0xf148``)."""
     if (w & 0x0FF00000) == 0x03000000:
         return ("movw", (w >> 12) & 0xF, ((w >> 4) & 0xF000) | (w & 0xFFF))
     if (w & 0x0FF00000) == 0x03400000:
         return ("movt", (w >> 12) & 0xF, ((w >> 4) & 0xF000) | (w & 0xFFF))
+    if (w & 0x0FFF0000) == 0x03A00000:
+        rot = ((w >> 8) & 0xF) * 2
+        imm = w & 0xFF
+        v = ((imm >> rot) | (imm << (32 - rot))) & 0xFFFFFFFF if rot else imm
+        if v <= 0xFFFF:
+            return ("movw", (w >> 12) & 0xF, v)
     return None
 
 
@@ -687,6 +699,61 @@ def masterdir_crypto(raw=None, game_real_path=None, md_start=None):
         return None
 
 
+def find_band_codecs(fw, dispatch):
+    """Where the codec dispatch keeps a MULTI-BAND record's render functions
+    (PAD-637), as ``{"BAND_RENDER": off}``: the stereo function of scale ``S``
+    is the pointer at ``dispatch + off + 0x40 * S``, the mono one 4 bytes on.
+    ``None`` when the selector isn't found.
+
+    The voice setup picks a sound's codec from its obj: chan (+0x1b), bands
+    (+0x1c) and scale (+0x1d)::
+
+        ldrb r2, [obj, #0x1b] ; ldrb r1, [obj, #0x1c] ; sub r2, r2, #1
+        ldrb r3, [obj, #0x1d] ; clz r2, r2 ; cmp r1, #1 ; ...
+        bls  <one band>       ; cmp <voice+0x2c>, #0 ; beq <...>
+        cmp r2, #0 ; movw/movt base ; add r3, base, r3, lsl #6
+        ldrne r2, [r3, #-mono] ; ldreq r2, [r3, #-stereo] ; ...
+
+    Read from the code, not assumed from the table: the table's 0x40-aligned
+    base (:func:`_find_dispatch`) sits at a different place in each build's
+    rows, so the slot a plain sound resolves to says nothing about the
+    multi-band one (Led Zeppelin Pro 1.22's plain codec IS its multi-band
+    one, Foo Fighters 1.04's is not)."""
+    t = fw.secs[".text"]
+    raw, toff, tva, tsz = fw.raw, t["off"], t["addr"], t["size"]
+    for o in range(toff, toff + tsz - 4, 4):
+        w = _u32(raw, o)
+        if (w & 0x0FFF0FF0) != 0x016F0F10 or (w >> 28) != 0xE:     # clz
+            continue
+        va = tva + (o - toff)
+        ins = list(_disasm(fw, va - 0x18, va + 0x40))
+        ops = [(x.mnemonic, x.op_str) for x in ins]
+        head = " | ".join("%s %s" % m for m in ops[:7])
+        if "#0x1b]" not in head or "#0x1c]" not in head or "#0x1d]" not in head:
+            continue
+        base = {}
+        reg_base = None
+        for i, x in enumerate(ins):
+            w2 = fw.w_text(x.address)
+            mm = _decode_movw_movt(w2)
+            if mm and mm[0] == "movw":
+                base[mm[1]] = mm[2]
+            elif mm and mm[0] == "movt" and mm[1] in base:
+                base[mm[1]] |= mm[2] << 16
+                reg_base = base[mm[1]]
+            elif reg_base is not None and x.mnemonic in ("ldrne", "ldreq")                     and "#-" in x.op_str:
+                nxt = ins[i + 1] if i + 1 < len(ins) else None
+                if nxt is None or nxt.mnemonic not in ("ldrne", "ldreq"):
+                    break
+                offs = {}
+                for y in (x, nxt):
+                    offs[y.mnemonic] = int(y.op_str.split("#-")[1].rstrip("]"), 16)
+                if set(offs) != {"ldrne", "ldreq"}                         or offs["ldreq"] - offs["ldrne"] != 4:
+                    break
+                return {"BAND_RENDER": reg_base - offs["ldreq"] - dispatch}
+    return None
+
+
 # --------------------------------------------------------------------------
 # top-level
 # --------------------------------------------------------------------------
@@ -699,27 +766,267 @@ def locate_all(game_real_path=None, raw=None):
     """Locate every firmware address the codec oracle needs, generically.
 
     Returns a dict (keys = :data:`_REQUIRED` plus ``RBTREE_ACC`` and ``OBJREG``)
-    or ``None`` if the build isn't a single-path decodable codec (any required
-    address missing, or no PROV/QMUL resolvable -> dual-path / unsupported).
+    or ``None`` if any required address isn't found (:func:`missing` names
+    which).
     """
     if raw is None:
         with open(game_real_path, "rb") as f:
             raw = f.read()
+    res, _gone = _locate(raw)
+    return res
+
+
+def missing(game_real_path=None, raw=None):
+    """What :func:`locate_all` could not find in this game program, as the
+    :data:`_REQUIRED` names (``OBJREG`` for the band object's register, or
+    ``"ELF: <why>"`` when the file doesn't read as a game program at all).
+    Empty when everything locates.  PAD-657: a user's card that doesn't
+    locate says which part, so the program they send in is a lead."""
+    if raw is None:
+        with open(game_real_path, "rb") as f:
+            raw = f.read()
+    return _locate(raw)[1]
+
+
+# --------------------------------------------------------------------------
+# board-keyed builds (PAD-674): the sound key comes from the CPU board
+# --------------------------------------------------------------------------
+def _fn_ins(fw, fn, span=0x100):
+    """*fn*'s instructions up to the next ``push {..,lr}`` or *span* bytes."""
+    t = fw.secs[".text"]
+    hi = min(fn + span, t["addr"] + (t["size"] & ~3))
+    if not t["addr"] <= fn < hi:
+        return []
+    for va in range(fn + 4, hi, 4):
+        w = _u32(fw.raw, t["off"] + (va - t["addr"]))
+        if (w & 0xFFFF0000) == 0xE92D0000 and (w & 0x4000):
+            hi = va
+            break
+    return list(_disasm(fw, fn, hi))
+
+
+def _frame_sender(fw, fn, span=0x100):
+    """If *fn* builds a ``0d 05`` node-bus frame on its stack -- the request
+    that has the CPU board's bus master compute a 4-byte answer (``mov
+    rX,#0xd ; strb rX,[sp,#n]`` and ``mov rY,#5 ; strb rY,[sp,#n+1]``, JP
+    1.13's 0x46474c; PAD-603 met the frame in Venom LE 0.95) -- the target
+    of the ``bl`` that sends it: the bus exchange ``(frame, reply, len) ->
+    ok``.  None otherwise."""
+    regs = {}; stores = {}
+    built = False
+    for x in _fn_ins(fw, fn, span):
+        ops = [o.strip() for o in x.op_str.split(",")]
+        if x.mnemonic == "mov" and len(ops) == 2 and ops[1].startswith("#"):
+            try:
+                regs[ops[0]] = int(ops[1][1:], 0)
+            except ValueError:
+                regs.pop(ops[0], None)
+        elif x.mnemonic == "strb" and ops[0] in regs and ops[1].startswith("[sp"):
+            if len(ops) == 2 and ops[1] == "[sp]":
+                off = 0
+            elif len(ops) == 3 and ops[1] == "[sp" and ops[2].startswith("#"):
+                off = int(ops[2][1:].rstrip("]"), 0)
+            else:
+                off = None
+            if off is not None:
+                stores[off] = regs[ops[0]]
+                built = any(v == 0xd and stores.get(o + 1) == 5 for o, v in stores.items())
+        elif x.mnemonic == "bl" and built:
+            return int(x.op_str.lstrip("#"), 0)
+        elif ops and ops[0] in regs and x.mnemonic not in ("strb", "str", "cmp", "tst"):
+            regs.pop(ops[0], None)
+    return None
+
+
+def _masks_slot(fw, fn):
+    """True if *fn* takes its frame's op from ``r0 & 0x30``: the slot setter
+    (JP 1.13's 0x4646cc), which also seeds the game's own reply mask."""
+    return any(x.mnemonic == "and" and x.op_str.endswith("#0x30")
+               for x in _fn_ins(fw, fn))
+
+
+_ARG_REGS = {"r0": 0, "r1": 1, "r2": 2, "r3": 3, "ip": 12, "lr": 14}
+
+
+def _init_seeds(fw, site):
+    """The four slot seeds the bus init at *site* (a ``bl``) is called with:
+    its 3rd to 6th arguments ``(r2, r3, [sp], [sp+4])``, constants the caller
+    builds with movw/movt just before the call.  None if any is not a
+    constant there."""
+    start = _func_start(fw, site) or site - 0x80
+    ins = list(_disasm(fw, max(start, site - 0x80), site))
+    consts = {}
+    stack = {}
+    for x in ins:
+        mm = _decode_movw_movt(fw.w_text(x.address))
+        if mm and mm[0] == "movw":
+            consts[mm[1]] = mm[2]
+        elif mm and mm[0] == "movt" and mm[1] in consts:
+            consts[mm[1]] = (consts[mm[1]] & 0xffff) | (mm[2] << 16)
+        elif x.mnemonic == "str":
+            ops = [o.strip() for o in x.op_str.split(",")]
+            if len(ops) == 2 and ops[1] == "[sp]":
+                stack[0] = _ARG_REGS.get(ops[0])
+            elif len(ops) == 3 and ops[1] == "[sp" and ops[2] == "#4]":
+                stack[4] = _ARG_REGS.get(ops[0])
+    regs = [2, 3, stack.get(0), stack.get(4)]
+    if any(r is None or r not in consts for r in regs):
+        return None
+    return tuple(consts[r] for r in regs)
+
+
+def _bucket_off(fw, md, bss, default=0xad8):
+    """Where the master-directory decoder keeps the band-template map's
+    bucket count, as an offset from the sound object *bss*: the ``ldr r1,
+    [rX, #off]`` right after rX is built as *bss* (0xad8 on JP LE 1.16, 0xa88
+    on 1.13).  The emulator writes a nonzero count at REG_BASE + 0xad8, so
+    REG_BASE is set from this."""
+    ins = list(_disasm(fw, md, _func_end(fw, md, maxspan=0x2400)))
+    pend = {}
+    armed = None
+    for x in ins:
+        mm = _decode_movw_movt(fw.w_text(x.address))
+        if mm and mm[0] == "movw":
+            pend[mm[1]] = (mm[2], x.address)
+        elif mm and mm[0] == "movt" and mm[1] in pend:
+            if ((mm[2] << 16) | pend[mm[1]][0]) == bss:
+                armed = (mm[1], x.address)
+        elif armed and x.mnemonic == "ldr" and x.address - armed[1] <= 12:
+            ops = [o.strip() for o in x.op_str.split(",")]
+            if (len(ops) == 3 and ops[0] == "r1" and _reg_index(ops[1].lstrip("[")) == armed[0]
+                    and ops[2].startswith("#")):
+                return int(ops[2][1:].rstrip("]"), 0)
+    return default
+
+
+def _bus_parts(fw, md):
+    """What a board-keyed program (see :mod:`.netbridge`) needs besides the
+    codec addresses, or None for a program that seeds from constants:
+
+    * ``BOOT_LO``/``BOOT_HI``: the sound init that calls the master-directory
+      decoder *md*, up to that call; before it, it calls a key builder that
+      asks the bus (:func:`_frame_sender`).  ``VF2_VA`` is the .data table the
+      init hands the key builder, ``BSS`` its sound object.
+    * ``BUS_XCHG``: the bus exchange the frame builders call.
+    * ``BUS_SEED``: the slot setter (:func:`_masks_slot`); ``BUS_SEEDS``: the
+      four seeds its init is called with (:func:`_init_seeds`), slot order.
+      Both None when the program asks the bus but these aren't found.
+    """
+    t = fw.secs[".text"]
+    text = (t["addr"], t["addr"] + (t["size"] & ~3))
+    sites = _bl_sites(fw, *text)
+    boot = ask_fn = xchg = md_site = None
+    for site, tgt in sites:
+        if tgt != md:
+            continue
+        start = _func_start(fw, site)
+        if start is None:
+            continue
+        for _s, fn in _bl_sites(fw, start, site):
+            if fn == md:
+                break
+            for c in [fn] + [f2 for _s2, f2 in _bl_sites(fw, fn, _func_end(fw, fn))]:
+                x = _frame_sender(fw, c)
+                if x is not None:
+                    boot, ask_fn, xchg, md_site = start, c, x, site
+                    break
+            if boot is not None:
+                break
+        if boot is not None:
+            break
+    if boot is None:
+        return None
+    out = dict(BOOT_LO=boot, BOOT_HI=md_site - 4, MASTERDIR_DECODE=md,
+               BUS_XCHG=xchg, BUS_ASK=ask_fn, BUS_SEED=None, BUS_SEEDS=None,
+               VF2_VA=None, BSS=None)
+    for _at, v in _func_const_loads(fw, boot, span=md_site - boot):
+        s = _sec_of(fw, v)
+        if s == ".data" and out["VF2_VA"] is None:
+            out["VF2_VA"] = v
+        elif s == ".bss" and out["BSS"] is None:
+            out["BSS"] = v
+    callers = sorted({_func_start(fw, s) for s, tg in sites if tg == xchg} - {None})
+    for fn in callers:
+        if fn != ask_fn and _frame_sender(fw, fn) == xchg and _masks_slot(fw, fn):
+            out["BUS_SEED"] = fn
+            break
+    if out["BUS_SEED"] is None:
+        return out
+    inits = sorted({_func_start(fw, s) for s, tg in sites if tg == out["BUS_SEED"]} - {None})
+    for init in inits:
+        n = sum(1 for _s, tg in _bl_sites(fw, init, _func_end(fw, init)) if tg == out["BUS_SEED"])
+        if n < 4:
+            continue
+        for s, tg in sites:
+            if tg == init:
+                seeds = _init_seeds(fw, s)
+                if seeds:
+                    out["BUS_SEEDS"] = seeds
+                    return out
+    return out
+
+
+def _locate(raw):
+    """``(addresses or None, [what is missing])`` for :func:`locate_all` and
+    :func:`missing`.  A program that doesn't locate the usual way and asks
+    the CPU board for its sound key (:func:`_bus_parts`) is located with its
+    sound init, bus exchange and seeds; one whose bus parts can't all be
+    found is ``["BOARD_KEY"]``."""
+    res, gone = _locate_parts(raw)
+    if not gone or gone[0].startswith("ELF"):
+        return res, gone
+    try:
+        fw = _FwView(raw)
+        md = _find_masterdir_decode(fw)
+        bus = _bus_parts(fw, md) if md is not None else None
+    except Exception:
+        return res, gone
+    if bus is None:
+        return res, gone
+    if not bus["BUS_SEEDS"] or bus["VF2_VA"] is None or bus["BSS"] is None:
+        return None, ["BOARD_KEY"]
+    res2, gone2 = _locate_parts(
+        raw, boot=dict(BOOT_LO=bus["BOOT_LO"], VF2_VA=bus["VF2_VA"], REG_BASE=bus["BSS"]),
+        md_bh=(md, bus["BOOT_HI"]))
+    if res2 is None:
+        return None, gone2
+    res2["REG_BASE"] = bus["BSS"] + _bucket_off(fw, md, bus["BSS"]) - 0xad8
+    for k in ("BUS_XCHG", "BUS_ASK", "BUS_SEED", "BUS_SEEDS"):
+        res2[k] = bus[k]
+    return res2, []
+
+
+def _locate_parts(raw, boot=None, md_bh=None):
+    """The codec addresses; *boot* and *md_bh* stand in for the boot finder
+    and the boot's master-directory call on a board-keyed program."""
+    step = "ELF"
     try:
         fw = _FwView(raw)
         idx = _loader_index(fw)
-        boot = _find_boot(fw, idx) or {}
+        step = "BOOT_LO"
+        boot = dict(boot) if boot else (_find_boot(fw, idx) or {})
+        step = "CAT0_REGISTER"
         cat0 = _find_cat0(fw, idx)
+        step = "DISPATCH"
         disp = _find_dispatch(fw)
-        if not boot.get("BOOT_LO") or cat0 is None or disp is None:
-            return None
-        md, bh = _boot_md_hi(fw, boot["BOOT_LO"])
+        early = ((["BOOT_LO"] if not boot.get("BOOT_LO") else [])
+                 + (["CAT0_REGISTER"] if cat0 is None else [])
+                 + (["DISPATCH"] if disp is None else []))
+        if early:
+            return None, early
+        step = "MASTERDIR_DECODE"
+        md, bh = md_bh if md_bh else _boot_md_hi(fw, boot["BOOT_LO"])
         if md is None or bh is None:
-            return None
+            return None, [k for k, v in (("MASTERDIR_DECODE", md),
+                                         ("BOOT_HI", bh)) if v is None]
+        step = "BANDLOOP"
         ipc = _find_internal_pcs(fw, md)
+        step = "FIND_BL"
         find_bl = _find_find_bl(fw, md, ipc["_end"])
         objreg = (fw.w_text(ipc["BANDOBJ"] - 8) >> 16) & 0xf if "BANDOBJ" in ipc else None
+        step = "RBTREE_HDR"
         hdr = _find_rbtree_hdr(fw, cat0)
+        step = "PROV"
         prov, qmul = _resolve_prov_qmul(fw, disp)
         res = dict(
             BOOT_LO=boot["BOOT_LO"], BOOT_HI=bh, VF2_VA=boot["VF2_VA"],
@@ -737,9 +1044,17 @@ def locate_all(game_real_path=None, raw=None):
         # Optional: the master-directory cipher sites.  A build these miss
         # decodes audio exactly as before; only growing the sound bank is
         # refused, with a named reason (see :mod:`.masterdir`).
+        step = "MASTERDIR_CRYPTO"
         res["MASTERDIR_CRYPTO"] = find_masterdir_crypto(fw, md, ipc["_end"])
-    except Exception:
-        return None
-    if any(res.get(k) is None for k in _REQUIRED) or objreg is None:
-        return None
-    return res
+        # Optional: a build this misses decodes every plain sound as before;
+        # its multi-band records decode through the resolved slot instead.
+        try:
+            res.update(find_band_codecs(fw, disp) or {})
+        except Exception:
+            pass
+    except Exception as e:
+        return None, [("ELF: %s" % e) if step == "ELF" else step]
+    gone = [k for k in _REQUIRED if res.get(k) is None]
+    if objreg is None:
+        gone.append("OBJREG")
+    return (None, gone) if gone else (res, [])

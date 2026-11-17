@@ -36,13 +36,32 @@ PAD_VNC_PASSWD=${PAD_VNC_PASSWD:-pinball}
 # who set PATH themselves has already answered this and their answer wins.
 PATH=$PATH:/usr/local/bin:/opt/homebrew/bin:/opt/local/bin
 PATH=$PATH:$HOME/.docker/bin:$HOME/.rd/bin:$HOME/.orbstack/bin
+PATH=$PATH:/opt/podman/bin
 PATH=$PATH:/Applications/Docker.app/Contents/Resources/bin
 # The app's own override (see docker_cli() in emulate_tab.py), for the Mac that
 # keeps it somewhere none of those name. Its DIRECTORY goes first, so `docker`
 # means the same binary here as it did in the check that let this run start.
-[ -n "${PAD_DOCKER:-}" ] && [ -x "$PAD_DOCKER" ] && \
-    PATH=$(dirname "$PAD_DOCKER"):$PATH
+# Podman stands in for docker through a `docker` link to it, in one shim
+# folder per user that every start reuses (a folder per run would pile up
+# in TMPDIR, as nothing after the exec below is left to remove it).
+if [ -n "${PAD_DOCKER:-}" ] && [ -x "$PAD_DOCKER" ]; then
+    if [ "$(basename "$PAD_DOCKER")" != "docker" ]; then
+        _SHIM="${TMPDIR:-/tmp}/pad-docker-shim-$(id -u)"
+        mkdir -p "$_SHIM"
+        ln -sf "$PAD_DOCKER" "$_SHIM/docker"
+        PATH="$_SHIM:$PATH"
+    else
+        PATH=$(dirname "$PAD_DOCKER"):$PATH
+    fi
+fi
 export PATH
+
+if ! command -v docker >/dev/null 2>&1 && command -v podman >/dev/null 2>&1; then
+    _SHIM="${TMPDIR:-/tmp}/pad-docker-shim-$(id -u)"
+    mkdir -p "$_SHIM"
+    ln -sf "$(command -v podman)" "$_SHIM/docker"
+    PATH="$_SHIM:$PATH"
+fi
 
 command -v docker >/dev/null 2>&1 || {
     echo "[box] docker is not installed." >&2
@@ -56,8 +75,10 @@ docker info >/dev/null 2>&1 || {
     # names an app that Mac does not have. See docker_state() in emulate_tab.py.
     if [ -d /Applications/Docker.app ] || [ -d /Applications/OrbStack.app ] \
        || [ -d "/Applications/Rancher Desktop.app" ] \
+       || [ -d "/Applications/Podman Desktop.app" ] \
+       || command -v podman >/dev/null 2>&1 \
        || command -v colima >/dev/null 2>&1; then
-        echo "[box] docker is installed but not running - start it and try again." >&2
+        echo "[box] docker / podman is installed but not running - start it and try again." >&2
     else
         echo "[box] the docker command is installed, but nothing on this Mac runs" >&2
         echo "[box] containers. docker is only the client; the containers need a" >&2
@@ -78,16 +99,39 @@ docker info >/dev/null 2>&1 || {
 # a mount or a staged copy. It used to sit at the bottom, so every poll built
 # the whole run configuration and could even trigger an image build, to answer
 # a question that needs neither.
+#
+# AS ROOT IN THE BOX (PAD-835), every one of them. A save-state run's guest is
+# root's (see RUN_ARGS below), and the box's own user can neither see its
+# environment - which is how status.sh and killgame.sh tell a run's processes
+# apart - nor kill it: the same reason the app runs these as `wsl -u root` on
+# Windows. Root sees and stops an ordinary run just as well. The three
+# save-state scripts are here for the same reason and need root besides
+# (criu does); PAD_RESTORE_KILL is the one setting of theirs that has to cross.
+box_up() { docker ps --format '{{.Names}}' | grep -qx "$NAME"; }
+box_exec() {
+    local e=()
+    [ -n "${PAD_RESTORE_KILL:-}" ] && e+=(-e "PAD_RESTORE_KILL=$PAD_RESTORE_KILL")
+    # ${e[@]+...}: the Mac's bash 3.2 under set -u calls an EMPTY array
+    # unbound and stops here, so no script ran in the box (PAD-856)
+    exec docker exec -u 0 ${e[@]+"${e[@]}"} "$NAME" bash "/pad/rig/$1" "${@:2}"
+}
 case "${1:-}" in
-    alive.sh|killgame.sh|status.sh)
-        if docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
-            exec docker exec "$NAME" bash "/pad/rig/$1" "${@:2}"
-        fi
+    alive.sh|killgame.sh|status.sh|restartgame.sh)
+        box_up && box_exec "$@"
         # No container: nothing this rig started can be running, so answer
         # rather than starting a box to ask.
         [ "${1:-}" = "alive.sh" ] && { echo "TOTAL STILL RUNNING    : 0  (clean)"; exit 0; }
         [ "${1:-}" = "status.sh" ] && { echo "state=off"; echo "procs=0"; exit 0; }
         echo "[box] nothing running"; exit 0 ;;
+    savegame.sh|loadgame.sh)
+        box_up && box_exec "$@"
+        echo "[${1%.sh}] the emulator is not running - start it first"; exit 1 ;;
+    slots.sh)
+        # A running box answers from the guest it holds. Without one the slots
+        # are still on the rootfs volume, and the Emulate tab lists and deletes
+        # them with no game up, as it does on Windows: further down, once the
+        # image is known.
+        box_up && box_exec "$@" ;;
 esac
 
 # ---- THE RIG HAS TO LIVE SOMEWHERE DOCKER IS ALLOWED TO LOOK ---------------
@@ -110,9 +154,19 @@ esac
 # the milliseconds, and an app update reaches the box with no cache to reason
 # about. (The hardware shim is the opposite case - minutes to rebuild - which is
 # why that one is digest-tracked instead. See watch.sh.)
+#
+# ...AND THE ONE FOLDER EVERY MAC ENGINE SHARES IS HOME (PAD-884). Docker
+# Desktop's list above is Docker Desktop's: colima - what "Set up emulator..."
+# installs - shares ~ and nothing else, and a bind mount of a path its Linux VM
+# cannot see is not refused, it is an EMPTY directory. So an app opened from
+# its disk image (/Volumes/...) or one macOS runs from a translocated copy
+# (/private/var/folders/...) passed the old Docker-Desktop list, was mounted
+# uncopied, and the box said "no rig at /pad/rig" (a Mac on colima, first run).
+# Home is shared by Docker Desktop (/Users), colima, OrbStack and Rancher
+# Desktop alike, so "under home" is the test, and anything else is copied.
 pad_docker_can_share() {
     case "$1" in
-        /Users/*|/Volumes/*|/private/*|/tmp/*|/var/folders/*) return 0 ;;
+        "$HOME"/*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -131,6 +185,10 @@ if [ "$(uname -s)" = Darwin ] && ! pad_docker_can_share "$RIG"; then
     # bind mounted, and deleting it underneath one would break a run that has
     # nothing to do with this command. Nothing in the rig is written to at run
     # time, so an overwrite in place is safe.
+    # Never a copy of something that is not a rig: a wrong $RIG would have
+    # this copy whatever directory it named, however large.
+    [ -f "$RIG/watch.sh" ] || {
+        echo "[box] no rig at $RIG (no watch.sh there)" >&2; exit 1; }
     mkdir -p "$STAGE" || exit 1
     cp -R "$RIG"/. "$STAGE"/ || {
         echo "[box] could not copy the rig into $STAGE" >&2; exit 1; }
@@ -149,14 +207,77 @@ if [ -z "$IMAGE" ]; then
     IMAGE=pad-spike2-emu:c$DKSUM
 fi
 
+# THE BUILD IS WATCHED, NOT JUST RUN (PAD-769). A Mac user's first Start sat
+# on the "building" line for twenty minutes with the tab saying "Not running",
+# and nothing in the log could tell a slow download from a docker that had
+# stopped answering. So:
+#   - BUILDKIT_PROGRESS=plain: one line per step and per apt message, whatever
+#     docker decides about the pipe it is writing to. (An env var, not
+#     --progress, which a legacy builder would refuse.)
+#   - a "[box] still building" line every minute, which the Emulate tab turns
+#     into its state label - the run is not "Not running", it is building;
+#   - and a build that prints NOTHING for PAD_BOX_SILENT_S (10 min; the longest
+#     quiet step measured is the ~40 s image export) is stopped with a message
+#     that says where to look, instead of waiting for ever.
 build() {
     echo "[box] building $IMAGE (first time takes a few minutes)"
-    docker build -t "$IMAGE" "$SELF"
+    local beat pidf rc
+    beat=$(mktemp -t padbox-beat.XXXXXX) || beat=/tmp/padbox-beat.$$
+    pidf=$beat.pid
+    printf '%s' "$SECONDS" > "$beat"
+    # Short sleeps, so the watcher is gone within seconds of the build: a
+    # 60 s sleep left behind would hold the app's output pipe open that long.
+    (
+        start=$SECONDS; said=0; tick=${PAD_BOX_TICK_S:-60}
+        while sleep 2; do
+            last=""; read -r last < "$beat" 2>/dev/null
+            [ "$last" = done ] && exit 0
+            case "$last" in ''|*[!0-9]*) last=$SECONDS ;; esac
+            mins=$(( (SECONDS - start) / tick ))
+            [ "$mins" -gt "$said" ] || continue
+            said=$mins
+            echo "[box] still building the emulator container: $mins min so far"
+            if [ $(( SECONDS - last )) -ge "${PAD_BOX_SILENT_S:-600}" ]; then
+                echo "[box] docker has printed nothing for $(( (SECONDS - last) / 60 )) min, so the build is stopped." >&2
+                echo "[box] Open Docker Desktop: it may be waiting for you (an update, a sign-in, an agreement) or out of disk space. Then press Start again." >&2
+                read -r pid < "$pidf" 2>/dev/null && kill "$pid" 2>/dev/null
+                exit 0
+            fi
+        done
+    ) &
+    local watcher=$!
+    (
+        BUILDKIT_PROGRESS=plain docker build -t "$IMAGE" "$SELF" 2>&1 &
+        echo $! > "$pidf"
+        wait $!
+    ) | while IFS= read -r line; do
+        printf '%s\n' "$line"
+        printf '%s' "$SECONDS" > "$beat"
+    done
+    rc=${PIPESTATUS[0]}
+    printf done > "$beat"
+    kill "$watcher" 2>/dev/null
+    wait "$watcher" 2>/dev/null
+    rm -f "$beat" "$pidf"
+    [ "$rc" = 0 ] || echo "[box] the emulator container did not build (docker exit $rc); the lines above say why." >&2
+    return "$rc"
 }
 
 case "${1:-}" in
     --build) build; exit $? ;;
 esac
+
+# THE SLOTS WITH NO RUN (PAD-835): a throwaway box with only the rig and the
+# rootfs volume, as root because the slots are root's. Never a BUILD for it,
+# though: a slot list is a status read, and minutes of image build behind one
+# would be a hang. No image yet means no run has ever been, so no slots.
+if [ "${1:-}" = slots.sh ]; then
+    docker image inspect "$IMAGE" >/dev/null 2>&1 ||
+        { echo "slots: the emulator has not been set up yet"; exit 1; }
+    exec docker run --rm -u 0 -v "$RIG:/pad/rig:ro" \
+        -v "${NAME}-rootfs:/pad/rootfs" --entrypoint /bin/bash \
+        "$IMAGE" /pad/rig/slots.sh "${@:2}"
+fi
 
 # Build on demand rather than making the user remember a separate step.
 docker image inspect "$IMAGE" >/dev/null 2>&1 || build || exit 1
@@ -203,12 +324,41 @@ RUN_ARGS=(
 )
 [ -n "${PAD_VNC_PASSWD:-}" ] && RUN_ARGS+=(-e "PAD_VNC_PASSWD=$PAD_VNC_PASSWD")
 
-# SOUND LEAVES OVER TCP. No audio server exists inside the box and VNC carries
-# no sound, so the guest's PCM is served raw on a loopback port (playaudio.sh's
-# relay sink) and played out here on the Mac by host_player(), below.
-AUDIO_PORT=${PAD_AUDIO_PORT:-45997}
-RUN_ARGS+=(-p "127.0.0.1:$AUDIO_PORT:$AUDIO_PORT"
-           -e "PAD_AUDIO_SINK=relay" -e "PAD_AUDIO_PORT=$AUDIO_PORT")
+# ★ A SAVE-STATE RUN (PAD-835): PAD_PIVOT=1, which the Emulate tab asks for on
+# every Start, as it does on Windows. criu can only freeze the game when the
+# guest is booted as ROOT in its own namespaces (watch.sh: "ROOT RUNS THE
+# GUEST"), so the box starts as root - watch.sh drops every helper back to pad,
+# and entrypoint.sh keeps the display pad's - and PRIVILEGED, because criu
+# walks and rebuilds a process tree with ptrace, its namespaces and its
+# /proc/sys knobs, which no short list of capabilities covers on every
+# container engine a Mac might have. The box is a Linux VM's process with
+# loopback-only ports, so this widens nothing a Mac exposes. A kernel that
+# still cannot do it is caught in entrypoint.sh and costs only the save states.
+if [ "${1:-}" = watch.sh ] && [ "${PAD_PIVOT:-}" = 1 ]; then
+    RUN_ARGS+=(--privileged -u 0 -e PAD_PIVOT=1 -e PAD_USER=pad)
+fi
+
+# SOUND LEAVES THROUGH docker exec. No audio server exists inside the box and
+# VNC carries no sound, so the guest's raw PCM FIFO (kept by playaudio.sh's
+# relay sink) is read by host_player(), below, with docker exec and played out
+# here on the Mac. It used to be served on a published loopback port, and
+# under Colima that port swallowed the stream (PAD-1109, see host_player).
+BOX_FIFO=/pad/rootfs/dump/audio.fifo
+RUN_ARGS+=(-e "PAD_AUDIO_SINK=relay")
+# THE VOLUME AND MUTE GO IN WITH IT (PAD-957). ffplay cannot change its level
+# while it plays, so the box's relay scales the sound instead, by a copy of the
+# Emulate tab's audio_ctl.json that ctl_sync() below keeps up to date. A copy
+# and not a mount: a bind mount of a file is lost the moment the app replaces
+# it (which it does on every slider move), and whether a change in a mounted
+# folder shows up inside the box at once is up to the container engine.
+# THE BOX'S PLAYFIELD WINDOW SHARES THE COPY (PAD-1129). It used to be started
+# with no PAD_AUDIO_CTL at all, so its page left out Volume, Mute and Restart
+# game. It now gets the copy's path, and ctl_sync carries the folder both
+# ways: the tab's volume and clip names in, the window's volume, Restart game
+# request and clip / sound records out (docker/boxctl.py).
+BOX_CTL_DIR=/tmp/pad_ctl
+BOX_CTL=$BOX_CTL_DIR/audio_ctl.json
+[ -n "${PAD_AUDIO_CTL:-}" ] && RUN_ARGS+=(-e "PAD_AUDIO_CTL=$BOX_CTL")
 
 # A card path on the HOST has to become one inside the box. Only the directory
 # is mounted, so this is a prefix swap and not a guess.
@@ -226,6 +376,20 @@ fi
 # where anybody keeps card images, and read-only because the box only reads it
 # (overrides.sh stages a copy inside the box's own home volume).
 if [ -n "${PAD_OVERRIDE_DIR:-}" ]; then
+    # THE SET IS BUILT IN THE APP'S TEMP DIR, which on a Mac is
+    # /var/folders/..., outside home - the same empty mount the rig got on
+    # colima (PAD-884), and an empty override set is a run that quietly shows
+    # none of your edits. So it is copied into home first, MIRRORED (--delete)
+    # rather than copied over the top: a file left from an older set would
+    # still override the card. rsync, so an unchanged set costs a compare and
+    # not a copy - sets can be hundreds of MB.
+    if [ "$(uname -s)" = Darwin ] && [ -d "$PAD_OVERRIDE_DIR" ]        && ! pad_docker_can_share "$PAD_OVERRIDE_DIR"; then
+        OSTAGE=${PAD_BOX_OVERRIDE_STAGE:-$HOME/Library/Caches/pinball_decryptor/spike2_overrides}
+        echo "[box] $PAD_OVERRIDE_DIR is outside Docker's file sharing; using a copy in $OSTAGE"
+        mkdir -p "$OSTAGE" && rsync -a --delete "${PAD_OVERRIDE_DIR%/}/" "$OSTAGE/" || {
+            echo "[box] could not copy your edits into $OSTAGE" >&2; exit 1; }
+        PAD_OVERRIDE_DIR=$OSTAGE
+    fi
     if [ -d "$PAD_OVERRIDE_DIR" ]; then
         RUN_ARGS+=(-v "${PAD_OVERRIDE_DIR%/}:/pad/overrides:ro"
                    -e "PAD_OVERRIDE_DIR=/pad/overrides")
@@ -260,13 +424,18 @@ fi
 # PAD-149's machine row rides the same list: the CPU board's country DIP
 # switches (PAD_CAB_DIP), the country stored in the machine (PAD_COUNTRY), the
 # mains (PAD_MAINS_HZ) and which mains the board was built for
-# (PAD_FACTORY_HZ). Unset is the rig's own machine, exactly as it was.
+# (PAD_FACTORY_HZ), and the model the board says the machine is (PAD_MODEL,
+# PAD-519). Unset is the rig's own machine, exactly as it was.
 # PAD_CARD_MODES=0 is the opt-out from a card's own modes (modes/cardmodes.sh). That
 # feature needs nothing from out here - run_game.sh reads the card inside the box - but
 # a "no" has to be able to cross, for the same reason PAD_SELECT=0 does.
-for v in PAD_GAME PAD_PLAYFIELD PAD_AUDIO PAD_AUTO_ATTRACT \
+# PAD_AUDIO_DUMP is the game's own sound count every 30 s ("[aud] ... main
+# played="), which the Emulate tab's Audio row is read from: without it a Mac
+# said "not sampled" and its log could not tell a silent game from a lost
+# stream (PAD-832).
+for v in PAD_GAME PAD_PLAYFIELD PAD_AUDIO PAD_AUDIO_DUMP PAD_AUTO_ATTRACT \
          PAD_SELECT PAD_SELECT_TIMEOUT PAD_SELECT_MEDIA PAD_CARD_MODES \
-         PAD_CAB_DIP PAD_COUNTRY PAD_MAINS_HZ PAD_FACTORY_HZ LOG; do
+         PAD_CAB_DIP PAD_COUNTRY PAD_MAINS_HZ PAD_FACTORY_HZ PAD_MODEL LOG; do
     [ -n "${!v:-}" ] && RUN_ARGS+=(-e "$v=${!v}")
 done
 
@@ -282,6 +451,121 @@ esac
 # on a Mac without the developer tools pops Apple's install dialog mid-run.
 # The poll is long (10 min) because a FIRST run builds the guest rootfs out of
 # the card before the game ever configures audio.
+# HOW THE CHANNEL COUNT IS SAID depends on the ffplay (PAD-832). FFmpeg 7 took
+# `-ac` away from ffplay (it was the raw demuxer's `channels` option, now gone;
+# only `-ch_layout` is left), and Homebrew ships 7 and newer, so a Mac's ffplay
+# said "Failed to set value '2' for option 'ac': Option not found", exited, and
+# every run was silent. `-ch_layout` exists from 5.1 on; an older ffplay has
+# no such option and still takes `-ac`. Ask the ffplay which one it has.
+ffplay_channel_args() {
+    if ffplay -hide_banner -h demuxer=s16le 2>/dev/null | grep -q -- '-ch_layout'; then
+        case "$1" in
+            1) echo "-ch_layout mono" ;;
+            2) echo "-ch_layout stereo" ;;
+            *) echo "-ch_layout ${1}c" ;;
+        esac
+    else
+        echo "-ac $1"
+    fi
+}
+# THE CUSHION, ON THE MAC (PAD-1109). The box's stream arrives through docker
+# exec from a container Colima can starve (its machine has 2 CPUs unless told
+# otherwise; the renderer drew 14 fps there), in lumps, and on a Mac a player
+# left waiting loses the next second of sound while the audio queue restarts:
+# a game's sound, consumed in full, was never heard. The app's own binary
+# (PAD_PACER, pyinstaller_entry.py --pace; a developer's python with
+# PAD_PACER_SCRIPT) runs padrelay.py's pacer here: reads what arrives, writes
+# exactly real-time bytes 350 ms ahead, silence for what is late. Without a
+# pacer the stream goes straight through, as before.
+mac_pace() {
+    if [ -n "${PAD_PACER:-}" ] && [ -x "$PAD_PACER" ]; then
+        "$PAD_PACER" ${PAD_PACER_SCRIPT:+"$PAD_PACER_SCRIPT"} --pace "$rate" "$ch"
+    else
+        cat
+    fi
+}
+# WHAT REACHED THE MAC (PAD-1109). The box's relay says what it sent, but it
+# reads at the game's own pace whatever happens downstream, so it read just as
+# healthy while Colima swallowed the stream and ffplay got 310 KB in all. This
+# stage passes the stream through unchanged and, every PAD_METER_S (30) s,
+# asks dd for its own count (SIGINFO on a Mac, SIGUSR1 elsewhere) and says it:
+# the bytes ffplay was actually handed. stdin is named for dd, because a
+# background command in a script otherwise reads /dev/null.
+# ibs/obs, never bs= (PAD-1162): with bs= alone the Mac's dd takes POSIX's
+# unbuffered path, which writes each read and loops back BEFORE its SIGINFO
+# check, so it never said its count until the end. obs=512 keeps the pass
+# prompt: at most 511 bytes (under 3 ms of sound) wait for the next read.
+mac_meter() {
+    local f p sig i line
+    f=$(mktemp "${TMPDIR:-/tmp}/padmeter.XXXXXX") || { cat; return; }
+    dd ibs=65536 obs=512 <&0 2>"$f" &
+    p=$!
+    sig=USR1; [ "$(uname -s)" = Darwin ] && sig=INFO
+    while kill -0 "$p" 2>/dev/null; do
+        i=0
+        while [ "$i" -lt "${PAD_METER_S:-30}" ] && kill -0 "$p" 2>/dev/null; do
+            sleep 1; i=$(( i + 1 ))
+        done
+        kill -0 "$p" 2>/dev/null || break
+        kill -"$sig" "$p" 2>/dev/null
+        sleep 0.3
+        line=$(grep -E 'bytes' "$f" | tail -n 1)
+        [ -n "$line" ] && echo "[box] handed to the Mac's speaker so far: $line" >&2
+    done
+    wait "$p" 2>/dev/null
+    line=$(grep -E 'bytes' "$f" | tail -n 1)
+    [ -n "$line" ] && echo "[box] handed to the Mac's speaker in all: $line" >&2
+    rm -f "$f"
+}
+# WHAT ffplay ITSELF SAYS (PAD-1109). Its status line - the playback clock,
+# then aq=, the sound it holds queued - only moves while the sound device is
+# taking audio from it, so it tells "fed but not playing" from "playing" from
+# inside the app's own run, the one place no Terminal test can stand in for.
+# ffplay rewrites that line with \r about 30 times a second: every
+# PAD_FFSTAT_N-th (900, about 30 s) is said, every other line of its passes.
+ffplay_status() {
+    tr '\r' '\n' | awk -v every="${PAD_FFSTAT_N:-900}" '
+        /(M-A|A-V|M-V):/ {
+            if (++n % every == 1) {
+                sub(/^ +/, ""); gsub(/ +/, " ")
+                print "[box] ffplay playing: " $0; fflush()
+            }
+            next
+        }
+        NF { print "[box] ffplay: " $0; fflush() }' >&2
+}
+# THE MAC'S SOUND OUTPUTS, ONCE PER RUN (PAD-1109). With the whole stream
+# proven to reach ffplay and its clock running at real time, the sound is
+# going somewhere the user does not hear; this says what outputs there are
+# and which is the default, so the log and the user's Sound settings can be
+# compared. system_profiler can take seconds: 15 s at most, and off a Mac
+# nothing is said.
+mac_outputs() {
+    [ "$(uname -s)" = Darwin ] || return 0
+    local f p w
+    f=$(mktemp "${TMPDIR:-/tmp}/padaudio.XXXXXX") || return 0
+    system_profiler SPAudioDataType >"$f" 2>/dev/null &
+    p=$!
+    ( sleep 15; kill "$p" 2>/dev/null ) >/dev/null 2>&1 &
+    w=$!
+    wait "$p" 2>/dev/null
+    kill "$w" 2>/dev/null
+    awk '
+        /^ {8}[^ ].*:$/ { name = $0; sub(/^ +/, "", name); sub(/:$/, "", name) }
+        /Output Channels:/ { out[name] = 1 }
+        /Default Output Device: Yes/ { def = name }
+        /Output Source:/ { src[name] = $0; sub(/.*Output Source: */, "", src[name]) }
+        END {
+            n = 0
+            for (d in out) {
+                n++
+                line = line (line == "" ? "" : "; ") d (src[d] != "" ? " (" src[d] ")" : "") (d == def ? " [default]" : "")
+            }
+            if (n) print "[box] speaker: Mac outputs: " line
+            else print "[box] speaker: the Mac lists no sound output"
+        }' "$f"
+    rm -f "$f"
+}
 host_player() {
     [ "${PAD_AUDIO:-1}" = 0 ] && return 0
     fmt=""
@@ -292,23 +576,186 @@ host_player() {
     [ -n "$fmt" ] || { echo "[box] the guest never reported a PCM format; this run is silent" >&2; return 0; }
     set -- $fmt
     rate=${1:-48000}; ch=${2:-2}
-    if command -v ffplay >/dev/null 2>&1; then
-        echo "[box] audio: ffplay, ${rate} Hz x ${ch} ch from tcp/$AUDIO_PORT"
-        exec ffplay -hide_banner -loglevel error -nodisp -autoexit \
-             -fflags nobuffer -flags low_delay \
-             -f s16le -ar "$rate" -ac "$ch" "tcp://127.0.0.1:$AUDIO_PORT"
+    if ! command -v ffplay >/dev/null 2>&1; then
+        echo "[box] no ffplay on this Mac, so this run is silent. Fix:" >&2
+        echo "[box]   brew install ffmpeg   (the same package the app's previews use)" >&2
+        return 0
     fi
-    echo "[box] no ffplay on this Mac, so this run is silent. Fix:" >&2
-    echo "[box]   brew install ffmpeg   (the same package the app's previews use)" >&2
+    chargs=$(ffplay_channel_args "$ch")
+    echo "[box] audio: ffplay, ${rate} Hz x ${ch} ch ($chargs) from the box's sound FIFO (docker exec)"
+    # WHICH ffplay, AND IN A CLEAN ENVIRONMENT (PAD-1109). With the stream
+    # proven to arrive - 172 KB/s at -3 dBFS, taken at playback speed - a
+    # Mac user still heard nothing from this ffplay, while the same ffplay
+    # run from Terminal played a test tone. The one systematic difference is
+    # the environment: on Linux the app scrubs its frozen bundle out of what
+    # the rig inherits (rig.rig_env_args, PAD-837), on macOS it never did, so
+    # ffplay got the app's own. It now starts with only what a program needs
+    # to find the user's sound (HOME, USER, LOGNAME, TMPDIR, LANG), and the
+    # log names the binary and any SDL / DYLD / PYTHON variables left behind.
+    fpbin=$(command -v ffplay)
+    echo "[box] speaker: $fpbin ($(ffplay -version 2>/dev/null | head -n 1 | cut -d' ' -f1-3))"
+    left=$(env | grep -E '^(SDL_|AUDIODEV=|DYLD_|PYTHON)' | cut -d= -f1 | sort | tr '\n' ' ')
+    [ -n "$left" ] && echo "[box] speaker: started without the app's ${left% }"
+    mac_outputs
+    if [ -n "${PAD_PACER:-}" ] && [ -x "$PAD_PACER" ]; then
+        echo "[box] speaker: the stream is paced on this Mac by $PAD_PACER"
+    else
+        echo "[box] speaker: no pacer on this Mac (PAD_PACER); the stream goes straight to ffplay"
+    fi
+    # NOT exec'd, and STARTED AGAIN IF IT STOPS (PAD-832), so the TERM that
+    # takes this player down at the end has to reach ffplay as well. Killing
+    # ffplay is enough: the docker exec feeding it dies on its next write.
+    fp=""
+    trap '[ -n "$fp" ] && kill "$fp" 2>/dev/null; exit 0' TERM INT
+    quick=0; rc=""
+    while :; do
+        # said only now: a box being stopped ends ffplay too, and is no restart
+        [ -n "${rc:-}" ] && echo "[box] the speaker (ffplay) stopped (exit $rc); started it again"
+        st=$SECONDS
+        # THROUGH docker exec, NOT A PUBLISHED PORT (PAD-1109). Under Colima
+        # the box's port reached the Mac through Lima's port forwarder, which
+        # took the relay's whole stream at full rate - 11 minutes, nothing
+        # dropped - while ffplay received 310 KB, under two seconds, and then
+        # nothing: a silent run with every counter healthy. docker exec rides
+        # the Docker socket every other step here already uses, and it pushes
+        # back, so a player that stops reading shows as the guest's dropped
+        # count instead of vanishing. padrelay.py --pipe waits for the FIFO
+        # itself (the PAD-832 race was a port answering before the relay was
+        # up; there is no port now), scales by the volume copy, and says what
+        # it sent every 30 s on stderr, which lands in the app's log.
+        # ONE READER OF THE FIFO: a relay left from the last player would
+        # take every other read of it, so it goes first
+        docker exec -u 0 "$NAME" pkill -f 'padrelay.py --pipe' >/dev/null 2>&1
+        # $chargs unquoted on purpose: it is an option and its value
+        # No -i: the relay reads nothing on stdin, and here stdin is /dev/null
+        # (an async list in a script), so -i only attached an input stream
+        # that ends at once. The stream a Mac user heard through Docker came
+        # from a command without it (PAD-1109).
+        docker exec "$NAME" python3 /pad/rig/padrelay.py --pipe \
+                "$BOX_FIFO" "${PAD_AUDIO_CTL:+$BOX_CTL}" |
+            mac_pace |
+            mac_meter |
+            env -i HOME="${HOME:-}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
+                TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-en_US.UTF-8}" \
+                "$fpbin" -hide_banner -loglevel info -stats -nodisp -autoexit \
+                 -fflags nobuffer -flags low_delay \
+                 -f s16le -ar "$rate" $chargs -i pipe:0 2> >(ffplay_status) &
+        fp=$!
+        wait "$fp"; rc=$?; fp=""
+        # The relay ends when the run does; so does this. Asked of the FIFO,
+        # which playaudio.sh removes as the run ends, and not only of the box:
+        # a box still shutting down answers `true`, and a speaker started
+        # again then was a reader left behind after Stop (PAD-1109's log:
+        # "TOTAL STILL RUNNING : 1", a padrelay.py --pipe one second old).
+        docker exec "$NAME" test -p "$BOX_FIFO" >/dev/null 2>&1 || break
+        if [ $(( SECONDS - st )) -lt 5 ]; then quick=$(( quick + 1 )); else quick=0; fi
+        if [ "$quick" -ge 5 ]; then
+            echo "[box] the speaker (ffplay) stopped 5 times in a row as soon as it started (exit $rc); the rest of this run is silent" >&2
+            break
+        fi
+        sleep 1
+    done
 }
+
+# THE CONTROL FOLDER, kept level with the box's (PAD-957, PAD-1129). Three
+# parts in one pipeline, through the docker exec every other step rides:
+#   ctl_feed   the Mac's volume file and the run's clip names, read every
+#              quarter second and sent only when different, so the tab's
+#              slider reaches the relay inside half a second and an idle knob
+#              costs a `cat`. Base64, so a file is one line whatever it holds.
+#   boxctl.py  in the box, as root: writes them into place beside the window
+#              and says what the window did (see its docstring).
+#   ctl_apply  that, here: the window's Volume / Mute into the tab's file (the
+#              tab's slider follows it, as on Windows), its Restart game as the
+#              tab's request file, its clip and sound records appended to the
+#              tab's. The box's rig is always slot 0; the Mac's files are named
+#              for the app's own slot.
+# No volume file on the Mac means full volume, which is what the relay plays
+# without one. Until the box is up there is nothing to talk to and it is tried
+# again; a pipeline that ends with the box up is started again.
+ctl_feed() {
+    local names last_c="" last_n="" cur beat=0
+    names="$1/clip_names_$2.json"
+    while :; do
+        cur=$(cat "$PAD_AUDIO_CTL" 2>/dev/null) || cur=""
+        if [ -n "$cur" ] && [ "$cur" != "$last_c" ]; then
+            printf 'PUT ctl %s\n' "$(printf '%s\n' "$cur" | base64 | tr -d '\n')" || return 0
+            last_c=$cur
+        fi
+        cur=$(cat "$names" 2>/dev/null) || cur=""
+        if [ -n "$cur" ] && [ "$cur" != "$last_n" ]; then
+            printf 'PUT names %s\n' "$(printf '%s\n' "$cur" | base64 | tr -d '\n')" || return 0
+            last_n=$cur
+        fi
+        # a word now and then, so a box that has gone ends this too
+        beat=$(( beat + 1 ))
+        if [ "$beat" -ge 8 ]; then beat=0; echo NOP || return 0; fi
+        sleep 0.25
+    done
+}
+ctl_apply() {
+    local dir=$1 slot=$2 line kind rest
+    while IFS= read -r line; do
+        kind=${line%% *}; rest=${line#* }
+        case $kind in
+            CTL) printf '%s\n' "$rest" > "$PAD_AUDIO_CTL.box.tmp" &&
+                     mv -f "$PAD_AUDIO_CTL.box.tmp" "$PAD_AUDIO_CTL" ;;
+            REQ) printf '%s\n' "$slot" > "$dir/restart_game_$slot.req"
+                 echo "[box] the playfield window asked for Restart game" >&2 ;;
+            STOP) printf '%s\n' "$slot" > "$dir/stop_emulator_$slot.req"
+                  echo "[box] the playfield window asked to stop the emulator" >&2 ;;
+            ADD) case ${rest%% *} in
+                     clips)  printf '%s\n' "${rest#* }" >> "$dir/clips_seen_$slot.jsonl" ;;
+                     sounds) printf '%s\n' "${rest#* }" >> "$dir/sounds_seen_$slot.jsonl" ;;
+                 esac ;;
+        esac
+    done
+}
+ctl_sync() {
+    [ -n "${PAD_AUDIO_CTL:-}" ] || return 0
+    local dir slot
+    dir=$(dirname "$PAD_AUDIO_CTL"); slot=${PAD_SLOT:-0}
+    while :; do
+        if box_up; then
+            ctl_feed "$dir" "$slot" |
+                docker exec -i -u 0 "$NAME" python3 /pad/rig/docker/boxctl.py "$BOX_CTL_DIR" |
+                ctl_apply "$dir" "$slot"
+        fi
+        sleep 1
+    done
+}
+
+# THE ENGINE HAS TO RUN 32-BIT ARM (PAD-884), and colima's does not out of the
+# box (Docker Desktop's does). binfmt.sh registers the image's own qemu handler
+# in the engine's Linux when none is there, and says nothing when one is. A
+# failure is said and the run goes on: the guest check in the box then names
+# exactly what is missing.
+#
+# -u 0 IS NOT OPTIONAL: the image ends USER pad, and only root may mount the
+# handler table. v1.316 left it out, and on colima that step said "cannot see
+# the handler table" and the guest still could not start (PAD-884).
+if [ "${1:-}" = watch.sh ]; then
+    bf=$(docker run --rm --privileged -u 0 -v "$RIG:/pad/rig:ro" \
+             --entrypoint /bin/bash "$IMAGE" /pad/rig/docker/binfmt.sh 2>&1)
+    # its own last line is the answer; anything docker printed comes before it
+    case "$(printf '%s\n' "$bf" | tail -n 1)" in
+        "binfmt: present"*) ;;
+        "binfmt: registered"*|"binfmt: enabled"*)
+            echo "[box] this container engine could not run 32-bit ARM programs (the"
+            echo "[box] game is one); registered the image's qemu handler for it" ;;
+        *)  echo "[box] could not check this container engine's 32-bit ARM support:" >&2
+            printf '%s\n' "$bf" | sed 's/^/[box]   /' >&2 ;;
+    esac
+fi
 
 echo "[box] starting; the picture appears at vnc://:$PAD_VNC_PASSWD@localhost:$PORT"
 echo "[box] on macOS: open 'vnc://:$PAD_VNC_PASSWD@localhost:$PORT'   (Screen Sharing; VNC password: $PAD_VNC_PASSWD)"
 # NOT exec'd any more: the run has a Mac-side child now, and something has to
 # be here afterwards to take it down when the box exits.
 host_player & HOSTAUD=$!
+ctl_sync & HOSTCTL=$!
 docker run "${RUN_ARGS[@]}" "$IMAGE" "$@"
 RC=$?
-kill "$HOSTAUD" 2>/dev/null
-wait "$HOSTAUD" 2>/dev/null
+kill "$HOSTAUD" "$HOSTCTL" 2>/dev/null
+wait "$HOSTAUD" "$HOSTCTL" 2>/dev/null
 exit "$RC"

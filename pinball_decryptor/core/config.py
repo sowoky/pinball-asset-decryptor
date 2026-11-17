@@ -11,6 +11,21 @@ WRITE_PHASES = ["Detect", "Scan", "Repack", "Cleanup"]
 # GitHub repo for the unified app's auto-update check.
 GITHUB_REPO = "davidvanderburgh/pinball-asset-decryptor"
 
+# The animal shelter donations total (PAD-754, core/donations.py): the
+# Cloudflare Worker in tools/donations_worker.  PAD_DONATIONS_URL points the
+# app elsewhere (tests, a staging copy); empty disables the network side and
+# the paw chip shows no total.  The key ships in the app and only keeps
+# casual scripts out (the Worker's rate limit does the real work).
+DONATIONS_URL = os.environ.get(
+    "PAD_DONATIONS_URL",
+    "https://pad-donations.davidvanderburgh.workers.dev")
+DONATIONS_APP_KEY = "pad-shelters-2026"
+# Report a problem (PAD-780, core/problem_report.py) goes to the same
+# Worker: PAD_REPORTS_URL points it elsewhere (tests); empty turns the
+# button into "save as a file" only.  Same key, same reasoning.
+REPORTS_URL = os.environ.get("PAD_REPORTS_URL", DONATIONS_URL)
+REPORTS_APP_KEY = DONATIONS_APP_KEY
+
 # Application name used for settings directory + window title.
 APP_NAME = "Pinball Asset Decryptor"
 _SETTINGS_NAMESPACE = "pinball_decryptor"

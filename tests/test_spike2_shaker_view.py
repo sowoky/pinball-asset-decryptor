@@ -15,6 +15,7 @@ driven at and for how long, PAD-381). What is worth failing on:
 import os
 import struct
 import sys
+import types
 
 import pytest
 
@@ -42,12 +43,40 @@ def test_a_named_shaker_row_is_the_shaker(tmp_path):
     assert coilmap.shaker_address(p) == (1, 0)
 
 
+#: godzilla_le's own group-5 rows: the cabinet board's lamps and buttons, on
+#: the test menu's cabinet picture, and not one coil.
+GODZILLA_CABINET = (
+    "led COIN ENABLE 0 0 0 0 5 0 - -",
+    "led COIN DOOR GI 268 255 30 30 5 1 - System/TestMode/spike_2_cabinet_front_cropped",
+    "led START BUTTON 102 228 30 30 5 2 - System/TestMode/spike_2_cabinet_front_cropped",
+    "led TOURNAMENT START 102 277 30 30 5 3 - System/TestMode/spike_2_cabinet_front_cropped",
+    "led LOCKDOWN BUTTON-G 250 169 30 30 5 4 - System/TestMode/spike_2_cabinet_front_cropped",
+    "led LOCKDOWN BUTTON-R 250 169 30 30 5 5 - System/TestMode/spike_2_cabinet_front_cropped",
+    "led LOCKDOWN BUTTON-B 250 169 30 30 5 7 - System/TestMode/spike_2_cabinet_front_cropped",
+    "switch LEFT COIN 261 334 30 30 5 16 - System/TestMode/spike_2_cabinet_front_cropped",
+    "switch CENTER COIN 203 342 51 50 5 17 - System/TestMode/spike_2_cabinet_front_cropped",
+    "switch RIGHT COIN 299 334 30 30 5 18 - System/TestMode/spike_2_cabinet_front_cropped",
+)
+
+
 def test_a_table_without_the_cabinet_board_gets_group_5_index_0(tmp_path):
     # godzilla_le: its table names no cabinet coil, and its game's drive 7 reached
     # the rig's board as node 1 coil 0 (PAD-414)
     p = _table(tmp_path, "coil TROUGH 260 613 20 20 6 1 - playfield",
-               "coil VUK 132 43 20 20 7 1 - playfield")
+               "coil VUK 132 43 20 20 7 1 - playfield", *GODZILLA_CABINET)
     assert coilmap.shaker_address(p) == (1, 0)
+
+
+def test_the_cabinet_boards_lamps_and_buttons_are_not_a_use(tmp_path):
+    # PAD-532: the group-5 LEDs and switches above are the cabinet board itself;
+    # counting them hid the Shaker panel on godzilla_le and eleven other titles.
+    # Only a group-5 COIL says group 5 is a playfield board.
+    p = _table(tmp_path, "coil TROUGH 260 613 20 20 6 1 - playfield",
+               *GODZILLA_CABINET)
+    assert coilmap.shaker_address(p) == (1, 0)
+    p = _table(tmp_path, "coil AUTO PLUNGER 219 453 20 20 5 4 - Test/pf",
+               *GODZILLA_CABINET)
+    assert coilmap.shaker_address(p) is None
 
 
 def test_the_coin_door_lockout_is_not_a_use_of_the_cabinet_board(tmp_path):
@@ -149,3 +178,25 @@ def test_the_same_shake_again_is_a_second_shake(watch):
     watch.tick(_block(until=2000, pulse_t=20, pulse_pwr=51), 300.0)
     st = watch.tick(_block(until=2400, pulse_t=20, pulse_pwr=51), 400.0)
     assert st[0] == 51 and st[3] == 2
+
+
+def test_the_switch_list_view_has_the_shaker_panel_too(tmp_path, monkeypatch):
+    """PAD-551 (peanuts): "missing shaker" on Aerosmith, Sword of Rage, Elvira,
+    Foo Fighters, Guardians, Led Zeppelin, Mandalorian, Munsters, Rush, TMNT
+    and Venom - every one a title with no playfield picture, whose window is
+    the switch list, which had no shaker panel. It has the same one now,
+    driven from the same drive table."""
+    import playfield
+    p = _table(tmp_path, "coil SHAKER MOTOR 0 0 0 0 5 0 - -")
+    monkeypatch.setattr(playfield, "TDIR", str(tmp_path))
+    rows = [{"id": 5, "num": 5, "node": 8, "bit": 0, "name": "LEFT OUTLANE"}]
+    S = playfield.Schematic(types.SimpleNamespace(), rows)
+    spec = S.spec()
+    assert spec["kind"] == "schematic"
+    assert spec["shaker"] == {"name": "SHAKER MOTOR", "addr": "node 1 coil 0"}
+    assert S.dyn()["shaker"] is None
+    S.shaker.tick(_block(until=0), 1000.0)
+    S.shaker.tick(_block(until=500, pulse_t=150, pulse_pwr=31), 1100.0)
+    assert S.dyn()["shaker"][0] == 31
+    js = open(os.path.join(RIG, "pfpage", "pf.js"), encoding="utf-8").read()
+    assert "if (info && S.view.shaker)" in js       # the page is view-agnostic

@@ -15,6 +15,8 @@ site tick             0x003b5420 0xe92d4038 0xe3a00037
 site shot_dispatch    0x000d3e2c 0xe92d41f0 0xe24dd008
 site ball_end         0x000d615c 0xe92d40f8 0xe3036fa0
 site sound_lookup     0x004d6460 0xe92d4038 0xe1a05000
+# PAD-494 music modes: get_asset_descriptor, WRAPPED (sounds.cfg)
+site sound_resolve    0x0043c104 0xe92d41f0 0xe1a05820
 # called
 site score_add        0x002b25b8 0xe301116a 0xe340107d
 site callout          0x0018bafc 0xe3003f60 0xe340307b
@@ -162,6 +164,11 @@ site stock_battle_running 0x000d43d0 0xe92d4070 0xe30f66a0
 # v[22]: an active mode with (kind & 0x21) == 1 (every multiball)
 site stock_multiball_running 0x000d45a8 0xe92d40f8 0xe30f66a0
 data stock_mode_manager       0x007b0ce4
+# PAD-733 (David's Premium, v32: every mode of ours waited from 208 s into a ball to its drain, KUMONGA's picks refused):
+# Tesla Strike (rule 23, started by the powerlines, over when its lit arrows are made or the ball ends) runs beside the
+# game's own battles and multiballs, so it is not "one of the game's modes running" for ours (the rule lines below name
+# it; MODE_SDK.md "The game's own modes")
+text stock_any_beside        Tesla Strike
 
 # ---- events (item 147): MODE_SDK.md, Events ----------------------------------------------------
 # The ids are Pro 1.15's, and every function that dispatches them has the same shape here
@@ -212,9 +219,12 @@ value roster_vec_at         8
 value roster_record_size    12
 value roster_id_at          4
 value roster_qualified_at   83
-# the start of a picked mode waits this long (mode_file.c): the selection screen fades and plays its intro clip,
-# gone by +2.4 s (run4, Pro 1.15); at +3.3 s the mode's start screen showed (run5, this build)
-value roster_start_after_ms 3000
+# PAD-733 (David: the scene transition "the same as what the normal modes do"): a picked mode starts as the
+# selection screen's close ends - filmed at 0.25x on Premium/LE 1.16, Pro 1.16 and the Heisei 1.99D card alike: the
+# fade is gone by 0.44 s, the map zooms into the frame and holds, and 2.0 s after the pick the close's display effect
+# (132 here) gives way and a battle of the game's is in its intro. The runtime starts the mode the tick it does
+# (pm_roster_closing); this is only the most it waits (it was the start itself, 3000: the city's HUD, then the mode's)
+value roster_start_after_ms 2500
 # the selection screen's slot table (derived by port_tool.py from 2 places; the same seven records and callout ids as
 # Pro 1.15, read from both programs): a claimed slot is made silent (pm_roster_callout; item 146 fix-1). Run on this build
 # in item 146 run7: slot 0's id read 1888 -> 0 at the claim, 207 by `roster_callout 207`, 1888 at release (PAD_PEEK)
@@ -230,6 +240,131 @@ value roster_city_bit        1
 value roster_city_index_at   20
 value roster_city_vec_at     44
 value roster_city_record_size 16
+# PAD-706: a pick COUNTS AS THE BATTLE IT REPLACED. Read at the desk off this build (Ghidra + objdump, C:\tmp\PAD-706):
+# CBattle::stop (battle, reason) is every roster battle's stop but the Megalon & Gigan multiball's (their v[11] calls it,
+# after the KOTM test, and adds only the victory screen): wins +0x64+4p, the cmode stop (stopped +0x13+p, reason
+# +0x17+p, the END, the manager's "stopped" = the COMPLETED audit), then the battle rule's and the cities rule's
+# bookkeeping. CBattle::start (0x7fa78) clears the two bytes and writes the city's battle (+0x38 vector of the cities
+# rule; not for flags (+8) & 0x10), the cmode start (0x11dbe8) counts the start (+0x3c+4p), calls the manager's
+# "started" (0xd47fc: the STARTED audit) and keeps the per-player clock (0x2865e0) at +0x54. The battle's points this
+# time are its award's (+0x50) +0xf0+8p, zeroed by its START. roster_cursor: the selection screen's "the cursor landed"
+# (r0 = the screen, its slot at +16), logged for rig runs.
+site battle_stop       0x0007f998 0xe92d4038 0xe2515000
+site battle_started    0x000d47fc 0xe351001a 0xe92d4008
+site battle_clock      0x002865e0 0xe92d4010 0xe1a04000
+site roster_cursor     0x00190f08 0xe92d4038 0xe1a05000
+# roster_resume: the city pick (0x198f24) STARTs the city's tier-1 battle (ids 12-15) not yet won there, through the
+# battle's vtable after `pop` (r0 = the battle): how the game plays a lost battle again at the next lit scoop (run2:
+# `SP START 14 lr 0x199310` after a drain). Hooked so that a battle whose slot a mode holds is the mode's again.
+site roster_resume     0x00199038 0xe5903000 0xe5933020
+value roster_cursor_at       16
+# PAD-707: new monsters on the selection screen (pm_roster_more) - the screen's own sounds, read from its switch
+# handler (0x191048): the left flipper button moves the cursor back with 271, the right on with 272; a pick plays 236
+# (then show 177); the screen's timer is 13 s.
+value roster_left_sound     271
+value roster_right_sound    272
+value roster_pick_sound     236
+value roster_select_ms      13000
+# The screen's handler (r0 = the screen, r1 = the switch: 137 the left flipper button, 139 the right) moves the
+# cursor only while the screen's clock (83) runs and the busy one (23) does not, and not when the other flipper is
+# down too (both pick); each move first gives the clock 3 more (bump), then the next open slot (next 0x190f70), the
+# sound, the cursor's word (+roster_cursor_at) and its landing (roster_cursor, the callout). Opening (open) starts
+# the cursor on the last slot played; the pick (pick: Action, both flippers or the clock) plays 236 and starts the
+# battle of the slot under the cursor. A slot's state (state, RuleBattle): 0 open, 2 won in this city, else locked.
+# PAD-1078: the PLAYER LANGUAGE SELECT - RuleCities' switch method (r0 RuleCities, r1 the switch) flips the player
+# up between English and Japanese at each release of a flipper BUTTON, the cabinet inputs 137 (left) / 139 (right);
+# the co-op pick keeps them from it while it has the flippers (coop.cfg's left / button)
+site language_keys       0x0013f7d0 0xe92d40f8 0xe1a04001
+value language_keys_left   137
+value language_keys_right  139
+# PAD-1114: PLAYER LANGUAGE SELECT (adjustment 14: the bar over the start film) and each player's language
+# word (+ 4 * player, 0 English / 1 Japanese) - the co-op intro's language window after the ball
+value language_adjustment 14
+data language_player     0x007b0e7c
+text language_0 ENGLISH
+text language_1 JAPANESE
+site roster_screen_keys   0x00191048 0xe92d4070 0xe1a05000
+site roster_screen_open   0x001911dc 0xe92d4038 0xe1a04000
+site roster_screen_pick   0x00190c60 0xe3a01000 0xe92d4010
+site roster_screen_bump   0x00190ecc 0xe92d4038 0xe1a05000
+site roster_slot_state    0x001244bc 0xe3510006 0xda000001
+site roster_timer_on      0x0020bb1c 0xe92d4008 0xe30c3154
+site roster_switch_held   0x0029643c 0xe59f1000 0xeaffffe2
+value roster_screen_left   137
+value roster_screen_right  139
+value roster_screen_timer  83
+value roster_screen_busy   23
+value roster_screen_bump_by 3
+# PAD-733: the screen's portrait changes in two steps (0x190acc, each frame with the cursor): the shown place's out,
+# then the new place's in, from the slot table's labels. Its state word: 4 shown, 5 going out, 3 coming in, 1 none;
+# the next word the place shown (it changes when the in is over). The step itself (r0 the screen's scene, r1 the
+# cursor) is wrapped: a new monster goes in the step that starts the next place's in.
+site roster_portrait_step 0x00190acc 0xe92d4030 0xe30b4480
+data roster_portrait_state 0x007bb480
+# the screen's scene, the path to its places' nodes, and each slot's node names (battle_select.py's)
+# PAD-1107: the game's start-of-game logo, a scene of its own (auto-loaded, one node) drawn over the HUD;
+# the co-op pick hides it while a card is up (same id on LE and Pro 1.16, read off both cards)
+text start_logo_scene     43b52a63772ce0a35b7f0e3d4f249566066b55f8
+text start_logo_path      Logo_Instance
+# PAD-1114: the start films (BDLGameIntro), intro<N> at random at a Start (Pro drew intro2, a name the program
+# builds); the co-op intro stands in for them
+text start_film_clips intro*
+# PAD-1114 round 2: the intro screen (BDLGameIntro, scene 762a9b99...) - its state word (the game's state object at
+# *0x7b0f70, + 0x44) reads 0 while it is up, 4 after (emulator: the film's end or its own ~9.5 s); its own words over
+# the film (the place, the date, the Japanese date art) hidden while the co-op intro is its film; the language bar stays
+data intro_state           0x007b0f70
+value intro_state_at        0x44
+value intro_state_up        0
+text intro_scene 762a9b99fc0c933b6c6c4822cb48911fa92bbd97
+text intro_hide_0 Line1_Textbox
+text intro_hide_1 Line2_Textbox
+text intro_hide_2 JapaneseText_Artbox
+# PAD-1114 round 3: the End of Ball Bonus loop's own crop (EndOfBallBonus_BackgroundLoop), for the co-op award
+# cards when no bonus end was seen
+text bonus_loop_crop SquareCrop
+# the ball start's serve (bl 0x38910c, the framework's serve with the serve record 0x7d3930), after its start display
+site serve_ball             0x002a77ec 0xeb038646 0xe3a00026
+text roster_screen_scene  cac32730af42b9d26d26c4bb6e667b07da53113e
+text roster_screen_path   SelectOverlay_Textbox.CharacterSelect_Instance.
+text roster_tile_0        Ebirah
+text roster_tile_1        Titan
+text roster_tile_2        Gigan
+text roster_tile_3        Megalon
+text roster_tile_4        Ghidorah
+text roster_tile_5        MegalonGigan
+text roster_tile_6        GhidorahGigan
+# each place's state box (its lock, its claw, its city), under the overlay: hidden where a new monster won it
+text roster_box_path      SelectOverlay_Textbox.
+text roster_box_0         T1_1_Artbox
+text roster_box_1         T1_2_Artbox
+text roster_box_2         T1_3_Artbox
+text roster_box_3         T1_4_Artbox
+text roster_box_4         T2_1_Artbox
+text roster_box_5         T2_2_Artbox
+text roster_box_6         T2_3_Artbox
+value battle_stopped_at      0x13
+value battle_reason_at       0x17
+value battle_starts_at       0x3c
+value battle_clock_at        0x54
+value battle_wins_at         0x64
+value battle_flags_at        8
+value battle_no_city_flag    0x10
+value battle_total_at        0xf0
+# the slots whose battle stops itself, not through CBattle::stop: 5, Megalon & Gigan multiball (its v[11] always counts a win)
+value battle_own_stop_slots  0x20
+value roster_city_battle_vec_at 56
+# PAD-707: a tier-1 battle's last hit (Ebirah 0x815d0, Titanosaurus 0x90b78, Gigan 0x9d1e8, Megalon 0xa5f08): beaten(rule), once the rule's
+# guard says it is built, then the cities rule's "beaten here" byte for the player (+0x44 vector, 4 a city) = 1,
+# before the victory show and CBattle::stop. A pick a mode won does the same (the city is finished: the next city
+# screen travels on).
+site battle_beaten       0x00121c28 0xe92d47f0 0xe1a06000
+data battle_beaten_rule       0x007b2e28
+data battle_beaten_guard      0x007b2f88
+value roster_city_beaten_vec_at 68
+# PAD-733: the city screen's "TO REMATCH %s" (numbered line 3750 of the game's text table, read off this build's
+# program: 3748 STAY IN:, 3749 TRAVEL TO:), the held battle's name; it names a new monster lost in the city instead
+value roster_rematch_line  3750
+value battle_beaten_slots   0x0f
 
 # ---- display priority (item 154 display; MODE_SDK.md "Display priority") --------------------------------------
 # Placed by signature from Pro 1.15 (strict); the effect and layered tables match Pro's record for record. Run here
@@ -316,7 +451,7 @@ lamp 296          0              FIGHTER RIGHT 2  # lamp 109, I/O group 6 index 
 lamp 297          0              FIGHTER RIGHT 3  # lamp 110, I/O group 6 index 11, at 215,566
 lamp 298          0x8000000      MASER  # lamp 111, I/O group 6 index 62, at 51,417
 lamp 299          0              MASER READY  # lamp 112, I/O group 6 index 63, at 67,425
-lamp 300,301,302  0x800000000    LEFT SPINNER  # lamp 113, I/O group 6 index 56, at 55,373
+lamp 300,301,302  0x800000200    LEFT SPINNER  # PAD-658: + the Left spinner shot (0x200); lamp 113, I/O group 6 index 56, at 55,373
 lamp 303          0              TANK 1  # lamp 114, I/O group 6 index 55, at 69,391
 lamp 304          0              ADV RAMPAGE  # lamp 115, I/O group 6 index 54, at 77,405
 lamp 305          0              RODAN  # lamp 116, I/O group 6 index 41, at 178,421
@@ -325,10 +460,10 @@ lamp 307          0              ANGUIRUS  # lamp 118, I/O group 6 index 47, at 
 lamp 308,309,310  0              TOP SAUCER  # lamp 119, I/O group 6 index 28, at 209,410
 lamp 311,312,313  0              BOTTOM SAUCER  # lamp 120, I/O group 6 index 17, at 215,436
 lamp 314          0              SAUCER  # lamp 121, I/O group 6 index 8, at 225,450
-lamp 315          0              ATTACK MECHA  # lamp 122, I/O group 6 index 23, at 200,381
+lamp 315          0x20000        ATTACK MECHA  # PAD-669: + the shield ramp spinner shot (0x20000), the insert the game's Ebirah battle names for it; lamp 122, I/O group 6 index 23, at 200,381
 lamp 316          0              TANK 6  # lamp 123, I/O group 6 index 22, at 227,394
 lamp 317          0x2000000000   SELECT CITY  # lamp 124, I/O group 6 index 21, at 236,380
-lamp 318,319,320  0x4000000000   MECHA LANE  # lamp 125, I/O group 6 index 24, at 282,393
+lamp 318,319,320  0x14000000000  MECHA LANE  # PAD-658: + the Mecha exit bottom shot (0x10000000000); lamp 125, I/O group 6 index 24, at 282,393
 lamp 321,322,323  0x40           POP BUMPER  # lamp 126, I/O group 6 index 42, at 251,413
 lamp 324,325,326  0x80000000     SHIELD LEFT  # lamp 127, I/O group 6 index 31, at 189,335
 lamp 327,328,329  0x100000000    SHIELD CENTER  # lamp 128, I/O group 6 index 34, at 199,346
@@ -353,7 +488,7 @@ lamp 351          0x80000        MAGNA GRAB  # lamp 146, I/O group 7 index 44, a
 lamp 352          0              TANK 3  # lamp 147, I/O group 7 index 43, at 95,276
 lamp 353          0              ATTACK BRIDGE  # lamp 148, I/O group 7 index 42, at 102,292
 lamp 354,355,356  0xc00000       BUILDING  # lamp 149, I/O group 7 index 76, at 123,202
-lamp 357,358,359  0x1800         TOP SPINNER  # lamp 150, I/O group 7 index 67, at 165,207
+lamp 357,358,359  0x3800         TOP SPINNER  # PAD-658: + the Top spinner shot (0x2000); lamp 150, I/O group 7 index 67, at 165,207
 lamp 360          0x10000000     POWERLINE LEFT  # lamp 151, I/O group 7 index 79, at 104,219
 lamp 361          0              LITE DESTRUCTION JACKPOT  # lamp 152, I/O group 7 index 71, at 124,220
 lamp 362          0x20000000     POWERLINE CENTER  # lamp 153, I/O group 7 index 70, at 144,216
@@ -406,9 +541,35 @@ value stock_slot_lit    25
 value stock_field       0x18
 # 12 cmode_battle_vs_ebirah (obj 0x7b53f0, handler 0x816e8): counts 0x200 / 0x2000 / 0x20000 (the spinners'
 # middle bits, 15 / 40 / 15 spins), then 0x40 (Pop bumper) or bit 42 for the final blow
-rule 12 0x00636d78 Battle vs Ebirah
+# PAD-699: the game's own modes a counts-as / instead-of row may name (game_mode_blocks.stock_rule_lines,
+# from the game program): `rule <id> <the vtable pointer its object carries> <name>`
+rule 1   0x0063a250 Godzilla Multiball
+rule 2   0x0063d1f0 Mechagodzilla Multiball
+rule 3   0x00639c90 Bridge Attack Multiball
+rule 4   0x00640820 Tank Attack Multiball
+rule 5   0x0063fb90 Saucer Attack Multiball
+rule 6   0x00638d60 Battle vs Megalon and Gigan Multiball
+rule 7   0x0063f2c8 Planet X Multiball
+rule 8   0x0063e4a0 Monster Zero Victory Multiball
+rule 9   0x006417b0 Terror of Mechagodzilla
+rule 10  0x0063b528 King of the Monsters Multiball
+rule 11  0x0063d770 Monster Island Madness
+rule 12  0x00636d78 Battle vs Ebirah
+rule 13  0x00639610 Battle vs Titanosaurus
+rule 14  0x00637ac0 Battle vs Gigan
+rule 15  0x00638670 Battle vs Megalon
+rule 16  0x00638020 Battle vs King Ghidorah
+rule 17  0x00637500 Battle vs Ghidorah and Gigan
+rule 18  0x006402c0 Super Train
+rule 19  0x0063eeb8 O2 Destroyer
+rule 20  0x0063b420 King of the Monsters
+rule 21  0x0063af48 Jet Fighter Attack
+rule 22  0x0063f4e8 Planet X Hurry Up
+rule 23  0x00640ee0 Tesla Strike
+rule 24  0x0063de00 Monster Rampage
+rule 25  0x0063aae8 Hedorah
+rule 26  0x0063e3c8 Monster Zero
 # 4 cmode_tank_attack_multiball (obj 0x7b4f30, handler 0x10a040): a hit on a tank's exact position bit
-rule 4  0x00640820 Tank attack multiball
 # ---- item 161: the game's own rules REWRITTEN in C (pad_stock.h; MODE_SDK.md "Rewriting a stock rule's shot logic") ----
 # Every site word pair below was read from the ELF by port_words.py; every offset and id by item 158
 # (desk-proven, the marked ones emulator-proven) and checked against this item's decompile.
@@ -503,6 +664,14 @@ site balls_in_play         0x00388e0c 0xe92d4010 0xe3034930
 # ball save in ticks (62 a second), r3 0xbb as this build's own multiballs pass it, two zero words on the
 # stack. pm_multiball_start / pm_multiball_add; a mode file's `multiball` line; the tab's Multiball.
 site multiball_serve       0x00388f88 0xe92d41f0 0xe301e16a
+# PAD-733: drain to one ball (pm_drain_to_one): the framework's all-flippers off and on (each flipper record's
+# enable bit at +6, the node boards' rules follow; found from Premium/LE 1.16 by code, movw/movt and branches
+# masked) - the pair the game's own dead-flipper feature calls (0xc19a4 / 0xc19cc), there with the kickbacks, pops
+# and slings off too; the runtime kills the flippers alone
+site flippers_off         0x003f1898 0xe92d4070 0xe3065244
+site flippers_on          0x003f196c 0xe92d4070 0xe3065244
+value shooter_lane_switch 62  # the served ball lands here (plunge.py: SHOOTER LANE); the flippers are back then
+data multiball_record      0x007d3930  # the framework's multiball record (the serve's r5): +0 its ball save's ticks, +4 the grace after it - drain to one ends the save
 
 # ---- the magnet: a grab of the mode's own (PAD-381; pad_mode_runtime.c "the magnet") - LE 1.16 (found from Pro 1.16 by code, movw/movt and branch fields masked).
 # coil_fire = ControlCoil's fire (device, pulse power, pulse ms, hold power, hold ms, x ms): one command
@@ -552,6 +721,11 @@ text bridge_label          bridge
 site scoop_handler         0x0007d8e4 0xe301316a 0xe2401002
 data scoop_slot            0x007570a4
 value scoop_event          2
+# PAD-733: the game's ball search put off while a mode holds the ball (pad_mode_runtime.c "the scoop"): its own holds
+# call ball_search_delay(ball search time) every tick (event 2's waits 0x7da38, the selection screen 0x191cc8); the
+# countdown 0x7d36a4 (62 a second), the time a byte (10 s) nothing writes. Rig runs bs_long / bs_long_fix, bs_hits(_fix).
+site ball_search_delay     0x00379f0c 0xe30336a4 0xe0600280
+data ball_search_time      0x007144f8
 # EMU 2026-09-26 (mb_e2e.sh): served 3 on a mode file's start, add-a-ball to 4, drains to 1, END (one ball left). PROVEN.
 
 # ---- PAD-379: the shield platform (Premium/LE only; a Pro's shield targets are fixed) ---------------------------
@@ -715,6 +889,11 @@ value switch_polarity_at    28
 switch 34   0x1000000000000000 Action button
 switch 60   0x2000000000000000 Left flipper button
 switch 59   0x4000000000000000 Right flipper button
+# PAD-658: two playfield switches the game's shot dispatch never names (MODE_API.md: the scoop and Mecha Exit Top
+# send only 0x1), as shots of their own: the right scoop (King Caesar's and Kamacuras's corner, the pack's cash-out
+# shot) and the top of the Mecha lane, beside Mechagodzilla (Minilla's)
+switch 53   0x0100000000000000 Right scoop
+switch 50   0x0200000000000000 Mecha exit top
 # PAD-416: the trough's six positions as one shot, "Trough". A ball draining home closes one of them (and the stack
 # rolling down after an eject closes the next), so a mode that keeps a ball save of its own knows the moment its ball
 # drained - the framework's count of the balls in play does not move while the save serves it back (measured: it
@@ -730,6 +909,31 @@ text internal_shots        Trough
 # the Action button's RGB light (lamp 97, I/O group 5 index 5/4/7, on the cabinet front), tied to its shot:
 # a mode that lights its shots lights the button
 lamp 282,283,284  0x1000000000000000 ACTION BUTTON  # lamp 97, I/O group 5 index 5, the cabinet front
+# ---- cabinet: cablamp <light ids R,G,B | one> <u> <name> - the expression lights, read by lamp_map.py ----
+# 0 blade pixel(s), 23 speaker light(s), placed on the cabinet drawing (PAD-1040)
+cablamp 523,524,525  41  SPEAKER 1  # lamp 244, I/O group 10 index 1, at 95,28, speaker L
+cablamp 526,527,528  125 SPEAKER 2  # lamp 245, I/O group 10 index 4, at 116,34, speaker L
+cablamp 529,530,531  208 SPEAKER 3  # lamp 246, I/O group 10 index 7, at 131,49, speaker L
+cablamp 532,533,534  291 SPEAKER 4  # lamp 247, I/O group 10 index 10, at 137,70, speaker L
+cablamp 535,536,537  375 SPEAKER 5  # lamp 248, I/O group 10 index 13, at 131,91, speaker L
+cablamp 538,539,540  458 SPEAKER 6  # lamp 249, I/O group 10 index 16, at 116,106, speaker L
+cablamp 541,542,543  541 SPEAKER 7  # lamp 250, I/O group 10 index 19, at 95,112, speaker L
+cablamp 544,545,546  625 SPEAKER 8  # lamp 251, I/O group 10 index 22, at 74,106, speaker L
+cablamp 547,548,549  708 SPEAKER 9  # lamp 252, I/O group 10 index 25, at 59,91, speaker L
+cablamp 550,551,552  791 SPEAKER 10  # lamp 253, I/O group 10 index 28, at 53,70, speaker L
+cablamp 553,554,555  875 SPEAKER 11  # lamp 254, I/O group 10 index 31, at 59,49, speaker L
+cablamp 556,557,558  958 SPEAKER 12  # lamp 255, I/O group 10 index 34, at 74,34, speaker L
+cablamp 559,560,561  45  SPEAKER 13  # lamp 256, I/O group 10 index 37, at 205,28, speaker R
+cablamp 562,563,564  136 SPEAKER 14  # lamp 257, I/O group 10 index 40, at 228,35, speaker R
+cablamp 565,566,567  227 SPEAKER 15  # lamp 258, I/O group 10 index 43, at 243,53, speaker R
+cablamp 568,569,570  318 SPEAKER 16  # lamp 259, I/O group 10 index 46, at 247,76, speaker R
+cablamp 571,572,573  409 SPEAKER 17  # lamp 260, I/O group 10 index 49, at 237,98, speaker R
+cablamp 574,575,576  500 SPEAKER 18  # lamp 261, I/O group 10 index 52, at 217,110, speaker R
+cablamp 577,578,579  590 SPEAKER 19  # lamp 262, I/O group 10 index 55, at 193,110, speaker R
+cablamp 580,581,582  681 SPEAKER 20  # lamp 263, I/O group 10 index 58, at 173,98, speaker R
+cablamp 583,584,585  772 SPEAKER 21  # lamp 264, I/O group 10 index 61, at 163,76, speaker R
+cablamp 586,587,588  863 SPEAKER 22  # lamp 265, I/O group 10 index 64, at 167,53, speaker R
+cablamp 589,590,591  954 SPEAKER 23  # lamp 266, I/O group 10 index 67, at 182,35, speaker R
 
 # The battle rule's shot handler, RuleBattle::v[25] (vtable 0x642690 + 8 + 100; shot mask in r2:r3): a lit
 # ramp counts toward a battle (0x100000 Left ramp, 0x200000 Right ramp), a lit scoop (hi 0x20) opens the
@@ -846,3 +1050,254 @@ text block_default          21 23
 site lamp_free_owner      0x003a619c 0xe92d4010 0xe1a04000
 value proc_exit_hooks      0x120
 value proc_exit_slots      4
+
+# ---- PAD-473: the game's own mini-wizards (MODE_SDK.md "The game's own mini-wizards on the other titles"): each one's
+# mode object, started by its own START (v[8]) as the game's rules start it and asked its ACTIVE (v[14]);
+# the names and what earns each are the game's rulesheet's, the objects this build's own (stock_scan_cpp).
+data  wizard_obj_1    0x007b5e78   # cmode_monster_zero
+text  wizard_name_1   Monster Zero
+text  wizard_film_1   Godzilla Multiball's Super Jackpot
+data  wizard_obj_2    0x007b5298   # cmode_terror_of_mechagodzilla, a multiball
+text  wizard_name_2   Terror of Mechagodzilla
+text  wizard_film_2   Mechagodzilla Multiball's Super Jackpot
+data  wizard_obj_3    0x007b51a8   # cmode_planet_x_multiball, a multiball
+text  wizard_name_3   Planet X Multiball
+text  wizard_film_3   a battle, Tesla Strike and two attack multiballs
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+data  game_flags          0x007d3848
+value game_flags_at       4
+data  game_flag_count     0x005fad40
+value challenge_on_flag   18
+value challenge_flag_0  40
+text  challenge_name_0  King of the Monsters
+value challenge_name_msg_0  3275
+value challenge_flag_1  41
+text  challenge_name_1  King of the Monsters Time Attack
+value challenge_name_msg_1  3276
+site  challenge_balls     0x00338820 0xe92d4030 0xe1a05000
+site  challenge_extra_ball 0x002b2cd8 0xe30a35c8 0xe340307c
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x0038af58 0xe301216a 0xe340207d
+# PAD-686: the start menu (process 0x5f930) lists game-mode table indices on its stack - 1 STANDARD, (2), 3 COMPETITION,
+# 4 KING OF THE MONSTERS CHALLENGE, (5 TIME ATTACK, 8) - at sp+300, the count at sp+64, room for 9 (the next local at
+# sp+336). Its every-frame point, inside the loop (it jumps back to 0x603c8, past where the buttons are first read):
+# the buttons in r5 (bit 4 the left flipper: the cursor r6 back, bit 2 the right: on, both wrapping; bit 0x80 leaves),
+# before the cursor moves and the index under it is applied live; its two words move (no pc-relative one). ONE MODE
+# CHALLENGE entry is appended there: King of the Monsters' own index again, its name message the mode's name, its
+# flippers stepping through the modes' own; picked, the game's KOTM challenge game, taken by the mode as the ball starts.
+site  challenge_menu_frame            0x000603d8 0xe0833106 0xe51330d4
+value challenge_menu_frame_buttons_reg 5
+value challenge_menu_frame_list_at    300
+value challenge_menu_frame_count_at   64
+value challenge_menu_frame_cap        9
+value challenge_menu_frame_entry      4
+value challenge_menu_frame_cursor_reg 6
+value challenge_menu_frame_left       4
+value challenge_menu_frame_right      2
+value challenge_menu_slot             0
+# the game applies the picked index's flags again as the game starts: on MODE CHALLENGE the pick is Standard's (the
+# GamePlayModes singleton, its index at +8) and the menu's pick alone makes it the mode's one-ball challenge game
+data  game_play_modes                 0x007b2814
+value game_play_mode_at               8
+value challenge_mode_plain            1
+value challenge_menu_sets_on          1
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x00386db4 0xe92d4010 0xe3034930
+value ball_launch_flag       12
+value ball_launch_wait_flag  13
+
+# ---- PAD-663: the game's champions for a mode's challenge game, read off this build's own code (portchallenge.py) ----
+# PAD-640: the game's end-of-game high scores (a mode's challenge game keeps the mode's own)
+site  challenge_scores       0x00300d20 0xe92d4ff0 0xe24dd0bc
+site  challenge_score_entry  0x00300254 0xe1a03000 0xe30c07b0
+# PAD-663: its question to the bus before it files a player under a category's entry ({player, category +2, entry +4}): in a mode's challenge game only the mode's record says yes
+site  challenge_scores_gate  0x00300f8c 0xeb03ef99 0xe3500000
+value challenge_scores_gate_id       91
+value challenge_scores_gate_cat_at   2
+value challenge_scores_gate_entry_at 4
+# PAD-663: the category table (36 bytes each; +28 the entry list a category's insert shifts) and its count
+data  challenge_scores_table 0x00729a3c
+data  challenge_scores_count 0x005fb3e8
+# PAD-663: HIGHEST SCORES, whose first entry a mode's challenge game goes in as the mode's own record
+value challenge_scores_cat   1
+# PAD-663: the champion page function(s) (each called per category; the attract mode's is the one it calls): a mode's challenge champion is shown on it after the lowest category the attract mode shows
+site  challenge_pages_0     0x00023b70 0xe306c27c 0xe340c07d
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x00300d20 0xe92d4ff0 0xe24dd0bc
+
+# PAD-710: the game's own mode framework (mode_framework.py, from this build's program): what one of its
+# modes writes as it starts and stops, so a mode of ours in one's place counts as it
+site  mode_player            0x003387f0 0xe3033b94 0xe3403071
+value mode_slot_stop         11
+value mode_stopped_at        0x13
+value mode_reason_at         0x17
+value mode_starts_at         0x3c
+site  mode_started           0x000d47fc 0xe351001a 0xe92d4008
+data  mode_manager           0x007b0ce4
+value mode_id_at             4
+
+# PAD-710: the challenges that are one of the game's own modes: a mode taking the challenge counts as it
+value challenge_place_0        20
+
+# PAD-782: the attract mode's page table (portattract.py); an owner's attract items play between its pages
+data  attract_table       0x0070d858
+value attract_entry_size  16
+value attract_page_at     4
+value attract_count       91
+site  attract_sleep       0x003f3200 0xe3063278 0xe340307d
+# PAD-782: the scene show an attract item's page puts the video bank's scene on the glass with
+site  attract_show        0x00405d2c 0xe92d4070 0xe306427c
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x005b3a3c 0xe5d13000 0xe3530008
+site coil_off              0x005afb28 0xe3510008 0xe1a02001
+data sw_struct             0x007d2004
+data coil_count            0x007d49ec
+data coil_table            0x007d6144
+
+# ---- PAD-1017: co-op play (portcoop.py, read off this build's program) ----
+site  coop_player_change 0x00338950 0xe92d41f0 0xe24dd008
+site  coop_add_player    0x00338790 0xe92d4038 0xe3a00051
+data  coop_player        0x00713b94
+data  coop_players       0x007d116c
+site  coop_first_ball    0x002a7714 0xeb02445a 0xe1a04000
+
+# ---- PAD-1202: co-op play - the ball start's "player N, you're up" call's read of the player up (portcoop.py) ----
+site  coop_up_call           0x0005562c 0xeb0b8c6f 0xe2401001
+
+# ---- PAD-1043: co-op play - the score panel's calls of the player-up getter (portcoop.py) ----
+site  coop_panel_lit         0x001ae4e0 0xeb0628c2 0xe5943070
+site  coop_panel_up          0x001ae3a4 0xeb062911 0xe5d431b5
+site  coop_panel_name        0x001ade70 0xeb0474be 0xe28d101c
+site  coop_panel_name_2      0x001ae740 0xeb04728a 0xe28d0030
+site  coop_panel_name_user   0x002cadc8 0xebfffbb6 0xe250a000
+site  coop_icon_draw         0x003e1a10 0xebfffdf3 0xe1560004
+
+# ---- PAD-1017: more for co-op play (the message table and its BALL line; the end-of-game high scores) ----
+value coop_ball_msg          1255
+
+# ---- PAD-1028: co-op awards - the game's audit add (portcoop.py, read off this build's program) ----
+site  audit_add              0x00416040 0xe92d43f0 0xe2505000
+# PAD-1031: co-op characters (pad_mode_runtime.c "co-op characters")
+# the adjustment-changed handler ({u16 id}): LIGHT ALLY's one-shot (a gift)
+site coop_adj_changed     0x000598b4 0xe92d4070 0xe1a05000
+# round 6: the framework's award-extra-ball (the mystery's AWARD EXTRA BALL; counts AUD_TOTAL_EXTRA_BALLS 73, the
+# player's byte at 0x7ca5c8 + 8 + player - 1): eb:<n> calls it as the character's ball n begins. r0: a points
+# word for the consolation (0 fine); answers 1 lit, 2 points instead (extra balls off or at their limit).
+site coop_eb_award        0x002b300c 0xe92d4070 0xe1a06000
+# the power-up add (this, n): a boost scales n
+site coop_boost           0x0014cb3c 0xe92d4030 0xe24dd014
+# copies LIGHT BATTLE DIFFICULTY into the battle rule's record (hooked: the rule's object)
+site coop_cache_173       0x0012406c 0xe92d40f8 0xe1a04000
+value coop_cache_173_at   0x10
+# copies BUILDING DIFFICULTY into the building rule's record (hooked: the rule's object)
+site coop_cache_168       0x0012e168 0xe92d40f8 0xe1a07000
+value coop_cache_168_at   0x4
+# the jets rule (rule 0x15 of the game's rule table): JET FIGHTER CHAMPION's and the bonus's jets destroyed at
+# rule + player x 4 + 0xa8
+data  coop_count_jets_rule 0x007b4afc
+value coop_count_jets_at   0xa8
+# the tank rule's game-start method; the city map's TANKS n/10 at this + (player - 1) x 4 + 0x48
+site coop_count_tanks     0x00180e44 0xe92d43f0 0xe1a04000
+value coop_count_tanks_at 0x44
+# the battles' rules (ids 12-18: the seven places of the selection screen) and the tier-1 ones (12-15): a character's
+# spot sends one of a running battle's lit shots; its unlock reads UNLOCK ALL MONSTER BATTLES (334) as 1 once a
+# tier-1 battle has started on its turn (the selection screen's slot state reads it live: Premium/LE 0x122ae8)
+value coop_battle_rules    0x7f000
+value coop_tier1_rules     0xf000
+# PAD-1041: the start menu of game-mode table indices - Prolonged Competition's entry is Competition's index again
+site  comp_menu_frame        0x000603d8 0xe0833106 0xe51330d4
+value comp_menu_frame_list_at    300
+value comp_menu_frame_count_at   64
+value comp_menu_frame_count_last 0
+value comp_menu_frame_cap        9   # the game-mode table's entries
+value comp_menu_frame_cursor_reg 6
+value comp_menu_frame_buttons_reg 5
+value comp_menu_index            3   # COMPETITION
+value comp_menu_index_msg        1920
+value comp_menu_end_index        1   # STANDARD
+value comp_menu_end_msg          1915
+# copies BRIDGE ATTACK DIFFICULTY (176) into the bridge rule's record (hooked: the rule's object), as 173/168
+site coop_cache_176       0x001349c4 0xe92d41f0 0xe1a04000
+value coop_cache_176_at   0x4
+# the tank rule's "in the Maser phase" check ((this) -> 1 once this wave's tanks reach the level's count): a
+# character's yes:maser answers 1 while they are up, so the Maser is lit for the whole of Tank Attack
+site coop_yes_maser       0x00108d20 0xe92d4038 0xe1a04000
+# the base-play rule that pays the MASER CANNON AWARD on the Maser target (its shot handler; its lit mask is the
+# framework's at +0x18 + 8 x player): a character's lit:maser holds the Maser bit in it while they are up
+site coop_lit_maser       0x001645ac 0xe92d4070 0xe1a04002
+value coop_lit_maser_mask  0x8000000
+# ... and its award wants the player's charge word (this + 4 x player + 0x14) non-zero: kept at least 1
+value coop_lit_maser_at    0x14
+value coop_lit_maser_min   1
+# the Mechagodzilla rule (its game-start copy of the two difficulties; LE's object is 0x7b29f8): spins toward
+# ONLINE at this + (player - 1) x 4 + 0x78 (goal at +0xd0, 20 on difficulty 1) and, while the shield is up, the
+# hits LEFT in the high word of the u64 at this + player x 8 + 0x30 - a character's double:spins / double:shield
+site coop_count_spins     0x0015c7a8 0xe92d40f8 0xe1a04000
+value coop_count_spins_at  0x74
+site coop_count_shield    0x0015c7a8 0xe92d40f8 0xe1a04000
+value coop_count_shield_at 0x34
+value coop_count_shield_stride 8
+# the building rule (one object): its six damage steps are a vector at +0x2c of words, a percent byte per player
+# (100 = the step done; the game's default difficulty does one a shot) - a character's steps:building does two
+value coop_steps_building_obj 0x007b1d10
+value coop_steps_building_at  0x2c
+value coop_steps_building_n   6
+# the heat ray rule (one object): HEAT RAY READY is the word at this + player x 4 + 4 (1 = ready, the spinner
+# maxed, HOLD DOWN ACTION BUTTON) - a character's count:heatray=1 sets it at the pick (the game clears it on the fire)
+value coop_count_heatray_obj 0x007b2d68
+value coop_count_heatray_at  0x4
+# ... its level at this + (player - 1) x 4 + 0x28 (READY when it reaches 4) and its spins toward the next level at
+# this + player x 4 + 0x28: count:heatlevel=3,count:heatspins=9 at the pick puts the heat ray
+# one spin from READY (the halved HEAT RAY SPINS PER LEVEL is 10), so the game's own transition lights it
+value coop_count_heatspins_obj 0x007b2d68
+value coop_count_heatspins_at  0x28
+# the saucer (Godzilla's pop bumper) rule: pop hits toward Saucer Attack at this + player x 4 + 4 - double:saucer
+value coop_count_saucer_obj   0x007b0de8
+value coop_count_saucer_at    0x4
+# the powerlines rule: the three targets of a set are words at +0x38 (1 = hit; a set done clears them and counts at
+# +0x44) - steps:powerline makes each hit two targets
+value coop_steps_powerline_obj 0x007b0b90
+value coop_steps_powerline_at  0x38
+value coop_steps_powerline_n   3
+value coop_steps_powerline_inline 1
+value coop_steps_powerline_done 1
+value coop_steps_powerline_width 4
+# MAGNA GRAB lit: the word the game sets from MAGNA GRAB LIT AT GAME START (194) at game start (LE 0x155cdc),
+# this + player x 4 + 0x14 of the Mechagodzilla magnet rule - keep:magna=1 holds it lit
+value coop_keep_magna_obj     0x007b1d4c
+value coop_keep_magna_at      0x14
+value coop_count_heatlevel_obj 0x007b2d68
+value coop_count_heatlevel_at  0x24
+# the Monster Rampage rule: its letters are a byte a player at this + player + 0xb (RAMPAGE STARTING LETTERS at game
+# start, 12 to start at +0xf + player) - double:rampage makes each letter two
+value coop_count_rampage_obj    0x007b2cfc
+value coop_count_rampage_at     0xb
+value coop_count_rampage_stride 1
+value coop_count_rampage_width  1
+# the Train rule (LIGHT TRAIN's handler names it): trains collected at this + player x 4 + 0x2c, one a lit loop -
+# double:train collects two at a time
+value coop_count_train_obj    0x007b2d24
+value coop_count_train_at     0x2c
+# the Destruction Jackpot rule (LIGHT LIGHT DESTRUCTION JACKPOT 309's handler): lit byte at +0xb + player, the
+# multiplier step (0 = 1X, 1 = 2X ...) at this + (player - 1) x 4 + 0x10, raised with each light - keep:djmult>=1
+value coop_keep_djmult_obj    0x007b1c78
+value coop_keep_djmult_at     0xc
+# round 6: the Godzilla power-ups a player owns (the perks picked at the scoop), one bit each in the word at the
+# power-up rule's object + 0x44 + 4 x player; each rule tests its own bit (0x14e388(id)): 8 LOOP VALUE 2X, 11 RAGE
+# COMBO +3 S, 18 DESTRUCTION JACKPOT +3 S, 19 +2X, 20 RODAN TIMER +15 S, 21 MAGNA GRAB 2X, 22 SUPER SPINNER +2X ...
+# (the 31 names at 0x5fcac0, in reverse id order). keep:perks|=<mask> keeps the character's bits set.
+value coop_keep_perks_obj     0x007b2dd0
+value coop_keep_perks_at      0x44
+
+# ---- PAD-1316: co-op play - the game start's adds of the Insider lobby's players, made while ball 1 waits (portcoop.py) ----
+site  coop_start_game        0x002a7934 0xe92d47f0 0xe30d4f9c
+site  coop_lobby_add         0x002a7a5c 0xebfffea3 0xe2506000

@@ -138,6 +138,9 @@ Kits in `C:/tmp/PAD-420` (all rigbatch jobs, two rigs, hidden, muted, stock card
   `spike2/masterdir.py _crypto_sites` ("this game version's sound-bank directory cipher could not be located in its
   firmware"). Avengers LE 1.10 builds. So on the Pro a mode's own sounds, and likely anything that rewrites its bank
   (Replace Audio), fail; worth its own ticket. Its media proof runs without the mode's own sounds (`--no-sound`).
+  FIXED in PAD-481: the Pro loads the directory CRC's seed (0xf1483940) as `mov r0,#0x3940 ; movt r0,#0xf148`, and
+  `locate._decode_movw_movt` read only `movw` low halves; a 16-bit `mov` immediate now reads as one. A grown bank on
+  the Pro is emulator-proven (PAD-565's sounds-in-turn sweep: MATCH).
 - **D&D LE 1.10**: the proof mode's own sounds grow its bank past 2 GiB (2,166,683,134 bytes; PAD-176's limit), so
   its proof set is built without them too.
 - Retries still failing: Aerosmith Pro 1.16 stack (our multiball never started on the retry), Munsters Pro 1.28
@@ -155,6 +158,17 @@ Kits in `C:/tmp/PAD-420` (all rigbatch jobs, two rigs, hidden, muted, stock card
   passed on the fourth: the same intermittent boot/Start crash the over-committed runs showed, not the port.
 - **Munsters Pro 1.28 multiball**: with KEEP (as Munsters LE needed) the drains went 3-4-3-2-0: the last two balls
   left together on the third drain. Look at its trough/drain switches (plunge.py drain) before trying again.
+  **PROVEN by PAD-480 (2026-10-14)**: the trough was never it (66-71 = Trough 6..1, 72 the jam, in the rig's tables and
+  the ball simulator alike; TAKE=2 was a wrong lead). It is the game's BALL SEARCH. The ticker at 0x2a1c68 runs a
+  timer (0x5fda60, reloaded to setting byte 0x553d79 x 62 = 5 s by a playfield switch) and counts tries (0x5fda64);
+  the try step 0x32f1c0, on try 0x55ec28 (5) with setting 123 on, WRITES OFF the balls in play: known balls (the
+  struct 0x603768 +60, checksum +61) = known - in play. Only scoring (0x30b0e0 -> 0x2a1d7c) or a serve clears the
+  tries, and our silent balls never score, so a switch every 9 s only delayed it: the 5th try fell ~2 s after the
+  second drain, known 4 -> 2 = the trough, 2 -> 0 in play, end of ball. A ball in play hits switches; the proof now
+  taps the pop bumpers (85, 86, 87, one every 1.5 s) through the multiball, the timer never runs out, no try happens,
+  and the drains go 3-4-3-2-1 (`C:/tmp/PAD-480`: mb_job.sh TAP_SW, ballpoll.py watching those words; addresses are
+  guest + 0x10000 in /proc/<pid>/mem, qemu's guest_base). The LE passed with KEEP alone. Also learned: a tapper in a
+  rigbatch job must source padpath.sh (HOME there is not the rig user's, so swpoke wrote a block no game reads).
 - **In flight at the end of run 6** (detached WSL chains in `C:/tmp/PAD-420`, logs `chainN.log`; each writes a
   rigbatch `results.tsv`; commit passes with `prove_set.py <SET> <results.tsv> "<evidence>"`, then
   `limits_table.py`, the tests, and a commit):
@@ -808,9 +822,10 @@ Kits in `C:/tmp/PAD-420` (all rigbatch jobs, two rigs, hidden, muted, stock card
 | shows | none left: every latest build names the game's own light shows (run 24; TMNT LE the last) | done in the emulator; a machine test of a non-Godzilla build's shows and of the lamp-group clean-up is the open proof |
 | scoop | proven (run 7) on Avengers LE 1.10, D&D LE 1.10, Guardians LE 1.15, Iron Maiden LE 1.18, Aerosmith LE 1.16 (the mechanisms helper's runs); 25 more staged (chain19) | Deadpool LE/Pro and James Bond Pro: the handler never saw a settled ball (a call probe of the device's handler next); Aerosmith Pro, Batman, JB 60th: the job closed the wrong switch (fix `mechs_conf.SCOOP`) |
 | held coils | PROVEN (run 8-9, `HELD_COILS_PROVEN`): Led Zeppelin Pro 1.22, Star Wars ELG 1.10, Sword of Rage LE/Pro 1.19, Deadpool LE 1.16 (their gates; generation B, the board-address route with the object taken). Re-running (chain23): Deadpool Pro, Led Zeppelin LE, Iron Maiden LE/Pro (up posts), Avengers LE/Pro (tower magnet, tower post), Jurassic Park LE/Pro (T-Rex magnet, up posts) | A' and B are staged; C (the Device framework, most titles) needs the powers its gate service uses read first (docs/plans/mode_coils_census.md). Every hold power is the game's own |
-| magnet (Mode > Magnet) | Godzilla only | the magnet part also needs `magnet_shot`; a title's magnet can be offered as a held coil first |
+| magnet (Mode > Magnet) | Godzilla, Jurassic Park LE, James Bond LE, D&D LE/Pro, Mandalorian LE, X-Men LE/Pro, Beatles, Rush LE | PAD-475: the rest of the newest builds read grey, the game's own limit (`MAGNET_GAME_LIMIT`): the game drives the magnet itself at its shot (Aerosmith, Avengers, Batman, Foo Fighters LE, King Kong, Led Zeppelin LE, Munsters, Rush Pro), uses it only inside a feature (Guardians, TMNT) or gives it to the player (Sword of Rage's magna-save) - PAD-475's switch walk (`C:/tmp/PAD-475/walk/magwalk_job.sh`: 8 shuffled rounds of every playfield switch, scoops held 900 ms) placed each; Metallica's section hidden (no ball magnet) |
 | shaker | Godzilla LE (PAD-414) and, since PAD-474, the other 20 latest builds with a shaker (docs/plans/pad474_shaker.md) | `ticket/PAD-420-shaker` duplicated PAD-414's runtime and was deleted (PAD-483); its desk reader `shaker_lines.py` (the game's own shake routine on any build) is noted on PAD-474 |
-| countdown | Aerosmith, John Wick, Elvira: the voice never says a number | `COUNTDOWN_NO_NUMBERS`: decide with David whether a countdown there is a number on screen only, with the section saying so in grey |
+| countdown | none: Aerosmith, John Wick, Elvira's voice never says a number | PAD-479 (David: no countdown pushed in where the game has none): the section says so in grey (`TitleProfile.limits`) |
+| time-up call | none: 16 latest builds have no time-is-up line (every clip, mono and stereo, transcribed) | PAD-479: `TIME_UP_NONE`, said in grey; a mode's own end sound rides a carrier there. Own music on Beatles / Deadpool: `own_music_none`, grey |
 
 Helper branches from the first run (pushed, not merged): `ticket/PAD-420-lights`, `ticket/PAD-420-balls` (a runtime
 guard: a port's mode table that is not the game's is left out instead of crashing it; changes the prebuilt object,

@@ -19,6 +19,7 @@ ffmpeg / ffprobe discovery (and the no-console-window flag) is shared with
 :mod:`core.audio`, so installing ffmpeg once lights up both tabs.
 """
 
+import copy
 import json
 import os
 import re
@@ -143,6 +144,21 @@ class VideoInfo:
         self.nframes = nframes         # frame count (custom backends; 0=unknown)
         self.keyint = keyint           # most frames between key frames (0=unknown)
 
+    #: every field but ``path`` (which is the real path at load time)
+    FIELDS = ("vcodec", "width", "height", "fps", "duration", "has_audio",
+              "has_alpha", "pix_fmt", "container", "nframes", "audio_rate",
+              "audio_channels", "profile", "level", "keyint")
+
+    def to_dict(self):
+        """The probe's answer as JSON-able fields (for the probe cache)."""
+        return {name: getattr(self, name) for name in self.FIELDS}
+
+    @classmethod
+    def from_dict(cls, data, path):
+        """A :class:`VideoInfo` for *path* from :meth:`to_dict`'s fields
+        (unknown keys ignored, missing ones at their defaults)."""
+        return cls(path, **{k: v for k, v in data.items() if k in cls.FIELDS})
+
     def audio_summary(self):
         """Human audio-track summary — "44.1 kHz Stereo" — or "" for a silent
         clip and a bare "Audio" when the track exists but details didn't
@@ -195,12 +211,141 @@ def detect_video_info(path):
 
     if not path or not os.path.isfile(path):
         return None
+    # A build probes the same clip several times over (the slot, its .orig/
+    # snapshot, the user's file: staging asks twice, the engine's checks
+    # twice more), each one an ffprobe process: a retheme of 300 clips paid
+    # for well over a thousand of them (PAD-599).  An answer is kept for as
+    # long as the file is the same size and modification time, and with the
+    # same prober (an ffmpeg-only install reads a banner instead).
+    key = _probe_key(path)
+    if key is not None:
+        with _PROBE_LOCK:
+            hit = _PROBE_MEMO.get(key, _MISS)
+        if hit is not _MISS:
+            return copy.copy(hit) if hit is not None else None
     info = _probe_video_info(path)
     if info is not None and not getattr(info, "keyint", 0):
         # Neither ffprobe's stream summary nor the banner says how far apart
         # the key frames are; the MP4 sample table does, for free.
         from .video_quality import keyframe_interval
         info.keyint = keyframe_interval(path)
+    if key is not None and key == _probe_key(path):
+        with _PROBE_LOCK:
+            if len(_PROBE_MEMO) >= _PROBE_MEMO_MAX:
+                _PROBE_MEMO.clear()
+            _PROBE_MEMO[key] = copy.copy(info) if info is not None else None
+    return info
+
+
+#: :func:`detect_video_info`'s answers, ``{(path, size, mtime_ns, prober):
+#: VideoInfo or None}``; callers get a copy, since some adjust what they get
+_PROBE_MEMO: dict = {}
+_PROBE_MEMO_MAX = 20000
+_PROBE_LOCK = threading.Lock()
+_MISS = object()
+
+
+def _probe_key(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (os.path.normcase(os.path.abspath(path)), st.st_size,
+            st.st_mtime_ns, find_ffprobe())
+
+
+# ----------------------------------------------------------------------
+# The per-project probe cache: ffprobe's answers, kept across app starts
+# ----------------------------------------------------------------------
+#: ``{rel: [size, mtime_ns, prober_tag, info_dict]}`` beside the project's
+#: ``.hashcache.json``.  The memo above lives only as long as the process:
+#: every app start, folder switch or manufacturer change ffprobed every
+#: clip again, thousands of them on eight workers (PAD-797).  Advisory and
+#: corrupt-tolerant, like the hash cache: a missing or broken sidecar
+#: costs one probe pass.  A probe that answered None is not kept, so a
+#: transient failure (a timeout) does not outlive the session.
+PROBE_CACHE_FILE = ".probecache.json"
+
+
+def prober_tag():
+    """What probed: the ffprobe path, or "banner" for an ffmpeg-only
+    install (the banner carries less, so its answers are kept apart)."""
+    return find_ffprobe() or "banner"
+
+
+def load_probe_cache(folder):
+    """The folder's probe cache; ``{}`` when absent or unreadable."""
+    try:
+        with open(os.path.join(folder, PROBE_CACHE_FILE), "r",
+                  encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items()
+                    if isinstance(k, str) and isinstance(v, list)
+                    and len(v) == 4 and isinstance(v[3], dict)}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def save_probe_cache(folder, cache):
+    """Best-effort persist.  Never in a capture run (PAD_UI_CAPTURE walks
+    the user's real project and must leave it as it found it)."""
+    if os.environ.get("PAD_UI_CAPTURE"):
+        return False
+    try:
+        with open(os.path.join(folder, PROBE_CACHE_FILE), "w",
+                  encoding="utf-8") as f:
+            json.dump(cache, f)
+        return True
+    except OSError:
+        return False
+
+
+def probe_cache_lookup(cache, rel, path):
+    """The cached :class:`VideoInfo` for *path* (keyed *rel*), or None when
+    the file's size or mtime moved, the prober changed, or it is not
+    there."""
+    ent = cache.get(rel)
+    if not ent:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if (ent[0] != st.st_size or ent[1] != st.st_mtime_ns
+            or ent[2] != prober_tag()):
+        return None
+    try:
+        return VideoInfo.from_dict(ent[3], path)
+    except TypeError:
+        return None
+
+
+def probe_cache_store(cache, rel, path, info):
+    """Remember *info* for *path* (keyed *rel*) when the file is still what
+    was probed.  Returns whether the cache changed."""
+    if info is None:
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    cache[rel] = [st.st_size, st.st_mtime_ns, prober_tag(), info.to_dict()]
+    return True
+
+
+def cached_video_info(folder, rel, cache, path=None):
+    """:func:`detect_video_info` through the folder's probe cache: the
+    cached answer when size, mtime and prober still match, else a probe
+    whose answer fills *cache* (the caller saves it)."""
+    if path is None:
+        path = os.path.join(folder, rel.replace("/", os.sep))
+    info = probe_cache_lookup(cache, rel, path)
+    if info is not None:
+        return info
+    info = detect_video_info(path)
+    probe_cache_store(cache, rel, path, info)
     return info
 
 
@@ -1263,16 +1408,51 @@ def _rate_str(bps):
     return "%d kbps" % round(bps / 1000)
 
 
+def atempo_chain(speed):
+    """An ffmpeg audio filter playing sound *speed* times as fast at its
+    own pitch (PAD-1232).  One ``atempo`` takes 0.5-2.0 on older ffmpeg
+    builds, so a bigger change is a chain of them."""
+    parts = []
+    speed = float(speed)
+    while speed > 2.0:
+        parts.append(2.0)
+        speed /= 2.0
+    while speed < 0.5:
+        parts.append(0.5)
+        speed /= 0.5
+    parts.append(speed)
+    return ",".join("atempo=%.6f" % p for p in parts)
+
+
+def speed_words(mine, stock):
+    """How much a *mine*-second clip is slowed down or sped up to run
+    *stock* seconds, the way the Video tab says it: "2.5% slower",
+    "20% faster", "same speed" (PAD-1232)."""
+    if not mine or not stock:
+        return ""
+    pct = (1.0 - float(mine) / float(stock)) * 100.0
+    if abs(pct) < 0.05:
+        return "same speed"
+    n = abs(pct)
+    num = ("%.1f" % n) if n < 10 else ("%d" % round(n))
+    return "%s%% %s" % (num, "slower" if pct > 0 else "faster")
+
+
 def transcode_video_to(src_path, dst_path, original_info,
                        match_length=False, cancel_cb=None, max_bytes=None,
-                       match_bitrate=None, best_quality=False, colour=None):
+                       match_bitrate=None, best_quality=False, colour=None,
+                       loop=False, stretch=False):
     """Transcode *src_path* into *dst_path*, whose extension selects the
     output container / codec.
 
     Resolution, frame rate, and (where the format allows) the alpha channel
     are matched to *original_info* so the result drops into the slot it
     replaces.  When *match_length* is set, the result is trimmed or padded to
-    the original's duration.  *cancel_cb* (returns truthy to abort) is polled
+    the original's duration; with *loop* too, a shorter source is played
+    over and over until it fills that duration (PAD-1226) instead of holding
+    its last frame; with *stretch* instead, the source is slowed down or sped
+    up (picture and sound together, the sound keeping its pitch) so it runs
+    exactly that duration (PAD-1232).  *cancel_cb* (returns truthy to abort) is polled
     during the encode so a user Cancel stops ffmpeg promptly.  Returns
     ``(ok, actions)`` — *actions* is a short human-readable summary; on
     failure *ok* is False and *actions* is an error.
@@ -1359,12 +1539,37 @@ def transcode_video_to(src_path, dst_path, original_info,
     src_dur = probe_duration(src_path)
     enc_dur = src_dur
     cap_to = None
+    looped = False
+    stretched = ""
     if match_length and original_info and original_info.duration > 0:
         target = original_info.duration
-        if src_dur > target + 0.05:
+        if stretch and src_dur and abs(src_dur - target) > 0.05:
+            # PAD-1232: retime the whole source to the slot's length; -t
+            # still cuts at it, so a rounding frame can't run over.
+            factor = target / src_dur
+            vf.insert(0, "setpts=PTS*%.6f" % factor)
+            if original_info.fps > 0:
+                # resampled here, not only by -r: -r alone dropped a slowed
+                # clip's last frame (1 s at 10 fps slowed to 3 s: 2.9 s)
+                vf.insert(1, "fps=%.4f" % original_info.fps)
+            vf.append("tpad=stop_mode=clone:stop_duration=0.25")
+            stretched = atempo_chain(1.0 / factor)
+            cap_to = target
+            enc_dur = target
+            actions.append("%s %.1fs→%.1fs (%s)" % (
+                "slow" if factor > 1 else "speed up", src_dur, target,
+                speed_words(src_dur, target)))
+        elif src_dur > target + 0.05:
             cap_to = target
             enc_dur = target
             actions.append(f"trim {src_dur:.1f}s→{target:.1f}s")
+        elif src_dur and src_dur < target - 0.05 and loop:
+            # PAD-1226: repeat the whole source (-stream_loop before -i)
+            # and cut the endless stream at the slot's length.
+            looped = True
+            cap_to = target
+            enc_dur = target
+            actions.append(f"loop {src_dur:.1f}s→{target:.1f}s")
         elif src_dur and src_dur < target - 0.05:
             vf.append(
                 f"tpad=stop_mode=clone:stop_duration={target - src_dur:.3f}")
@@ -1427,7 +1632,10 @@ def transcode_video_to(src_path, dst_path, original_info,
                 vbps = max(40_000, int(budget * 8 * hr / enc_dur) - abps)
 
             def build_cmd(pass_no, out, _vbps=vbps, _floored=floored):
-                cmd = [ffmpeg, "-y", "-i", src_path]
+                cmd = [ffmpeg, "-y"]
+                if looped:
+                    cmd += ["-stream_loop", "-1"]
+                cmd += ["-i", src_path]
                 if vf:
                     cmd += ["-vf", ",".join(vf)]
                 if original_info and original_info.fps > 0:
@@ -1457,6 +1665,8 @@ def transcode_video_to(src_path, dst_path, original_info,
                 if silent or pass_no == 1:
                     cmd += ["-an"]
                 else:
+                    if stretched:
+                        cmd += ["-af", stretched]
                     cmd += aargs
                     if budget:
                         cmd += ["-b:a", str(abps)]

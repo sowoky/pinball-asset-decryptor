@@ -185,6 +185,58 @@ def connector_group_node(dev_rows):
     return {g: next(iter(n)) for g, n in seen.items() if len(n) == 1}
 
 
+def directory_group_node(nodedir_path):
+    """{group: node} for the playfield and accessory groups (>= 6), from the
+    title's own NODE DIRECTORY (node_ident.txt v2, nbdir.py's `group=`).
+
+    A device-table group is its board's place in the directory (PAD-500), and
+    the directory is the game's own declaration of its boards, so this is a
+    measurement, not an inference. PAD-551 (peanuts) is why it is consulted:
+    on all 53 latest builds the switch join agrees with it on every group it
+    can answer, and the only disagreements were the two weaker sources it now
+    overrules -
+
+      * the ascending rule counted pinnodes only, so a coil4node board was
+        skipped: Sword of Rage's group 8 is node 12 "TOPPER 1" (a coil4node),
+        the rule said node 13, and its topper was shown as node 13;
+      * GODZILLA'S CONSTANT stood in where nothing else answered: Elvira's and
+        Rush's group 6 is node 7, their BACKBOX SPEAKER LIGHTS, and the
+        constant read it as node 8 - the speaker ring showed the lower
+        playfield's lamps ("weird speaker lights");
+      * Batman 66's connector column names ONE row of group 9 "13a" and one
+        of group 8 "9c", against 37 group-10 rows that really are node 13: a
+        group of one row cannot outvote the directory, which puts group 9 on
+        node 12 "Accessory Topper" and group 8 on node 10 "Turntable" - the
+        board TURNTABLE BATPHONE is named for.
+
+    Groups below 6 are left alone: 4 and 5 are FIXED_GROUPS' and the Home
+    Editions' business (fixed_group_node), and 1-3 are the cabinet's strip
+    boards, which cablights.py places itself - mapping them here would make
+    elvira3's topper drawing (group 3) a usable layout, the regression
+    layout_is_usable() documents. A v1 directory (no `group=`) answers {}.
+    """
+    out = {}
+    if not nodedir_path:
+        return out
+    try:
+        with open(nodedir_path, encoding="ascii", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return out
+    for line in lines:
+        if not line.startswith("node="):
+            continue
+        head = line.partition(" name=")[0]
+        kv = dict(t.split("=", 1) for t in head.split() if "=" in t)
+        try:
+            node, group = int(kv["node"]), int(kv["group"])
+        except (KeyError, ValueError):
+            continue
+        if group >= 6 and 0 <= node < NODES:
+            out[group] = node
+    return out
+
+
 def fixed_group_node(dev_rows):
     """{group: node} for a FIXED_GROUPS group whose own rows say it is a board.
 
@@ -361,6 +413,8 @@ def group_node(rows, nodedir_path=None, dev_rows=None,
 
     dev_rows = dev_rows if dev_rows is not None else rows
     measured = dict(connector_group_node(dev_rows))
+    # the title's own node directory over the connector column (PAD-551)
+    measured.update(directory_group_node(nodedir_path))
     measured.update(fixed_group_node(dev_rows))
     measured.update(switch_group_node(dev_rows, switch_lines))
 
@@ -539,6 +593,22 @@ def load(path):
                  switch_lines=_maybe_lines(swlist))
 
 
+def read_exact_group_node(path):
+    """{group: node} from a group_node_exact.txt (`group node` per line), or
+    {} when there is none. A rig that KNOWS its title's map writes it - Spike 3
+    (PAD-1090), whose device group is simply the board's 1-based place in the
+    title's node directory - and then nothing has to be inferred."""
+    out = {}
+    for line in _maybe_lines(path) or []:
+        p = line.split()
+        if len(p) >= 2 and not line.startswith("#"):
+            try:
+                out[int(p[0])] = int(p[1])
+            except ValueError:
+                continue
+    return out
+
+
 def group_node_for(table_path, dev_rows=None):
     """This title's derived group -> node map, from a device_xy.txt PATH.
 
@@ -558,6 +628,9 @@ def group_node_for(table_path, dev_rows=None):
     not parsed twice.
     """
     d = os.path.dirname(table_path or "")
+    exact = read_exact_group_node(os.path.join(d, "group_node_exact.txt"))
+    if exact:
+        return exact
     if dev_rows is None:
         dev_rows = parse_rows(_maybe_lines(table_path) or [])
     nodedir = os.path.join(d, "node_ident.txt")
@@ -682,10 +755,17 @@ def shaker_address(table_path):
     """(node, index) of the cabinet's shaker motor for a device_xy.txt, or None.
 
     The named row when the table has one. Otherwise group 5 index 0 - but only
-    when no row of the table uses group 5 at all, which is what keeps the HOME
+    when no COIL of the table is on group 5, which is what keeps the HOME
     EDITIONS out: their whole machine is group 5 (fixed_group_node()), so index
-    0 there is a playfield coil or nothing, and they have no shaker. A platform
-    record every cabinet has (SHAKER_GROUP_IGNORED) does not count as a use.
+    0 there is a playfield coil, and they have no shaker. A platform record
+    every cabinet has (SHAKER_GROUP_IGNORED) does not count as a use.
+
+    ONLY COILS RULE IT OUT (PAD-532). The cabinet board's own lamps and
+    buttons - COIN DOOR GI, START BUTTON, LOCKDOWN BUTTON - are group-5 LEDs
+    and switches on twelve titles whose table names no cabinet coil at all
+    (godzilla_le, jaws_le, john_wick_le, king_kong_le...); counting them
+    turned the Shaker panel off on every one, when they are the best evidence
+    there is that group 5 IS the cabinet board.
     """
     coils = load(table_path)
     got = address(coils, SHAKER)
@@ -693,7 +773,7 @@ def shaker_address(table_path):
         return got
     rows = parse_rows(_maybe_lines(table_path) or [])
     if not rows or any(
-            r.get("group") == SHAKER_GROUP
+            r.get("group") == SHAKER_GROUP and r.get("kind") == "coil"
             and (r.get("name") or "").upper().strip() not in SHAKER_GROUP_IGNORED
             for r in rows):
         return None
@@ -713,6 +793,109 @@ DRIVE_PULSE_PWR_OFF = 6832
 DRIVE_HOLD_PWR_OFF = 7088
 DRIVE_FIRES_OFF = 7344
 DRIVE_READ = 7356
+
+#: padled VERSION 6 (PAD-500): a strip board's channels past its first 96 -
+#: hi[node][channel - 96] for channels 96..479, the levels of the banked frames
+#: the shim used to walk and throw away. padled.h carries the meaning;
+#: tests/test_spike2_led_strip_hi.py pins the offset to both C structs.
+HI_OFF = DRIVE_READ
+HI_IDX = 4 * 96
+HI_READ = HI_OFF + NODES * HI_IDX
+
+
+#: PAD-658: the colour a MODE painted on a one-colour insert, written by the mode runtime (pad_mode_runtime.c
+#: lamp_paint_note) right after the hi plane: magic 'PINT', a gen, then 256 entries of [group, index, r, g, b, on,
+#: 0, 0]. padled.h carries the meaning; tests/test_pad658_show_view.py pins the offset to padled.h and the runtime.
+#: PAD-668: the playfield view names that colour in the insert's tooltip and does not draw it - on the machine a
+#: one-colour insert glows in its lens's colour, whatever a show asks.
+PAINT_OFF = HI_READ
+PAINT_MAGIC = 0x544E4950
+PAINT_N = 256
+PAINT_READ = PAINT_OFF + 8 + 8 * PAINT_N
+
+#: padled VERSION 7 (PAD-775): each coil's firing RULE (cmd 41) - power, and
+#: the input whose closing makes the BOARD fire it (flippers, slingshots, pop
+#: bumpers: the game sends nothing per flip). padled.h carries the meaning;
+#: tests/test_vpx_bridge.py pins these to the header.
+RULE_PWR_OFF = PAINT_READ
+RULE_IN_OFF = RULE_PWR_OFF + NODES * COIL_N
+RULE_SETS_OFF = RULE_IN_OFF + NODES * COIL_N
+RULE_READ = RULE_SETS_OFF + 4
+
+
+def rule(data, node, index):
+    """{power, input} for one coil's rule from a version-7 block, or None.
+    `input` is the board input (0..63) whose closing fires the coil, or None
+    when the rule names none; power 0 is a cleared rule (the coil is dead)."""
+    if data is None or len(data) < RULE_READ or not has_magic(data):
+        return None
+    if struct.unpack_from("<I", data, 4)[0] < 7:
+        return None
+    if not (0 <= node < NODES and 0 <= index < COIL_N):
+        return None
+    o = node * COIL_N + index
+    raw = data[RULE_IN_OFF + o]
+    return {"power": data[RULE_PWR_OFF + o],
+            "input": (raw & 0x3F) if raw & 0x40 else None}
+
+
+#: padled VERSION 8 (PAD-1228): where each node board's STEPPER was last sent
+#: (cmd 34 home = 0, cmd 35 a move): a bit per configured motor, then its
+#: place in steps from home. The board runs the motor itself and tells the
+#: game only its end switches, so a Visual Pinball table could not follow
+#: Rush LE's drum clock hand. padled.h carries the meaning.
+STEPPERS = 4
+STEP_CFG_OFF = RULE_READ
+STEP_POS_OFF = STEP_CFG_OFF + NODES
+STEP_READ = STEP_POS_OFF + NODES * STEPPERS * 4
+
+
+def stepper(data, node, motor):
+    """One node-board stepper's place (steps from home; either sign), from a
+    version-8 block, or None while the block cannot say: an older shim, or a
+    motor the game has not homed or moved yet."""
+    if data is None or len(data) < STEP_READ or not has_magic(data):
+        return None
+    if struct.unpack_from("<I", data, 4)[0] < 8:
+        return None
+    if not (0 <= node < NODES and 0 <= motor < STEPPERS):
+        return None
+    if not data[STEP_CFG_OFF + node] & (1 << motor):
+        return None
+    return struct.unpack_from("<i", data, STEP_POS_OFF + (node * STEPPERS + motor) * 4)[0]
+
+
+def paint_tints(data, group_node):
+    """{(node, index): (r, g, b)} - the one-colour inserts a mode holds now, in the colour it painted them; empty
+    when the block has no such plane (an older watch.sh, no mode runtime, a real machine's log). ``group_node``:
+    the title's I/O group -> node board map (the view's GROUP_NODE)."""
+    if data is None or len(data) < PAINT_READ or struct.unpack_from("<I", data, PAINT_OFF)[0] != PAINT_MAGIC:
+        return {}
+    out = {}
+    for k in range(PAINT_N):
+        o = PAINT_OFF + 8 + 8 * k
+        g, i, r, gg, b, on = data[o:o + 6]
+        if on and (r or gg or b):
+            node = group_node.get(g)
+            if node is not None:
+                out[(node, i)] = (r, gg, b)
+    return out
+
+
+def strip_level(data, node, channel):
+    """One strip channel's level from a padled block, or None when the block
+    cannot say: channels 0..95 are val[], 96..479 version 6's `hi` plane. None
+    rather than 0 for a channel the block has no room for, because 0 means the
+    game turned it off."""
+    if data is None or node is None or not 0 <= node < NODES or channel < 0:
+        return None
+    if channel < 96:
+        off = 20 + node * 96 + channel
+        return data[off] if off < len(data) else None
+    if (channel >= 96 + HI_IDX or len(data) < HI_READ
+            or struct.unpack_from("<I", data, 4)[0] < 6):
+        return None
+    return data[HI_OFF + node * HI_IDX + channel - 96]
 
 
 def drive(data, node, index):

@@ -8,6 +8,7 @@ import { html, useEffect, useMemo, useRef, useState, Button, Field, Select, Seg,
   Note, Table, Modal, openMenu, tip, Icon, PageHead, Spinner, mediaUrl, call, cx } from "../core/ui.js";
 import { useNs, useEvent, state } from "../core/store.js";
 import { OriginalsWindow } from "./originals.js";
+import { testCol } from "../core/testtick.js";
 
 export const css = true;
 
@@ -20,16 +21,24 @@ const T = {
   fromFolder: "Pick a folder of your own files and each one becomes the replacement for the slot with the same name — for a whole set you reworked outside the app, like every clip made black and white. The file type and capital letters don't have to match (Intro.mp4 is used for Intro.mov and converted to suit it), and subfolders are fine. Nothing changes until you confirm, and every file left out is named in the log.\n\nKeep the extract's own files where they are: files dropped into the project folder only count under the card's exact name.",
   clear: "Drop every replacement picked on this tab in one go — for starting a project over without clearing 48 rows one at a time. It only drops the picks: your own files are untouched, and a slot already built into the project folder keeps the bytes it has (use “Revert all changes…” on the Write tab for those). To clear only some, select the rows — click, then Shift-click or Ctrl-click — and right-click the selection.",
   csv: "Save the whole audio table (every slot, not just the filtered view) as a CSV — name, length, format, type, replacement and changed-on-disk status — for tracking a big replacement project in a spreadsheet.",
+  callouts: "Rename every sound to the words in the text column of this project's callouts.csv, the file Auto-name call-outs writes. Correct the words there (by hand or in a spreadsheet), save it in the project folder, then press this to bring them all back in one go. Each sound keeps its idx number, characters a file name can't hold become _, and the names are remembered for future extracts like a rename in Audio Properties.",
+  updCallouts: "The other way round: write every sound's name as it is now into this project's callouts.csv, so names you gave in Audio Properties are kept there too. A row whose sound was renamed gets the new file name and words, a named sound with no row gets one, and rows for sounds this project doesn't have are kept as they are. Makes the file if the project has none. A rename in Audio Properties also updates its own row from now on.",
+  comCallouts: "Take every sound's comment from the comment column of this project's callouts.csv as it is now, after you filled it in by hand, in a spreadsheet or with another tool. Each row finds its sound by its file name, or its idx number when the sound was renamed since. Only the comments change: names, types and the other columns stay as they are. A header of comment, comments or notes all work.",
   type: "Show only one kind of audio — every row matches the Type column, so a filtered list only ever holds that Type. Music = the game's song/bank tracks. Sound FX = effects named by the game's own Sound Test menu. Callouts = spoken lines found by Auto-name call-outs. Other = the rest — short unnamed effects. On a game that identifies no music at all (some pins store their songs as Sound-Test-named sequences), anything 20 seconds or longer counts as Music instead, and the Type column says so.",
   dups: "Group the slots that carry byte-identical factory audio under one row, so every copy of a sound sits together. The first tick scans the sound banks (about ten seconds). The game may play any copy of a duplicated sound, so mod them together — assign a replacement to one copy, then right-click it and choose \"Apply to all copies\".",
   show: "Narrow the list by what you've already done to it. Changed = the slots with a pending replacement or already changed on disk by a previous build. Unchanged = everything you haven't touched yet, so a part-finished pass is what's left in front of you instead of something to scroll past.",
+  unused: "Ticked, the list shows every sound. Untick it to leave out the sounds whose Requests column reads None: no sound request in the game's code plays them, so the game program never asks for them and they are most likely leftovers the game does not use. Sounds with a blank Requests cell (a music bank's songs) stay in the list.\n\nThe count beside the buttons says how many are shown.",
+  comments: "Show the Comment column: the notes you give sounds in Audio Properties (right-click a row, or F2), such as who says a callout or the mode it belongs to. Click its heading to sort by it, and the search box finds words in comments too.\n\nThe comments themselves live in this project's callouts.csv; this tick only shows or hides the column, and the app remembers it.",
   seq: "When a clip finishes, select and play the next row in the list, following whatever sort, search and Type filter are showing.\n\nStops at the end of the list, and any ■ (or clicking another row) stops it.",
   subst: "While playing sequentially, a row that has a replacement (picked now, or already changed on disk) plays the replacement instead of the original — the whole list sounds the way the built card will.\n\nSo anything that still sounds stock is a clip you haven't replaced yet.\n\nIt applies to the ▶ buttons too: with this ticked, pressing ▶ under Original on a row you have replaced plays your replacement, so what you hear is always what the card will play.\n\nTicking this turns on \"Play sequentially\" as well.",
   adv: "Fine-tune how replacements are encoded: experimental head/tail block handling and the anti-pop codec seed — plus machine-render preview WAVs on Build.\n\nThese are levers for chasing clicks heard on the real machine. Defaults match the standard behavior.\n\nA * on the button means at least one option is currently OFF its default (they persist between sessions) — open the dialog to see which, or to set everything back.",
   profile: "Characterize every sound in the scanned extract folder — lead-in, fade-out, peak/RMS level, DC offset, spectral brightness — and flag replacements that deviate from the game's own callout style. Writes audio_profile.csv into the extract folder.",
   loop: "Loop this replacement in-game.\n\nThese music stems normally play once — there's no built-in loop — so a replacement that's shorter than the original goes silent partway through its mode. Ticking Loop bakes a forward-loop flag into the rebuilt audio (the same loop_mode flag Godot's importer would set), so the engine repeats your clip to fill the mode; the game stops or fades it on the next song change.\n\nDefaults ON for tracks with \"LOOP\" in the name (the mode music). Leave it OFF for one-shot sound effects and callouts.",
   keep: "Keep this replacement's full length.\n\nBy default every track is trimmed (or padded) to its original slot length on Write. Tick Full to skip that for this one slot, so a longer replacement plays at its full length.\n\nThe file validates and boots at any length (the game's checksums are re-forged regardless of size). Whether it actually plays to the end is up to the game: best for a cue nothing plays over — e.g. the end-of-game track before attract — since the show may still cut it short. Test on the machine.",
-  level: "How loud THIS replacement lands, in dB.\n\nEvery replacement is normally gained to the loudness of the sound it replaces, so it sits with its neighbours instead of jumping out — and that ignores the level you mixed your own file at, so exporting the same track louder changes nothing. This is the way to overrule it for one clip.\n\nIt stacks on the build-wide \"Replacement loudness\" offset in Advanced Audio Options: that one moves every replacement together, this one moves this clip relative to the rest. 0 dB = whatever the rest of the build does.\n\nHandy for music, which Stern mixes as a bed under the callouts. Boosts are soft-limited, never hard-clipped, and the build log lists every clip you levelled by hand.\n\nThe Replacement preview redraws and plays at this offset, so you can see and hear it. What the preview can't show is the automatic match to the stock sound's own level: that happens inside the encoder, against audio only the machine's own decoder can produce.",
+  level: "How loud THIS replacement lands, in dB.\n\nEvery replacement is normally gained to the loudness of the sound it replaces, so it sits with its neighbours instead of jumping out — and that ignores the level you mixed your own file at, so exporting the same track louder changes nothing. This is the way to overrule it for one clip.\n\nIt stacks on the build-wide \"Replacement loudness\" offset in Advanced Audio Options: that one moves every replacement together, this one moves this clip relative to the rest. 0 dB = whatever the rest of the build does.\n\nHandy for music, which Stern mixes as a bed under the callouts. Boosts are soft-limited, never hard-clipped, and the build log lists every clip you leveled by hand.\n\nA music mode's sound has a loudness of its own: play it from the row's Music modes menu and this box becomes \"Mode N's loudness\", for that file only. A sound's own offset never reaches its mode files, and on a sound with no replacement it leaves the stock sound as it is.\n\nThe Replacement preview redraws and plays at this offset, so you can see and hear it. What the preview can't show is the automatic match to the stock sound's own level: that happens inside the encoder, against audio only the machine's own decoder can produce.",
+  prev: "Play the row above in the list, as the sort, search and filters show it.",
+  next: "Play the row below in the list, as the sort, search and filters show it.\n\nUnder Replacement, a row with a replacement plays the replacement; one without plays its original.",
+  levelAllMode: "A music mode's sound is in the Replacement pane, so this box is that file's own loudness, one file at a time. Load a sound's own replacement to set the rows together.",
   levelAll: "Give every row the list is currently showing this same offset — the search box, the Type filter and Show: Changed/Unchanged all narrow what \"shown\" means.\n\nSo: set Type to Music, type this box to +4, and every song sits 4 dB above stock while the callouts stay where they are.\n\nSetting it back to 0 the same way clears them.",
 };
 const TYPES = ["All types", "Music", "Sound FX", "Callouts", "Other"];
@@ -247,7 +256,7 @@ function NameCell({ r, prefix }) {
 }
 
 // ------------------------------------------------------------------ panes
-function Pane({ side, pane, actions, extra, onPlay }) {
+function Pane({ side, pane, actions, extra, onPlay, onStep }) {
   const p = usePlayer(side);
   const strip = useRef(null);
   const a = p.el;
@@ -299,10 +308,14 @@ function Pane({ side, pane, actions, extra, onPlay }) {
       ${loaded && dur > 0 ? html`<i class="aud-head" style=${`left:${pct(pos)}`}></i>` : null}
     </div>
     <div class="row aud-transport">
-      <${Button} size="sm" icon=${p.playing ? "pause" : "play"} label=${p.playing ? "Pause" : "Play"}
-        onClick=${() => { if (p.playing) stopPlayer(p); else onPlay(side); }}>${p.playing ? "Pause" : "Play"}<//>
-      <${Button} size="sm" kind="ghost" icon="stop" label="Stop" onClick=${() => {
-        stopAll(); seekTo(p, 0); call("audio.stop"); }} />
+      <span class="row aud-keys">
+        <${Button} size="sm" kind="ghost" icon="prev" label="Previous" title=${T.prev} onClick=${() => onStep(side, -1)} />
+        <${Button} size="sm" icon=${p.playing ? "pause" : "play"} label=${p.playing ? "Pause" : "Play"}
+          onClick=${() => { if (p.playing) stopPlayer(p); else onPlay(side); }}>${p.playing ? "Pause" : "Play"}<//>
+        <${Button} size="sm" kind="ghost" icon="next" label="Next" title=${T.next} onClick=${() => onStep(side, 1)} />
+        <${Button} size="sm" kind="ghost" icon="stop" label="Stop" onClick=${() => {
+          stopAll(); seekTo(p, 0); call("audio.stop"); }} />
+      </span>
       <span class="mono small muted nw aud-clock">${time}</span>
       ${extra ? html`<span class="grow"></span>${extra}` : null}
     </div>
@@ -319,7 +332,7 @@ function Loudness({ s, selRel }) {
     timer.current = setTimeout(() => { if (rel) call("audio.set_level", rel, v); }, 200);
   };
   return html`<span class="row aud-loud" style="gap:8px">
-    <label class="lbl nw" for="aud-db" ...${tip(T.level)}>Loudness for this clip:</label>
+    <label class="lbl nw" for="aud-db" ...${tip(T.level)}>${s.level_label || "Loudness for this clip:"}</label>
     <span class=${cx("field sm aud-db", !s.level_enabled && "disabled")} ...${tip(T.level)}>
       <input id="aud-db" type="number" min="-12" max="12" step="1" value=${val} disabled=${!s.level_enabled}
         aria-label="Loudness in dB"
@@ -327,20 +340,30 @@ function Loudness({ s, selRel }) {
         onInput=${(e) => { setVal(e.target.value); send(e.target.value, selRel); }} />
       <span class="muted">dB</span>
     </span>
-    <${Button} size="sm" kind="ghost" disabled=${!s.level_enabled} title=${T.levelAll}
+    <${Button} size="sm" kind="ghost" disabled=${!s.level_enabled || s.level_all === false}
+      title=${s.level_all === false ? T.levelAllMode : T.levelAll}
       onClick=${() => call("audio.level_apply_all", val)}>Apply to all shown<//>
   </span>`;
 }
 
 // ---------------------------------------------------------------- dialogs
+// PAD-1069: a comment on any sound (who says it, the mode, what plays it), kept in the
+// project's callouts.csv; a sound whose name can't change gets only the comment
 function PropsModal({ data, onClose }) {
   const [name, setName] = useState(data.label || "");
   const [cat, setCat] = useState(data.category || "other");
-  const ok = () => { onClose(); call("audio.rename", data.rel, name, cat); };
+  const [note, setNote] = useState(data.comment || "");
+  const renamable = data.renamable !== false;
+  const ok = () => {
+    onClose();
+    if (renamable) call("audio.rename", data.rel, name, cat, note);
+    else call("audio.set_comment", data.rel, note);
+  };
   return html`<${Modal} title="Audio Properties" icon="edit" onClose=${onClose}
     footer=${html`<${Button} kind="danger" onClick=${onClose}>Cancel<//><${Button} kind="primary" onClick=${ok}>OK<//>`}>
     <div onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); ok(); } }} class="stack" style="gap:10px">
-      <div class="msg">${data.prompt}</div>
+      <div class=${cx("msg", !renamable && "mono")}>${data.prompt}</div>
+      ${renamable ? html`
       ${data.suggestions && data.suggestions.length ? html`<div class="small muted" style="font-style:italic">Pick one of the game's own Sound Test names, or type anything:</div>` : null}
       <${Field} value=${name} onChange=${setName} list="aud-sugg" autoFocus />
       <datalist id="aud-sugg">${(data.suggestions || []).map((x) => html`<option value=${x} />`)}</datalist>
@@ -348,7 +371,11 @@ function PropsModal({ data, onClose }) {
         <span class="lbl">Type:</span>
         <${Select} value=${cat} options=${data.cats} onChange=${setCat} width=${150} />
         <span class="small muted" style="font-style:italic">(the Type is remembered with the name)</span>
-      </div>
+      </div>` : null}
+      <label class="lbl" for="aud-note">Comment:</label>
+      <span class="field"><input id="aud-note" type="text" aria-label="Comment" value=${note} autoFocus=${!renamable}
+        placeholder="Who says it, the mode it belongs to, what plays it…" onInput=${(e) => setNote(e.target.value)} /></span>
+      <div class="small muted" style="font-style:italic">Kept in this project's callouts.csv (comment column), so it stays with the sound when you extract again or share the file.</div>
     </div>
   <//>`;
 }
@@ -360,20 +387,26 @@ function AdvancedModal({ data, onClose }) {
   const plat = (state.write || {}).platform;
   const mac = plat ? plat === "darwin" : /Mac/.test(navigator.platform || "");
   const ok = () => { onClose(); call("audio.advanced_set", cfg); };
-  const defaults = () => setCfg((c) => ({ ...c, head_mode: "encode", leadout: "silence", previews: false,
-    experiment_idxs: "", slot_seed: false, slot_seed_db: 65, blip_free_optin: false, loudness: "match", loudness_db: 0 }));
+  // SAM and Spike 1 builds read only the loudness row (PAD-588): the rest
+  // are Spike 2 encoder levers, left as they are when restoring from here
+  const full = data.full !== false;
+  const defaults = () => setCfg((c) => ({ ...c, loudness: "match", loudness_db: 0,
+    ...(full ? { head_mode: "encode", leadout: "silence", previews: false,
+      experiment_idxs: "", slot_seed: false, slot_seed_db: 65 } : {}) }));
   const num = (k, lo, hi, step) => html`<span class="field sm aud-num"><input type="number" min=${lo} max=${hi} step=${step}
     value=${cfg[k]} onInput=${(e) => put(k)(e.target.value)} /></span>`;
   return html`<${Modal} title="Advanced Audio Options" icon="gear" wide onClose=${onClose}
     footer=${html`<${Button} onClick=${defaults}>Restore defaults<//><span class="grow"></span>
       <${Button} onClick=${onClose}>Cancel<//><${Button} kind="primary" onClick=${ok}>OK<//>`}>
     <div class="stack aud-adv" style="gap:10px" onKeyDown=${(e) => { if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); ok(); } }}>
-      <p class="aud-p">How Stern Spike 2 audio replacements are encoded. The loudness setting below is an everyday one; the rest are experiment levers. Defaults match the standard behavior; change one thing at a time when chasing a click on the real machine.</p>
-      <hr />
+      ${full ? html`<p class="aud-p">How Stern Spike 2 audio replacements are encoded. The loudness setting below is an everyday one; the rest are experiment levers. Defaults match the standard behavior; change one thing at a time when chasing a click on the real machine.</p>
+      <hr />` : null}
       <div class="row wrap"><span class="lbl nw">Replacement loudness:</span>
         <${Select} value=${cfg.loudness} options=${data.loudness} onChange=${put("loudness")} width=${340} />
         <span class="lbl">then</span>${num("loudness_db", -12, 12, 1)}<span class="lbl">dB</span></div>
-      <p class="aud-expl">This row is the setting for the WHOLE build: it moves every replacement together. For one clip on its own, use the "Loudness for this clip" box beside the Replacement preview on the Audio tab (its dB stacks on top of this one).
+      ${full ? null : html`<p class="aud-expl">This row is the setting for the WHOLE build: it moves every replacement together. For one clip on its own, use the "Loudness for this clip" box beside the Replacement preview (its dB stacks on top of this one).
+By default every replacement is gained to the same loudness as the sound it replaces, so it sits with its neighbours instead of jumping out; the level you mixed your own file at does not change the build. Use the dB box to sit deliberately above or below stock. "Keep each replacement's own level" turns the match off: your file plays at the level you mixed it, plus the dB box. Boosts are soft-limited, never hard-clipped.</p>`}
+      ${full ? html`<p class="aud-expl">This row is the setting for the WHOLE build: it moves every replacement together. For one clip on its own, use the "Loudness for this clip" box beside the Replacement preview on the Audio tab (its dB stacks on top of this one).
 By default every replacement is gained to the same loudness as the sound it replaces, so it sits with its neighbours instead of jumping out. That match ignores the level you mixed your own file at: exporting the same track louder and rebuilding produces exactly the same card. Use the dB box to sit deliberately above or below stock — handy for music, which Stern mixes as a bed under the callouts. "Normalize to full scale" ignores the stock level instead and pushes each replacement as loud as the codec will carry. Boosts are soft-limited, never hard-clipped. The build log records whichever setting built the card.</p>
       <hr />
       <div class="kv aud-kv">
@@ -388,14 +421,14 @@ By default every replacement is gained to the same loudness as the sound it repl
         <span class="lbl">level -</span>${num("slot_seed_db", 40, 90, 5)}<span class="lbl">dBFS</span></div>
       <p class="aud-expl">Mixes an inaudible low tone (default -65 dBFS) into replacements so a callout is never completely silent. On some machines a silent or very quiet replacement clicks at the start while audible ones and the stock callouts do not — the machine's audio output adds that pop on dead silence (the decoded audio itself is correct). Keeping a whisper-level signal present is meant to stop that. Turn on if silent or quiet replacements click at the start; combine with the 'only these idx numbers' box above to seed some slots and leave others as an on-card A/B. Experimental, hardware-unverified.</p>
       <hr />
-      <${Check} wrap checked=${cfg.blip_free_optin} onChange=${put("blip_free_optin")} label="Blip-free callouts: patch the game firmware so a replaced sound plays your audio for its whole length (image builds only)" />
-      <p class="aud-expl">What it does, technically. At boot the game reads two ~512-byte windows out of every sound's body to work out that sound's decoder settings, and each result feeds the next, so the whole sound bank is one forward chain. Re-encoding a sound changes those bytes and desyncs the chain, which makes the machine reboot the moment any audio plays. The safe fallback is to put the original bytes back in just those two windows — but they sit inside the audible part, so you hear a ~6 ms scrap of the ORIGINAL sound twice inside every replacement (the "blip"). Instead of that, this stashes a copy of the original window bytes inside the firmware and adds a small piece of ARM code that points the boot-time read at the copy, for the replaced sounds only. The chain then sees exactly what it saw on a stock card while the card itself carries your audio end to end. The added code needs somewhere to live: it is appended to the game binary and given a memory mapping of its own, at an address no part of the game claims. (Before v0.94.0 it was tucked into a run of zero bytes inside the game's own data instead, which on some titles turned out to be memory the game was using — on Elvira, the node board table — and those cards booted slowly and threw node board errors.) Because the binary gets longer, this needs the Linux filesystem driver, the same as full-size video replacement, and it is skipped for a direct-SD write. Every build re-derives all the sounds' settings from the patched firmware first and falls back to the plain stock-byte restore if anything would drift. Why it is opt-in. This has been confirmed working on real machines, so it is safe to use; it is left as a choice because it needs an image build (with the Linux filesystem driver) rather than a direct-SD write, and it rebuilds the game binary. Leaving it off costs you a ~6 ms scrap of the original sound at two points inside each replacement, which at least one tester listening for it could not hear. As with any image build, keep your original image so you can rebuild the card if you want to.</p>
+      <div class="row wrap"><span class="lbl"><b>Blip-free callouts: always on.</b> A replaced sound plays your audio for its whole length, with no scrap of the original inside it. There is nothing to switch on.</span></div>
+      <p class="aud-expl">What it does, technically. At boot the game reads two ~512-byte windows out of every sound's body to work out that sound's decoder settings, and each result feeds the next, so the whole sound bank is one forward chain. Re-encoding a sound changes those bytes and desyncs the chain, which makes the machine reboot the moment any audio plays. The old fix put the original bytes back in just those two windows, but they sit inside the audible part, so you heard a ~6 ms scrap of the ORIGINAL sound twice inside every replacement (the "blip"). Instead, every build now stashes a copy of the original window bytes inside the game program and adds a small piece of code that points the boot-time read at the copy, for the replaced sounds only. The game then sees exactly what it saw on a stock card while the card itself carries your audio end to end. Because the game program gets longer, this needs the Linux filesystem driver, the same as full-size video replacement. A direct-SD write, a computer without that driver, or a game program it can't safely patch gets the old fix instead (the ~6 ms scrap stays), and the Write Complete message says which one your card got. Every build checks all the sounds' settings against the patched program first and uses the old fix if anything would drift.</p>
       <hr />
-      <${Check} wrap checked=${cfg.audio_grow} onChange=${put("audio_grow")} label="Allow replacements longer than the original (grows the sound bank; image builds only)" />
-      <p class="aud-expl">What it does. A replacement that runs longer than the sound it replaces is trimmed to fit, because the card's sound bank records where every sound starts and how long it is, and making one longer in place would strand every sound after it. Ticking this appends instead: your audio goes into new space at the end of the bank, and a copy of that sound's record is added pointing at it. Nothing that already exists moves, so every other sound on the card is untouched, and the game's play tables are re-pointed at the copy so it is the one that plays. The file gets bigger, so this needs the Linux filesystem driver, the same as full-size video replacement, and it is skipped for a direct-SD write. Why it is opt-in. This has been confirmed on a real machine (longer cues play, do not loop, and cut off correctly), so it is safe to use; it is left as a choice because it needs an image build. There are two limits. The game can only open a sound bank up to about 2 GB, and every lengthened sound is added on top of the original bank at its whole length, not just the extra (on Godzilla 1.16 that is room for about 45 minutes of lengthened stereo sound). Anything over that is trimmed and named in the log. The lengthened sounds also need room on the card's games partition, which they share with full-size replacement videos, and a stock 8 GB card can have only a few hundred MB free. When that room runs short, longer sounds are trimmed to fit it and named in the log. ${mac ? "A build for a bigger SD card, which this app can make on Windows and Linux, gives" : "SD card size on the Write tab gives"} the games partition more room, but it does not raise the 2 GB limit. Leaving this off trims longer clips exactly as before.</p>
+      <div class="row wrap"><span class="lbl"><b>Longer and shorter replacements: always on.</b> Each replacement plays at its own length, longer or shorter than the sound it replaces. There is nothing to switch on.</span></div>
+      <p class="aud-expl">What it does. The card's sound bank records where every sound starts and how long it is, so a sound can't get longer in place without stranding every sound after it. Instead, a replacement of a different length goes into new space at the end of the bank, and a copy of that sound's record is added pointing at it. Nothing that already exists moves, so every other sound on the card is untouched, and the game's play tables are re-pointed at the copy so it is the one that plays. Confirmed on a real machine: longer cues play, do not loop, and cut off correctly. A replacement that ends at least 0.1 s before the sound it replaces gets its own length the same way, so the game stops playing it where your audio ends instead of holding it through silence. A sound with files to play in turn keeps the original's length, because those files play for as long as it does. The file gets bigger, so this needs the Linux filesystem driver, the same as full-size video replacement; a direct-SD write fits each replacement to the original's length instead (longer is trimmed, shorter padded with silence). How much fits. The game can only open a sound bank up to about 2 GB, and every lengthened sound is added on top of the original bank at its whole length, not just the extra (on Godzilla 1.16 that is room for about 45 minutes of lengthened stereo sound). Past that, the lengthened sounds go into extra sound banks of their own beside it (image-sc01.bin and on, the way Stern's music titles keep their songs), so they are not trimmed for it, songs the game plays in parts (an intro, the song, an outro) included. A few sounds stay in the main bank and are trimmed there when it is full (for example one the game never plays through its sound list, or one that shares its sound ids with a music mode's file kept in the main bank); the log names them. The lengthened sounds need room on the card's games partition, which they share with full-size replacement videos, and a stock 8 GB card can have only a few hundred MB free. When that room runs short, longer sounds are trimmed to fit it and named in the log. ${mac ? "A build for a bigger SD card, which this app can make on Windows and Linux, gives" : "SD card size on the Write tab gives"} the games partition more room.</p>
       <hr />
       <${Check} wrap checked=${cfg.previews} onChange=${put("previews")} label="On Build, export machine-render WAVs of every changed sound (hear exactly what the card will play)" />
-      <p class="aud-expl">Previews land in a ${"<build name>"}_machine_previews folder next to the built image. Note: they show what our decoder renders — an artifact the real machine adds on its own cannot appear in a preview.</p>
+      <p class="aud-expl">Previews land in a ${"<build name>"}_machine_previews folder next to the built image. Note: they show what our decoder renders — an artifact the real machine adds on its own cannot appear in a preview.</p>` : null}
     </div>
   <//>`;
 }
@@ -403,14 +436,234 @@ By default every replacement is gained to the same loudness as the sound it repl
 // -------------------------------------------------------------------- tab
 // Default column widths (px) until the user drags one; the dragged ones are
 // the Tk tree's own (settings.json column_widths.audio, shared with Tk).
-const FIXED = { play: 30, len: 96, fmt: 184, type: 92, loop: 58, keep: 58, lvl: 76 };
+const FIXED = { play: 30, len: 96, fmt: 184, type: 92, rq: 88, loop: 58, keep: 58, lvl: 76 };
 const ROW_H = 32;
-const MIN_W = { "#0": 80, rep: 110 };    // the Tk columns' minwidth
+const MIN_W = { "#0": 80, rep: 110, cm: 90 };    // the Tk columns' minwidth (cm: PAD-1069's Comment)
 // A control inside a row: its second click of a double-click does nothing
 // (one picker, one play, one toggle), and the double-click never reaches the
 // row, whose double-click opens the replacement picker.
 const once = (fn) => (e) => { e.stopPropagation(); if (e.detail > 1) return; fn(e); };
 const noDbl = (e) => e.stopPropagation();
+
+// PAD-998: a window row's ▶ plays its file in the Replacement pane behind the window, where the
+// pane's own Stop can't be reached: while that file plays the button turns into ■ and stops it
+function RowPlay({ path, title, onPlay }) {
+  const p = usePlayer("rep");
+  const on = !!path && p.path === path && (p.playing || p.want);
+  return html`<${Button} size="sm" kind="ghost" icon=${on ? "stop" : "play"} title=${on ? "Stop" : title}
+    onClick=${() => { if (on) { stopPlayer(p); call("audio.stop"); } else onPlay(); }} />`;
+}
+
+// PAD-1074: the list's own ▶ turns into ■ while that row's sound plays in either pane (the pane
+// says which row it holds), and stops it as the pane's ■ does; a mode's file or a jukebox song
+// playing in the pane names no row, so every row keeps its ▶ then
+function TrackPlay({ r, panes, onPlay }) {
+  const po = usePlayer("orig"), pr = usePlayer("rep");
+  const live = (p, pane) => !!pane && pane.rel === r.k && !!p.path && p.path === pane.path && (p.playing || p.want);
+  const p = live(po, panes.orig) ? po : live(pr, panes.rep) ? pr : null;
+  const label = p ? "Stop" : "Play";
+  return html`<button type="button" class=${"aud-rowplay" + (p ? " on" : "")} aria-label=${label} ...${tip(label)} onDblClick=${noDbl}
+    onClick=${once(() => { if (p) { stopAll(); seekTo(p, 0); call("audio.stop"); } else onPlay(); })}><${Icon} name=${p ? "stop" : "play"} /></button>`;
+}
+
+// PAD-998: ▶ / ■ that plays a file right where it is, on a page with no Replacement pane (the Attract
+// page's flipper sounds: their ▶ played into the Audio tab's pane, which isn't mounted there, so it
+// played nothing): a player of its own, never one of the panes
+let fileV = 0;
+export function FilePlay({ path, title }) {
+  const p = usePlayer("file");
+  const on = !!path && p.path === path && (p.playing || p.want);
+  useEffect(() => () => { const f = player("file"); if (f.path === path) stopPlayer(f); }, [path]);
+  return html`<${Button} size="sm" kind="ghost" icon=${on ? "stop" : "play"} title=${on ? "Stop" : title} disabled=${!path}
+    onClick=${() => { if (on) stopPlayer(p); else startPlayer(syncPlayer("file", { path, v: ++fileV }), 0); }} />`;
+}
+
+// PAD-1004: the Jukebox and Sounds on shots lists sort by a column's title: the first click sorts by it
+// (A to Z, or most first where the column says desc), the second turns it round, the third gives the
+// list its own order back. Only the view sorts: the list's own order (#) stays as it was.
+// cols: {key: {val(row), desc}}
+function useColSort(rows, cols) {
+  const [by, setBy] = useState(null);
+  const click = (k) => setBy((c) => (!c || c.key !== k ? { key: k, desc: !!cols[k].desc }
+    : c.desc === !!cols[k].desc ? { key: k, desc: !c.desc } : null));
+  const shown = useMemo(() => {
+    if (!by || !cols[by.key]) return rows;
+    const val = cols[by.key].val;
+    const cmp = (a, b) => {
+      const x = val(a), y = val(b);
+      const ex = x === "" || x == null, ey = y === "" || y == null;
+      if (ex || ey) return ex === ey ? 0 : ex ? 1 : -1;            // empties last, either way round
+      const d = typeof x === "number" && typeof y === "number" ? x - y
+        : String(x).localeCompare(String(y), undefined, { numeric: true, sensitivity: "base" });
+      return by.desc ? -d : d;
+    };
+    return [...rows].sort((a, b) => cmp(a, b) || a.k - b.k);
+  }, [rows, by]);
+  const Th = ({ k, children }) => html`<th><button type="button" class="aud-sort"
+    ...${tip(by && by.key === k && by.desc !== !!cols[k].desc ? "Click for the list's own order" : "Click to sort by this")}
+    onClick=${() => click(k)}>${children}${by && by.key === k ? (by.desc ? " ▼" : " ▲") : ""}</button></th>`;
+  return { shown, Th, sorted: !!by && !(by.key === "k" && !by.desc) };
+}
+
+// PAD-685: the jukebox - the song modes play one of these songs, drawn at random, each with its own
+// intro video: the header button opens its song list
+function JukeboxButton({ j, onOpen }) {
+  return html`<span ...${tip({ head: "Jukebox", lines: j.tip || [] })}><${Button} kind="ghost" icon="audio"
+    onClick=${() => (j.why ? call("audio.jukebox_action", "why") : onOpen())}>${j.n ? `Jukebox (${j.n})` : "Jukebox"}<//></span>`;
+}
+
+// PAD-1003: a song's intro video, watched in a window over the jukebox's. A file the page's engine
+// can't play as it is (an .avi, .wmv, .mpg, ProRes...), or plays with no picture, plays from a copy
+// Python makes of it
+const H264 = 'video/mp4; codecs="avc1.42E01E"';
+function JukeVideo({ k, path, name, onClose }) {
+  const [src, setSrc] = useState(path);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => { stopAll(); call("audio.stop"); }, []);
+  const onError = async () => {
+    if (src !== path || busy) { setErr(err || "This video can't be played here."); return; }
+    setBusy(true);
+    const fmt = document.createElement("video").canPlayType(H264) ? "mp4" : "webm";
+    const got = (await call("audio.jukebox_preview", k, fmt)) || {};
+    setBusy(false);
+    if (got.path) setSrc(got.path); else setErr(got.error || "This video can't be played here.");
+  };
+  return html`<${Modal} title=${name} icon="video" wide onClose=${onClose}
+    footer=${html`<span class="small mono muted grow ellip">${path}</span><${Button} kind="primary" onClick=${onClose}>Close<//>`}>
+    <div class="thumb aud-juke-video">
+      ${err ? html`<span class="err-ink">${err}</span>`
+        : busy ? html`<span class="row"><${Spinner} /><span>Preparing a preview copy…</span></span>`
+        : html`<video key=${src} src=${mediaUrl(src)} controls autoplay playsinline onError=${onError}
+            onLoadedMetadata=${(e) => { if (!e.currentTarget.videoWidth && src === path) onError(); }}></video>`}
+    </div>
+  <//>`;
+}
+const JUKE_COLS = { k: { val: (g) => g.k }, audio: { val: (g) => g.audio }, video: { val: (g) => g.video || "" },
+  weight: { val: (g) => Number(g.weight), desc: true } };
+
+// PAD-1007: the jukebox's pools - each of the game's musics draws from its own pool's songs (the song
+// modes, the special modes, the background music): the window shows one pool at a time.
+// PAD-1008: a song's ▶ sits before its name, as the intro video's button does before the video's (and
+// a sound's in the Sounds on shots window before the sound's)
+function JukeboxModal({ data, onClose }) {
+  const [d, setD] = useState(data);
+  const [watch, setWatch] = useState(null);
+  const act = async (a) => { const got = await call("audio.jukebox_action", a); if (got) setD(got); };
+  const songs = d.songs || [];
+  const pools = d.pools || [];
+  const pool = pools.find((p) => p.key === d.pool) || pools[0] || { intro: true };
+  const full = (d.total ?? songs.length) >= (d.max || 0);
+  const weights = (d.weights || []).map((w) => ({ value: String(w.w), label: w.label }));
+  const { shown, Th, sorted } = useColSort(songs, JUKE_COLS);
+  const moveTip = sorted ? "Sort by # to move songs: the list is sorted by another column" : undefined;
+  return html`<${Modal} title="Jukebox" icon="audio" wide remember="jukebox" onClose=${onClose}
+    footer=${html`<${Button} icon="plus" disabled=${d.running || full || !!d.why}
+        title=${full ? `At most ${d.max} songs` : "Choose songs' audio files, and their intro videos with them: a video goes with the song of the same name"}
+        onClick=${() => act("add")}>Add songs…<//>
+      <${Button} kind="ghost" icon="trash" disabled=${d.running || !songs.length}
+        title="Take every song out of the jukebox to start over (it asks first)"
+        onClick=${() => act("clear")}>Clear all…<//>
+      <span class="muted small" title="Every pool's songs count toward the most the jukebox takes">${d.total ?? songs.length} of ${d.max} songs in all</span>
+      <span class="grow"></span>
+      <${Button} kind="primary" onClick=${onClose}>Close<//>`}>
+    <div class="stack" style="gap:10px">
+      <p class="aud-p">${d.tip}</p>
+      ${d.why ? html`<${Note} kind="warn">${d.why}<//>` : null}
+      ${pools.length > 1 ? html`<div class="row aud-juke-pools" style="gap:10px;flex-wrap:wrap">
+        <${Seg} value=${d.pool} options=${pools.map((p) => ({ value: p.key, label: `${p.name} (${p.n || 0})`, title: p.about }))}
+          onChange=${(v) => act(`pool:${v}`)} />
+        <span class="muted small">${pool.about}</span></div>` : null}
+      ${songs.length ? html`<div class="aud-juke"><table>
+        <thead><tr><${Th} k="k">#<//><${Th} k="audio">Song<//><${Th} k="video">Intro video<//><${Th} k="weight">How often<//><th></th></tr></thead>
+        <tbody>${shown.map((g) => html`<tr class=${cx(g.gone && "gone")} title=${g.gone ? "A file of this song is not on this PC any more" : ""}>
+          <td class="muted">${g.n ?? g.k}</td>
+          <td><span class="nw"><${RowPlay} path=${g.path} title="Play this song" onPlay=${() => act(`play:${g.k}`)} /> ${g.audio}</span></td>
+          <td>${!pool.intro ? html`<span class="muted" title="This music opens with no intro video of its own, so its songs show none">none</span>`
+            : g.video ? html`<span class="nw"><${Button} size="sm" kind="ghost" icon="video" title="Watch this intro video"
+              onClick=${() => setWatch(g)} /> ${g.video}</span>`
+            : html`<span class="muted">its song mode's own</span>`}</td>
+          <td><${Select} sm value=${String(g.weight)} options=${weights} disabled=${d.running}
+            onChange=${(v) => act(`weight:${g.k}:${v}`)} width=${110} /></td>
+          <td class="nw">
+            <${Button} size="sm" kind="ghost" icon="more" title="More for this song" onClick=${(e) => openMenu(e.currentTarget, [
+              pool.intro ? { label: g.video ? "Change the intro video…" : "Choose an intro video…", icon: "video", disabled: d.running,
+                title: "The video the song mode opens with when this song is drawn, the song's name in it", onClick: () => act(`video:${g.k}`) } : null,
+              pool.intro && g.video ? { label: "Watch the intro video", icon: "play", onClick: () => setWatch(g) } : null,
+              pool.intro && g.video ? { label: "Use the song mode's own intro", icon: "undo", disabled: d.running, onClick: () => act(`novideo:${g.k}`) } : null,
+              pool.intro ? { sep: true } : null,
+              { label: "Move up", icon: "up", disabled: d.running || sorted || (g.n ?? g.k) === 1, title: moveTip, onClick: () => act(`up:${g.k}`) },
+              { label: "Move down", icon: "down", disabled: d.running || sorted || (g.n ?? g.k) === songs.length, title: moveTip, onClick: () => act(`down:${g.k}`) },
+              { sep: true },
+              { label: "Take out of the jukebox", icon: "x", disabled: d.running, onClick: () => act(`off:${g.k}`) },
+            ].filter(Boolean), { align: "right" })} />
+          </td></tr>`)}</tbody></table></div>`
+        : pools.length > 1 ? html`<div class="muted">No songs in ${pool.name} yet: the game plays its own music there.</div>`
+        : html`<div class="muted">No songs yet. Add the songs' audio files, and their intro videos with them: Hey Jude.mp4 is the intro of Hey Jude.wav.</div>`}
+    </div>
+    ${watch ? html`<${JukeVideo} k=${watch.k} path=${watch.vpath} name=${watch.video} onClose=${() => setWatch(null)} />` : null}
+  <//>`;
+}
+
+// PAD-945: sounds on the shots of the game's modes - a hit on a shot while one of the game's modes
+// runs plays a sound: the header button (and a row's right-click) opens the list
+function ShotsButton({ g, onOpen }) {
+  return html`<span ...${tip({ head: "Sounds on shots", lines: g.tip || [] })}><${Button} kind="ghost" icon="audio"
+    onClick=${() => (g.why ? call("audio.shots_action", "why") : onOpen())}>${g.n ? `Sounds on shots (${g.n})` : "Sounds on shots"}<//></span>`;
+}
+
+const SHOT_COLS = { k: { val: (r) => r.k }, mode: { val: (r) => r.mode }, shot: { val: (r) => r.shot },
+  sound: { val: (r) => r.sound } };
+
+function ShotsModal({ data, onClose }) {
+  const [d, setD] = useState(data);
+  const [mode, setMode] = useState("");
+  const [shot, setShot] = useState("");
+  const [lit, setLit] = useState("");
+  const act = async (a) => { const got = await call("audio.shots_action", a); if (got) setD(got); };
+  const rows = d.rows || [];
+  const modes = d.modes || [];
+  const shots = d.shots || [];
+  const m = mode || (modes[0] || {}).value || "";
+  const s = shot || (shots[0] || {}).value || "";
+  const litOk = (d.lit_ok || []).includes(s);
+  const l = litOk ? lit : "";
+  const full = rows.length >= (d.max || 0);
+  const { shown, Th } = useColSort(rows, SHOT_COLS);
+  return html`<${Modal} title="Sounds on shots" icon="audio" wide remember="shots" onClose=${onClose}
+    footer=${html`<span class="grow"></span><${Button} kind="primary" onClick=${onClose}>Close<//>`}>
+    <div class="stack" style="gap:10px">
+      <p class="aud-p">${d.tip}</p>
+      ${d.why ? html`<${Note} kind="warn">${d.why}<//>` : null}
+      ${rows.length ? html`<div class="aud-juke"><table>
+        <thead><tr><${Th} k="k">#<//><${Th} k="mode">In the game's mode<//><${Th} k="shot">When this shot is hit<//><${Th} k="sound">It plays<//><th></th></tr></thead>
+        <tbody>${shown.map((r) => html`<tr class=${cx(r.gone && "gone")} title=${r.gone ? "This sound's file is not on this PC any more" : ""}>
+          <td class="muted">${r.k}</td>
+          <td><span class="nw">${r.mode}</span></td>
+          <td><span class="nw">${r.shot}</span></td>
+          <td><span class="nw"><${RowPlay} path=${r.path} title="Play this sound" onPlay=${() => act(`play:${r.k}`)} /> ${r.sound}</span></td>
+          <td class="nw">
+            <${Button} size="sm" kind="ghost" icon="x" title="Take this one out" disabled=${d.running} onClick=${() => act(`off:${r.k}`)} />
+          </td></tr>`)}</tbody></table></div>`
+        : html`<div class="muted">None yet. Pick a mode, a shot and a sound below, then Add.</div>`}
+      ${d.why ? null : html`<div class="row wrap" style="gap:8px">
+        <span class="lbl nw">In</span>
+        <${Select} sm value=${m} options=${modes} onChange=${setMode} width=${200} title="One of the game's modes" />
+        <span class="lbl nw">when</span>
+        <${Select} sm value=${s} options=${shots} onChange=${setShot} width=${200} title="The shot (the game's own switch name)" />
+        <span class="lbl nw">is hit</span>
+        <${Select} sm value=${l} options=${d.lits || []} onChange=${setLit} width=${140} disabled=${!litOk}
+          title=${litOk ? "Any time, or only while the shot's light shows this color (the color it was lit when it was hit). A shot can have a sound for each color." : "The app cannot read this shot's light, so its sound plays at any hit."} />
+        <span class="lbl nw">play</span>
+        <${Button} size="sm" drop title="The sound: one of the game's own (in the project's audio folder) or a file of yours"
+          onClick=${() => act("choose")}>${d.pick || "Choose a sound…"}<//>
+        <${Button} size="sm" kind="primary" icon="plus" disabled=${!d.pick || !m || !s || full || d.running}
+          title=${full ? `At most ${d.max}` : !d.pick ? "Choose the sound first" : "Add this sound on that shot"}
+          onClick=${() => act(`add:${m}:${s}:${l}`)}>Add<//>
+      </div>`}
+    </div>
+  <//>`;
+}
 
 export default function AudioTab() {
   const s = useNs("audio");
@@ -426,6 +679,8 @@ export default function AudioTab() {
   const wrapRef = useRef(null);
   const [props, setProps] = useState(null);
   const [adv, setAdv] = useState(null);
+  const [juke, setJuke] = useState(null);
+  const [shotsWin, setShotsWin] = useState(null);
   const selKey = JSON.stringify(s.sel || []);
   useEffect(() => {
     const next = s.sel || [];
@@ -433,8 +688,22 @@ export default function AudioTab() {
     // a selection Python made (sequential play, a pick, a rename) moves the
     // focus row to it; the echo of the page's own selection leaves it be
     if (selKey !== sentSel.current && next.length) { cursor.current = next[0]; anchor.current = next[0]; }
+    // PAD-592: a row sent here from another tab (the Video tab's clip sounds) comes to the
+    // middle of the list when it is out of sight or at its very edge (under the header)
+    if (selKey !== sentSel.current && next.length === 1) {
+      requestAnimationFrame(() => {
+        const el = wrapRef.current && wrapRef.current.querySelector(".scroller");
+        const i = indexRef.current.get(next[0]);
+        if (!el || i == null) return;
+        const y = i * ROW_H;
+        if (y < el.scrollTop + ROW_H || y + ROW_H * 3 > el.scrollTop + el.clientHeight) {
+          el.scrollTop = Math.max(0, y - Math.floor(el.clientHeight / 2));
+        }
+      });
+    }
   }, [selKey]);
   const index = useMemo(() => new Map(rows.map((r, i) => [r.k, i])), [rows]);
+  const indexRef = useRef(index); indexRef.current = index;
 
   // keep the players on what the panes hold
   useEffect(() => { syncPlayer("orig", panes.orig); }, [panes.orig && panes.orig.v, panes.orig && panes.orig.limit, panes.orig && panes.orig.gain]);
@@ -523,6 +792,7 @@ export default function AudioTab() {
   const doAction = async (action, rel, cur) => {
     const res = await call("audio.menu_action", action, rel, cur);
     if (res && res.open === "props" && res.data) setProps(res.data);
+    if (res && res.open === "shots" && res.data) setShotsWin(res.data);
   };
   const onContext = async (r, i, e) => {
     if (!r || r.g) return;
@@ -532,11 +802,15 @@ export default function AudioTab() {
     const items = await call("audio.menu", r.k, cur);
     if (!items || !items.length) return;
     // a toggle entry reads as a box, ticked or not ("☑  Keep this song
-    // whole…" / "☐  …", the Tk menu's own labels)
-    openMenu({ x, y }, items.map((it) => it.sep ? { sep: true } : ({
+    // whole…" / "☐  …", the Tk menu's own labels); PAD-494: an entry may open
+    // a submenu of its own ("Music modes")
+    // (PAD-638: a header names a part of a submenu, "Mode 2 (Custom A): Orch.wav")
+    const item = (it) => it.sep ? { sep: true } : it.header ? { header: it.header } : ({
       label: it.checked == null ? it.label : (it.checked ? "☑  " : "☐  ") + it.label,
       icon: it.icon, kbd: it.kbd, disabled: it.disabled,
-      onClick: it.action ? () => doAction(it.action, r.k, cur) : undefined })));
+      submenu: it.submenu ? it.submenu.map(item) : undefined,
+      onClick: it.action ? () => doAction(it.action, r.k, cur) : undefined });
+    openMenu({ x, y }, items.map(item));
   };
   const openProps = async () => {
     const data = await call("audio.props_info");
@@ -545,6 +819,14 @@ export default function AudioTab() {
   const openAdv = async () => {
     const data = await call("audio.advanced_get");
     if (data) setAdv(data);
+  };
+  const openJuke = async () => {
+    const data = await call("audio.jukebox_open");
+    if (data) setJuke(data);
+  };
+  const openShots = async () => {
+    const data = await call("audio.shots_open");
+    if (data) setShotsWin(data);
   };
   const onKey = (e) => {
     if (e.key === " " || e.code === "Space") {
@@ -560,6 +842,8 @@ export default function AudioTab() {
     syncPlayer(side, panes[side]);
     call("audio.play", side);
   };
+  // PAD-701: ⏮ / ⏭ play the row before / after (starting it silences the old one)
+  const stepPane = (side, delta) => call("audio.step", side, delta);
 
   // ---- the table
   const col = s.col;
@@ -601,13 +885,19 @@ export default function AudioTab() {
     { key: "play", label: "", width: FIXED.play + "px", cls: "aud-pc",
       render: (r) => r.g
         ? html`<span class="aud-caret"><${Icon} name=${r.open ? "down" : "right"} /></span>`
-        : html`<button type="button" class="aud-rowplay" aria-label="Play" ...${tip("Play")} onDblClick=${noDbl}
-            onClick=${once(() => { cursor.current = r.k; anchor.current = r.k; sentSel.current = JSON.stringify([r.k]); setSel([r.k]); call("audio.play_row", r.k); })}><${Icon} name="play" /></button>` },
+        : html`<${TrackPlay} r=${r} panes=${panes}
+            onPlay=${() => { cursor.current = r.k; anchor.current = r.k; sentSel.current = JSON.stringify([r.k]); setSel([r.k]); call("audio.play_row", r.k); }} />` },
     { key: "#0", label: "Original Track", sort: "#0", width: name0, titleOf: (r) => r.g ? r.label : r.k,
       render: (r) => html`<${NameCell} r=${r} prefix=${s.prefix} />` },
     { key: "len", label: "Length", sort: "len", width: FIXED.len + "px", num: true, render: (r) => r.len },
-    { key: "fmt", label: "Format", sort: "fmt", width: FIXED.fmt + "px", titleOf: (r) => r.fmt, render: (r) => html`<span class="dim">${r.fmt || ""}</span>` },
+    // PAD-637: a file of several variants of one sound says so, and how Write takes it
+    { key: "fmt", label: "Format", sort: "fmt", width: FIXED.fmt + "px", titleOf: (r) => r.fmt_tip ? undefined : r.fmt,
+      render: (r) => html`<span class="dim" ...${r.fmt_tip ? tip({ head: "Variants", lines: r.fmt_tip }) : {}}>${r.fmt || ""}</span>` },
     { key: "type", label: "Type", sort: "type", width: FIXED.type + "px", render: (r) => r.type || "" },
+    // PAD-635: how many of the game code's sound requests play the sound
+    ...(s.req_cap ? [{ key: "rq", label: "Requests", sort: "rq", title: s.req_tip, width: FIXED.rq + "px", num: true,
+      render: (r) => r.rq == null ? "" : html`<span class=${cx(!r.rq && "warn-ink")} aria-label=${r.rq ? `Played by ${r.rq} sound requests` : "No sound request plays it"}
+        ...${tip({ head: "Sound requests", lines: r.rq_tip })}>${r.rq || "None"}</span>` }] : []),
     ...(col === "loop" || col === "keep" ? [{ key: col, label: html`<span class="aud-hc">${flagName}</span>`, sort: col,
       title: col === "loop" ? T.loop : T.keep, width: FIXED[col] + "px", cls: "aud-flagc",
       titleOf: () => (col === "loop" ? T.loop : T.keep),
@@ -616,10 +906,20 @@ export default function AudioTab() {
         onClick=${once(() => call("audio.toggle_flag", r.k, col))}>${r[col] ? html`<${Icon} name="check" />` : null}</button>` }] : []),
     ...(col === "lvl" ? [{ key: "lvl", label: "Level", sort: "lvl", title: T.level, width: FIXED.lvl + "px", num: true,
       titleOf: () => T.level, render: (r) => r.lvl || "" }] : []),
+    // PAD-1069: the user's comments, once a sound has one (Audio Properties)
+    ...(s.comments ? [{ key: "cm", label: "Comment", sort: "cm", width: `minmax(${MIN_W.cm}px,0.8fr)`,
+      titleOf: (r) => r.cm || undefined, render: (r) => r.cm ? html`<span class="dim">${r.cm}</span>` : "" }] : []),
+    // PAD-1279: TEST puts the sound on the test card
+    ...(s.test_on ? [testCol({ ns: "audio", tags: s.test_tags, full: s.test_full,
+      keyOf: (r) => (r.g || r.k == null || String(r.k).startsWith("::") ? null : r.k) })] : []),
     { key: "rep", label: "Replacement", sort: "rep", width: `minmax(${MIN_W.rep}px,1fr)`, titleOf: (r) => r.rep,
       render: (r) => r.g ? html`<span class="muted">${r.rep}</span>`
-        : html`<button type="button" class=${cx("aud-rep", r.t === "picked" && "picked", r.t === "ondisk" && "ondisk", r.t === "stray" && "stray", !r.t && "choose")}
-            onDblClick=${noDbl} onClick=${once(() => { selectOne(r.k); call("audio.choose", r.k); })}>${r.rep}</button>` },
+        : html`<span class="aud-repcell"><button type="button" class=${cx("aud-rep", r.t === "picked" && "picked", r.t === "ondisk" && "ondisk", r.t === "stray" && "stray", !r.t && "choose")}
+            onDblClick=${noDbl} onClick=${once(() => { selectOne(r.k); call("audio.choose", r.k); })}>${r.rep}</button>${r.md
+          ? html`<span class="aud-modes" aria-label=${`Sounds for music modes ${r.md.join(", ")}`} ...${tip({ head: "Music modes", lines: [r.md_tip] })}><${Icon} name="music" />${r.md.join(" ")}</span>`
+          : null}${r.tn
+          ? html`<span class="aud-modes" aria-label=${r.tr ? `Plays ${r.tn} sounds at random` : `Plays ${r.tn} sounds in turn`} ...${tip({ head: r.tr ? "Play at random" : "Play in turn", lines: [r.tn_tip] })}><${Icon} name="shuffle" />${r.tn}</span>`
+          : null}</span>` },
   ];
   const selected = sel.length === 1 ? sel[0] : new Set(sel);
   const selRel = sel.find((k) => index.has(k) && !String(k).startsWith("::dupgrp::")) || null;
@@ -629,21 +929,32 @@ export default function AudioTab() {
     ${s.scanning || s.dup_scanning ? html`<${Spinner} />` : null}<span class="wrap">${s.empty || ""}</span></div>`;
 
   const repActions = html`
-    <${Button} size="sm" disabled=${!cur} onClick=${() => call("audio.choose_selected")}>Choose…<//>
+    <${Button} drop size="sm" disabled=${!cur} onClick=${() => call("audio.choose_selected")}>Choose…<//>
     ${cur && cur.built ? html`<${Button} size="sm" kind="ghost" icon="undo" onClick=${() => call("audio.remove_selected")}>Revert to original<//>`
       : cur && cur.assigned ? html`<${Button} size="sm" kind="ghost" onClick=${() => call("audio.remove_selected")}>Remove replacement<//>` : null}`;
 
   return html`<div class="page aud-page">
     <${PageHead} title="Audio" sub=${T.intro}>
       ${s.status ? html`<${Chip} kind="acc">${s.status}<//>` : null}
+      ${s.mem ? html`<${Chip} kind=${s.mem.kind} dot=${!!s.mem.kind} title=${{ head: s.mem.head, lines: s.mem.lines }}>${s.mem.text}<//>` : null}
       <${Button} onClick=${() => call("audio.scan")} icon=${s.scanning ? "x" : "refresh"}>${s.scanning ? "Cancel scan" : "Scan"}<//>
-      <${Button} icon="folder" disabled=${s.running} title=${T.fromFolder} onClick=${() => call("audio.replace_from_folder")}>Replace from folder…<//>
+      <${Button} drop icon="folder" disabled=${s.running} title=${T.fromFolder} onClick=${() => call("audio.replace_from_folder")}>Replace from folder…<//>
       <${Button} icon="search" disabled=${s.running} title=${T.originals} onClick=${() => call("audio.originals_open")}>Find originals…<//>
+      ${s.attract ? html`<${Button} kind="ghost" icon="audio" title="The attract flipper sounds are on the Attract page now"
+        onClick=${() => call("ui.select_tab", "attract")}>Attract flipper sounds…<//>` : null}
+      ${s.jukebox ? html`<${JukeboxButton} j=${s.jukebox} onOpen=${openJuke} />` : null}
+      ${s.shots ? html`<${ShotsButton} g=${s.shots} onOpen=${openShots} />` : null}
       ${s.adv_cap ? html`<${Button} kind="ghost" icon="gear" title=${T.adv} onClick=${openAdv}>${s.adv_marker ? "Advanced…*" : "Advanced…"}<//>` : null}
       <${Button} kind="ghost" icon="more" label="More" busy=${s.profile_busy}
-        title=${s.adv_cap ? "More: Export CSV, Clear replacements…, Save / load settings, Profile vs stock" : "More: Export CSV, Clear replacements…, Save / load settings"}
+        title=${"More: Export CSV, Rename from callouts.csv, Update callouts.csv, Update comments, Clear replacements…, Save / load settings" + (s.modes_share ? ", Save / load music modes" : "") + (s.adv_full ? ", Profile vs stock" : "")}
         onClick=${(e) => openMenu(e.currentTarget, [
           { label: "Export CSV", icon: "download", title: T.csv, onClick: () => call("audio.export_csv") },
+          { label: "Rename from callouts.csv…", icon: "edit", title: T.callouts, disabled: s.running,
+            onClick: () => call("audio.rename_from_callouts") },
+          { label: "Update callouts.csv from the names…", icon: "upload", title: T.updCallouts, disabled: s.running,
+            onClick: () => call("audio.update_callouts") },
+          { label: "Update comments from callouts.csv…", icon: "edit", title: T.comCallouts,
+            onClick: () => call("audio.comments_from_callouts") },
           { label: "Clear replacements…", icon: "trash", title: T.clear, disabled: !s.can_clear || s.running,
             onClick: () => call("audio.clear_all") },
           { sep: true },
@@ -652,8 +963,15 @@ export default function AudioTab() {
           { label: "Load settings from a file…", icon: "upload", disabled: s.running,
             title: "Put the settings in a file saved here or by someone else onto the same slots of this card. A slot this card does not have is left out.",
             onClick: () => call("audio.settings_load") },
-          s.adv_cap ? { sep: true } : null,
-          s.adv_cap ? { label: s.profile_busy ? "Profiling…" : "Profile vs stock", icon: "wave", title: T.profile,
+          s.modes_share ? { sep: true } : null,
+          s.modes_share ? { label: "Save the music modes to a file…", icon: "download",
+            title: "The music modes' names, every sound's files for the other modes with their loudness, and those files, in one file to keep or to load into another project.",
+            onClick: () => call("audio.modes_save") } : null,
+          s.modes_share ? { label: "Load music modes from a file…", icon: "upload", disabled: s.running,
+            title: "Give this project's sounds the music modes in a file saved here or on another PC. A sound this card names otherwise is found by what it is.",
+            onClick: () => call("audio.modes_load") } : null,
+          s.adv_full ? { sep: true } : null,
+          s.adv_full ? { label: s.profile_busy ? "Profiling…" : "Profile vs stock", icon: "wave", title: T.profile,
             disabled: s.profile_busy, onClick: () => call("audio.profile") } : null,
         ], { align: "right" })} />
     <//>
@@ -663,10 +981,11 @@ export default function AudioTab() {
         : html`<span class="muted ellip">${s.folder_note}</span>`}
     </div>
     ${s.ffmpeg_missing ? html`<${Note} kind="err">${s.ffmpeg_text}<//>` : null}
+    ${s.req_note && !s.scanning ? html`<${Note} kind="info">${s.req_note}<//>` : null}
     <${Card} cls="aud-card" bodyCls="flush aud-body" footer=${html`<div class="aud-panes">
-        <${Pane} side="orig" pane=${panes.orig} onPlay=${playPane} />
+        <${Pane} side="orig" pane=${panes.orig} onPlay=${playPane} onStep=${stepPane} />
         <span class="aud-vsep"></span>
-        <${Pane} side="rep" pane=${panes.rep} onPlay=${playPane} actions=${repActions}
+        <${Pane} side="rep" pane=${panes.rep} onPlay=${playPane} onStep=${stepPane} actions=${repActions}
           extra=${s.level_cap ? html`<${Loudness} s=${s} selRel=${selRel} />` : null} />
       </div>`}>
       <div class="toolbar aud-tools">
@@ -677,6 +996,10 @@ export default function AudioTab() {
           onChange=${(v) => call("audio.set_group_dups", v)} />` : null}
         <span class="row aud-seg" ...${tip(T.show)}><span class="lbl">Show</span>
           <${Seg} value=${s.show} options=${SHOWS} onChange=${(v) => call("audio.set_show", v)} /></span>
+        ${s.req_cap ? html`<${Check} checked=${!s.hide_unused} label="Show unused" title=${T.unused}
+          onChange=${(v) => call("audio.set_hide_unused", !v)} />` : null}
+        <${Check} checked=${!!s.comments} label="Show comments" title=${T.comments}
+          onChange=${(v) => call("audio.set_show_comments", v)} />
         <span class="sp"></span>
         ${s.trim_visible ? html`<${Check} cls="small" checked=${s.trim} label="Trim / pad replacements to the original slot length" title=${s.trim_tip}
           onChange=${(v) => call("audio.set_trim", v)} />` : null}
@@ -689,11 +1012,14 @@ export default function AudioTab() {
           onSelect=${onSelect} onActivate=${(r) => { if (!r.g) call("audio.choose", r.k); }} onContext=${onContext}
           sort=${s.sort || {}} onSort=${(k) => call("audio.sort", k)}
           resizable widths=${tblWidths} onResize=${onResize}
-          rowClass=${(r) => cx(r.g && "aud-grp", r.t === "stray" && "aud-stray")} empty=${empty} rowHeight=${ROW_H} />
+          rowClass=${(r) => cx(r.g && "aud-grp", r.t === "stray" && "aud-stray")} empty=${empty} rowHeight=${ROW_H}
+          fileDropOk=${(r) => !r.g} onFileDrop=${(r) => { selectOne(r.k); call("audio.choose", r.k); }} />
       </div>
     <//>
     ${props ? html`<${PropsModal} data=${props} onClose=${() => setProps(null)} />` : null}
     ${adv ? html`<${AdvancedModal} data=${adv} onClose=${() => setAdv(null)} />` : null}
+    ${juke ? html`<${JukeboxModal} data=${juke} onClose=${() => setJuke(null)} />` : null}
+    ${shotsWin ? html`<${ShotsModal} data=${shotsWin} onClose=${() => setShotsWin(null)} />` : null}
     ${s.originals && s.originals.open ? html`<${OriginalsWindow} ns="audio" o=${s.originals} />` : null}
   </div>`;
 }

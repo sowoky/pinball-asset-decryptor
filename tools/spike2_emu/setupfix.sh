@@ -70,6 +70,14 @@ if [ "$(id -u)" != 0 ]; then
     exit 1
 fi
 
+# A read-only disk makes every step below fail with I/O errors that read like
+# a broken apt (PAD-816) - and the run still ended "result=ok". Say what it is.
+if pad_disk_readonly /var/lib; then
+    pad_disk_readonly_say setup 2>&1
+    echo "result=readonly"
+    exit 1
+fi
+
 #: The facts, from the ONE place that derives them. setupfix does not repeat
 #: setupcheck's probing - it asks it, so the two can never disagree about what
 #: is missing or about which register command this distro wants.
@@ -448,7 +456,12 @@ fi
 # back here having changed nothing.
 needs_restart=0
 if [ "$(_get "$facts" iswsl)" = 1 ] && [ "$(_get "$facts" wslconf)" = 0 ]; then
-    if grep -qi 'systemd' /etc/wsl.conf 2>/dev/null; then
+    if [ "$(_get "$facts" hassystemd)" = 0 ]; then
+        # The app's own PAD-Runtime has no systemd, on purpose (see
+        # tools/runtime/Dockerfile): wsl.conf cannot turn on what is not here.
+        echo "This Linux has no systemd, so the ARM registration will be lost"
+        echo "when WSL next restarts, and setting it up again will bring it back."
+    elif grep -qi 'systemd' /etc/wsl.conf 2>/dev/null; then
         # It has an opinion already (systemd=false, or a commented note). That
         # is a deliberate choice by someone and not this script's to overrule.
         echo "/etc/wsl.conf already mentions systemd - leaving it alone."

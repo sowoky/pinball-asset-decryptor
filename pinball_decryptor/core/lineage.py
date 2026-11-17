@@ -31,6 +31,7 @@ manufacturer that can fingerprint its cards registers a printer
 (:func:`register_printer`); this module stays plugin-free.
 """
 
+import hashlib
 import json
 import os
 import socket
@@ -107,8 +108,36 @@ def remember_print(card_path, info):
     data = _load_cache()
     data[_key(card_path)] = {
         "size": stamp[0], "mtime_ns": stamp[1], "seen": time.time(),
-        **{k: info.get(k) for k in ("print", "sidx", "label", "official")}}
+        **{k: info.get(k) for k in ("print", "sidx", "label", "official",
+                                    "manufacturer")}}
     _save_cache(data)
+
+
+#: How many slices of a file :func:`file_print` hashes, and their size.
+_SAMPLES = 64
+_SAMPLE_BYTES = 64 * 1024
+
+
+def file_print(path, tag, extra=b""):
+    """A fingerprint for a manufacturer whose card is one big file it can't
+    walk cheaply (a JJP install ISO, a BoF ``.fun``): the file's size, its
+    first and last MiB and :data:`_SAMPLES` slices spread evenly between,
+    with *tag* (the format) and *extra* (what the printer read of its
+    header).  Every rebuild of such a file moves its layout and size, so a
+    PAD build never prints like the release it was built over.  A few MiB
+    read: well under a second, even on a spinning disk."""
+    h = hashlib.sha256()
+    h.update(tag.encode() + b"\0" + extra)
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        h.update(str(size).encode())
+        spots = [0, max(0, size - (1 << 20))]
+        spots += [size * i // (_SAMPLES + 1) for i in range(1, _SAMPLES + 1)]
+        for off in spots:
+            f.seek(off)
+            h.update(f.read((1 << 20) if off in spots[:2] else _SAMPLE_BYTES))
+    return h.hexdigest()[:32]
 
 
 def card_print(card_path, measure=False):
@@ -294,6 +323,25 @@ def note_build(folder, out_name, out_info, parent_info, app_version=""):
     return entry
 
 
+def note_built(original_path, folder, output_path, log=None):
+    """A Write just built *output_path* from the project in *folder* over
+    the card *original_path*: print both and add the revision (PAD-787: the
+    JJP and BoF Writes; Stern's adds its build record on top).  Returns the
+    entry, or ``None`` when either card can't be printed.  Best-effort."""
+    from .. import __version__
+    try:
+        out = card_print(output_path, measure=True)
+        parent = card_print(original_path, measure=True)
+        entry = note_build(folder, os.path.basename(output_path), out,
+                           parent, __version__)
+    except Exception:                                     # noqa: BLE001
+        return None
+    if entry and log is not None:
+        log("This build is rev %d of %s." % (
+            entry["rev"], base_words(read_lineage(folder) or {})), "info")
+    return entry
+
+
 def latest(lin):
     revs = (lin or {}).get("revs") or []
     return max(revs, key=lambda r: int(r.get("rev") or 0)) if revs else None
@@ -309,6 +357,64 @@ def base_words(lin):
             and not src.get("rev"):
         return "a modified %s card" % label
     return "official %s" % label
+
+
+def extracted_from(folder):
+    """What the project in *folder* was extracted from when it was NOT the
+    card the game shipped on (PAD-539, DragonRR: his project came off a card
+    PAD had written, so that Write's additions were its "original"):
+    ``{"kind": "written", "rev": n, "label"}`` for one of this project's own
+    revisions, ``{"kind": "modified", "label"}`` for a card the stock check
+    found modified; ``None`` for the official card or when nothing says."""
+    lin = read_lineage(folder)
+    src = (lin or {}).get("source") or {}
+    label = ((lin or {}).get("stock") or {}).get("label") or src.get("label") or ""
+    if src.get("rev"):
+        return {"kind": "written", "rev": int(src["rev"]), "label": label}
+    status = src.get("status")
+    if not status:
+        # a project extracted with no print taken still has the stock verdict
+        from .extract_source import read_extract_source
+        stock = (read_extract_source(folder) or {}).get("stock") or {}
+        status, label = stock.get("status"), label or stock.get("label") or ""
+    if status == "modified":
+        return {"kind": "modified", "label": label}
+    return None
+
+
+def extracted_from_note(came, scenes=True):
+    """``{"chip", "head", "lines"}``: what :func:`extracted_from`'s answer
+    *came* means for As shipped and Reset (PAD-539), or ``None``.  *came* may
+    also be ``{"kind": "hidden"}``: no record, but the scene has layers a
+    Write hid on the card (PAD-535), which only a written card has.
+    *scenes*: said on the Scenes tab (the Layers stop sign is right there)."""
+    if not came:
+        return None
+    kind, label = came.get("kind"), came.get("label") or ""
+    if kind == "written":
+        chip, head = "From a written card", "Extracted from a card PAD wrote"
+        first = ("This project was extracted from its own Rev %d: a card a Write built, "
+                 "with the edits of that Write on it." % came.get("rev", 0))
+    elif kind == "modified":
+        chip, head = "From a modified card", "Extracted from a modified card"
+        first = ("This project was extracted from a modified %s card, not the one the game "
+                 "shipped on: one a Write (or another tool) changed."
+                 % (label or "game"))
+    elif kind == "hidden":
+        chip, head = "From a written card", "Extracted from a card a Write changed"
+        first = ("This scene came off a card an earlier Write changed: it has layers that "
+                 "Write hid.")
+    else:
+        return None
+    shown = ("click the red stop sign at the end of their row in Layers" if scenes else
+             "the red stop sign at the end of their row in the Scenes tab's Layers")
+    return {"chip": chip, "head": head, "lines": [
+        first,
+        "As shipped and Reset put things back the way that card has them, not the way the "
+        "game shipped.",
+        "Pictures and text an earlier Write added are part of that card now, so they cannot "
+        "be taken back here. Layers it hid can: %s." % shown,
+        "To start from the game as it shipped, extract the official card into a new project."]}
 
 
 def describe(lin):

@@ -24,6 +24,7 @@ and the default is Stern, so every argv the Stern tests pin is unchanged.
 """
 import os
 import re
+import time
 from dataclasses import dataclass
 
 
@@ -98,6 +99,10 @@ class MultibootBackend:
     #: machine.  Only a Stern game can be adjusted (its colors are in its own
     #: drawing shaders), so only Stern offers the tick.
     settings_tile: bool = False
+    #: EDITIONS, NO MENU (PAD-495): every image an edition of one game and the
+    #: game's own EDITION setting picks at power-up.  A Stern game program is the
+    #: only one that takes the setting.
+    editions: bool = False
     #: THE MENU'S SOUND: music, move / confirm sounds and the volume.  Every
     #: platform has it.  A Barrels of Fun menu is one static binary that cannot
     #: load the machine's sound library, so it streams its mix into a pipe and
@@ -127,15 +132,35 @@ class MultibootBackend:
     #: (0 = the rows, max_cards).  A BOF update carries four builds in one FAT32
     #: file, and a random card over them is a row that adds no build.
     max_games: int = 0
+    #: THE OUTPUT IS ONE UPDATE FILE the machine's own updater installs (BOF's
+    #: .fun, PAD-342; a Big Lebowski update zip, PAD-853): built as the user,
+    #: by a tool with the same command line, from a static menu program that
+    #: also draws the preview.  The tab's update-file words and steps key on
+    #: this, not on one platform's name.
+    update_file: bool = False
+    #: THE BUILDER TAKES THE SHARED COMMAND LINE (--primary / --extra / --out /
+    #: --selector-dir / --titles ..., and plan / build / verify / inject /
+    #: media) that the update-file tools brought, and its ensure script prints
+    #: the preview's line.  Every update-file backend does; a CARD built that
+    #: way too (Spike 3, PAD-1263), whose words stay a card's.
+    own_tool: bool = False
 
     # ---- pure helpers -----------------------------------------------------
     def device(self, img):
         """images.conf's device token for image *img* (0 = the primary).  On
-        BOF it is the program FILE the image becomes (mkbofmulti.py)."""
+        BOF it is the program FILE the image becomes (mkbofmulti.py); on a Big
+        Lebowski the version folder (mkdpmulti.py: the stock version, then
+        each build's)."""
+        if self.key == "dp":
+            return "stock" if img == 0 else "build%d" % img
+        if self.key == "spooky":
+            return "b%d" % img           # mkspkmulti.py: b0 the primary, carried whole
         if self.key == "bof":
             return "GDCraze.x86_64" if img == 0 else "pad_image%d.bin" % img
         if self.key == "jjp":
             return "rootA" if img == 0 else ("rootB" if img == 1 else "rootB:img%d" % img)
+        if self.key == "s3":
+            return "img%d" % img         # mks3multi.py: /games/pad/imgN, bound over /games
         return "p3" if img == 0 else ("p7" if img == 1 else "p7:img%d" % img)
 
     def suggest_title(self, path):
@@ -147,6 +172,26 @@ class MultibootBackend:
         # the way the building machine spelled it, and a card built on
         # Windows is read on Linux too (os.path.basename splits only on /)
         b = re.split(r"[\\/]", path or "")[-1]
+        if self.key == "dp":
+            # Dutch Pinball's updates are TBL-v<version>.zip; a mod PAD wrote
+            # carries the same name or a word after it ("TBL-v1.15 my mod")
+            stem = re.sub(r"\.zip$", "", b, flags=re.I)
+            m = re.match(r"^TBL-v([\d.]+?)\.?(?:[\s_-]+(.*))?$", stem, flags=re.I)
+            if m:
+                rest = re.sub(r"[_\s]+", " ", m.group(2) or "").strip()
+                return "THE BIG LEBOWSKI", rest or ("Version %s" % m.group(1))
+            return "THE BIG LEBOWSKI", re.sub(r"[_\s]+", " ", stem).strip()
+        if self.key == "spooky":
+            # A Spooky update is named for its date or version (v2025.12.01.09.scooby,
+            # tcm-1_00.pkg, code_H78.pkg), the same for a mod PAD wrote: the extension
+            # says which game, the folder may say which build ("Scooby (my mod)")
+            parts = [x for x in re.split(r"[\\/]", path or "") if x]
+            folder = re.sub(r"[_\s]+", " ", parts[-2] if len(parts) > 1 else "").strip()
+            game = spooky_game_name(b)
+            stem = re.sub(r"\.(scooby|beetlejuice|looney|ed|pkg)$", "", b, flags=re.I)
+            if folder and game.lower() in folder.lower():
+                return folder, stem
+            return game, stem
         if self.key == "bof":
             # A .fun is named for its TITLE (lab.fun) whatever build it is, so
             # the file says which game and the folder may say which build:
@@ -158,6 +203,18 @@ class MultibootBackend:
             if folder and game.lower() in folder.lower():
                 return folder, ""
             return game, ""
+        if self.key == "s3":
+            # Stern's Spike 3 cards: fallout_le-0_81_0_spike3.Release.64G.sdcard-secure.raw
+            # -> "FALLOUT LE 0.81.0"; a word after the version (a mod PAD wrote,
+            # "pokemon_le-0_82_0 my mod.raw") is the subtitle
+            stem = re.sub(r"\.(raw|img)$", "", b, flags=re.I)
+            stem = re.sub(r"\.Release\..*$", "", stem, flags=re.I)
+            m = re.match(r"^([A-Za-z0-9_]+?)-(\d+(?:_\d+)+)(?:_spike3)?(.*)$", stem)
+            if m:
+                rest = re.sub(r"[_\s]+", " ", m.group(3)).strip(" -.")
+                return ("%s %s" % (m.group(1).replace("_", " ").upper(),
+                                   m.group(2).replace("_", ".")), rest)
+            return re.sub(r"[_\s]+", " ", stem).strip(), ""
         if self.key == "jjp":
             b = re.sub(r"\.(iso|raw|img)$", "", b, flags=re.I)
             return re.sub(r"[_\s]+", " ", b).strip(), ""
@@ -172,8 +229,16 @@ class MultibootBackend:
         keeps its title's own name (lab.fun) - the machine's updater looks
         for exactly that name on the stick - in the multi/ folder the caller
         puts every output in."""
-        if self.key == "bof":
+        if self.key in ("bof", "spooky"):
+            # Spooky (PAD-980): the machines' update menus list a title's own names
+            # (Texas Chainsaw's tcm-N_NN.pkg), so the multi-boot keeps the primary's
             return os.path.basename(primary or "") or "lab.fun"
+        if self.key == "dp":
+            # the machine's update menu reads the version off the NAME, and it
+            # must be one the machine has not got: '9.' and four digits from
+            # the minute (mkdpmulti.py default_v), read back by the builder
+            minute = int(time.time() // 60)
+            return "TBL-v9.%04d.zip" % (minute % 9000 + 1000)
         base = os.path.basename(primary or "")
         stem = re.sub(r"\.(raw|img|iso)$", "", base, flags=re.I)
         return stem + self.out_suffix
@@ -235,7 +300,7 @@ STERN = MultibootBackend(
     selector_default="~/spike2root/usr/local/codeselect",
     selector_suffix="/usr/local/codeselect", selector_binary="codeselect",
     preview_native=False, conf_font="/usr/local/codeselect/font.ttf",
-    root_steps=frozenset(("build", "update")), settings_tile=True)
+    root_steps=frozenset(("build", "update")), settings_tile=True, editions=True)
 
 #: JJP: every writing step mounts something (the ISOs, the scratch root) and
 #: the restored roots the emulator shares are root's, so the media step (it
@@ -336,9 +401,191 @@ BOF = MultibootBackend(
     tab_sub=("Several builds of one game in one update file, with a boot menu "
              "the machine shows on power-up."),
     add_choices=frozenset({"_add_image", "_add_random_over_existing"}),
-    max_games=4)
+    max_games=4, update_file=True)
 
-BACKENDS = {STERN.key: STERN, JJP.key: JJP, BOF.key: BOF}
+#: DUTCH PINBALL - THE BIG LEBOWSKI (PAD-853): the machine's own USB update
+#: installs a TBL update zip as a new version folder and its own Version Select
+#: switches to one, so ONE zip carries the launcher (its start), the menu and
+#: every build's files; the stock version is already on the machine and does
+#: not travel (tools/dp_emu/mkdpmulti.py, MULTIBOOT.md).  Nothing needs root:
+#: the zips are read with Python, and the menu programs are built natively
+#: (ensuredpselect.sh), the static menu also drawing the preview.
+_DP = "tools/dp_emu"
+DP = MultibootBackend(
+    key="dp", label="Dutch Pinball",
+    tool_dir=_DP, tool=_DP + "/mkdpmulti.py",
+    media_tool=(_DP + "/mkdpmulti.py", "media"),
+    selector_src=_SPIKE2 + "/codeselect", ensure_tool=_DP + "/ensuredpselect.sh",
+    card_flag="--zip",
+    image_exts=(".zip",),
+    image_types=(("Big Lebowski updates", "*.zip"), ("All files", "*.*")),
+    image_noun="update (.zip)",
+    image_pick_title="Pick a Big Lebowski update (.zip) for the menu",
+    out_ext=".zip", out_suffix=".zip", out_noun="update",
+    out_label="Multi-boot update (.zip):",
+    empty_path_text=("No update yet. Add the update zips below - the stock "
+                     "version first - and the path fills itself in, or type "
+                     "where the multi-boot zip (TBL-v9.xxxx.zip) should be written."),
+    medium="USB stick", medium_needed="USB stick needed:", medium_holds="stick holds",
+    flash_frame="Put it on a USB stick",
+    flash_tick="Copy the update onto a USB stick",
+    flash_detail=("Copy the finished zip onto a USB stick under its own name "
+                  "(TBL-v9.xxxx.zip), install it with the service menu's USB "
+                  "update, then select that version in Version Select. The "
+                  "menu shows from then on; selecting another version takes "
+                  "it away again."),
+    build_flash_text="Build update…",
+    overhead_label="The menu, its pictures and the launcher",
+    sizes=(("8G", "8 GB"), ("16G", "16 GB"), ("32G", "32 GB"), ("64G", "64 GB")),
+    fits_re=re.compile(r"fits USB\s+(\d+G)\s+stick size\s+\d+:\s+(YES|NO)\s*\(spare\s+(-?\d+)\)"),
+    total_re=re.compile(r"^zip-size\s+(\d+)"),
+    status_checks=(("card", "Update"), ("images", "Images"),
+                   ("built", "Built"), ("ready", "Ready for the stick")),
+    max_cards=7, groups=False, compact=False, machine_volume=False,
+    # a TBL update has no clip or still the tools can take: 'auto' is none
+    volume_default=50, volume_max=100, attract_clip=False,
+    update=False, bypass=False, extract=False, read_card=False,
+    selector_default="/var/tmp/dpselect",
+    selector_suffix="/dpselect", selector_binary="dpselect",
+    preview_native=True, conf_font="/var/tmp/dpselect/font.ttf",
+    root_steps=frozenset(),
+    sound=True, scores_column=False, emulate=False, flash=False,
+    tab_sub=("Several builds of The Big Lebowski on one machine, in one update "
+             "zip, with a boot menu the machine shows on power-up."),
+    add_choices=frozenset({"_add_image"}),
+    update_file=True)
+
+#: SPOOKY PINBALL (PAD-980): every Linux Spooky title starts /game/code/uptest/
+#: main.x86_64 and installs an update into that folder, so ONE update of the title's
+#: own kind carries the launcher as its main.x86_64, the menu, the primary build whole
+#: and every other build's differences (tools/spooky_emu/mkspkmulti.py, MULTIBOOT.md).
+#: Nothing needs root: the updates are read with Python (the GPG layers with gpg), and
+#: the menu programs are built natively (ensurespkselect.sh), the static menu also
+#: drawing the preview.
+_SPK = "tools/spooky_emu"
+SPOOKY = MultibootBackend(
+    key="spooky", label="Spooky Pinball",
+    tool_dir=_SPK, tool=_SPK + "/mkspkmulti.py",
+    media_tool=(_SPK + "/mkspkmulti.py", "media"),
+    selector_src=_SPIKE2 + "/codeselect", ensure_tool=_SPK + "/ensurespkselect.sh",
+    card_flag="--update",
+    image_exts=(".scooby", ".beetlejuice", ".looney", ".ed", ".pkg"),
+    image_types=(("Spooky updates", "*.scooby *.beetlejuice *.looney *.ed *.pkg"), ("All files", "*.*")),
+    image_noun="update",
+    image_pick_title="Pick a Spooky game update for the menu",
+    out_ext="", out_suffix="", out_noun="update",
+    out_label="Multi-boot update:",
+    empty_path_text=("No update yet. Add the updates below - the stock one first - and "
+                     "the path fills itself in, or type the folder the multi-boot update "
+                     "should be written to (it keeps the stock update's name)."),
+    medium="USB stick", medium_needed="USB stick needed:", medium_holds="stick holds",
+    flash_frame="Put it on a USB stick",
+    flash_tick="Copy the update onto a USB stick",
+    flash_detail=("Copy the finished update onto a USB stick under its own name and "
+                  "install it the way every update of the game is installed. The menu "
+                  "shows from the next power-up; installing any normal update later "
+                  "takes it away again."),
+    build_flash_text="Build update…",
+    overhead_label="The menu, its pictures and the launcher",
+    sizes=(("8G", "8 GB"), ("16G", "16 GB"), ("32G", "32 GB"), ("64G", "64 GB")),
+    fits_re=re.compile(r"fits USB\s+(\d+G)\s+stick size\s+\d+:\s+(YES|NO)\s*\(spare\s+(-?\d+)\)"),
+    total_re=re.compile(r"^upd-size\s+(\d+)"),
+    status_checks=(("card", "Update"), ("images", "Images"),
+                   ("built", "Built"), ("ready", "Ready for the stick")),
+    max_cards=9, groups=False, compact=False, machine_volume=False,
+    volume_default=50, volume_max=100, attract_clip=False,
+    update=False, bypass=False, extract=False, read_card=False,
+    selector_default="/var/tmp/spkselect",
+    selector_suffix="/spkselect", selector_binary="spkselect",
+    preview_native=True, conf_font="/var/tmp/spkselect/font.ttf",
+    root_steps=frozenset(),
+    sound=True, scores_column=False, emulate=False, flash=False,
+    tab_sub=("Several builds of one Spooky game on one machine, in one update, with a "
+             "boot menu the machine shows on power-up."),
+    add_choices=frozenset({"_add_image"}),
+    update_file=True)
+
+#: a Spooky update's file name -> the game (the title a fresh row starts with)
+SPOOKY_EXT_NAMES = {".scooby": "Scooby-Doo", ".beetlejuice": "Beetlejuice",
+                    ".looney": "Looney Tunes", ".ed": "Evil Dead"}
+
+
+def spooky_game_name(name):
+    n = (name or "").lower()
+    for ext, game in SPOOKY_EXT_NAMES.items():
+        if n.endswith(ext):
+            return game
+    if n.startswith("rm-gamecode"):
+        return "Rick and Morty"
+    if n.startswith("ac-gamecode"):
+        return "Alice Cooper's Nightmare Castle"
+    if n.startswith("tcm-"):
+        return "Texas Chainsaw Massacre"
+    if "h78" in n:
+        return "Halloween"
+    if "um" in n and n.startswith("code"):
+        return "Ultraman"
+    return re.sub(r"\.[^.]*$", "", name or "")
+
+
+#: STERN SPIKE 3 (PAD-1263): a Spike 3 machine runs /games/game off its
+#: encrypted games partition, so a multi-boot card is image 0's card with every
+#: image's games tree in that partition (/games/pad/imgN) and /games/game the
+#: menu's hook, which binds the chosen tree over /games; the signed boot
+#: partition and the rootfs stay image 0's (tools/spike3_emu/mks3multi.py,
+#: MULTIBOOT.md).  Building maps the card through dm-crypt with the user's own
+#: key, so build / verify / inject run as root.  The menu reads the coin door's
+#: NEXT / PREVIOUS / SELECT and is silent (the amplifier is the game's to
+#: start); the preview draws with a native build of the same menu.
+_S3 = "tools/spike3_emu"
+S3 = MultibootBackend(
+    key="s3", label="Stern Spike 3",
+    tool_dir=_S3, tool=_S3 + "/mks3multi.py",
+    media_tool=(_S3 + "/mks3multi.py", "media"),
+    selector_src=_SPIKE2 + "/codeselect", ensure_tool=_S3 + "/ensures3select.sh",
+    card_flag="--card",
+    image_exts=(".raw", ".img"),
+    image_types=(("Spike 3 card images", "*.raw *.img"), ("All files", "*.*")),
+    image_noun="card image", image_pick_title="Pick a Spike 3 card image for the card",
+    out_ext=".raw", out_suffix=".multi.raw", out_noun="card",
+    out_label="Multi-boot card image:",
+    empty_path_text=("No card yet. Add the Spike 3 card images below - the "
+                     "path fills itself in from the first one - or type where "
+                     "the card should be written."),
+    medium="SD card", medium_needed="SD card needed:", medium_holds="card holds",
+    flash_frame="Flash to an SD card",
+    flash_tick="Write the card onto an SD card (you pick which card next)",
+    flash_detail=("WHICH SD CARD? You pick it in the next dialog: Start opens "
+                  "the SD-card picker the Write tab uses, and nothing is written "
+                  "to any card until you have chosen one there and confirmed. "
+                  "A Spike 3 card image is 64 GB, so it needs a 64 GB card or "
+                  "bigger, and writing it takes a while. The machine's own boot "
+                  "and system partitions are the first image's, unchanged: only "
+                  "the games partition carries the other images and the menu."),
+    build_flash_text="Build / flash card…",
+    overhead_label="The menu and its pictures",
+    sizes=(("64G", "64 GB"), ("128G", "128 GB")),
+    fits_re=re.compile(r"fits SD\s+(\d+G)\s+card size\s+\d+:\s+(YES|NO)\s*\(spare\s+(-?\d+)\)"),
+    total_re=re.compile(r"^card-size\s+(\d+)"),
+    status_checks=(("card", "Card image"), ("images", "Images"),
+                   ("built", "Built"), ("ready", "Ready to flash")),
+    max_cards=9, groups=False, compact=False, machine_volume=False,
+    volume_default=50, volume_max=100, attract_clip=False,
+    update=False, bypass=False, extract=False, read_card=False,
+    selector_default="/var/tmp/s3select",
+    selector_suffix="/s3select", selector_binary="s3select",
+    preview_native=True, conf_font="/var/tmp/s3select/font.ttf",
+    root_steps=frozenset(("selector", "build", "verify", "inject")),
+    sound=False, scores_column=False, emulate=True, flash=True,
+    tab_sub=("Several Spike 3 game images on one SD card, with a boot menu the "
+             "machine shows on power-up."),
+    add_choices=frozenset({"_add_image"}),
+    # PAD-1325: a card of editions (each Written with EDITION in its menu) boots by the setting
+    editions=True,
+    own_tool=True)
+
+BACKENDS = {STERN.key: STERN, JJP.key: JJP, BOF.key: BOF, DP.key: DP, SPOOKY.key: SPOOKY,
+            S3.key: S3}
 
 
 def backend_for(what):

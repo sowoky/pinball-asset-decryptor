@@ -17,7 +17,7 @@ import os
 import re
 import sys
 
-from ...core.ext4_grow import LOOP_PROBE
+from ...core.ext4_grow import LOOP_PROBE, with_bundled_debugfs
 from ...core.registry import (Capabilities, Game, InputSpec, Manufacturer,
                               Prerequisite)
 from ...core.transcribe import TranscribePipeline
@@ -25,16 +25,27 @@ from ...core.musicid import MusicIdPipeline
 from ..pinmame_classic import capture as _wscapture
 from ..pinmame_classic.formats import detect_game as _ws_detect
 from ..pinmame_classic.games import GAME_DB as _PMC_GAME_DB
+from ..pinmame_classic import sam as _sam
+from ..pinmame_classic.sam import identify as _sam_identify
+from ..pinmame_classic.sam_games import SAM_GAME_DB as _SAM_DB
 from .formats import (detect_game, detect_spike1_game, display_for_key,
                       spike1_display_for_key)
 from .games import GAME_DB, SPIKE1_GAME_DB
-from .pipeline import (Spike1ExtractPipeline, Spike1RevertPipeline,
+from .pipeline import (SamExtractPipeline, SamExtractPlusCapturePipeline,
+                       SamRevertPipeline, SamWritePipeline,
+                       Spike1ExtractPipeline, Spike1RevertPipeline,
                        Spike1WritePipeline, SternDirectSsdExtractPipeline,
                        SternDirectSsdWritePipeline, SternExtractPipeline,
                        SternFlashImagePipeline, SternRevertPipeline,
                        SternWritePipeline)
+from . import spike3 as _spike3
+from . import spike3_spk as _spike3_spk
+from . import spike3_extract as _spike3_extract
+from .spike3_extract import Spike3ExtractPipeline
+from .spike3_spk import Spike3SpkExtractPipeline
+from .spike3_games import SPIKE3_DB, spike3_key_for_path, spike3_display
 
-# Stern handles three hardware eras under one picker entry:
+# Stern handles four hardware eras under one picker entry:
 #   * "spike2"    — the modern SD-card games (image.bin audio + ext4 assets),
 #                   the full extract / write / replace / Direct-SD surface.
 #   * "spike1"    — the 2015-2016 DMD generation (WrestleMania … Ghostbusters):
@@ -43,18 +54,58 @@ from .pipeline import (Spike1ExtractPipeline, Spike1RevertPipeline,
 #   * "whitestar" — the classic 1999-2006 MAME-ROM games (Monopoly, Elvis,
 #                   LOTR, Sopranos, etc.), shared with the PinMAME-capture
 #                   pipeline the Data East / Sega entries use; capture-only.
+#   * "sam"       — the 2006-2014 S.A.M. games (Mustang, Metallica, Tron,
+#                   AC/DC, ...): one .bin code update per game, which is also
+#                   the PinMAME ROM, so the same capture, the input matched by
+#                   checksum (pinmame_classic/sam.py); capture-only.
 # detect() reports the era of the loaded file; the GUI re-applies the
 # capability-dependent layout when it changes (default era = spike2, so the
 # Spike 2 flow is unchanged until a Spike 1 .iso / MAME .zip is loaded).
-# SAM (2006-2014) is a planned fourth era (sam.c).
 _WHITESTAR_DB = {k: v for k, v in _PMC_GAME_DB.items()
                  if v["manufacturer"] == "Stern"}
+
+
+def _rom_file(path):
+    """A PinMAME input (a Whitestar / SAM zip, or a SAM .bin / .ebi), not
+    an SD card: the card probes must never open one.  A SAM update is at
+    most 128 MB where a Spike card is gigabytes, so a size check tells a
+    SAM .bin from a card image named .bin without reading it."""
+    low = path.lower()
+    if low.endswith(".zip"):
+        return True
+    if not low.endswith(_sam.EXTENSIONS):
+        return False
+    try:
+        return os.path.getsize(path) <= _sam.MAX_BIN_SIZE
+    except OSError:
+        return False
+
+
+def _sam_info(path):
+    """Image-Info sections for a SAM game file: which version PinMAME
+    matched it to (a Whitestar zip gets none, like before)."""
+    m = _sam_identify(path)
+    if m is None:
+        return []
+    rows = [("System", "Stern S.A.M.")]
+    if m.runnable:
+        rows.append(("Version", m.title))
+        rows.append(("PinMAME romset", m.romset))
+        rows.append(("Match", "checksum matches PinMAME's copy" if m.exact
+                     else "not PinMAME's copy of any version; runs as the "
+                          "version of the same size"))
+    else:
+        rows.append(("Version", "one PinMAME doesn't have, so it can't "
+                                "be run"))
+    if m.member:
+        rows.append(("Game file", m.member))
+    return [("Firmware", rows)]
 
 
 def _spike2_print(path):
     """A Spike 2 card's fingerprint for project lineage (PAD-427); ``None``
     for anything else."""
-    if path.lower().endswith(".zip") or detect_spike1_game(path) is not None:
+    if _rom_file(path) or detect_spike1_game(path) is not None:
         return None
     from .stock_prints import card_print
     return card_print(path)
@@ -72,6 +123,26 @@ from ...core import lineage as _lineage  # noqa: E402
 _lineage.register_printer(_spike2_print)
 _lineage.register_off_stock(_spike2_off_stock)
 
+# My machines' daily game-code check (PAD-783): Stern's public page
+from ...core import code_watch as _code_watch  # noqa: E402
+from .machine_info import GAME_CODE_PAGE as _GAME_CODE_PAGE  # noqa: E402
+from .machine_info import parse_game_code_page as _parse_game_code_page  # noqa: E402
+_code_watch.register_source("stern", _GAME_CODE_PAGE, _parse_game_code_page,
+                            page_words="Stern's game-code page")
+
+
+def _spike2_release(sidx):
+    from .machine_info import known_release_keys, release_info
+    return release_info(sidx, known_release_keys())
+
+
+from ...core import machines as _machines  # noqa: E402
+from .machine_info import short_version as _short_version  # noqa: E402
+_machines.register_kind(
+    "stern", "Stern", _spike2_release, _short_version, "card image",
+    [("Stern card images", "*.raw *.img *.bin")],
+    "a Stern Spike 2 card image (.raw or .img of the SD card)")
+
 _SPIKE2_GAMES = tuple(
     Game(key=k, display=info["display"], manufacturer_key="stern",
          era="spike2")
@@ -85,16 +156,81 @@ _WHITESTAR_GAMES = tuple(sorted(
           notes=f"Whitestar {v['year']}", era="whitestar")
      for k, v in _WHITESTAR_DB.items()),
     key=lambda g: g.display.lower()))
-_GAMES = _SPIKE2_GAMES + _SPIKE1_GAMES + _WHITESTAR_GAMES
+_SAM_GAMES = tuple(sorted(
+    (Game(key=k, display=v["display"], manufacturer_key="stern",
+          notes=f"SAM {v['year']}", era="sam")
+     for k, v in _SAM_DB.items()),
+    key=lambda g: g.display.lower()))
+_SPIKE3_GAMES = tuple(
+    Game(key=k, display=v["display"], manufacturer_key="stern",
+         notes="Spike 3", era="spike3",
+         supported=v.get("supported", True),
+         unsupported_reason=v.get("reason", ""))
+    for k, v in SPIKE3_DB.items())
+_GAMES = (_SPIKE2_GAMES + _SPIKE1_GAMES + _WHITESTAR_GAMES + _SAM_GAMES
+          + _SPIKE3_GAMES)
+
+# Spike 3 (Pi-4 secure-boot era): the SD card's game partition is LUKS2-
+# encrypted over Spike 2's own asset tree.  Extract decrypts it on the fly
+# and runs the Spike 2 extractors over it (spike3_card.GamesVolume), every
+# sound decoded from image.bin to a WAV (PAD-1077); PAD-1186: the Replace
+# tabs work on that project as on Spike 2's, and Write puts the edits back
+# on a copy of the card through the volume's own encryption
+# (spike3_write.py) - the boot partition is never touched, so nothing needs
+# signing.  See spike3_card.py / spike3_extract.py / spike3_write.py.
+_SPIKE3_CAPS = Capabilities(
+    extract=True,
+    extract_categories=_spike3_extract.CATEGORIES,
+    write=True,
+    replace_audio=True,
+    replace_video=True,
+    replace_image=True,
+    replace_text=True,
+    # PAD-1090: the Emulate tab runs a Spike 3 card on the Spike 3 rig
+    # (tools/spike3_emu/s3launch.sh), with the virtual playfield beside it
+    emulate=True,
+    # PAD-1244: the sounds decode to Spike 2's audio/idxNNNN.wav and
+    # music_catNN_NNNN.wav, so Extract's Auto-transcribe (faster-whisper
+    # names the callouts) and Auto-name music run on them unchanged.
+    # Extract itself names the ones the game's Sound Test menu names first
+    # (spike3_requests), and Auto-transcribe skips named files.
+    transcribe=True,
+    music_id=True,
+    # PAD-1263: several Spike 3 card images on one card with a boot menu
+    # (the Multi-boot tab's "s3" platform, tools/spike3_emu/mks3multi.py)
+    multiboot=True,
+)
 
 # Capture-only capabilities for the Whitestar era (no write/replace/Direct-SD
 # — you can't repack a MAME ROM; extraction is a libpinmame attract capture).
 _WHITESTAR_CAPS = Capabilities(extract=False, capture=True)
+# SAM has the same libpinmame capture of the DMD animations...
+_CAPTURE_ERAS = ("whitestar", "sam")
+# ...and, from PAD-582, every sound read straight out of the code update and
+# written back: Extract (the Basic box) decodes the game's own sound table to
+# WAVs, Replace Audio + Write re-encode edits into their slots in a copy of
+# the .bin (sam_audio.py).  PAD-583: the still pictures and font glyphs too
+# (sam_images.py) - Extract writes them as PNGs, Replace Images + Write put
+# edits back in place.  PAD-584: the DMD animation frames (sam_anim_assets.py)
+# - PNGs under animations/, re-encoded into the game's own frame formats on
+# Write.
+_SAM_CAPS = Capabilities(
+    extract=True,
+    capture=True,
+    write=True,
+    modpack=True,
+    replace_audio=True,
+    replace_image=True,
+    dmd_shades=True,
+    audio_level_offset=True,
+    transcribe=True,
+    music_id=True,
+    audio_duration_names=True,
+)
 
-# Spike 1: audio extract + write.  The master directory is plaintext and every
-# sound is raw PCM, so no emulator/codec prerequisites; the surface is audio-
-# only for now (the DMD-era display content is .spv/dot data — a future era
-# upgrade, not a video/image replace tab).  Partition Explorer stays off: the
+# Spike 1: audio, display text and DMD pictures extract + write.  The master
+# directory is plaintext and every sound is raw PCM, so no emulator/codec
+# prerequisites.  Partition Explorer stays off: the
 # game data lives on a *logical* partition, which the explorer doesn't
 # enumerate yet.
 _SPIKE1_CAPS = Capabilities(
@@ -103,6 +239,21 @@ _SPIKE1_CAPS = Capabilities(
     modpack=True,
     replace_audio=True,
     audio_level_offset=True,
+    # PAD-869: every word on the DMD is a string in the game program (the
+    # KISS song names on its song-select screen among them).  Extract lists
+    # them in text/strings.tsv, the Replace Text tab edits them, and Write
+    # patches them into the card's game ELF in place - a longer line goes in
+    # space the ELF already carries (spike1_text.py), so the file keeps its
+    # size.
+    replace_text=True,
+    # PAD-870: every DMD picture, font glyph and animation frame in
+    # image.bin's picture table (S.A.M.'s formats, spike1_images.py):
+    # Extract writes them as PNGs, Replace Images + Write re-encode edits in
+    # place, or into the free page at the front of image.bin when they
+    # outgrow their own bytes.  A display of 16 shades: no Scenes or Color
+    # Profile.
+    replace_image=True,
+    dmd_shades=True,
     flash_image=True,
     # Emulate tab (its OWN flag, era-gated — the Spike 2 ``emulate`` panel is a
     # different rig).  The static armel game now boots and renders its attract
@@ -155,7 +306,7 @@ _WHITESTAR_PREREQS = (
 )
 
 _EXT4_GROW_REASON = (
-    "Full-size video replacement, longer sounds, the opt-in blip-free "
+    "Full-size video replacement, longer sounds, the blip-free "
     "callouts, and different-size file swaps in the Partition Explorer: "
     "resizes files inside the card's ext4 partition through the platform's "
     "Linux filesystem path. Without it an oversized replacement clip is "
@@ -185,15 +336,14 @@ def _bigger_card_words(platform=None, capital=False):
 
 def _ext4_grow_prereqs(platform):
     """The platform dependency of :mod:`...core.ext4_grow` — what full-size
-    video replacement and the (now opt-in) blip-free cave ride on.  It became
+    video replacement and the blip-free cave ride on.  It became
     load-bearing for AUDIO quality the moment the blip-free cave started
     growing ``game_real``, but was never declared, so the strip said "All
     prerequisites OK" on machines whose every build was quietly falling back
     to the scrap-remains build — a tester burned two hardware tests that way
-    (Elvira spinner, 2026-07-30).  Blip-free going opt-in in v0.104.0 takes
-    the audio half of that off the default path, but does not retire the
-    declaration: video still needs it, and a build that opts back in still
-    falls back silently without it.  Missing is not fatal (the build still
+    (Elvira spinner, 2026-07-30).  Blip-free was opt-in from v0.104.0 and is
+    always on again since PAD-523, so every Spike 2 build with a replaced
+    sound rides on this once more.  Missing is not fatal (the build still
     degrades gracefully and the completion dialog now says so); declaring it
     makes the gap visible BEFORE a card is built and tested.
 
@@ -204,8 +354,9 @@ def _ext4_grow_prereqs(platform):
     as root while owning zero loop devices: the strip said OK on a machine
     where every grow failed with a bare losetup error, after the card's
     .sidx had already been rewritten (PAD-13, a 489-video write that shipped
-    nothing).  macOS needs e2fsprogs' ``debugfs`` (probed in the same
-    keg-only locations ``ext4_grow._find_e2fsprogs`` searches); native Linux
+    nothing).  macOS needs e2fsprogs' ``debugfs`` (probed in the app's own
+    copy, PAD-573, and the same keg-only locations
+    ``ext4_grow._find_e2fsprogs`` searches); native Linux
     takes the same debugfs route since PAD-314 (a loop mount needs root, which a
     desktop app has no terminal to ask sudo for), so it declares e2fsprogs too,
     looked for where Debian keeps it off a user's PATH (/sbin, /usr/sbin)."""
@@ -228,12 +379,14 @@ def _ext4_grow_prereqs(platform):
         return (
             Prerequisite(
                 name="e2fsprogs", where="host",
-                probe="test -x /opt/homebrew/opt/e2fsprogs/sbin/debugfs || "
-                      "test -x /usr/local/opt/e2fsprogs/sbin/debugfs || "
-                      "test -x /opt/local/sbin/debugfs || "
-                      "command -v debugfs",
+                probe=with_bundled_debugfs(
+                    "test -x /opt/homebrew/opt/e2fsprogs/sbin/debugfs || "
+                    "test -x /usr/local/opt/e2fsprogs/sbin/debugfs || "
+                    "test -x /opt/local/sbin/debugfs || "
+                    "command -v debugfs"),
                 reason=_EXT4_GROW_REASON,
-                install_hint="brew install e2fsprogs"),
+                install_hint="brew install e2fsprogs",
+                mac_pkg="e2fsprogs"),
         )
     if platform.startswith("linux"):                     # PAD-314
         return (
@@ -375,12 +528,13 @@ class SternManufacturer(Manufacturer):
         extract_categories=(("audio", "Audio"), ("video", "Video"),
                             ("images", "Images"), ("text", "Text")),
     )
-    # Accepts Spike 2 / Spike 1 SD-card images AND classic Whitestar MAME ROM
-    # zips; detect() routes by signature + extension and reports the era.
+    # Accepts Spike 2 / Spike 1 SD-card images, SAM code updates (.bin, bare
+    # or zipped) AND classic Whitestar MAME ROM zips; detect() routes by
+    # signature + extension and reports the era.
     input_spec = InputSpec(
-        label="Stern SD-card image (Spike 2 / Spike 1) or MAME ROM zip "
-              "(Whitestar)",
-        extensions=(".img", ".bin", ".raw", ".iso", ".zip"),
+        label="Stern SD-card image (Spike 2 / Spike 1), SAM code update "
+              "(.bin or .zip) or MAME ROM zip (Whitestar)",
+        extensions=(".img", ".bin", ".raw", ".iso", ".zip", ".ebi", ".spk"),
     )
     _SPIKE2_EXTRACT_PHASES = ("Detect", "Locate partitions", "Extract video",
                               "Extract images", "Decode audio", "Checksums")
@@ -402,6 +556,10 @@ class SternManufacturer(Manufacturer):
     #: do there: the check is "is this the card this image was flashed from",
     #: and the write is one partition, not the image.
     menu_flash_phases = ("Check the card", "Write the menu", "Verify", "Flush")
+    #: The flash dialog's "Keep the SD card's settings, audits and high
+    #: scores" (PAD-736): a whole-image flash that puts the card's own /data
+    #: back.  make_flash_pipeline takes ``keep_data=``; no other brand does.
+    flash_keep_data = True
     # "Revert all changes" fallback: re-derive originals with no .orig snapshot
     # straight from the source card.
     revert_phases = ("Read source", "Restore")
@@ -463,12 +621,55 @@ class SternManufacturer(Manufacturer):
     # single-mode per era — Card image vs ROM zip — instead of multi-modal).
     # A 3rd tuple element is an optional corner badge on that pill (the GUI's
     # _build_era_badges renders it) — e.g. "BETA" to mark a preview era.
-    eras = (("spike2", "SPIKE 2"), ("spike1", "SPIKE 1"),
-            ("whitestar", "WHITESTAR"))
+    _ERAS = (("spike2", "SPIKE 2"), ("spike3", "SPIKE 3", "BETA"),
+             ("spike1", "SPIKE 1"),
+             ("sam", "SAM"), ("whitestar", "WHITESTAR"))
+
+    @property
+    def eras(self):
+        # Spike 3 is a preview feature (core/preview.py "spike3"): it only
+        # appears in the era switcher once a preview code unlocks it.
+        from ...core import preview
+        if preview.enabled("spike3"):
+            return self._ERAS
+        return tuple(e for e in self._ERAS if e[0] != "spike3")
     # Mirror the destination radio so the action button names what it does
     # (the generic "Build update" / "Apply Modifications" don't connect to
     # the SD-card wording above them).
-    write_build_button = "Build SD-card image"
+    @property
+    def write_build_button(self):
+        # SAM builds the game's code update, not a card
+        return "Build game file" if self._era == "sam" \
+            else "Build SD-card image"
+
+    # The Extract tab's Basic box, for SAM (the only Stern era with both a
+    # basic extract and a capture): the sounds, and the capture runs attract
+    # mode only.
+    capture_basic_label = (
+        "Basic extract (every sound, picture, font and animation frame)")
+    capture_simulates_gameplay = False
+
+    def capture_help_text(self, basic, capture):
+        if self._era != "sam":
+            return None
+        if basic and capture:
+            return ("Both: decodes every sound in the game file to a WAV "
+                    "(audio/), every still picture and font to a PNG "
+                    "(images/) and every DMD animation frame to a PNG "
+                    "(animations/), then runs the game in attract mode under "
+                    "PinMAME and records its DMD animations + audio as MP4s, "
+                    "into the same project folder.  Capture requires "
+                    "libpinmame.")
+        if capture:
+            return ("Capture only: runs the game in attract mode under "
+                    "PinMAME and records its DMD animations + audio as MP4s.  "
+                    "Most SAM games play no sound in attract mode.  Requires "
+                    "libpinmame.")
+        return ("Basic only: decodes every sound in the game file to a WAV "
+                "(audio/), every still picture and font to a PNG (images/) "
+                "and every DMD animation frame to a PNG (animations/), ready "
+                "for Replace Audio and Replace Images.  Tick \"Use PinMAME\" "
+                "too to ALSO record the animations as they play, as MP4s.")
     write_direct_button = "Write to SD card"
     direct_medium_noun = "SD card"
     # The card is small removable media in a reader — bias the picker away
@@ -501,12 +702,19 @@ class SternManufacturer(Manufacturer):
         self._era = "spike2"
 
     def set_era(self, era):
-        self._era = era if era in ("whitestar", "spike1") \
+        self._era = era if era in ("whitestar", "sam", "spike1", "spike3") \
             else "spike2"
 
     @property
     def current_era(self):
         return self._era
+
+    def video_codecs(self):
+        """The codecs the machine's video player decodes (webui
+        video_helpers.machine_codecs): Spike 2's i.MX6 VPU plays H.264;
+        Spike 3's game opens the Pi 4's HEVC and H.264 decoders itself
+        (PAD-1090 stage 5, PAD-1186)."""
+        return ("h264", "hevc") if self._era == "spike3" else ("h264",)
 
     def colour_profile_on_display(self):
         """Spike 2: the Write patches the game's drawing shaders
@@ -516,30 +724,51 @@ class SternManufacturer(Manufacturer):
 
     @property
     def capabilities(self):
-        if self._era == "whitestar":
+        if self._era == "sam":
+            return _SAM_CAPS
+        if self._era in _CAPTURE_ERAS:
             return _WHITESTAR_CAPS
         if self._era == "spike1":
             return _SPIKE1_CAPS
+        if self._era == "spike3":
+            return _SPIKE3_CAPS
         return self._SPIKE2_CAPS
 
     @property
     def prerequisites(self):
-        if self._era == "whitestar":
+        if self._era == "sam":
+            # Spike 1's audio set; its ffmpeg also renders the capture MP4s
+            return _SPIKE1_PREREQS
+        if self._era in _CAPTURE_ERAS:
             return _WHITESTAR_PREREQS
         if self._era == "spike1":
             return _SPIKE1_PREREQS
+        if self._era == "spike3":
+            # LUKS decrypt is pure Python over the bundled crypto backend;
+            # videos copy out verbatim (no ffmpeg).  Only Auto-transcribe
+            # needs anything (PAD-1244), and extract works without it.
+            return (_SPIKE1_PREREQS[1],)
         return self._SPIKE2_PREREQS
 
     @property
     def extract_phases(self):
-        if self._era == "whitestar":
+        if self._era == "sam":
+            return SamExtractPipeline.PHASES
+        if self._era in _CAPTURE_ERAS:
             return _wscapture.PHASES
         if self._era == "spike1":
             return self._SPIKE1_EXTRACT_PHASES
+        if self._era == "spike3":
+            return Spike3ExtractPipeline.PHASES
         return self._SPIKE2_EXTRACT_PHASES
 
     @property
     def write_phases(self):
+        if self._era == "sam":
+            return SamWritePipeline.PHASES
+        if self._era == "spike3":
+            from .spike3_write import PHASES as _S3_WRITE_PHASES
+            return _S3_WRITE_PHASES
         return self._SPIKE1_WRITE_PHASES if self._era == "spike1" \
             else self._SPIKE2_WRITE_PHASES
 
@@ -548,11 +777,23 @@ class SternManufacturer(Manufacturer):
         return _wscapture.PHASES
 
     @property
+    def combined_phases(self):
+        # SAM's Basic + Capture: the sounds, then the capture (Whitestar has
+        # no Basic box, so it never asks)
+        return SamExtractPlusCapturePipeline.PHASES \
+            if self._era == "sam" else ()
+
+    @property
     def extract_input_label(self):
         # The input medium differs by era, so the field label can't say
         # "Card image" universally: Spike 2 loads a raw SD-card image, Whitestar
         # loads a MAME ROM zip.  Reads better than the bare ".img:"/".zip:" the
         # raw extension would otherwise produce.
+        # SAM: Stern's .bin code update, bare or in a zip.
+        if self._era == "sam":
+            return "Game file"
+        if self._era == "spike3":
+            return "Secure SD-card image"
         return "ROM zip" if self._era == "whitestar" else "Card image"
 
     def write_output_ext(self):
@@ -564,7 +805,11 @@ class SternManufacturer(Manufacturer):
         # build), so it pins nothing.
         if self._era == "spike1":
             return ".iso"
-        return ".raw" if self._era == "spike2" else ""
+        # SAM: the code update itself, which the machine's USB update reads
+        if self._era == "sam":
+            return ".bin"
+        # Spike 3 (PAD-1186): a secure SD-card image, raw like Spike 2's
+        return ".raw" if self._era in ("spike2", "spike3") else ""
 
     def audio_forces_length_match(self, assets_dir=None):
         # Spike audio (both generations) is a size-neutral in-place patch:
@@ -585,16 +830,33 @@ class SternManufacturer(Manufacturer):
                     "sound is fit to its original slot length (longer is "
                     "trimmed, shorter padded with silence) and loudness-"
                     "matched to the original (soft-limited).")
-        return ("Replacements are encoded size-neutral: each sound is fit to "
-                "its original slot length (longer is trimmed, shorter padded "
-                "with silence) and amplitude-limited into the codec's range. "
-                "Advanced audio options can let a longer replacement grow the "
-                "sound bank instead of being trimmed, on image builds only. "
-                "The game can't open a sound bank bigger than about 2 GB, and "
-                "each lengthened sound also needs room for its whole length "
-                "on the card's games partition, shared with full-size "
-                "videos; a sound past either limit is trimmed. %s adds that "
-                "room but does not raise the 2 GB limit."
+        if self._era == "sam":
+            return ("Replacements are re-encoded in place, in the game's own "
+                    "4-bit ADPCM at the original's rate (24 kHz, or 12 or "
+                    "8 kHz for most speech), mono: each sound is fit to its "
+                    "original slot length (longer is trimmed, shorter padded "
+                    "with silence) and loudness-matched to the original "
+                    "(soft-limited).")
+        if self._era == "spike3":
+            return ("Each replacement plays at its own length, longer or "
+                    "shorter than the original (always on), as 16-bit PCM "
+                    "at 44.1 kHz with the original's channels: a shorter one "
+                    "goes in the original's place, a longer one into new "
+                    "space in the sound container, which then goes onto the "
+                    "card whole.")
+        return ("Each replacement plays at its own length, longer or shorter "
+                "than the original (always on): it goes into new space at the "
+                "end of the sound bank, on image builds only. A direct-SD "
+                "write fits each sound to its original slot length instead "
+                "(longer is trimmed, shorter padded with silence). Either way "
+                "it is amplitude-limited into the codec's range. "
+                "The game can't open a sound bank bigger than about 2 GB; "
+                "past that, lengthened sounds go into extra sound banks of "
+                "their own beside it (a few the game plays in a way a bank "
+                "can't serve stay and are trimmed). Each lengthened sound "
+                "also needs room for its whole length on the card's games "
+                "partition, shared with full-size videos; a sound past that "
+                "is trimmed. %s adds that room."
                 % _bigger_card_words(capital=True))
 
     def video_length_note(self):
@@ -619,8 +881,22 @@ class SternManufacturer(Manufacturer):
     def image_note(self):
         # No inline note — the auto-fit / per-store fitting rules live in the
         # "?" help window (a tester: the tab read as cluttered; the earlier
-        # one-line summary went too).
+        # one-line summary went too).  SAM's DMD has its own rules, short
+        # enough to say.
+        if self._era == "sam":
+            return ("The DMD shows 16 shades of one color: a replacement is "
+                    "scaled to the original's size and its grays are taken "
+                    "to the nearest shade (transparent stays transparent).  "
+                    "Build the game file on the Write tab.")
         return ""
+
+    def image_slot_dirs(self, assets_dir):
+        # SAM: the pictures Write puts back (images/), and the decoded
+        # animations (animations/, PAD-584) - not the capture's frames
+        if self._era == "sam":
+            return [os.path.join(assets_dir, d)
+                    for d in ("images", "animations")]
+        return super().image_slot_dirs(assets_dir)
 
     def detect(self, path):
         # Route by signature + extension: MAME ROM zip => classic Whitestar
@@ -629,6 +905,28 @@ class SternManufacturer(Manufacturer):
         # has no side effects (it's also called to probe other manufacturers)
         # — the era it reports on the Game is applied to the live
         # manufacturer by the GUI.
+        # Spike 3 .spk package (a .spk.zip Stern publishes) — checked before the
+        # Whitestar .zip branch so it isn't mistaken for a MAME ROM zip.  Behind
+        # the preview code.  A .spk works for ANY title (fleet key), so it is
+        # always "supported".
+        from ...core import preview
+        if preview.enabled("spike3") and _spike3_spk.is_spk_input(path):
+            key = spike3_key_for_path(path)
+            return Game(key=key, display=spike3_display(key, path),
+                        manufacturer_key="stern", era="spike3",
+                        notes="Spike 3 .spk package", supported=True)
+        # SAM first: matched by the .bin's checksum, it is certain where
+        # the Whitestar ROM-name score is a guess, and a .bin no bigger than
+        # SAM's 128 MB ROM can't be a Spike card.
+        sam = _sam_identify(path)
+        if sam is not None:
+            info = _SAM_DB[sam.key]
+            return Game(key=sam.key, display=info["display"],
+                        manufacturer_key="stern", era="sam",
+                        notes=f"SAM {info['year']}, " + (
+                            sam.title if sam.exact else
+                            f"{info['display']}, a version PinMAME "
+                            "doesn't have"))
         if path.lower().endswith(".zip"):
             key = _ws_detect(path, _WHITESTAR_DB)
             if key is None:
@@ -641,6 +939,18 @@ class SternManufacturer(Manufacturer):
         # the Image Info report reads better saying which it looked at.
         from ...core.rawdevice import is_device_path
         noun = "card" if is_device_path(path) else "card image"
+        # Spike 3 (secure SD image) before Spike 2: its boot/LUKS layout is
+        # distinct, and detect_game only matches the Spike 2 signature.  Behind
+        # the preview code: an app without it doesn't claim a Spike 3 card.
+        from ...core import preview
+        if preview.enabled("spike3") and _spike3.is_spike3_card(path):
+            key = spike3_key_for_path(path)
+            info = SPIKE3_DB.get(key, {})
+            return Game(key=key, display=spike3_display(key, path),
+                        manufacturer_key="stern", era="spike3",
+                        notes="Spike 3 %s" % noun,
+                        supported=info.get("supported", True),
+                        unsupported_reason=info.get("reason", ""))
         key = detect_game(path)
         if key is not None:
             return Game(key=key, display=display_for_key(key, path),
@@ -684,6 +994,12 @@ class SternManufacturer(Manufacturer):
                 em = re.search(r"_(le|pro|se)$", m.group(1).lower())
                 if em:
                     disp += " %s" % em.group(1).upper()
+        elif game.era == "sam" and ", " in game.notes:
+            # notes = "SAM 2014, Mustang Limited Edition (V1.45)": the
+            # version PinMAME matched names the game fully on its own.
+            disp = game.notes.split(", ", 1)[1]
+            if not disp.startswith(game.display):
+                disp = "%s (%s)" % (game.display, disp)
         elif game.era == "whitestar" and game.notes:
             disp += " (%s)" % game.notes
         return disp
@@ -700,7 +1016,7 @@ class SternManufacturer(Manufacturer):
         # is the likeliest way to meet a multi-boot card in the first place.
         from ...core.rawdevice import is_device_path
         if not is_device_path(path) and (
-                path.lower().endswith(".zip") or detect_game(path) is None):
+                _rom_file(path) or detect_game(path) is None):
             return ""
         from .multiimage import note_for_path
         try:
@@ -734,24 +1050,26 @@ class SternManufacturer(Manufacturer):
             return "%s  (multi-boot card, %d games)" % (name, len(images))
         return name
 
-    def image_info(self, path, assets_dir=None):
+    def image_info(self, path, assets_dir=None, partial=None):
         # Only the Spike 2 card probe — a Whitestar MAME zip or Spike 1 card
         # gets just the generic File/Detection sections (the Spike 2 probe
         # reads the card through the primary-partition explorer, which a
         # Spike 1 card's logical layout would only confuse).  Route on the
         # file, not the era pill, so the Info tab matches whatever image is
         # actually selected.
-        if path.lower().endswith(".zip"):
-            return []
+        if _rom_file(path):
+            return _sam_info(path)
         if detect_spike1_game(path) is not None:
             return []
         from .info import card_info
-        return card_info(path)
+        return card_info(path, partial=partial)
 
     def card_version(self, path):
         """``(version, exact)`` — the build a card image really is, read
         from its own update index (see info.card_version_probe).  Opens the
         image: call off the UI thread."""
+        if _rom_file(path):
+            return None, False
         from .info import card_version_probe
         return card_version_probe(path)
 
@@ -761,7 +1079,7 @@ class SternManufacturer(Manufacturer):
         ``None`` for a card that has no official record to check against
         (Spike 1, Whitestar).  *deep* hashes every file's bytes (minutes on
         a spinning disk).  Opens the image: call off the UI thread."""
-        if path.lower().endswith(".zip") or detect_spike1_game(path)                 is not None:
+        if _rom_file(path) or detect_spike1_game(path) is not None:
             return None
         from .stock_prints import check_card
         got = check_card(path, deep=deep)
@@ -787,15 +1105,53 @@ class SternManufacturer(Manufacturer):
         # Spike 2 cards only — a Whitestar MAME zip has no manifest/firmware
         # to diff, and the Spike 1 comparer isn't built yet, so refuse with a
         # plain explanation instead of a stack.
-        if path_a.lower().endswith(".zip") or path_b.lower().endswith(".zip"):
-            return [("Error", [("Compare", "Whitestar ROM zips can't be "
-                                "compared — pick two Spike 2 card images.")])]
+        if _rom_file(path_a) or _rom_file(path_b):
+            return [("Error", [("Compare", "ROM zips and SAM game files "
+                                "can't be compared — pick two Spike 2 card "
+                                "images.")])]
         if (detect_spike1_game(path_a) is not None
                 or detect_spike1_game(path_b) is not None):
             return [("Error", [("Compare", "Spike 1 cards can't be compared "
                                 "yet — pick two Spike 2 card images.")])]
         from .compare import compare_cards
         return compare_cards(path_a, path_b, assets_a, assets_b)
+
+    def mode_news(self, raw, project=None, progress=None, cancel=None):
+        """Can the project's modes run on the game program of card *raw*?
+        One sentence for the Mod Pack tab's What's new (PAD-1388).  A build
+        PAD has no port for is worked out here (a few minutes the first time,
+        kept after), the same port a Write or Try it would use."""
+        from . import port_derive, title_reader
+        from .mode_project import list_modes, title_label
+        try:
+            game, version, elf = title_reader.game_program(raw)
+        except Exception as e:                       # noqa: BLE001
+            return "the game program could not be read (%s)" % e
+        label = title_label(game, version)
+        n = 0
+        if project:
+            try:
+                n = len(list_modes(project)[0])
+            except Exception:                        # noqa: BLE001
+                n = 0
+        yours = ("this project's %d mode%s" % (n, "" if n == 1 else "s")
+                 if n else "modes")
+        pr = port_derive.ensure_port(elf, game, version, progress=progress,
+                                     cancel=cancel)
+        if not pr.path:
+            lacks = ", ".join(pr.missing) or "the game's own hooks"
+            return ("%s can't run on %s yet: the app could not place %s in its "
+                    "game program." % (yours[0].upper() + yours[1:], label,
+                                       lacks))
+        if pr.origin == "shipped":
+            return "%s run on %s." % (yours[0].upper() + yours[1:], label)
+        if port_derive.ran_live(pr.path):
+            return ("%s run on %s (worked out on this PC and tried in the "
+                    "emulator)." % (yours[0].upper() + yours[1:], label))
+        return ("%s can run on %s: the app worked out its new game program on "
+                "this PC. Press Try it once on the Modes tab before a Write, "
+                "so they have run in the emulator before they go on a card."
+                % (yours[0].upper() + yours[1:], label))
 
     def compare_folders(self, dir_a, dir_b, progress=None, cancel=None):
         # The decoded sounds pair by slot and past the codec's lead-in, the
@@ -807,16 +1163,71 @@ class SternManufacturer(Manufacturer):
             progress=progress, cancel=cancel)
 
     def video_variants_offer(self, assets_dir, rels):
-        # PAD-446: the in-game video bank's clips, on a title the swap was
-        # proven on (clip_variants.PROVEN)
+        # PAD-446: the in-game video banks' clips, on a build whose port gives
+        # the runtime a way to hook the game's ask (PAD-723: clip_variants.hook_route)
         from .clip_variants import MAX_EXTRA, offer
         why, slots = offer(assets_dir, rels, probe=True)
         return {"why": why, "slots": slots, "max": MAX_EXTRA}
 
+    def sound_modes_offer(self, assets_dir, rels):
+        # PAD-494: the sound bank's sounds, on a title the music modes were
+        # proven on (sound_modes.PROVEN)
+        from .sound_modes import MAX_MODES, offer, offer_attract, offer_shots, offer_turns
+        why, slots = offer(assets_dir, rels, probe=True)
+        # PAD-565: and which can play files in turn (no menu setting, so more titles)
+        twhy, tslots = offer_turns(assets_dir, rels, probe=True)
+        # PAD-641: and whether the flipper buttons can play sounds in attract
+        out = {"why": why, "slots": slots, "max": MAX_MODES,
+               "turns_why": twhy, "turn_slots": tslots,
+               "attract_why": offer_attract(assets_dir, probe=True),
+               # PAD-945: and whether the game's modes can play sounds on shots
+               "shots_why": offer_shots(assets_dir, probe=True)}
+        # PAD-685: a jukebox for the song modes, on a title that has them (no key elsewhere)
+        from .jukebox import offer as jukebox_offer, pool_rows as jukebox_pools, slot_pools
+        jw = jukebox_offer(assets_dir, probe=True)
+        if jw is not None:
+            out["jukebox_why"] = jw
+            out["jukebox_pools"] = jukebox_pools(assets_dir, probe=True)   # PAD-1007
+            # PAD-1106: the slots whose music the jukebox plays in place of (the pane plays a song for them)
+            out["jukebox_slots"] = slot_pools(assets_dir, rels, probe=True) if not jw else {}
+        return out
+
+    def sound_request_uses(self, assets_dir, rels):
+        # PAD-635: Extract's sound_requests.tsv, for the decoded idx sounds;
+        # a music bank's song (no idx) is left out, not called unplayed
+        from .clip_sounds import _IDX_RE, sound_uses
+        uses = sound_uses(assets_dir)
+        if uses is None:
+            return None
+        out = {}
+        for rel in rels:
+            d, _s, name = rel.rpartition("/")
+            m = _IDX_RE.search(name) if d == "audio" else None
+            if m:
+                out[rel] = list(uses.get(int(m.group(1)), ()))
+        return out
+
+    def sound_request_why(self, assets_dir):
+        from .clip_sounds import sound_uses_why
+        return sound_uses_why(assets_dir)
+
+    def sound_variant_counts(self, assets_dir, rels):
+        # PAD-637: Extract's sound_variants.json - the decoded sounds whose
+        # file is several variants of one sound, one after another
+        from .clip_sounds import _IDX_RE, sound_variants
+        got = sound_variants(assets_dir)
+        out = {}
+        for rel in rels:
+            d, _s, name = rel.rpartition("/")
+            m = _IDX_RE.search(name) if d == "audio" and got else None
+            if m and int(m.group(1)) in got:
+                out[rel] = got[int(m.group(1))]
+        return out
+
     def video_quality(self, path, log=None, progress=None, cancel=None):
         # Spike 2 cards only — the clips are ftyp assets on an ext4 games
         # partition, which neither a Whitestar ROM zip nor a Spike 1 card has.
-        if path.lower().endswith(".zip"):
+        if _rom_file(path):
             return []
         if detect_spike1_game(path) is not None:
             return []
@@ -827,8 +1238,7 @@ class SternManufacturer(Manufacturer):
                            cache_dir=None, log=None, progress=None,
                            cancel=None):
         for path in (card, stock):
-            if path.lower().endswith(".zip") or \
-                    detect_spike1_game(path) is not None:
+            if _rom_file(path) or detect_spike1_game(path) is not None:
                 raise ValueError("Pick Spike 2 card images: %s isn't one."
                                  % os.path.basename(path))
         from .source_find import find_video_sources
@@ -843,11 +1253,25 @@ class SternManufacturer(Manufacturer):
     def make_extract_pipeline(self, input_path, output_dir,
                               log_cb, phase_cb, progress_cb, done_cb,
                               extract_categories=None, duration_names=False):
+        if self._era == "sam":
+            return SamExtractPipeline(
+                input_path, output_dir, log_cb, phase_cb, progress_cb,
+                done_cb, duration_names=duration_names)
         if self._era == "spike1":
             return Spike1ExtractPipeline(
                 input_path, output_dir, log_cb, phase_cb, progress_cb,
                 done_cb, extract_categories=extract_categories,
                 duration_names=duration_names)
+        if self._era == "spike3":
+            # A .spk package vs a secure SD-card image take different front
+            # ends (reconstruct+SPKS vs LUKS partition), same asset backend.
+            if _spike3_spk.is_spk_input(input_path):
+                return Spike3SpkExtractPipeline(
+                    input_path, output_dir, log_cb, phase_cb, progress_cb,
+                    done_cb, extract_categories=extract_categories)
+            return Spike3ExtractPipeline(
+                input_path, output_dir, log_cb, phase_cb, progress_cb,
+                done_cb, extract_categories=extract_categories)
         return SternExtractPipeline(
             input_path, output_dir, log_cb, phase_cb, progress_cb, done_cb,
             extract_categories=extract_categories,
@@ -856,8 +1280,20 @@ class SternManufacturer(Manufacturer):
     def make_capture_pipeline(self, input_path, output_dir,
                               log_cb, phase_cb, progress_cb, done_cb,
                               **kwargs):
-        # Whitestar era: libpinmame attract-mode DMD capture (same as the
-        # Data East / Sega entries).
+        # Whitestar / SAM era: libpinmame attract-mode DMD capture (same as
+        # the Data East / Sega entries).
+        if self._era == "sam":
+            cap_kwargs = dict(
+                duration_seconds=kwargs.get("duration_seconds", 180.0),
+                frame_cb=kwargs.get("frame_cb"), capture_ready_cb=None)
+            # Basic ticked too: the sounds first, into the same folder
+            if kwargs.get("also_run_static"):
+                return SamExtractPlusCapturePipeline(
+                    input_path, output_dir, log_cb, phase_cb, progress_cb,
+                    done_cb, **cap_kwargs)
+            return _wscapture.SamCapturePipeline(
+                input_path, output_dir, log_cb, phase_cb, progress_cb,
+                done_cb, **cap_kwargs)
         return _wscapture.CapturePipeline(
             input_path, output_dir, log_cb, phase_cb, progress_cb, done_cb,
             game_db=_WHITESTAR_DB,
@@ -868,8 +1304,17 @@ class SternManufacturer(Manufacturer):
     def make_write_pipeline(self, original_path, assets_dir, output_path,
                             log_cb, phase_cb, progress_cb, done_cb,
                             update=None):
+        if self._era == "sam":
+            return SamWritePipeline(
+                original_path, assets_dir, output_path,
+                log_cb, phase_cb, progress_cb, done_cb)
         if self._era == "spike1":
             return Spike1WritePipeline(
+                original_path, assets_dir, output_path,
+                log_cb, phase_cb, progress_cb, done_cb)
+        if self._era == "spike3":
+            from .spike3_write import Spike3WritePipeline
+            return Spike3WritePipeline(
                 original_path, assets_dir, output_path,
                 log_cb, phase_cb, progress_cb, done_cb)
         return SternWritePipeline(
@@ -1109,10 +1554,10 @@ class SternManufacturer(Manufacturer):
 
     def make_flash_pipeline(self, image_path, device_path,
                             log_cb, phase_cb, progress_cb, done_cb,
-                            menu_only=False, verify=True):
+                            menu_only=False, verify=True, keep_data=False):
         return SternFlashImagePipeline(
             image_path, device_path, log_cb, phase_cb, progress_cb, done_cb,
-            menu_only=menu_only, verify=verify)
+            menu_only=menu_only, verify=verify, keep_data=keep_data)
 
     def make_revert_pipeline(self, source, assets_dir, rels,
                              log_cb, phase_cb, progress_cb, done_cb,
@@ -1120,6 +1565,10 @@ class SternManufacturer(Manufacturer):
         """Build the fallback pipeline that re-derives pre-snapshot originals
         from the source card (the GUI calls this only for changed files with no
         ``.orig`` snapshot)."""
+        if self._era == "sam":
+            return SamRevertPipeline(
+                source, assets_dir, rels, log_cb, phase_cb, progress_cb,
+                done_cb)
         if self._era == "spike1":
             return Spike1RevertPipeline(
                 source, assets_dir, rels, log_cb, phase_cb, progress_cb,
@@ -1144,6 +1593,14 @@ class SternManufacturer(Manufacturer):
             rename_after=rename_after)
 
     def extract_input_help(self):
+        if self._era == "spike3":
+            return ("Select a Stern Spike 3 secure SD-card image (.raw) or a "
+                    ".spk package. Extract decrypts the games partition, "
+                    "decodes its sounds to per-sound WAVs (audio/), named from "
+                    "the game's Sound Test menu where it names them, and "
+                    "copies out the videos and pictures. Tick Auto-transcribe "
+                    "to name the rest of the voice callouts by their spoken "
+                    "text.")
         if self._era == "spike1":
             return ("Select a Stern Spike 1 SD-card image — Stern's update "
                     ".iso files are raw card images and work directly. "

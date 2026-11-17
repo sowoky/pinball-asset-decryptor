@@ -178,6 +178,7 @@ def test_the_plan_refuses_a_grown_sound_nothing_names_or_without_a_key():
         engine._plan_descriptor_repoint(params, sites)
 
 
+@pytest.mark.usefixtures("preview_modes_off")
 def test_two_grown_sounds_in_one_descriptor_are_both_expected_switch_off():
     """The preview switch off: both keys re-pointed, and the declared duration
     moves by BOTH growths, rounded as a build without the family rounds."""
@@ -284,7 +285,8 @@ def test_a_grown_bank_keeps_the_sound_engines_failed_count_at_zero(
     seen.clear()
     folded.clear()
     _reader, _staged = _grow_card(monkeypatch, tmp_path, params)
-    assets2, _w2 = _edits(tmp_path / "b", 0.5)
+    # (within 0.1 s of its slot: a clip further short has a record of its own, PAD-800)
+    assets2, _w2 = _edits(tmp_path / "b", 0.95)
     writes2, _c, _p, _m, _v = _run(
         monkeypatch, assets2, params, params[0]["body_off"], log)
     assert not seen
@@ -369,8 +371,10 @@ def test_a_grown_row_counts_by_its_stock_key():
     assert engine._desc_key_mask(params, sites) == GZ
 
 
-def test_no_clear_winner_is_refused():
-    """Half a card named each way is not a measurement."""
+def test_no_clear_winner_is_refused(monkeypatch):
+    """Half a card named each way is not a measurement (when the build's own pairs measure no
+    mask either: PAD-724 lets one that names nearly every record win)."""
+    monkeypatch.setattr(engine, "_measured_key_mask", lambda stock, sites: None)
     p1, s1 = _named_card(GZ, 10)
     p2, s2 = _named_card(MASK, 10)
     for p in p2:
@@ -384,16 +388,18 @@ def test_no_clear_winner_is_refused():
         engine._desc_key_mask(p1 + p2, s1 + s2)
 
 
-def test_the_switch_off_plan_keeps_the_one_mask_it_always_had():
-    """The preview switch off (core/preview.py): the plan takes the mask a build
-    without the mode editor family takes, and on a Godzilla Pro 1.15 layout it
-    refuses exactly as that build does."""
+def test_the_switch_off_plan_measures_the_mask_too():
+    """The preview switch off (core/preview.py): the plan still measures the build's key
+    mask (PAD-636: Led Zeppelin's names 11 of Led Zeppelin Pro 1.22's 549 records, so every
+    longer replacement there failed the Write), and keeps the switch-off duration rounding."""
     params, sites = _named_card(GZ, 20)
+    new = _key(0x7777, 0x80000123)
     params[3].update(grown=True, stock_findkey=params[3]["findkey"],
-                     findkey=_key(0x7777, 0x80000123), length=176600,
-                     stock_length=83456)
-    with pytest.raises(RuntimeError, match="idx 3: no descriptor"):
-        engine._plan_descriptor_repoint(params, sites)
+                     findkey=new, length=176600, stock_length=83456)
+    _writes, expect = engine._plan_descriptor_repoint(params, sites, family=False)
+    s = sites[3]
+    assert expect == {s.sid: ({new}, s.duration + engine._duration_units(176600)
+                              - engine._duration_units(83456))}
     # ...and on Led Zeppelin's layout it re-points as it always did
     params, sites = _named_card(MASK, 20)
     new = _key(0x7777, 0x00000123)
@@ -448,3 +454,100 @@ def test_a_swapped_sound_is_grown_but_its_descriptors_are_left_alone():
     used = [{"name": "A", "key": "sound_start", "request": 900, "idx": 41, "swap": True}]
     engine._mode_swap_keys(used, params, log)
     assert used == [] and _said(msgs, "did not come out of the grown bank")
+
+
+def test_a_measured_layout_naming_every_record_wins_over_a_known_one_naming_some():
+    """PAD-565: James Bond 007 Pro 1.06 measures 0x80005FFF (2351 of 2351 records named) where
+    Led Zeppelin's 0xE0001FFF names 343 by the bits the two share - under ten times as many, so
+    the measured mask was passed over and no Bond sound id could be re-pointed."""
+    bond = 0x80005FFF
+    params, sites = [], []
+    for i in range(40):
+        w1 = 0x1000 + i
+        # a few records whose second word Led Zeppelin's mask happens to read right
+        w2 = (0x00001000 + i) if i < 6 else (0x00004000 + i)
+        junk = 0x01650000 if i >= 6 else 0
+        params.append({"idx": i, "grown": False, "findkey": _key(w1, w2 & bond)})
+        sites.append(_site(100 + i, 0x1000 + 0x20 * i, _key(w1, (w2 & bond) | junk)))
+    msgs, log = _capture()
+    got = engine._desc_key_mask(params, sites, log)
+    stock = {p["findkey"] for p in params}
+    assert {engine._play_key(s.payload, s.sid, got) for s in sites} == stock
+    assert _said(msgs, "measured on this build")
+    known = len({engine._play_key(s.payload, s.sid, MASK) for s in sites} & stock)
+    assert 0 < known * 10 >= len(stock)                    # the old rule would not have measured
+
+
+def test_a_measured_layout_naming_every_record_wins_over_a_known_one_naming_half():
+    """PAD-724: Avengers Infinity Quest Pro 1.10 measures 0xF80001FF (1554 of 1554 records named)
+    where Godzilla's 0xFC0003FF names 799 by the bits the two share - more than a third, so the
+    measured mask was passed over and half the game's sounds could take no music mode."""
+    avengers = 0xF80001FF
+    params, sites = [], []
+    for i in range(40):
+        w1 = 0x1000 + i
+        # half the records' second words read right under Godzilla's mask as well
+        w2 = 0x00000100 + i
+        junk = 0x00000200 if i >= 20 else 0                  # a bit Godzilla's mask keeps
+        params.append({"idx": i, "grown": False, "findkey": _key(w1, w2 & avengers)})
+        sites.append(_site(100 + i, 0x1000 + 0x20 * i, _key(w1, (w2 & avengers) | junk)))
+    stock = {p["findkey"] for p in params}
+    known = len({engine._play_key(s.payload, s.sid, GZ) for s in sites} & stock)
+    assert len(stock) * 3 < known * 10 < len(stock) * 9    # the old rule kept the known mask
+    msgs, log = _capture()
+    got = engine._desc_key_mask(params, sites, log)
+    assert {engine._play_key(s.payload, s.sid, got) for s in sites} == stock
+    assert _said(msgs, "measured on this build")
+
+
+# --------------------------------------------------------------------------
+# PAD-593: a card that came in with sounds already grown
+# --------------------------------------------------------------------------
+def _row(idx, ident, findkey, length, body_off):
+    return {"idx": idx, "identity": ident, "findkey": findkey, "length": length,
+            "scale": 1, "pred16": 0, "body_off": body_off}
+
+
+def test_a_sound_grown_on_the_incoming_card_is_re_pointed_from_the_record_it_plays(monkeypatch):
+    """PAD-593: a custom Godzilla image built with 98 longer sounds stopped the next Write at
+    "idx 31: no descriptor ... names this sound's record". Its play tables name each such
+    sound's APPENDED record, so the stock record the derive retired is named by nothing: the
+    key to re-point from is the incoming card's live one, and a sound this build leaves alone
+    is skipped."""
+    from pinball_decryptor.plugins.stern.spike2 import emulator as EM
+    k_a, k_live, k_c, k_c_new = (_key(0x11, 0x101), _key(0x12, 0x102), _key(0x13, 0x103),
+                                 _key(0x14, 0x104))
+    # the incoming card: idx 1 already grown (its appended record is raw idx 3)
+    card = [_row(0, "x", _key(0x10, 0x100), 1000, 0),
+            dict(_row(1, "y", k_live, 9000, 5000), shadows=3),
+            _row(2, "z", k_c, 1000, 2000)]
+    # the staged bank: the card's records, then this build grows idx 2
+    staged = [_row(0, "x", _key(0x10, 0x100), 1000, 0), _row(1, "y", k_a, 1000, 1000),
+              _row(2, "z", k_c, 1000, 2000), _row(3, "y", k_live, 9000, 5000),
+              _row(4, "z", k_c_new, 5000, 14000)]
+
+    class _Emu:
+        def __init__(self, *a):
+            pass
+
+        def boot(self):
+            pass
+
+        def derive_params(self, progress=None):
+            return [dict(r) for r in staged]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(EM, "Spike2Emu", _Emu)
+    monkeypatch.setattr(engine, "_install_consumed_hook", lambda emu: (None, None))
+    msgs, log = _capture()
+    params, _reads = engine._derive_grown("gr", "staged", card, log)
+    by = {p["idx"]: p for p in params}
+    assert by[1]["grown"] and by[1]["stock_findkey"] == k_live and by[1]["stock_length"] == 9000
+    assert by[2]["grown"] and by[2]["stock_findkey"] == k_c and by[2]["stock_length"] == 1000
+
+    sites = [_site(31, 0x100, k_live), _site(40, 0x200, k_c)]
+    writes, expect = engine._plan_descriptor_repoint(params, sites, mask=MASK, family=True)
+    assert sorted(writes) == [0x200 - 7, 0x200]
+    assert set(expect) == {40} and expect[40][0] == {k_c_new}

@@ -62,9 +62,18 @@ esac
 bash "$SPP_TOOLS/killgame.sh" >/dev/null 2>&1
 
 rm -rf "$SPP_RIG"
-mkdir -p "$SPP_RIG/game"
-cp -al "$(realpath "$BUILD")" "$SPP_RIG/game/$DIR"
-rm -f "$SPP_RIG/game/$DIR/title"
+if [ -n "${SPP_MACHINE_GAME:-}" ]; then
+    # THE MACHINE'S /game (machine_sim.sh, the multi-boot proof, PAD-980): installed the way
+    # the title's codeupdate leaves it and kept between power-ups, so the multi-boot
+    # launcher's renames in the game's folder are the machine's.  <build> still names the
+    # stock build the rig's settings come from.
+    mkdir -p "$SPP_RIG"
+    ln -s "$SPP_MACHINE_GAME" "$SPP_RIG/game"
+else
+    mkdir -p "$SPP_RIG/game"
+    cp -al "$(realpath "$BUILD")" "$SPP_RIG/game/$DIR"
+    rm -f "$SPP_RIG/game/$DIR/title"
+fi
 echo "$BUILD" > "$SPP_RIG/build"
 echo "$VISIBLE" > "$SPP_RIG/visible"
 echo "$TITLE" > "$SPP_RIG/title"
@@ -75,7 +84,7 @@ touch "$(realpath "$BUILD")/used"            # the Cache window's "Last played"
 # are the cache's own inodes (hard links), and the game must not rewrite
 # them.  A file it does rewrite is copied first (below).
 chown "$SPP_USER": "$SPP_RIG"
-find "$SPP_RIG/game" -type d -exec chown "$SPP_USER": {} +
+find "$SPP_RIG/game/" -type d -exec chown "$SPP_USER": {} +
 # Alice Cooper's Unity player uses /game/code/... only when this file exists
 # (else its developer's C:/ALICECOOPER/...).
 # Its launcher reads two files of the machine's OS and, finding them missing,
@@ -96,7 +105,10 @@ chown "$SPP_USER": "$SPP_RIG/rig.log"     # spprun.py writes it too
 # The board, seeded from the machine yaml: the trough full of balls (an NC
 # trough opto with a ball is open), everything else at rest.  prochw.py
 # needs PyYAML, which PAD-Runtime's python lacks and AP's py3 env has.
+# --bridge: a Visual Pinball table's files in the rig folder (PAD-954,
+# tools/spike2_emu/vpx/spkbridge.py), as on the Warden board.
 PATH=$SPP_PY3/bin:$PATH PAD_SLOT=$SPP_SLOT bash "$SPP_PROC/hw.sh" --yaml "$SPP_RIG/game/$DIR/$YAML" \
+    --bridge "$SPP_RIG" \
     >> "$SPP_RIG/rig.log" \
     || { echo "run_game.sh: the board did not come up" >&2; exit 3; }
 FPGA=$(. "$SPP_PROC/procpath.sh"; echo "$PROC_FPGA")
@@ -119,14 +131,14 @@ echo "$SCREEN" > "$SPP_RIG/screen"
 echo "$SCREEN" > "$SPP_RIG/window"
 
 AUDIO=$(rigboard_audio "$VISIBLE" "$AUDIO")
-if [ "$AUDIO" = 1 ] && [ -S /mnt/wslg/PulseServer ]; then
+if [ "$AUDIO" = 1 ] && [ -S "$SPP_PULSE" ]; then
     # No shared memory with WSLg's PulseAudio, as on the AP rig: the py27
     # env's libpulse (no memfd) wants WSLg's /dev/shm, which this distro
     # cannot see, and then fails the whole connection ("shm_open() failed"
     # -> "Could not connect to PulseAudio") - the game started with its
     # sound off on every visible run (PAD-405).
     echo 'enable-shm = no' > "$SPP_RIG/pulse-client.conf"
-    AUDIO_ENV="SDL_AUDIODRIVER=pulse PULSE_SERVER=unix:/mnt/wslg/PulseServer PULSE_CLIENTCONFIG=$SPP_RIG/pulse-client.conf"
+    AUDIO_ENV="SDL_AUDIODRIVER=pulse PULSE_SERVER=unix:$SPP_PULSE PULSE_CLIENTCONFIG=$SPP_RIG/pulse-client.conf"
 else
     AUDIO_ENV="SDL_AUDIODRIVER=disk SDL_DISKAUDIOFILE=/dev/null SDL_DISKAUDIODELAY=0"
 fi
@@ -140,6 +152,9 @@ setsid -f unshare --net --mount --propagation private \
         SPP_SITE="$SPP_ROOT/site" SPP_STUB="$SPP_PROC/pystub" SPP_DIR="$DIR" SPP_LAUNCH="$LAUNCH" \
         SPP_UNITY="$UNITY" SPP_OSFILES="$OSFILES" SPP_SCREEN="$SCREEN" SPP_XVFB=$XVFB DISPLAY="$DISP" \
         SPP_BALLS="$BALLS" PROC_EMU_FPGA="$FPGA" PROC_EMU_CTL="$CTL" SPP_VISIBLE=$VISIBLE $AUDIO_ENV \
+        SPP_MACHINE_LAUNCH="${SPP_MACHINE_LAUNCH:-}" SPP_MSIM_FIFO="${SPP_MSIM_FIFO:-}" \
+        SPP_MSIM_SHIM="${SPP_MSIM_SHIM:-}" SPP_MSIM_LIB="${SPP_MSIM_LIB:-}" \
+        SPP_MENU_PY="${SPP_MENU_PY:-}" \
     bash "$SPP_TOOLS/netns.sh" < /dev/null >> "$SPP_RIG/rig.log" 2>&1
 
 # Up = the game's run loop is going and attract has shown its first page:
@@ -147,17 +162,20 @@ setsid -f unshare --net --mount --propagation private \
 # starts.  A cold cache reads ~3 GB of assets first.
 for i in $(seq 1 1800); do
     [ -f "$SPP_RIG/attract" ] && break
-    [ "$i" -gt 50 ] && ! spp_alive game && break
+    # (the multi-boot's launcher shows its menu before the game starts: netns.sh)
+    [ "$i" -gt 50 ] && ! spp_alive game && [ ! -f "$SPP_RIG/launcher.running" ] && break
     sleep 0.1
 done
 # The app's Volume / Mute, live, as on the Warden rig: spkvol.py finds the
 # game's (and Alice Cooper's player's) streams by SPK_MARK (netns.sh).
-if [ "$AUDIO" = 1 ] && [ -n "${PAD_AUDIO_CTL:-}" ] && [ -S /mnt/wslg/PulseServer ] && spp_alive game; then
-    setsid -f python3 "$SPP_TOOLS/../spkvol.py" --ctl "$PAD_AUDIO_CTL" --rig "$SPP_RIG" \
+if [ "$AUDIO" = 1 ] && [ -n "${PAD_AUDIO_CTL:-}" ] && [ -S "$SPP_PULSE" ] && spp_alive game; then
+    setsid -f python3 "$SPP_TOOLS/../spkvol.py" --ctl "$PAD_AUDIO_CTL" --rig "$SPP_RIG" --pulse "unix:$SPP_PULSE" \
         < /dev/null >> "$SPP_RIG/spkvol.log" 2>&1
 fi
 if spp_alive game && [ -f "$SPP_RIG/attract" ]; then
-    rigboard_post spooky-proc "$SPP_SLOT" "$(spp_pid game)" "$(basename "$BUILD")" "$NAME" "$VISIBLE" "$AUDIO"
+    # RIGBOARD_ROOT: the rig folder, where a table's controller finds the
+    # board's files (PAD-954)
+    RIGBOARD_ROOT=$SPP_RIG rigboard_post spooky-proc "$SPP_SLOT" "$(spp_pid game)" "$(basename "$BUILD")" "$NAME" "$VISIBLE" "$AUDIO"
     # The playfield window's keys in the game's own window too, as on the
     # Warden rig (PAD-313): gamekeys.py speaks the Warden board's ctl.sock,
     # which sppctl.py --serve answers from this board (its own socket has no

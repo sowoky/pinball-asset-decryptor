@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from . import config, ecoredata, usbstick
+from . import config, ecoredata, remote_key, usbstick
 from .resources import DECRYPT_C_SOURCE, ENCRYPT_C_SOURCE, STUB_C_SOURCE
 from .executor import (CommandError, create_executor, find_usbipd,
                        _decode_output as _exec_decode_output,
@@ -906,12 +906,16 @@ def _robust_run(executor):
             # over an .iso that was mounted a second earlier.
             return list(executor._head()) + [bash_cmd]
         if cls == "NativeExecutor":
-            return [*executor._cmd_prefix(), bash_cmd]
+            # None = the run's root session (pkexec, PAD-1173), which stops a
+            # command past its timeout itself
+            prefix = executor._cmd_prefix()
+            return None if prefix is None else [*prefix, bash_cmd]
         if cls == "DockerExecutor":
             if not getattr(executor, "_container_running", False):
                 return None  # let orig_run raise the canonical "not running"
             from .executor import _DOCKER_CONTAINER
-            return ["docker", "exec", _DOCKER_CONTAINER, "bash", "-c", bash_cmd]
+            cli = executor._cli() if hasattr(executor, "_cli") else "docker"
+            return [cli, "exec", _DOCKER_CONTAINER, "bash", "-c", bash_cmd]
         return None
 
     def _run(bash_cmd, timeout=120):
@@ -958,6 +962,22 @@ def _install_robust_run_host(executor):
     executor.run_win = _robust_run_host
     executor.run = _robust_run(executor)
     return executor
+
+
+def _done_ends_root(done_cb, executor):
+    """*done_cb*, after first ending the run's root shell (PAD-1173): on a
+    Linux desktop a run asks for root ONCE and keeps it to its end, and the
+    end is the done callback - cleanup has unmounted everything by then.  A
+    root command after it simply asks again."""
+    def _done(*args, **kwargs):
+        close = getattr(executor, "close_root", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                pass
+        return done_cb(*args, **kwargs)
+    return _done
 
 
 def _ps_list(args):
@@ -1880,14 +1900,16 @@ class DecryptionPipeline:
         self.log_link = lambda text, url: None  # optional; set by caller
         self.on_phase = phase_cb
         self.on_progress = progress_cb
-        self.on_done = done_cb
-
         self.executor = _install_robust_run_host(create_executor())
+        self.on_done = _done_ends_root(done_cb, self.executor)
         self.mount_point = None
         self.game_name = None
         self.cancelled = False
         self._succeeded = False
         self._bind_mounted = []
+        # The key server this run took a lease on (PAD-529), so cleanup gives
+        # back exactly that and nothing else; None for the key in this PC.
+        self._remote_key = None
         self._iso_mount = None      # temp mount for ISO
         self._iso_mounted = False   # True if ISO was loop-mounted (vs xorriso)
         self._raw_img_path = None   # extracted raw ext4 (cached between runs)
@@ -1903,7 +1925,7 @@ class DecryptionPipeline:
 
     def _check_cancel(self):
         if self.cancelled:
-            raise PipelineError("Cancelled", "Operation cancelled by user.")
+            raise PipelineError("Canceled", "Operation canceled by user.")
 
     def _timed(self, label, phase_fn):
         """Run a phase and log its wall-clock duration — field reports of
@@ -2024,7 +2046,7 @@ class DecryptionPipeline:
                                 for f in futs:
                                     f.cancel()
                                 raise PipelineError(
-                                    "Cancelled", "Operation cancelled by user.")
+                                    "Canceled", "Operation canceled by user.")
         self.on_progress(total, total, "Checksums complete")
 
         # Consume the per-run sidecar so a later run can't merge a stale one.
@@ -2105,20 +2127,21 @@ class DecryptionPipeline:
 
         # Docker info (macOS only)
         if sys.platform == "darwin":
+            cli = self.executor._cli() if hasattr(self.executor, "_cli") else "docker"
             try:
                 rc, out, _ = self.executor.run_host(
-                    "docker --version", timeout=5)
+                    f"{cli} --version", timeout=5)
                 if rc == 0 and out.strip():
-                    self.log(f"  Docker: {out.strip()}", "info")
+                    self.log(f"  Container engine: {out.strip()}", "info")
             except Exception:
-                self.log("  Docker: (could not detect)", "info")
+                self.log("  Container engine: (could not detect)", "info")
 
-            # Docker Desktop VM resources vs the host — an underprovisioned
+            # Docker Desktop / Podman VM resources vs the host — an underprovisioned
             # VM (the default is often half the cores) directly throttles
             # the compress/decompress phases.
             try:
                 rc, out, _ = self.executor.run_host(
-                    "docker info --format '{{.NCPU}} {{.MemTotal}}'",
+                    f"{cli} info --format '{{.NCPU}} {{.MemTotal}}'",
                     timeout=10)
                 rc2, host_cpus, _ = self.executor.run_host(
                     "sysctl -n hw.ncpu", timeout=5)
@@ -2467,7 +2490,7 @@ class DecryptionPipeline:
             for line in self.executor.stream(cmd, timeout=config.EXTRACT_TIMEOUT):
                 if self.cancelled:
                     self.executor.kill()
-                    raise PipelineError("Extract", "Cancelled by user.")
+                    raise PipelineError("Extract", "Canceled by user.")
                 # partclone outputs progress with ANSI escapes like:
                 # "Elapsed: 00:00:08, Remaining: 00:01:17, Completed:   9.33%,   3.71GB/min,"
                 # Strip ANSI escape codes
@@ -2570,7 +2593,7 @@ class DecryptionPipeline:
             for line in self.executor.stream(cmd, timeout=config.EXTRACT_TIMEOUT):
                 if self.cancelled:
                     self.executor.kill()
-                    raise PipelineError("Extract", "Cancelled by user.")
+                    raise PipelineError("Extract", "Canceled by user.")
                 self.log(f"  {line.strip()}", "info")
                 if "Progress:" in line:
                     m = re.search(r'(\d+\.?\d*)%', line)
@@ -2844,6 +2867,63 @@ class DecryptionPipeline:
 
     def _phase_dongle(self):
         self.log("Checking for HASP dongle...", "info")
+        remote = remote_key.current()
+        if remote is not None:
+            self._attach_remote_dongle(remote)
+        else:
+            self._attach_local_dongle()
+        self._await_dongle()
+
+    def _remote_run(self, cmd):
+        return self.executor.run(cmd, timeout=90)
+
+    def _attach_remote_dongle(self, remote):
+        """The key is in another PC (PAD-529): attach it over USB/IP from
+        inside WSL instead of usbipd-win's local bind/attach, under this run's
+        own lease (see remote_key), so cleanup can never pull a key out from
+        under an emulator run that is using it."""
+        self.log("Attaching the HASP dongle from the key server (%s)..."
+                 % remote_key.describe(remote), "info")
+        try:
+            how, port = remote_key.attach(self._remote_run, remote, "extract")
+        except remote_key.RemoteKeyError as e:
+            raise PipelineError("Dongle", str(e)) from e
+        self._remote_key = remote
+        self.log("Dongle %s over the network (USB/IP port %s)."
+                 % ("attached" if how == "attached"
+                    else "already attached here - sharing it", port),
+                 "success")
+
+    def _release_remote_dongle(self):
+        """Give back this run's lease on a network key: detached only when
+        nothing else (an emulator run, a key attached by hand) still holds
+        it."""
+        remote, self._remote_key = self._remote_key, None
+        if remote is None:
+            return
+        state, detail = remote_key.release(self._remote_run, remote,
+                                           "extract")
+        if state == "kept":
+            self.log("Network dongle left attached: still in use (%s)."
+                     % detail, "info")
+        elif state == "detached":
+            self.log("Network dongle handed back to the key server.", "info")
+
+    def _detach_dongle(self):
+        """Cleanup: the local key goes back to Windows; a network key only
+        loses this run's lease."""
+        if self._remote_key is not None:
+            self._release_remote_dongle()
+            return
+        if remote_key.current() is not None:
+            return      # never attached it: nothing of ours to detach
+        usbipd = find_usbipd()
+        self.executor.run_win(
+            [usbipd, "detach", "--hardware-id", config.HASP_VID_PID],
+            timeout=10,
+        )
+
+    def _attach_local_dongle(self):
         usbipd = find_usbipd()
 
         # Check dongle on Windows side via usbipd
@@ -2909,6 +2989,7 @@ class DecryptionPipeline:
                 raise PipelineError("Dongle",
                     f"Failed to attach dongle to WSL: {stderr}")
 
+    def _await_dongle(self):
         # Wait for USB device to appear in WSL (usbipd attach is async)
         self.log("Waiting for dongle to appear in WSL...", "info")
         # Total wait steps: USB settle + 3s interface settle + daemon ready
@@ -2972,6 +3053,16 @@ class DecryptionPipeline:
         bind (if needed) → detach → attach → wait for lsusb → restart daemon.
         """
         self.log("Re-attaching dongle to WSL...", "info")
+        remote = self._remote_key or remote_key.current()
+        if remote is not None:
+            # the same transport as the first attach: give back our lease
+            # (which detaches only if no one else holds it) and attach again
+            self._release_remote_dongle()
+            self._attach_remote_dongle(remote)
+            self._wait_dongle_visible()
+            time.sleep(2)
+            self._start_hasp_daemon()
+            return
         usbipd = find_usbipd()
 
         # Ensure bound (may have moved to a different port)
@@ -2992,6 +3083,15 @@ class DecryptionPipeline:
         if rc != 0 and "already" not in stderr.lower():
             self.log(f"Warning: usbipd attach returned: {stderr}", "error")
 
+        self._wait_dongle_visible()
+
+        # Extra settle time
+        time.sleep(2)
+
+        # Restart daemon
+        self._start_hasp_daemon()
+
+    def _wait_dongle_visible(self):
         # Wait for device to appear in WSL
         for i in range(config.USB_SETTLE_TIMEOUT):
             time.sleep(1)
@@ -3001,12 +3101,6 @@ class DecryptionPipeline:
         else:
             self.log("Warning: could not confirm the dongle inside WSL after "
                      "re-attach. Continuing to the daemon check.", "error")
-
-        # Extra settle time
-        time.sleep(2)
-
-        # Restart daemon
-        self._start_hasp_daemon()
 
     def _start_hasp_daemon(self, progress_step=0, progress_total=0):
         """Kill any existing HASP daemon and start a fresh one.
@@ -3327,7 +3421,7 @@ class DecryptionPipeline:
                 for line in self.executor.stream(cmd, timeout=config.DECRYPT_TIMEOUT):
                     if self.cancelled:
                         self.executor.kill()
-                        raise PipelineError("Decrypt", "Cancelled by user.")
+                        raise PipelineError("Decrypt", "Canceled by user.")
 
                     output_lines.append(line)
 
@@ -3704,11 +3798,7 @@ class DecryptionPipeline:
                 pass
 
             # Detach USB from WSL (non-critical)
-            usbipd = find_usbipd()
-            self.executor.run_win(
-                [usbipd, "detach", "--hardware-id", config.HASP_VID_PID],
-                timeout=10,
-            )
+            self._detach_dongle()
 
             # Unmount bind mounts in reverse order
             for target in reversed(self._bind_mounted):
@@ -3948,7 +4038,7 @@ class DecryptionPipeline:
                     continue
                 raise PipelineError(
                     "Mount",
-                    "Admin password failed twice. Cancelling. "
+                    "Admin password failed twice. Canceling. "
                     "Re-run Extract / Apply to try again.")
             if result.returncode != 0:
                 raise CommandError(what, result.returncode, output)
@@ -4121,7 +4211,7 @@ class DecryptionPipeline:
             raise PipelineError(
                 "Mount",
                 "Admin password is required to read the SSD. "
-                "Cancelled.")
+                "Canceled.")
         # osascript prints: button returned:OK, text returned:<pw>
         # (with possible trailing fields).  We pull just the
         # text-returned value.
@@ -4415,7 +4505,7 @@ class ModPipeline(DecryptionPipeline):
         self.changed_files = []
         for i, (rel_path, full_path) in enumerate(all_files):
             if self.cancelled:
-                raise PipelineError("Scan", "Cancelled by user.")
+                raise PipelineError("Scan", "Canceled by user.")
 
             h = hashlib.md5()
             with open(full_path, 'rb') as fh:
@@ -4657,7 +4747,7 @@ class ModPipeline(DecryptionPipeline):
                 for line in self.executor.stream(cmd, timeout=config.DECRYPT_TIMEOUT):
                     if self.cancelled:
                         self.executor.kill()
-                        raise PipelineError("Encrypt", "Cancelled by user.")
+                        raise PipelineError("Encrypt", "Canceled by user.")
 
                     output_lines.append(line)
 
@@ -4970,7 +5060,7 @@ class ModPipeline(DecryptionPipeline):
             ):
                 if self.cancelled:
                     self.executor.kill()
-                    raise PipelineError("Convert", "Cancelled by user.")
+                    raise PipelineError("Convert", "Canceled by user.")
                 clean = line.strip()
                 if not clean:
                     continue
@@ -5306,11 +5396,7 @@ class ModPipeline(DecryptionPipeline):
             except CommandError:
                 pass
 
-            usbipd = find_usbipd()
-            self.executor.run_win(
-                [usbipd, "detach", "--hardware-id", config.HASP_VID_PID],
-                timeout=10,
-            )
+            self._detach_dongle()
 
             for target in reversed(self._bind_mounted):
                 try:
@@ -5383,7 +5469,7 @@ class StandaloneDecryptPipeline(DecryptionPipeline):
             f"Decrypted 0 of {walked} encrypted asset(s).\n\n"
             f"{detail}"
             "This game build encrypts its assets in a way this version does "
-            "not recognise, so there is nothing to show for the run. Newer "
+            "not recognize, so there is nothing to show for the run. Newer "
             "game engines change the scheme and support has to be added for "
             "them.\n\n"
             "The unencrypted part of the image still extracts: tick "
@@ -5627,7 +5713,7 @@ class StandaloneDecryptPipeline(DecryptionPipeline):
             for line in self.executor.stream(cmd, timeout=config.DECRYPT_TIMEOUT):
                 if self.cancelled:
                     self.executor.kill()
-                    raise PipelineError("Decrypt", "Cancelled by user.")
+                    raise PipelineError("Decrypt", "Canceled by user.")
 
                 level = "info"
                 if "[FAIL]" in line:
@@ -7409,7 +7495,7 @@ class StandaloneModPipeline(ModPipeline):
                 if clean.strip():
                     fsck_lines.append(clean.strip())
         if fsck_rc & 32:
-            raise PipelineError("Convert", "e2fsck was cancelled, so the "
+            raise PipelineError("Convert", "e2fsck was canceled, so the "
                                 "modified filesystem was left unchecked and "
                                 "no ISO was built.")
         if fsck_rc & 4 or fsck_rc & 8 or fsck_rc & 16:
@@ -7536,7 +7622,7 @@ class StandaloneModPipeline(ModPipeline):
             ):
                 if self.cancelled:
                     self.executor.kill()
-                    raise PipelineError("Convert", "Cancelled by user.")
+                    raise PipelineError("Convert", "Canceled by user.")
                 clean = line.strip()
                 if not clean:
                     continue
@@ -9169,16 +9255,19 @@ class DirectSSDDecryptPipeline(StandaloneDecryptPipeline):
             self.log("Copying SSD partition to Docker VM (this may take "
                      "several minutes)...", "info")
 
-            # Stream: dd on host -> pipe -> docker exec cat > file
+            # Stream: dd on host -> pipe -> docker/podman exec cat > file
+            cli = self.executor._cli() if hasattr(self.executor, "_cli") else "docker"
+            env = self.executor._env() if hasattr(self.executor, "_env") else None
             try:
                 dd_proc = subprocess.Popen(
                     ["dd", f"if={raw_dev}", "bs=1048576"],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 docker_proc = subprocess.Popen(
-                    ["docker", "exec", "-i", "jjp-decryptor-worker",
+                    [cli, "exec", "-i", "jjp-decryptor-worker",
                      "sh", "-c", f"cat > '{container_img}'"],
                     stdin=dd_proc.stdout,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=env)
                 dd_proc.stdout.close()
 
                 docker_out, docker_err = docker_proc.communicate(timeout=3600)
@@ -9571,9 +9660,10 @@ class DirectSSDDecryptPipeline(StandaloneDecryptPipeline):
             self.executor.run_host(
                 f"diskutil unmountDisk {device}", timeout=15)
             import subprocess as _sp
+            cli = self.executor._cli() if hasattr(self.executor, "_cli") else "docker"
             try:
                 docker_proc = _sp.Popen(
-                    ["docker", "exec", "jjp-decryptor-worker",
+                    [cli, "exec", "jjp-decryptor-worker",
                      "cat", container_img],
                     stdout=_sp.PIPE, stderr=_sp.PIPE)
                 dd_proc = _sp.Popen(
@@ -10402,9 +10492,9 @@ class RestoreToSSDPipeline:
         self.log = log_cb
         self.on_phase = phase_cb
         self.on_progress = progress_cb
-        self.on_done = done_cb
         self.cancelled = False
         self.executor = executor or _install_robust_run_host(create_executor())
+        self.on_done = _done_ends_root(done_cb, self.executor)
         self._tool = tool_path or _mkjjpmulti_path()
         self._attached = None       # the Windows disk handed to WSL, until handed back
         self._offlined = None       # the disk number taken offline, until put back
@@ -10417,7 +10507,7 @@ class RestoreToSSDPipeline:
 
     def _check_cancel(self):
         if self.cancelled:
-            raise PipelineError("Install", "Cancelled by user. The disk is half written: "
+            raise PipelineError("Install", "Canceled by user. The disk is half written: "
                                 "install again before it goes into a machine.")
 
     @property
@@ -10873,40 +10963,41 @@ def check_prerequisites(executor, standalone=False):
                 "  (enables direct SSD access without copying)"))
 
     elif isinstance(executor, NativeExecutor):
-        # Linux: check tools directly
+        # Linux: check tools directly, AS THE USER - a tool probe needs no
+        # root, and through pkexec it would ask for a password (PAD-1173)
         ok, msg = executor.check_available()
         results.append(("System", ok, msg))
 
         try:
-            executor.run("command -v partclone.ext4", timeout=10)
+            executor.run_user("command -v partclone.ext4", timeout=10)
             results.append(("partclone", True, "Available"))
         except Exception:
             results.append(("partclone", False,
                 "Not installed. Run: sudo apt install partclone"))
 
         try:
-            executor.run("command -v xorriso", timeout=10)
+            executor.run_user("command -v xorriso", timeout=10)
             results.append(("xorriso", True, "Available"))
         except Exception:
             results.append(("xorriso", False,
                 "Not installed. Run: sudo apt install xorriso"))
 
         try:
-            executor.run("command -v debugfs", timeout=10)
+            executor.run_user("command -v debugfs", timeout=10)
             results.append(("debugfs", True, "Available"))
         except Exception:
             results.append(("debugfs", False,
                 "Not installed. Run: sudo apt install e2fsprogs"))
 
         try:
-            executor.run("command -v pigz", timeout=10)
+            executor.run_user("command -v pigz", timeout=10)
             results.append(("pigz", True, "Available"))
         except Exception:
             results.append(("pigz", False,
                 "Not installed. Run: sudo apt install pigz"))
 
         try:
-            executor.run("command -v ffmpeg", timeout=10)
+            executor.run_user("command -v ffmpeg", timeout=10)
             results.append(("ffmpeg", True, "Available"))
         except Exception:
             results.append(("ffmpeg", False,

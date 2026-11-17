@@ -128,9 +128,9 @@ function FullView({ s, w, busy, onClose }) {
   return html`<${Modal} title="Boot menu, full size" onClose=${onClose} xwide cls="mb-dlg mb-fullview" footer=${footer}>
     <div class="mb-fullbox"><${Screen} pv=${pv} tipText="" busy=${busy} openFull=${() => {}} full /></div>
     <div class="row mb-flips" onKeyDown=${flipKeys}>
-      <${Button} size="sm" disabled=${!s.flippers} title=${w.flipper_tip} onClick=${() => call("multiboot.flip", -1)}>◂ Left flipper<//>
+      <${Button} size="sm" disabled=${!s.flippers} title=${w.flipper_tip} onClick=${() => call("multiboot.flip", -1)}>${w.flip_left || "◂ Left flipper"}<//>
       <${Button} size="sm" title=${w.select_tip} onClick=${() => call("multiboot.press_select")}>Select<//>
-      <${Button} size="sm" disabled=${!s.flippers} title=${w.flipper_tip} onClick=${() => call("multiboot.flip", 1)}>Right flipper ▸<//>
+      <${Button} size="sm" disabled=${!s.flippers} title=${w.flipper_tip} onClick=${() => call("multiboot.flip", 1)}>${w.flip_right || "Right flipper ▸"}<//>
     </div>
   <//>`;
 }
@@ -149,9 +149,9 @@ function MenuCard({ s, w, busy }) {
     ${full ? html`<${FullView} s=${s} w=${w} busy=${busy} onClose=${() => setFull(false)} />` : null}
     <div class="row wrap mb-strip">
       <div class="row mb-flips" onKeyDown=${flipKeys}>
-        <${Button} size="sm" disabled=${!s.flippers} title=${w.flipper_tip} onClick=${() => call("multiboot.flip", -1)}>◂ Left flipper<//>
+        <${Button} size="sm" disabled=${!s.flippers} title=${w.flipper_tip} onClick=${() => call("multiboot.flip", -1)}>${w.flip_left || "◂ Left flipper"}<//>
         <${Button} size="sm" title=${w.select_tip} onClick=${() => call("multiboot.press_select")}>Select<//>
-        <${Button} size="sm" disabled=${!s.flippers} title=${w.flipper_tip} onClick=${() => call("multiboot.flip", 1)}>Right flipper ▸<//>
+        <${Button} size="sm" disabled=${!s.flippers} title=${w.flipper_tip} onClick=${() => call("multiboot.flip", 1)}>${w.flip_right || "Right flipper ▸"}<//>
       </div>
       <span class="grow"></span>
       ${silent ? null : html`<div class="row mb-vol" ...${tip(w.volume_tip)}>
@@ -323,7 +323,7 @@ function ImagesCard({ s, w, busy }) {
     { key: "media", label: "Picture", width: "60px", cls: "dim", titleOf: (r) => r.media },
     { key: "music", label: "Sounds", title: "Music · Confirm sound", width: "84px", cls: "dim",
       titleOf: (r) => "Music: " + r.music + " · Confirm: " + r.sound, render: (r) => `${r.music} · ${r.sound}` },
-    { key: "scores", label: "Scores", title: "High scores on the machine", width: "52px", cls: "dim", titleOf: (r) => r.scores_tip,
+    { key: "scores", label: "Scores", title: "Settings and high scores on the machine", width: "84px", cls: "dim", titleOf: (r) => r.scores_tip,
       render: (r) => html`<span class=${r.scores_warn ? "warn-ink" : ""}>${r.scores}${r.modes ? " ★" : ""}</span>` },
     { key: "code", label: "Code", width: "52px", cls: "mono" },
     acts,
@@ -334,7 +334,7 @@ function ImagesCard({ s, w, busy }) {
     { key: "media", label: "Picture", width: "60px", cls: "dim", titleOf: (r) => r.media },
     { key: "music", label: "Music", width: "48px", cls: "dim", titleOf: (r) => r.music },
     { key: "sound", label: "Confirm", width: "56px", cls: "dim", titleOf: (r) => r.sound },
-    { key: "scores", label: "Scores", title: "High scores on the machine", width: "56px", cls: "dim", titleOf: (r) => r.scores_tip,
+    { key: "scores", label: "Scores", title: "Settings and high scores on the machine", width: "84px", cls: "dim", titleOf: (r) => r.scores_tip,
       render: (r) => html`<span class=${r.scores_warn ? "warn-ink" : ""}>${r.scores}${r.modes ? " ★" : ""}</span>` },
     { key: "code", label: "Code", width: "52px", cls: "mono" },
     acts,
@@ -388,7 +388,7 @@ function CardCard({ s, w, busy }) {
         </div>
         <div class="row mb-pathbtns">
           ${w.read_card ? html`<${Button} disabled=${busy} title=${w.from_card_tip} onClick=${() => call("multiboot.from_card")}>From SD card…<//>` : null}
-          <${Button} disabled=${busy} onClick=${() => call("multiboot.browse")}>Browse…<//>
+          <${Button} drop disabled=${busy} onClick=${() => call("multiboot.browse")}>Browse…<//>
           <${Button} kind="ghost" disabled=${busy} title=${w.new_tip} onClick=${() => call("multiboot.new_card")}>${w.new_text || "New card"}<//>
         </div>
       </div>
@@ -429,7 +429,7 @@ function SoundRow({ label, field, value, words, used, playTip }) {
     <div class="row mb-sound">
       <${Field} id=${fid(field)} ns=${NS} k=${field} value=${value} cls="grow" mono
         suffix=${html`<button type="button" class="mb-drop" aria-label=${"Choose the " + noColon(label).toLowerCase()} onClick=${choose}>▾</button>`} />
-      <${Button} onClick=${() => call("multiboot.sound_browse", field)}>Browse…<//>
+      <${Button} drop onClick=${() => call("multiboot.sound_browse", field)}>Browse…<//>
       <${Button} icon="play" title=${playTip} onClick=${() => call("multiboot.play", field)}>Play<//>
     </div>`;
 }
@@ -462,7 +462,7 @@ function EditDialog({ s, w }) {
             ${ed.file_kind ? html`<label class="k" for=${fid(fileKey)}>${ed.file_label}</label>
               <div class="row">
                 <${Field} id=${fid(fileKey)} ns=${NS} k=${fileKey} value=${s[fileKey]} mono cls="grow" disabled=${!ed.file_live} />
-                <${Button} onClick=${() => call("multiboot.edit_browse", ed.file_kind)}>Browse…<//>
+                <${Button} drop onClick=${() => call("multiboot.edit_browse", ed.file_kind)}>Browse…<//>
               </div>` : null}
           </div>
           ${ed.note ? html`<span class="small muted">${ed.note}</span>` : null}
@@ -477,10 +477,14 @@ function EditDialog({ s, w }) {
           </div>
           <span class="small muted">${ed.roll_note}</span>
         <//>` : null}
-        ${ed.scores ? html`<${Box} legend="High scores">
+        ${ed.scores ? html`<${Box} legend="Settings and high scores">
           ${ed.scores_modes ? html`<span class="small">${ed.scores_modes}</span>` : null}
+          <${Check} ns=${NS} k="ed_own_settings" checked=${s.ed_own_settings} label=${ed.settings_label} />
+          ${s.ed_own_settings && (ed.settings_with || []).length > 1 ? html`<${ShareWith} ed=${ed} k="ed_settings_with" value=${s.ed_settings_with} options=${ed.settings_with} />` : null}
           <${Check} ns=${NS} k="ed_own_scores" checked=${s.ed_own_scores} label=${ed.scores_label} />
+          ${s.ed_own_scores && (ed.scores_with || []).length > 1 ? html`<${ShareWith} ed=${ed} k="ed_scores_with" value=${s.ed_scores_with} options=${ed.scores_with} />` : null}
           <span class="small muted">${ed.scores_note}</span>
+          ${(ed.settings_with || []).length > 1 || (ed.scores_with || []).length > 1 ? html`<span class="small muted">${ed.share_note}</span>` : null}
         <//>` : null}
         ${w.sound === false ? null : html`<${Box} legend="Sounds">
           <div class="kv mb-kv2">
@@ -494,6 +498,16 @@ function EditDialog({ s, w }) {
       <${Box} legend="Preview" cls="mb-ed-pv"><${CardPreview} card=${ed.card} /><//>
     </div>
   <//>`;
+}
+
+// PAD-1196: under an own-settings / own-high-scores tick, which other images
+// it shares that store or table with.  The options' values are the names on
+// the card; "No other image" is one of its own.
+function ShareWith({ ed, k, value, options }) {
+  return html`<div class="row mb-indent">
+    <label class="k" style="white-space:nowrap" for=${fid(k)}>${ed.share_label}</label>
+    <${Select} id=${fid(k)} value=${value} options=${options} ns=${NS} k=${k} cls="grow" />
+  </div>`;
 }
 
 // PAD-239: a random card's games, changed where the card is edited.  One
@@ -523,8 +537,8 @@ function Members({ m }) {
       </li>`)}
     </ol>
     <div class="row">
-      <${Button} onClick=${() => call("multiboot.member_add")}>Add files…<//>
-      <${Button} onClick=${() => call("multiboot.member_add_folder")}>Add folder…<//>
+      <${Button} drop onClick=${() => call("multiboot.member_add")}>Add files…<//>
+      <${Button} drop onClick=${() => call("multiboot.member_add_folder")}>Add folder…<//>
     </div>
     <span class="small muted">${m.note}</span>
   <//>`;
@@ -575,7 +589,10 @@ function MenuDialog({ s, w }) {
       <${Check} ns=${NS} k="same_text" checked=${s.same_text} wrap label="Same text size on every card (a long name is not shrunk on its own)" />
       <${Check} ns=${NS} k="counter" checked=${s.counter} wrap label="Count the cards under them (the “<  3 / 7  >” line; five cards or more)" />
       ${w.settings_tile ? html`<${Check} ns=${NS} k="settings_tile" checked=${s.settings_tile} wrap
-        label="End the menu with a SETTINGS card (adjust each game's color correction on the machine; shown for games built with a color profile)" />` : null}
+        label="End the menu with a SETTINGS card (color correction and test pictures on the machine; shown for games built with a color profile)" />` : null}
+      ${w.editions ? html`<${Check} ns=${NS} k="editions" checked=${s.editions} wrap
+        label="No menu: boot the edition the game's EDITION setting names (every image an edition of one game, edition 1 first)"
+        title=${md.editions_tip} />` : null}
       <${Check} ns=${NS} k="footer_on" checked=${s.footer_on} wrap label="Show the instructions under the cards (the line naming the buttons)" />
       <div class="kv mb-kv2">
         <label class="k" for=${fid("footer")}>Instructions:</label>
@@ -609,6 +626,10 @@ function MenuDialog({ s, w }) {
         <label class="k" for=${fid("default")}>Default image:</label>
         <div class="row wrap"><${Field} id=${fid("default")} ns=${NS} k="default" value=${s.default} ...${num} max=${md.default_max} />
           <span class="small muted">highlighted at power-up (the last choice wins once one was made)</span></div>
+        ${md.back_hold_ok !== false && html`
+        <label class="k" for=${fid("back_hold")}>Hold BACK (s):</label>
+        <div class="row wrap"><${Field} id=${fid("back_hold")} ns=${NS} k="back_hold" value=${s.back_hold} ...${num} max=${60} />
+          <span class="small muted">in a game, holding the coin door's BACK (EXIT on some machines) this long restarts into this menu; 0 = off</span></div>`}
       </div>
     <//>
     </div>

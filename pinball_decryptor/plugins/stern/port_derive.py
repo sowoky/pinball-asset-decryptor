@@ -474,6 +474,13 @@ def merge(drafts, refs, tgt, game, version, family):
         for k in parsed[d["ref"]][0]:
             if k not in order:
                 order.append(k)
+    # PAD-714: the lines every draft writes from THIS build's own program (portgen.generated: its game modes' starts,
+    # objects and names, PAD-363) are the build's, not a reference's placement to vote on: the first draft's go in as
+    # they are (they were left out as "no reference names it", so a derived port had none of the game's modes)
+    own = [line for line in ranked[0]["lines"] if not line.startswith("#") and len(line.split(None, 1)) == 2
+           and portgen.generated(*line.split(None, 1))]
+    own_keys = {(line.split()[0], line.split()[1]) for line in own}
+    order = [k for k in order if k not in own_keys]
     lines = {"site": [], "data": [], "scene": []}
     provenance, placed = {}, {}
     for k in order:
@@ -533,6 +540,8 @@ def merge(drafts, refs, tgt, game, version, family):
     same = _same_title(game, pref.game)
     values, shots, callouts, texts, lamps = [], [], [], [], []
     for key, rest in parsed[primary["ref"]][2]:
+        if portgen.generated(key, rest):
+            continue                                 # PAD-714: the build's own, in `own` above
         if key == "value":
             values.append((rest.split()[0], rest))
         elif key == "shot":
@@ -554,7 +563,7 @@ def merge(drafts, refs, tgt, game, version, family):
         mine = _same_title(game, by_ref[d["ref"]].game)
         for key, rest in parsed[d["ref"]][2]:
             n = rest.split()[0] if rest.split() else ""
-            if key != "value" or n in have or n.startswith("shot_mask"):
+            if key != "value" or n in have or n.startswith("shot_mask") or portgen.generated(key, rest):
                 continue
             if not mine and not framework_value(n):
                 left_off.add(n)
@@ -563,6 +572,13 @@ def merge(drafts, refs, tgt, game, version, family):
             have.add(n)
     # the end of ball's bus id and the switch tables are read off THIS build (framework_core), never copied
     values = [(n, r) for n, r in values if not _read_here(n)]
+    if "stock_slot_start" not in have:
+        # PAD-714: the title's own START slot (a mode in a game mode's place counts its starts through it), read off
+        # this build where no reference of the same title gave it
+        slot = portgen.build_start_slot(tgt, game) if getattr(tgt, "b", None) else None
+        if slot is not None:
+            values.append(("stock_slot_start", "stock_slot_start      %d   # PAD-714: read off this build" % slot))
+            have.add("stock_slot_start")
     left_off -= have
     notes = []
     if not same:
@@ -668,6 +684,49 @@ def merge(drafts, refs, tgt, game, version, family):
         body += events
     if lamps:
         body += [""] + lamps
+    cab = portgen.cabinet_draft(tgt)    # PAD-1040: the cabinet's expression lights, off this build's own tables
+    if cab:
+        body += [""] + cab
+    if own:
+        body += ["", "# ---- the game's own modes and rules (PAD-363, game_mode_blocks.py): read off this build's "
+                     "program ----"] + own
+    from . import portchallenge
+    b = getattr(tgt, "b", None)
+    challenges, _why = portchallenge.find(b) if b else ([], [])   # PAD-615: read off the build's own code
+    # PAD-619: the finder also writes the flag bitmap's lines, which the body may already carry: never twice
+    challenges = [line for line in portchallenge.missing_from(challenges, "\n".join(body))
+                  if not line.startswith("#")] if challenges else []
+    if challenges:
+        body += ["", "# ---- the game's Challenge list (PAD-615, portchallenge.py): each challenge's own start on the "
+                     "ball's start event ----"] + challenges
+    # PAD-641 round 2: the game's end-of-game high scores on every build (the attract flipper sounds keep quiet while a
+    # high score's initials are entered)
+    scores = [line for line in portchallenge.missing_from(portchallenge.game_scores(b), "\n".join(body))
+              if not line.startswith("#")] if b else []
+    if scores:
+        body += ["", "# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials "
+                     "are in) ----"] + scores
+    # PAD-782: the attract mode's page table (an owner's attract items play between its pages)
+    from . import portattract
+    attract = [line for line in (portattract.lines(b) + portattract.element_lines(b) + portattract.show_lines(b))
+               if not line.startswith("#")
+               and line.split()[:2] not in [l.split()[:2] for l in body if l.strip()]] if b else []
+    if attract:
+        body += ["", "# ---- PAD-782: the attract mode's page table (portattract.py) ----"] + attract
+    # PAD-1017: co-op play - the framework's player change, add player and player bytes
+    from . import portcoop
+    coop = [line for line in portcoop.lines(b)[0]
+            if line.split()[:2] not in [l.split()[:2] for l in body if l.strip()]] if b else []
+    if coop:
+        body += ["", "# ---- PAD-1017: co-op play (portcoop.py) ----"] + coop
+    # PAD-710: the game's own mode framework, read off this build's program (a mode in the place of one of the game's
+    # modes counts as it)
+    from . import mode_framework
+    framework = (mode_framework.lines_for(b, "\n".join(body))
+                 + mode_framework.plain_lines_for(b, "\n".join(body))) if b else []   # plain-C: the modes' books
+    framework += mode_framework.challenge_place_lines("\n".join(body + framework))     # challenges that are its modes
+    if framework:
+        body += [""] + framework
     return body, provenance, missing, notes
 
 
@@ -695,8 +754,9 @@ def framework_value(name):
 
 def _read_here(name):
     """Values a port gets from its own build only: the end of ball's bus id (0x34 on generation B is
-    the tick's exit on A) and the switch tables (portswitch)."""
-    return name == "ball_end_event" or name.startswith("switch_")
+    the tick's exit on A), the switch tables (portswitch) and, PAD-715, a plain-C title's books of its modes (audit
+    and flag ids: each build's own name tables, mode_framework.plain_books)."""
+    return name == "ball_end_event" or name.startswith(("switch_", "place_audit_", "place_flag_"))
 
 
 def _numbers(values):
@@ -792,18 +852,37 @@ def framework_core(tgt, lines, placed, provenance):
     if ("site", "shot_dispatch") not in placed:
         src = portswitch.switch_source(tgt)
         out["notes"] += src["notes"]
-        if src["mapped"] and portgen.is_hooked_ok(tgt, int(src["sites"][1].split()[2], 0)):
+        if not src["mapped"]:
+            src = None
+    else:
+        # PAD-645: the shots come from the dispatch; the drain is there for the flipper buttons'
+        # sounds in attract (no `switch` lines)
+        src = portswitch.drain_source(tgt)
+    if src is not None:
+        own = {name: int(next(l for l in src["sites"] if l.startswith("site %s " % name)).split()[2], 0)
+               for name in ("switch_edge", "switch_drain")}
+        if any(placed.get(("site", n)) not in (None, va) for n, va in own.items()):
+            # the references placed another function there: this build's own drain is the one
+            _drop_placed(lines, placed, provenance, "site", tuple(own))
+            lines["site"] = [l for l in lines["site"] if not re.match(r"^# site (switch_edge|switch_drain) ", l)]
+        if ("site", "switch_edge") not in placed:
             lines["site"] += src["sites"]
-            for name, va in src["data"].items():
-                if ("data", name) not in placed:
-                    _drop_not_placed(lines, "data", name)
-                    lines["data"].append(_entry_line("data", name, va, tgt))
-                    placed[("data", name)] = va
-            for name in ("switch_edge", "switch_drain"):
-                va = int(next(l for l in src["sites"] if l.startswith("site %s " % name)).split()[2], 0)
+            for name, va in own.items():
                 placed[("site", name)] = va
                 provenance["site %s" % name] = dict(value=_fmt(va), how=src["how"], refs=[])
-            out["values"] += src["values"]
+        for name, va in src["data"].items():
+            if ("data", name) not in placed:
+                _drop_not_placed(lines, "data", name)
+                lines["data"].append(_entry_line("data", name, va, tgt))
+                placed[("data", name)] = va
+        # PAD-645: the drain's values are this build's own, read off its code, also where the
+        # references placed its sites (they carry no switch_* values a merge copies)
+        out["values"] += src["values"]
+        if not src.get("mapped"):
+            # the drain is not this port's shots (the dispatch is): only the attract sounds use it (the runtime's
+            # switches_arm leaves the switch_hit sites the shots)
+            out["values"].append(("switch_edge_shots", 0))
+        if src.get("mapped"):
             out["mapped"] = src["mapped"]
             out["switch_lines"] = portswitch.switch_lines(src["mapped"])
             out["example"] = portswitch.example_start_shot(src["mapped"])
@@ -972,6 +1051,8 @@ def ensure_port(elf, game, version, progress=None, cancel=None, workers=None):
     ver = port_version(version)
     label = _label(game, ver)
     say(0.0, "Looking for a port shipped for this build")
+    if bytes(elf[4:5]) == b"\x02":
+        return _spike3_port(elf, game, label, say)
     try:
         tgt = portgen.Elf(elf, "%s %s" % (game, version))
     except portgen.PortgenError as e:
@@ -988,6 +1069,32 @@ def ensure_port(elf, game, version, progress=None, cancel=None, workers=None):
         say(1.0, "")
         return PortResult(missing=("a port that could be derived",),
                           notes=("The port for %s could not be derived: %s: %s" % (label, type(e).__name__, e),))
+
+
+def _spike3_port(elf, game, label, say):
+    """PAD-1272: a Spike 3 game program (64-bit ARM): the listed port of its game whose every
+    site is this program's own (``mode_write.find_port``'s test), never one derived here -
+    derivation reads Spike 2's 32-bit programs only. PAD-1277: only the Spike 3 ports
+    (``ports/spike3``, :func:`.mode_runtime.port_arch`) are tried, so a Spike 2 port of the
+    same game folder and build is never even read."""
+    from . import mode_runtime as MR, mode_write as MW
+    for g, _v, path in MR.port_paths():
+        if g != game or MR.port_arch(path) != "a64":   # PAD-1277: the Spike 3 ports only
+            continue
+        try:
+            sites = MW.port_sites(path)
+            if sites and not MW.site_mismatches(path, bytes(elf)):
+                say(1.0, "")
+                shipped = os.path.normcase(os.path.dirname(os.path.abspath(path))) == \
+                    os.path.normcase(os.path.abspath(MR.spike3_ports_dir()))
+                return PortResult(path=path, origin="shipped" if shipped else "derived",
+                                  proven=not MW.port_unproven(path))
+        except (OSError, MW.ModeWriteError):
+            continue
+    say(1.0, "")
+    return PortResult(missing=("no port for this build",),   # mode_project's own words for it
+                      notes=("The app does not know yet how to run modes on %s (a Spike 3 "
+                             "build): no port for it ships." % label,))
 
 
 def _ensure(elf, tgt, game, version, say, check, cancel, workers, t0):

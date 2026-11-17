@@ -8,7 +8,7 @@ import tarfile
 
 from ...core import clonezilla
 from ...core.checksums import (CHECKSUMS_FILE, generate_checksums,
-                               md5_file, read_checksums)
+                               md5_file, note_extract_files, read_checksums)
 from ...core.executor import CommandError, create_executor
 from ...core.pipeline_base import BasePipeline, PipelineError
 from ...core.tar_utils import format_size, safe_member, truncation_hint
@@ -113,7 +113,7 @@ class IsoExtractPipeline(BasePipeline):
             raise PipelineError("Detect",
                 f"Cannot identify game from ISO: "
                 f"{os.path.basename(self.iso_path)}\n\n"
-                f"Recognised filename hints: alien40, queen.")
+                f"Recognized filename hints: alien40, queen.")
         info = GAME_DB[game_key]
         iso_cfg = info.get("iso") or {}
         self._log(f"Game detected: {info['display']}", "success")
@@ -362,6 +362,7 @@ def apply_delta(assets_folder, delta_upd_path,
     overwritten = 0
     added = 0
     total = 0
+    wrote = []
 
     with tarfile.open(delta_upd_path, "r:gz") as tar:
         members = tar.getmembers()
@@ -378,6 +379,7 @@ def apply_delta(assets_folder, delta_upd_path,
             existed = os.path.lexists(target)
             tar.extract(safe, assets_folder, set_attrs=True)
             if safe.isfile():
+                wrote.append(safe.name)
                 if existed:
                     overwritten += 1
                 else:
@@ -385,6 +387,9 @@ def apply_delta(assets_folder, delta_upd_path,
             if progress_cb and (i % 25 == 0 or i == total - 1):
                 progress_cb(i + 1, total, safe.name)
 
+    # card content the pristine-base baseline does not list: the Replace
+    # tabs must keep listing a folder only the delta brings (PAD-1193)
+    note_extract_files(assets_folder, wrote)
     if log_cb:
         log_cb(f"Delta applied: {added} new file(s), "
                f"{overwritten} overwritten.", "success")

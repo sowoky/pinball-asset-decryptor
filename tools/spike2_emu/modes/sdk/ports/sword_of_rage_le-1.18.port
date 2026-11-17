@@ -200,6 +200,18 @@ site surface_find     0x003d9e98 0xe92d4070 0xe24dd008
 site surface_set_video 0x003d172c 0xe5d03238 0xe92d4ff0
 site surface_play     0x003ceecc 0xe5d03238 0xe92d43f0
 site surface_stop     0x003ce9d0 0xe5d03238 0xe92d40f0
+# PAD-725: the surface's own seek, length and position (PAD-530's, from Bond 1.06): a mode's clip the game's own
+# clip took the surface from comes back where it would be by then. Placed by the James Bond LE 1.06 recipe at
+# its distances from surface_play (+0x1bc / -0x1274 / -0x360: the older player), each proven by its call: the
+# player's virtual seek (+0x20), duration (+0x28) and position (+0x24), whose entries call gst_element_seek /
+# query_duration / query_position.
+site surface_seek     0x003cf088 0xe92d43f0 0xe1a07003
+site surface_duration 0x003cdc58 0xe5d03238 0xe92d40f0
+site surface_position 0x003ceb6c 0xe5d03238 0xe92d40f0
+# PAD-725: the backdrop on the bank's surface, as Bond's (PAD-521): a mode's loop plays there again whenever it
+# is idle, and a clip the game loops there gets one pass before the loop takes it back. Emulator-proven on the
+# newest build of every title with a clip v2 bank, 2026-10-25.
+value backdrop_surface 1
 value surface_playing       2
 value scene_player_scene    0x10
 
@@ -522,3 +534,54 @@ site block_rule_12         0x000ad3d8 0xe92d4ff0 0xe24dd024  # crule_u_turn_comb
 text block_rule_name_12    U Turn Combos
 site block_rule_13         0x000b0608 0xe92d4ff8 0xe1c049d0  # crule_wheel_modes::v[23]
 text block_rule_name_13    Wheel Modes
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+data  game_flags          0x00600034
+value game_flags_at       4
+data  game_flag_count     0x0043fa48
+value challenge_on_flag   16
+value challenge_flag_0  62
+text  challenge_name_0  Retro
+value challenge_flag_1  63
+text  challenge_name_1  Ransom
+site  challenge_balls     0x00239d10 0xe92d4030 0xe1a05000
+site  challenge_balls_2   0x002925e0 0xe92d4038 0xe1a04000
+site  challenge_extra_ball 0x00249964 0xe3053d1c 0xe340306a
+site  challenge_menu      0x00043018 0xe1a05000 0xe3150080
+site  challenge_menu_pick 0x00043160 0xe2433001 0xe3530003
+value challenge_menu_list_at   176
+value challenge_menu_count_at  20
+value challenge_menu_cap       5
+value challenge_menu_entry     16
+value challenge_menu_kind      3
+value challenge_menu_slot      0
+value challenge_menu_caption   1901
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x0011b768 0xe30520a2 0xe340206a
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x00117754 0xe92d4010 0xe30e46f4
+value ball_launch_flag       11
+value ball_launch_wait_flag  12
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x00188734 0xe92d4ff0 0xe24dd0c4
+
+# PAD-710: the game's own mode framework (mode_framework.py, from this build's program): what one of its
+# modes writes as it starts and stops, so a mode of ours in one's place counts as it
+data  mode_player_at         0x005b21e8
+value mode_slot_stop         34
+value mode_stopped_at        0x5f
+value mode_starts_at         0x70
+value mode_wins_at           0x8c
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x00404a34 0xe5d13000 0xe3530008
+data sw_listen             0x005ff5b8
+data sw_boards             0x006aeba4
+site coil_used             0x0027ef90 0xe92d43f8 0xe300850c

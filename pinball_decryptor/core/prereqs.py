@@ -113,7 +113,10 @@ def check_prerequisite(prereq: Prerequisite) -> PrerequisiteResult:
     hint_override = ""
     try:
         if prereq.probe.startswith("python:"):
-            ok, msg = _probe_python_import(prereq.probe.split(":", 1)[1])
+            module = prereq.probe.split(":", 1)[1]
+            ok, msg = _probe_python_import(module)
+            if ok and module in CPP_RUNTIME_PROBES and not cpp_runtime_found():
+                ok, msg, hint_override = False, CPP_RUNTIME_MISSING, CPP_RUNTIME_HINT
         elif prereq.where == "host":
             ok, msg = _probe_host(prereq.probe)
         elif prereq.where == "wsl":
@@ -157,19 +160,89 @@ def check_prerequisite(prereq: Prerequisite) -> PrerequisiteResult:
     )
 
 
-def _probe_python_import(module_name: str) -> Tuple[bool, str]:
-    """Try to ``import`` *module_name* in the current process.
+#: Modules a ``python:`` probe really imports: native extensions that load
+#: a library at import, where "installed" is not yet "loads" (a wheel for
+#: another CPU, a missing runtime).  Everything else is answered from the
+#: file system (PAD-797).
+IMPORT_PROBES = frozenset({"unicorn", "capstone"})
+
+
+#: Modules answered from the file system whose native code needs the Visual
+#: C++ runtime on Windows (ctranslate2 under faster_whisper imports
+#: MSVCP140.dll).  Installed is not "loads" without it: a clean PC read
+#: faster-whisper green, then Auto-name died loading ctranslate2.dll
+#: (PAD-821).  Checked by file, not by import, for PAD-797's speed.
+CPP_RUNTIME_PROBES = frozenset({"faster_whisper"})
+
+CPP_RUNTIME_MISSING = ("installed, but the Visual C++ runtime it needs "
+                       "(MSVCP140.dll) is missing")
+CPP_RUNTIME_HINT = ("Reinstall Pinball Asset Decryptor (its installer ships "
+                    "the Visual C++ runtime), or install Microsoft's Visual "
+                    "C++ 2015-2022 Redistributable (x64).")
+
+
+def cpp_runtime_found() -> bool:
+    """True when MSVCP140.dll is where a native extension's load looks for
+    it: beside the running python.exe (the app's own bundle ships it) or in
+    System32 (the Visual C++ Redistributable).  Always True off Windows."""
+    if sys.platform != "win32":
+        return True
+    system32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                            "System32")
+    return any(os.path.isfile(os.path.join(d, "msvcp140.dll"))
+               for d in (os.path.dirname(sys.executable), system32))
+
+
+def _probe_python_import(module_name: str, really_import=None) -> Tuple[bool, str]:
+    """Is *module_name* installed for the current process?
 
     No subprocess (and no PATH lookup) -- always uses ``sys.executable``'s
     site-packages, which is exactly what the app will use at runtime.
+
+    The module is NOT imported unless it is in :data:`IMPORT_PROBES`
+    (PAD-797): the probes run for every manufacturer switch, and importing
+    faster_whisper to see whether it exists cost 150 ms warm, a second or
+    more cold.  ``find_spec`` answers from the file system, and the version
+    comes from the distribution's metadata, or from a module already
+    imported, or reads "available".
     """
-    import importlib
+    if really_import is None:
+        really_import = module_name in IMPORT_PROBES
+    if really_import:
+        import importlib
+        try:
+            mod = importlib.import_module(module_name)
+        except ImportError as e:
+            return False, str(e)
+        version = getattr(mod, "__version__", None) or _module_version(module_name)
+        return True, f"{module_name} {version}"
+    import importlib.util
     try:
-        mod = importlib.import_module(module_name)
-    except ImportError as e:
+        spec = importlib.util.find_spec(module_name)
+    except (ImportError, ValueError) as e:
         return False, str(e)
-    version = getattr(mod, "__version__", "available")
-    return True, f"{module_name} {version}"
+    if spec is None:
+        return False, f"No module named '{module_name}'"
+    return True, f"{module_name} {_module_version(module_name)}"
+
+
+def _module_version(module_name: str) -> str:
+    """A module's version without importing it: the distribution's
+    metadata (the top-level package's name, dashes and underscores alike),
+    else ``__version__`` of a module that is already imported, else
+    "available"."""
+    from importlib import metadata
+    top = module_name.split(".", 1)[0]
+    for dist in (top, top.replace("_", "-")):
+        try:
+            return metadata.version(dist)
+        except metadata.PackageNotFoundError:
+            continue
+        except Exception:                                 # noqa: BLE001
+            break
+    mod = sys.modules.get(module_name)
+    version = getattr(mod, "__version__", None) if mod is not None else None
+    return str(version) if version else "available"
 
 
 def check_prerequisites(prereqs) -> List[PrerequisiteResult]:
@@ -859,6 +932,22 @@ def _diagnose_wsl_unusable() -> Tuple[str, str]:
     status = _wsl_status_ok()
     if status is None:
         return _diagnose_wsl_silent()
+    # PAD-1103: where this build carries the app's own Linux, Install Missing
+    # installs THAT (core.prereq_launch.pick_route), not an Ubuntu of one
+    # exact release with the tools apt-installed into it - so the hint says
+    # what the button does now.  available() reads a constant: no wsl.exe.
+    if runtime.available() and sys.platform == "win32":
+        if status:
+            return ("WSL is enabled, but no Linux distro is installed yet — "
+                    "normal right after the post-install restart; one step "
+                    "remains.",
+                    "Click 'Install Missing' above the tabs — it installs "
+                    "the app's own Linux, with every tool already in it (no "
+                    "Ubuntu needed). No restart is needed this time.")
+        return ("WSL is not installed on this machine.",
+                "Click 'Install Missing' above the tabs — it sets up WSL2 "
+                "and asks for one Windows restart. After the restart, click "
+                "it again to install the app's own Linux.")
     if status:
         return ("WSL is enabled, but no Linux distro is installed yet — "
                 "normal right after the post-install restart; one step "
@@ -915,7 +1004,9 @@ def _diagnose_wsl_silent() -> Tuple[str, str]:
                f"disk grows on it: WSL freezes when that drive fills up, so "
                f"that is the likely cause, not a missing install.")
         cure = (f"Free some space on {drive} first: WSL's disk cannot grow "
-                f"without it. Then: " + cure)
+                f"without it. Then: " + cure + " Once WSL answers again, "
+                f"Settings > Manage disk space > Move to another drive puts "
+                f"its disks on a roomier drive.")
     else:
         why = (" That is WSL stuck, which usually follows a hang or a crash, "
                "not a missing install.")

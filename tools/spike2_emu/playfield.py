@@ -137,6 +137,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ballmodel
+import bootprog
+import cablights
+import clipwatch
+import soundwatch
 import coilact
 import coilmap
 import devicexy
@@ -228,6 +232,29 @@ LED_PATH = os.path.join(padpath.dump() or "", "padled")
 #: reopen-per-poll rule as LED_PATH - a held handle reads a frozen cache over
 #: \\wsl.localhost.
 LCD_PATH = os.path.join(padpath.dump() or "", "padlcd")
+
+#: PAD-498: the boards this run does not have because the Emulate tab's Topper
+#: box is off - watch.sh writes the title's own topper nodes here ("12,14" on
+#: Venom) and removes the file when the topper is on.
+TOPPER_OFF_PATH = os.path.join(padpath.dump() or "", "topper_off")
+
+
+def topper_off_nodes():
+    """{node} of the topper boards the run left off the bus, else empty.
+
+    "Venom: node 12 present with Topper toggle off" (peanuts, 2026-10-10):
+    a cabinet without its topper has no topper boards, so this window lists
+    neither their lights nor their switches (Foo Fighters' TOPPER HOME 1/2
+    are on its node 12). Read fresh each time: the file is a few bytes, and
+    it belongs to whichever run is up."""
+    if not padpath.dump():
+        return set()
+    try:
+        with open(TOPPER_OFF_PATH) as f:
+            return {int(n) for n in re.split(r"[,\s]+", f.read())
+                    if n.isdigit()}
+    except OSError:
+        return set()
 
 #: The LCD clip decoder. PIL, not Tk, for two measured reasons: Tk's
 #: "gif -index N" has no frame cursor, so every call re-parsed the clip from
@@ -397,6 +424,10 @@ PADLED_READ = WIDE_SKIPPED_OFF + 4
 #: Version 5 appends each coil's drive (coilmap.drive); read through it so the
 #: shaker panel (PAD-424) sees what the cabinet's motor is driven at.
 PADLED_DRIVE_READ = coilmap.DRIVE_READ
+#: Version 6 appends a strip board's channels past its first 96 (PAD-500): the
+#: blades' right side and most of every topper. One read takes all of it - the
+#: cost is the round trip, not the bytes (see the module header).
+PADLED_HI_READ = coilmap.HI_READ
 
 #: How long a coil marker stays lit after its fire counter moves. A coil pulse
 #: is ~30 ms and a 50 ms poll would show it for one frame or miss it; this is a
@@ -812,6 +843,29 @@ def wsl_run(script, *args):
     return r
 
 
+def _as_root(cmd):
+    """*cmd* through ``sudo -n`` where the machine has said that is how this
+    window reaches root, else as it is.
+
+    The Mac's emulator box (PAD-835) sets PAD_STATE_SUDO=1 and lets its
+    ``pad`` user, which this window runs as, run the three save-state scripts
+    as root without a password (docker/Dockerfile's sudoers rule). The rule
+    names ``/bin/bash``, so that is the path asked for. ``-n``: a password
+    prompt would be a hang with nobody to answer it.
+
+    A Linux desktop or the Docker image (PAD-871) sets it too, where sudo
+    asks no password for anything. Its env_reset drops PAD_SLOT, and the
+    scripts find the guest among their slot's processes, so a run on a rig
+    other than 0 hands the slot over through ``env`` - only there: the box
+    runs on rig 0, and its rule names bash alone.
+    """
+    if (os.environ.get("PAD_STATE_SUDO") == "1" and hasattr(os, "geteuid")
+            and os.geteuid() != 0):
+        slot = ["env", "PAD_SLOT=%d" % padpath.slot()] if padpath.slot()             else []
+        return ["sudo", "-n"] + slot + ["/bin/bash"] + cmd[1:]
+    return cmd
+
+
 def state_run(script, slot="quicksave", label=None):
     """Run savegame.sh / loadgame.sh, the item 13 save-state wrappers.
 
@@ -835,7 +889,7 @@ def state_run(script, slot="quicksave", label=None):
     else:
         # The native-Linux path: run it plainly; without root the script's own
         # "needs root" line lands in the status bar, which is the honest hint.
-        cmd = ["bash", os.path.join(HERE, script), slot] + extra
+        cmd = _as_root(["bash", os.path.join(HERE, script), slot] + extra)
     try:
         return subprocess.run(cmd, capture_output=True, timeout=240,
                               creationflags=_CREATE_NO_WINDOW)
@@ -864,6 +918,10 @@ def _rows(path, at_least):
 #: the literal "playfield" was never a safe filter.
 DEV_ROWS = devicexy.read_table(os.path.join(TDIR or "", "device_xy.txt"))
 LAYOUT_IMAGE = devicexy.layout_image(DEV_ROWS)
+#: PAD-702: the stems this title spells "LEFT POP BUMPER R" (Rush), which
+#: split_channel() takes as RGB lights
+SPACED_RGB = cablights.spaced_stems(r["name"] for r in DEV_ROWS
+                                    if r["kind"] == "led")
 
 #: THIS TITLE'S device-table group -> bus node map, derived (item 53), with
 #: godzilla's old constant as the last rung of coilmap.group_node()'s ladder.
@@ -881,6 +939,181 @@ LAYOUT_IMAGE = devicexy.layout_image(DEV_ROWS)
 #: tables are read once at import for the same reason they always were.
 GROUP_NODE = coilmap.group_node_for(
     os.path.join(TDIR or "", "device_xy.txt"), dev_rows=DEV_ROWS)
+
+
+def load_boards():
+    """{node: {type, group, name}} - the title's node directory with each
+    board's place and name (nbdir v2, PAD-500), which is what places the
+    cabinet's own lights (cablights.py). Read when a view is built, like the
+    switch table: the run writes it at its start."""
+    return cablights.boards(os.path.join(TDIR or "", "node_ident.txt"))
+
+
+def expression_on():
+    """The window's "Expression lights" tick box (PAD-500), kept in its own
+    state file beside its position so it survives the run - the page itself
+    runs in a private WebView whose storage does not."""
+    return load_state().get("expression_lights", True) is not False
+
+
+def cab_panel_open():
+    """Whether the CABINET LIGHTS box is unfolded (PAD-532). In the state file
+    like the tick box inside it, because the page's own storage is private to
+    one run; open until it is first folded."""
+    return load_state().get("cab_panel_open", True) is not False
+
+
+#: PAD-628: how the playfield picture is shown - "xray" (the Modes tab's
+#: look: the drawing inverted to light lines on dark, the lights glowing on it)
+#: or "drawing" (the game's test-menu drawing as it ships, black on white)
+ART_LOOKS = ("xray", "drawing")
+
+
+def art_look():
+    """The picture's look (PAD-628), X-ray until it is first switched; kept in
+    the state file like the tick boxes, the page's own storage being private
+    to one run."""
+    look = load_state().get("art_look")
+    return look if look in ART_LOOKS else ART_LOOKS[0]
+
+
+#: PAD-668: how inserts take a mode's colours - "real" (as the machine: a
+#: single-colour insert glows in its own colour, from INSERT COLOURS, else
+#: white) or "rgb" (as if every insert were RGB: a single-colour insert a mode
+#: holds is drawn in the colour the mode painted, PAD-658's view)
+INSERT_LOOKS = ("real", "rgb")
+
+
+def insert_look():
+    """The picture's Real LEDs / All RGB switch (PAD-668), Real LEDs until it
+    is first switched; kept in the state file like the X-ray switch."""
+    look = load_state().get("insert_look")
+    return look if look in INSERT_LOOKS else INSERT_LOOKS[0]
+
+
+def tinted(vals, F, tints):
+    """A single-colour fixture's values as the colour a MODE painted it, else
+    ``vals`` as they are - the All RGB look (PAD-668; PAD-658 drew this
+    always). The hue from the mode (coilmap.paint_tints, padled's paint
+    plane), the brightness - and so the timing - from what the game actually
+    sent the board."""
+    if not tints or set(vals) != {"W"}:
+        return vals
+    tint = tints.get(F["channels"]["W"])
+    v = vals.get("W") or 0
+    if not tint or not v:
+        return vals
+    m = max(tint)
+    return {c: t * v // m for c, t in zip("RGB", tint)}
+
+
+#: PAD-668: a single-colour insert's colour until the user sets one: white,
+#: "colour not known" (see fixture_color)
+LENS_DEFAULT = (255, 255, 255)
+
+
+def _hex_rgb(s):
+    """'#rrggbb' -> (r, g, b), or None for anything else"""
+    s = str(s or "")
+    if len(s) == 7 and s[0] == "#":
+        try:
+            return tuple(int(s[i:i + 2], 16) for i in (1, 3, 5))
+        except ValueError:
+            return None
+    return None
+
+
+def lens_colours(title=None):
+    """{insert name: (r, g, b)} - the colours the user gave this title's
+    single-colour inserts (PAD-668), from the state file's "lens_colours"
+    {title: {name: "#rrggbb"}}. By NAME, so a table survives a new build of
+    the title; by title, because LE and Pro need not share their lenses."""
+    got = (load_state().get("lens_colours") or {}).get(title or GAME or "") or {}
+    out = {}
+    for name, h in got.items():
+        rgb = _hex_rgb(h)
+        if rgb:
+            out[name] = rgb
+    return out
+
+
+def save_lens_colour(name, colour, title=None):
+    """Set (``colour`` '#rrggbb') or clear (None) one insert's colour in the
+    state file; returns the title's table as lens_colours() reads it."""
+    st = load_state()
+    table = st.setdefault("lens_colours", {}).setdefault(title or GAME or "", {})
+    rgb = _hex_rgb(colour)
+    if rgb:
+        table[name] = "#%02x%02x%02x" % rgb
+    else:
+        table.pop(name, None)
+    with open(STATE, "w") as f:
+        json.dump(st, f, indent=1)
+    global _LENS
+    _LENS = None
+    return lens_colours(title)
+
+
+_LENS = None
+_STATE_SEEN = [None, 0.0]       # the state file's mtime when last read, the time it was last looked at
+
+
+def lens_of(name):
+    """One insert's colour from the user's table (read once, re-read after a
+    save or when the file changes - state_changed), or None for the default."""
+    global _LENS
+    if _LENS is None:
+        _LENS = lens_colours()
+    return _LENS.get(name)
+
+
+def own_lens(name):
+    """The colour a single-colour insert glows in (r, g, b): the user's
+    (lens_of), else the one its NAME says (PAD-1144: Star Wars 2025's "TOP
+    GI-BLU (x10)" - cablights.named_colour), else None for white."""
+    return lens_of(name) or cablights.named_colour(name)
+
+
+def _hex(rgb):
+    return "#%02x%02x%02x" % rgb if rgb else ""
+
+
+def state_changed(every=1.0):
+    """True when the state file changed since it was last looked at - at most
+    once every ``every`` s. The Modes tab's Light shows writes the same
+    INSERT COLOURS table and Real LEDs / All RGB switch (PAD-668:
+    pinball_decryptor/plugins/stern/insert_colours.py), so a colour set there
+    reaches an open window within a second. Drops the table's cache."""
+    global _LENS
+    now = time.monotonic()
+    if now - _STATE_SEEN[1] < every:
+        return False
+    _STATE_SEEN[1] = now
+    try:
+        mt = os.stat(STATE).st_mtime
+    except OSError:
+        mt = None
+    if mt == _STATE_SEEN[0]:
+        return False
+    first = _STATE_SEEN[0] is None and mt is not None and _LENS is None
+    _STATE_SEEN[0] = mt
+    _LENS = None
+    return not first
+
+
+def cabinet_names(boards=None, expression=True):
+    """{(node, channel): name} for the cabinet's own lights (cablights.py),
+    which GROUP_NODE has no node for - so the swatch grid can name a blade or a
+    speaker pixel instead of showing its wire address."""
+    secs, _left = cablights.sections(
+        DEV_ROWS, GROUP_NODE, load_boards() if boards is None else boards,
+        expression=expression)
+    out = {}
+    for S in secs:
+        for P in S["pixels"]:
+            for chan, key in P["channels"].items():
+                out[key] = P["name"] if chan == "W" else "%s-%s" % (P["name"], chan)
+    return out
 
 
 def layout_rows(kind):
@@ -925,6 +1158,45 @@ def load_switches():
     return sorted(rows, key=lambda r: r["id"])
 
 
+def panel_switch_rows():
+    """The switches the title draws on its BACK PANEL picture, not the
+    playfield (PAD-1179), in the device table's order.
+
+    Iron Maiden's bullseye behind the centre ramp - BULLS EYE, INNER RING,
+    OUTER RING - is on the picture named `backpanel`, and so are Star Wars
+    LE's accelerator optos and Stranger Things LE's back-panel lock; King
+    Kong LE's TRAIN ENTER OPTO is on its own back-panel wireframe. load_switches()
+    keeps only the layout image, so none of them had anything to click."""
+    if not LAYOUT_IMAGE:
+        return []
+    return [r for r in DEV_ROWS
+            if r["kind"] == "switch" and r["image"] != LAYOUT_IMAGE
+            and cablights.is_backpanel_image(r["image"])]
+
+
+def load_panel_switches(switch_list=None):
+    """panel_switch_rows() joined to the live switch ids on the NAME, as
+    load_switches() derives a playfield one: [{id, node, bit, name}, ...].
+    A row the running game's table does not name is left out (it cannot be
+    pressed), and so is a switch the playfield already draws."""
+    rows = panel_switch_rows()
+    if not rows:
+        return []
+    if switch_list is None:
+        switch_list = load_switch_list()
+    live = {r["name"].strip().upper(): r for r in switch_list
+            if r["name"] and r["name"] != "?"}
+    out, seen = [], set()
+    for r in rows:
+        hit = live.get(r["name"].strip().upper())
+        if hit is None or hit["id"] in seen:
+            continue
+        seen.add(hit["id"])
+        out.append(dict(id=hit["id"], node=hit["node"], bit=hit["bit"],
+                        name=r["name"]))
+    return out
+
+
 def load_leds():
     """The layout's LEDs: name, position, and the (node, index) on the wire.
 
@@ -947,7 +1219,14 @@ def load_leds():
     on that title is a playfield board.
     """
     out = []
+    boards = load_boards()
     for r in layout_rows("led"):
+        # PAD-500: the cabinet's own lights are not inserts. John Wick, King
+        # Kong and Metallica put the expression-lighting blades on the
+        # playfield picture, down its two edges, where they were drawn as 96
+        # inserts that never lit; they are drawn in the cabinet column now.
+        if cablights.role_of(r, GROUP_NODE, boards):
+            continue
         out.append(dict(node=GROUP_NODE.get(r["group"]), index=r["index"],
                         x=r["x"], y=r["y"], name=r["name"], group=r["group"]))
     return out
@@ -975,6 +1254,11 @@ def load_led_names():
         node = GROUP_NODE.get(r["group"])
         if node is not None:
             out[(node, r["index"])] = r["name"]
+    # PAD-500: and the cabinet's own lights, which only the node directory
+    # places - Rush's node 2 block reads EXPRESSIVE LIGHTING L 1 rather than
+    # 2.0, and its node 7 SPEAKER 1
+    for key, name in cabinet_names().items():
+        out.setdefault(key, name)
     return out
 
 
@@ -989,10 +1273,12 @@ SWITCH_POLL_S = 2.0
 
 
 def split_channel(name):
-    """('SHIELD LEFT', 'R') for 'SHIELD LEFT-R'; (name, 'W') for a plain insert."""
-    if len(name) > 2 and name[-2] == "-" and name[-1] in "RGB":
-        return name[:-2].rstrip(), name[-1]
-    return name, "W"
+    """('SHIELD LEFT', 'R') for 'SHIELD LEFT-R'; (name, 'W') for a plain insert.
+
+    PAD-702: the cabinet column's reading, so every spelling the tables use
+    joins - Venom's topper is "TOPPER BIKE - R", and read only as "-R" its 29
+    lights were 87 white cells. cablights.split_channel lists them."""
+    return cablights.split_channel(name, SPACED_RGB)
 
 
 def group_fixtures(leds):
@@ -1014,6 +1300,11 @@ def group_fixtures(leds):
             f = fixtures[stem] = dict(name=stem, channels={}, xs=[], ys=[],
                                       group=L.get("group"))
             order.append(f)
+        elif chan in f["channels"]:
+            # PAD-702: Stern's G, R, G typo for G, R, B
+            chan = cablights.repeated_channel(
+                f["channels"], chan, L["index"],
+                max(i for _n, i in f["channels"].values())) or chan
         f["channels"][chan] = (L["node"], L["index"])
         f["xs"].append(L["x"])
         f["ys"].append(L["y"])
@@ -1024,8 +1315,10 @@ def group_fixtures(leds):
     return order
 
 
-def fixture_color(vals):
+def fixture_color(vals, lens=None):
     """(r, g, b), level for a fixture's channel values, or (None, 0) when off.
+    ``lens``: a single-colour insert's colour (r, g, b) from the user's table
+    (lens_colours), None for the default.
 
     TWO ANSWERS, NOT ONE, and the split is the whole point. The COLOUR is
     brightness-lifted hue-preservingly (sqrt, close enough to display gamma)
@@ -1037,15 +1330,23 @@ def fixture_color(vals):
     brightness shown by transparency AND size, and folding brightness into
     the colour is exactly what makes both of those impossible.
 
-    Single-channel inserts keep the orange ramp the window has always used -
-    the lens colour is not in any table, and the coil flash's "nothing else
-    here is magenta" contrast depends on it.
+    A SINGLE-CHANNEL INSERT HAS ONE LEVEL AND NO COLOUR ON THE WIRE (PAD-668):
+    on the machine it glows in its own LED's and lens's colour, which no table
+    in the game names (the device records' part numbers are the board, shared
+    by RGB and one-colour inserts). So it is drawn in the colour the user gave
+    it in the side panel's INSERT COLOURS table, else WHITE - "colour not
+    known", where the old orange ramp read as "this insert is yellow". The
+    same holds while a MODE lights one: the mode's colour reaches the board as
+    one level, so PAD-658's painting it in the show's colour showed what the
+    machine cannot; the colour asked for is in its tooltip instead, and the
+    picture's All RGB switch draws it that way on request (tinted).
     """
     if "W" in vals:
         v = vals.get("W") or 0
         if not v:
             return None, 0.0
-        return (255, 60 + v * 3 // 4, 0), v / 255.0
+        s = (v / 255.0) ** 0.5
+        return tuple(int(c * s + 0.5) for c in (lens or LENS_DEFAULT)), v / 255.0
     r, g, b = (vals.get(c) or 0 for c in "RGB")
     m = max(r, g, b)
     if not m:
@@ -1111,7 +1412,9 @@ def load_switch_list():
         # already silent about a MISSING file; only the join minded, and
         # item 73 made this call unconditional, so it minded on import.
         return []
-    return trough.load_list(os.path.join(TDIR, "switch_list.txt"))
+    rows = trough.load_list(os.path.join(TDIR, "switch_list.txt"))
+    gone = topper_off_nodes()                       # PAD-498
+    return [r for r in rows if r["node"] not in gone] if gone else rows
 
 
 #: PAD-259: a spinning disc (james_bond_60th_le's Oddjob disc) is read by an
@@ -1547,7 +1850,7 @@ def state_slots():
         cmd = (wsl_head(root=True) + ["-e", "env"] + wsl_rig_env()
                + ["bash", "%s/slots.sh" % WSL_DIR, "list"])
     else:
-        cmd = ["bash", os.path.join(HERE, "slots.sh"), "list"]
+        cmd = _as_root(["bash", os.path.join(HERE, "slots.sh"), "list"])
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=30,
                            creationflags=_CREATE_NO_WINDOW)
@@ -1791,9 +2094,14 @@ class LedRing:
             # is drawn dark - as distinct from 0, which means the game turned
             # it off.
             if d and node is not None:
-                off = LED_HDR + node * LED_IDX + idx
-                if off < len(d):
-                    v = d[off]
+                if idx < LED_IDX:
+                    off = LED_HDR + node * LED_IDX + idx
+                    if off < len(d):
+                        v = d[off]
+                else:
+                    # a strip channel past the board's first 96 (PAD-500):
+                    # padled version 6's `hi` plane, None on an older block
+                    v = coilmap.strip_level(d, node, idx)
             if now is not None:
                 env = self.overlay.get((node, idx))
                 if env is not None:
@@ -1853,6 +2161,15 @@ def raise_existing():
     run on that PC got a playfield again. EnumWindows does not list these;
     FindWindowW does. So walk every window with the title and count only a
     real one.
+
+    ...AND "REAL" IS DECIDED BY WHO OWNS IT, NOT BY A LIST OF IMPOSTORS
+    (PAD-629, the same symptom again on another PC). The class filter names
+    the one impostor seen on David's; any other program that copies window
+    titles (a second taskbar, a window manager, a newer shell) or a dead or
+    hung window from an earlier run was still "raised" in place of a new one,
+    and the run had no playfield with nothing on screen to say why. Ours is a
+    VISIBLE window, owned by a Python process, that answers: anything else is
+    not a reason to stay shut.
     """
     if sys.platform != "win32":
         return False
@@ -1870,13 +2187,67 @@ def raise_existing():
             if not h:
                 return False
             u.GetClassNameW(h, cls, 256)
-            if not cls.value.startswith("Windows.Internal.Shell."):
+            if cls.value.startswith("Windows.Internal.Shell."):
+                continue
+            if _our_live_window(h):
                 break
+            print("playfield: passed over a window called %r (class %s) that "
+                  "is not a live playfield window" % (WINDOW_TITLE, cls.value),
+                  flush=True)
         u.ShowWindow(h, 9)                  # SW_RESTORE
+        _onto_a_screen(h)
         u.SetForegroundWindow(h)
         return True
     except Exception:
         return False                        # never block on the guard failing
+
+
+def _our_live_window(h):
+    """True for a window an earlier playfield process is really showing:
+    visible, not hung, and owned by a python*.exe (PAD-629)."""
+    import ctypes
+    from ctypes import wintypes
+    u, k = ctypes.windll.user32, ctypes.windll.kernel32
+    u.IsWindowVisible.argtypes = [wintypes.HWND]
+    u.IsHungAppWindow.argtypes = [wintypes.HWND]
+    u.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                           ctypes.POINTER(wintypes.DWORD)]
+    if not u.IsWindowVisible(h) or u.IsHungAppWindow(h):
+        return False
+    pid = wintypes.DWORD()
+    u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+    k.OpenProcess.restype = wintypes.HANDLE
+    k.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD)]
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    hp = k.OpenProcess(0x1000, False, pid.value)   # QUERY_LIMITED_INFORMATION
+    if not hp:
+        return False
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        n = wintypes.DWORD(1024)
+        if not k.QueryFullProcessImageNameW(hp, 0, buf, ctypes.byref(n)):
+            return False
+        return os.path.basename(buf.value).lower().startswith("python")
+    finally:
+        k.CloseHandle(hp)
+
+
+def _onto_a_screen(h):
+    """A raised window that sits off every monitor (one unplugged since) is
+    moved onto the main one: raising it there would show nothing."""
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.windll.user32
+    u.MonitorFromWindow.restype = wintypes.HANDLE
+    u.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+    u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                               ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                               wintypes.UINT]
+    if u.MonitorFromWindow(h, 0):           # MONITOR_DEFAULTTONULL
+        return
+    u.SetWindowPos(h, None, 40, 40, 0, 0, 0x0001 | 0x0004)   # NOSIZE|NOZORDER
 
 
 
@@ -2396,15 +2767,29 @@ class LedGrid(LedRing):
         self.cells = []
         self.by_node = {}
         self.seen = set()
+        # PAD-498: a board the cabinet does not have earns no block, whatever
+        # the wire shows for it - Topper off is no topper lights.
+        self.gone = topper_off_nodes()
         self.gen = 0                    # bumps when the roster is rebuilt
         self._decoded = None
         self._init_ring()
+
+    def seed(self, keys):
+        """Give these (node, channel)s their cells before the wire shows them
+        (PAD-551: the cabinet's own boards, which the window knows from the
+        title's tables). A board the cabinet does not have stays out."""
+        keys = {tuple(k) for k in keys if k[0] not in self.gone} - self.seen
+        if keys:
+            self.seen |= keys
+            self._rebuild()
 
     def _discover(self, d):
         """Add every channel the block shows (val or seen) and we have not.
         Per node, with a C-level all-zero test first. True when it grew."""
         grew = False
         for node in range(coilmap.NODES):
+            if node in self.gone:
+                continue
             for base in (LED_HDR + node * LED_IDX, SEEN_OFF + node * LED_IDX):
                 s = d[base:base + LED_IDX]
                 if len(s) < LED_IDX or s.count(0) == LED_IDX:
@@ -2412,6 +2797,18 @@ class LedGrid(LedRing):
                 for idx, v in enumerate(s):
                     if v and (node, idx) not in self.seen:
                         self.seen.add((node, idx))
+                        grew = True
+        # PAD-500: a strip board's channels past its first 96, which padled
+        # version 6 publishes level-only - a cell once one has been lit
+        if len(d) >= PADLED_HI_READ and struct.unpack_from("<I", d, 4)[0] >= 6:
+            for node in range(coilmap.NODES):
+                base = coilmap.HI_OFF + node * coilmap.HI_IDX
+                s = d[base:base + coilmap.HI_IDX]
+                if s.count(0) == len(s):
+                    continue
+                for i, v in enumerate(s):
+                    if v and (node, LED_IDX + i) not in self.seen:
+                        self.seen.add((node, LED_IDX + i))
                         grew = True
         return grew
 
@@ -2433,8 +2830,12 @@ class LedGrid(LedRing):
                 else:
                     stem, chan = "%d.%d" % (node, idx), "W"
                 # A stem that repeats a channel letter is two lamps sharing a
-                # name, not one lamp with two reds.
+                # name, not one lamp with two reds - unless it is Stern's
+                # G, R, G typo for G, R, B (PAD-702).
                 C = stems.get(stem)
+                if C is not None and chan in C["channels"]:
+                    chan = cablights.repeated_channel(
+                        C["channels"], chan, idx, max(C["idxs"])) or chan
                 if C is not None and chan in C["channels"]:
                     stem = "%s (%d.%d)" % (stem, node, idx)
                     C = stems.get(stem)
@@ -2468,7 +2869,7 @@ class LedGrid(LedRing):
         # only the ring, never val[]).
         grew = False
         for key in self.overlay:
-            if key not in self.seen:
+            if key not in self.seen and key[0] not in self.gone:
                 self.seen.add(key)
                 grew = True
         # Discovery gated on BOTH write counters (a swelf frame can grow
@@ -2483,7 +2884,8 @@ class LedGrid(LedRing):
             self._rebuild()
         lit = 0
         for C in self.cells:
-            rgb, level = fixture_color(self._chan_vals(C, d, now))
+            rgb, level = fixture_color(self._chan_vals(C, d, now),
+                                       own_lens(C["name"]))
             if rgb:
                 lit += 1
             st = (rgb, level)
@@ -2518,6 +2920,198 @@ class LedGrid(LedRing):
                    "named by the title's device table" if C["named"]
                    else "no name in this title's table - shown by wire address"))
 
+
+#: The cabinet column's width, as a fraction of the artwork's: wide enough for
+#: a topper drawing to read and two blades side by side, narrow enough that the
+#: playfield keeps the window. The page scales both together.
+CAB_W_FRAC = 0.34
+
+
+class CabinetLights:
+    """PAD-500: the cabinet's own lighting, in a column left of the artwork -
+    the topper, the expression-lighting blades and the speaker lights, which
+    are not inserts and which no playfield picture has room for.
+
+    cablights.py decides which rows are which and which board each is on; this
+    reads them off the wire and says what the page should draw. ONE PIXEL A
+    MARKER: an RGB pixel is one dot in the colour its channels compose to, as
+    an insert is (fixture_color).
+
+    EVERY SECTION SHOWS FROM THE START, dark until its board lights (PAD-551).
+    It used to wait for the board to speak, so that a strip encoding the shim
+    cannot decode would not leave dots that never light - but most games leave
+    the topper and the speakers off in attract, and peanuts read fifteen titles'
+    toppers and speaker rings as missing. `alive` still records that the board
+    has spoken (a lit channel, or one the `seen` plane says the game
+    addressed): the CABINET LIGHTS box says "nothing from it yet" until it has.
+    """
+
+    def __init__(self, expression=True, boards=None):
+        self.expression = expression
+        bm = load_boards() if boards is None else boards
+        # PAD-498: with the Emulate tab's Topper box off, the topper's boards
+        # are not on the bus at all, so they get no section either
+        gone = topper_off_nodes()
+        every, left = cablights.sections(DEV_ROWS, GROUP_NODE, bm,
+                                         gone_nodes=gone)
+        # the boards the tick box takes out, whichever way it is set: the side
+        # panel offers the box only on a title that has them, and the swatch
+        # grid hides their blocks
+        self.expression_nodes = sorted({S["node"] for S in every if
+                                        S["role"] in cablights.EXPRESSION_ROLES})
+        self.has_expression = bool(self.expression_nodes)
+        if not expression:
+            every, left = cablights.sections(DEV_ROWS, GROUP_NODE, bm,
+                                             expression=False, gone_nodes=gone)
+        self.sections, self.left_out = every, left
+        self.pixels = []
+        for S in self.sections:
+            S["alive"] = False
+            for P in S["pixels"]:
+                P["cid"] = len(self.pixels)
+                P["state"] = ()
+                P["drawn"] = None
+                P["section"] = S
+                self.pixels.append(P)
+
+    def shown(self):
+        return list(self.sections)
+
+    def channels(self):
+        """Every (node, channel) a section's pixels use."""
+        return {ch for P in self.pixels for ch in P["channels"].values()}
+
+    def _spoken(self, S, d):
+        """Has this section's board said anything: a lit channel, or one the
+        game addressed (version 4's `seen` plane, channels 0..95)."""
+        seen = (len(d) >= PADLED_READ and
+                struct.unpack_from("<I", d, 4)[0] >= 4)
+        for P in S["pixels"]:
+            if P["drawn"]:
+                return True
+            if seen:
+                for node, ch in P["channels"].values():
+                    if ch < LED_IDX and d[SEEN_OFF + node * LED_IDX + ch]:
+                        return True
+        return False
+
+    def tick(self, d):
+        """(changes, grew): changes maps a pixel id to [r, g, b, alpha] or 0;
+        grew is True when a section came alive (the page lays out again)."""
+        changes, grew = {}, False
+        if not d or len(d) < LED_HDR:
+            return changes, grew
+        for P in self.pixels:
+            vals = {c: coilmap.strip_level(d, n, ch)
+                    for c, (n, ch) in P["channels"].items()}
+            rgb, level = fixture_color(vals)
+            st = (rgb, level)
+            if st == P["state"] and P["drawn"] is not None:
+                continue
+            P["state"] = st
+            if rgb:
+                _rs, alpha = level_shape(level)
+                want = [rgb[0], rgb[1], rgb[2], round(alpha, 3)]
+            else:
+                want = 0
+            if want != P["drawn"]:
+                P["drawn"] = want
+                changes[P["cid"]] = want
+        for S in self.sections:
+            if not S["alive"] and self._spoken(S, d):
+                S["alive"] = True
+                grew = True
+        return changes, grew
+
+    def spec(self):
+        """What the page lays out, top to bottom. A positioned topper sends
+        its pixels' own x, y; the speakers a ring and any other strip a row,
+        both in chain order; the blades send their sides, bottom first."""
+        out = []
+        for S in self.shown():
+            px = S["pixels"]
+            sec = {"key": S["key"], "label": S["label"], "node": S["node"],
+                   "where": cablights.where(S),
+                   "board": S["board"], "role": S["role"], "n": len(px)}
+            if S["bars"]:
+                sec["bars"] = [[px[k]["cid"] for k in bar] for bar in S["bars"]]
+            elif S["positioned"]:
+                sec["pos"] = [[P["cid"], round(P["x"], 1), round(P["y"], 1)]
+                              for P in px if P["placed"]]
+                # a lamp with no place (the BACKPANEL GI) goes in a row
+                # under the shape rather than at its corner
+                rest = [P["cid"] for P in px if not P["placed"]]
+                if rest:
+                    sec["row"] = rest
+            elif S["role"] == cablights.SPEAKER:
+                # the speaker lights are rings round the backbox speakers
+                # (Sam, 2026-10-11: "in a circle instead of a grid")
+                sec["ring"] = [P["cid"] for P in px]
+            else:
+                sec["row"] = [P["cid"] for P in px]
+            out.append(sec)
+        return out
+
+    def grid_shapes(self, cells):
+        """The switch list's swatch grid draws the speakers' block as a ring
+        and the blades' as their two bars, as the column does (Sam,
+        2026-10-11): {node: {"ring": [key, ...]}} or {node: {"bars": [[key,
+        ...], ...]}}, a slot per pixel in the column's order, holding the grid
+        cell that carries that pixel's channels - None while the wire has not
+        shown it, so the shape never reflows. A cell no pixel claims stays in
+        the block's ordinary grid."""
+        at = {}
+        for C in cells:
+            for ch in C["channels"].values():
+                at.setdefault(tuple(ch), C["key"])
+        out = {}
+        for S in self.sections:
+            if S["role"] not in cablights.EXPRESSION_ROLES:
+                continue
+            slots = [next((at[ch] for ch in sorted(P["channels"].values())
+                           if ch in at), None) for P in S["pixels"]]
+            if S["bars"]:
+                out[S["node"]] = {"bars": [[slots[k] for k in bar]
+                                           for bar in S["bars"]]}
+            else:
+                out[S["node"]] = {"ring": slots}
+        return out
+
+    def dyn(self):
+        return {P["cid"]: P["drawn"] or 0 for P in self.pixels}
+
+    def panel(self, heard=True):
+        """The side panel's CABINET LIGHTS box: what the column holds, and the
+        tick box when the title has blades or speakers. None when there is
+        nothing to say. `heard`: say which boards have not spoken yet - the
+        artwork view's column knows; the switch list's grid does not ask."""
+        lines = []
+        for S in self.sections:
+            n = len(S["pixels"])
+            lines.append([S["label"], cablights.where(S), "%s%d light%s%s" % (
+                S["board"] + " · " if S["board"]
+                and S["board"].upper() != S["label"].upper() else "",
+                n, "" if n == 1 else "s",
+                "" if S["alive"] or not heard else ", nothing from it yet")])
+        for which, n, why in self.left_out:
+            lines.append([cablights.LABEL[which], "not shown",
+                          "%d channel%s: %s" % (n, "" if n == 1 else "s", why)])
+        if not lines and not self.has_expression:
+            return None
+        return {"lines": lines, "expression": self.expression,
+                "has_expression": self.has_expression, "open": cab_panel_open()}
+
+    def describe(self, cid):
+        try:
+            P = self.pixels[int(cid)]
+        except (ValueError, IndexError):
+            return ""
+        S = P["section"]
+        where = ", ".join("%s=channel %d" % (c, ch) for c, (_n, ch)
+                          in sorted(P["channels"].items()))
+        return ("LED  %s\n%s - node %d%s\n%s"
+                % (P["name"], S["label"], S["node"],
+                   " (%s)" % S["board"] if S["board"] else "", where))
 
 
 class LcdPanel:
@@ -3187,6 +3781,12 @@ class Field(LedRing):
                 self.chan_fix.setdefault(key, []).append(F)
 
         self.sw_rows = list(self.switches)
+        # PAD-1179: the back panel's switches (Iron Maiden's bullseye), drawn
+        # under the Backpanel section of the cabinet column
+        self.panel_sw = self._panel_switches()
+        self.insert_look = insert_look()        # PAD-668
+        # PAD-500: the cabinet's own lights, in a column left of the art
+        self.cab = CabinetLights(expression_on())
         self._sw_named = None
         self._kick_map = None
         self._kick_n = 0
@@ -3213,6 +3813,8 @@ class Field(LedRing):
             "kind": "field",
             "info": self.info,
             "art": "art" if self.art else None,
+            "look": art_look(),
+            "insert_look": self.insert_look,
             "base": list(self.base or (313, 710)),
             "fixtures": [[F["fid"], round(F["x"], 2), round(F["y"], 2)]
                          for F in self.fixtures],
@@ -3224,7 +3826,66 @@ class Field(LedRing):
             "trough": self.trough.spec() if (
                 self.trough is not None and self.trough.clickable) else None,
             "shaker": self.shaker.spec() if self.shaker else None,
+            "cab": self.cab_spec(),
+            "cab_panel": self.cab.panel(),
+            "lens": self.lens_spec(),
         }
+
+    def lens_spec(self):
+        """PAD-668: the side panel's INSERT COLOURS table - every positioned
+        single-colour insert, by name, with the colour the user gave it ("" =
+        the default). [[name, "#rrggbb" or "", [fid, ...], default], ...]; the
+        fids light the insert on the picture while its row is hovered, and
+        ``default`` is the colour its name says ("" = white, PAD-1144)."""
+        rows = {}
+        for F in self.fixtures:
+            if set(F["channels"]) == {"W"}:
+                rows.setdefault(F["name"], []).append(F["fid"])
+        return [[name, _hex(lens_of(name)), rows[name],
+                 _hex(cablights.named_colour(name))] for name in sorted(rows)]
+
+    def lens_changed(self, name=None):
+        """Redraw an insert whose colour the user just changed (every insert:
+        None)."""
+        for F in self.fixtures:
+            if name is None or F["name"] == name:
+                F["state"] = None
+
+    def _panel_switches(self, switch_list=None):
+        """load_panel_switches(), less any switch the playfield draws."""
+        on_pf = {S["id"] for S in self.switches}
+        return [S for S in load_panel_switches(switch_list)
+                if S["id"] not in on_pf]
+
+    def cab_spec(self):
+        """The cabinet column (PAD-500), or None on a title with none.
+        `w` is its width in the artwork's own pixels, so the page scales the
+        two together.
+
+        PAD-1179: the back panel's switches ride its section as `sw`, [[k,
+        name, id], ...] - a ring and a name each, under the lamps, because
+        on the picture Iron Maiden's three bullseye switches are 11 px
+        apart and the column draws it at a quarter size. A title whose back
+        panel has switches and no lamps gets the section for them alone."""
+        secs = self.cab.spec()
+        if self.panel_sw:
+            bp = [S for S in secs if S["key"] == cablights.BACKPANEL]
+            if not bp:
+                nodes = sorted({S["node"] for S in self.panel_sw})
+                bp = [{"key": cablights.BACKPANEL,
+                       "label": cablights.LABEL[cablights.BACKPANEL],
+                       "node": nodes[0], "board": "", "n": 0,
+                       "role": cablights.BACKPANEL,
+                       "where": ("node %d" % nodes[0] if len(nodes) == 1
+                                 else "nodes " + ", ".join(map(str, nodes)))}]
+                secs.append(bp[0])
+                secs.sort(key=lambda S: cablights.ORDER.get(S["role"], 9))
+            bp[0]["sw"] = [[k, S["name"], S["id"]]
+                           for k, S in enumerate(self.panel_sw)]
+        if not secs:
+            return None
+        bw = (self.base or (313, 710))[0]
+        return {"w": int(round(bw * CAB_W_FRAC)), "sections": secs}
 
     def dyn(self):
         fx = {}
@@ -3232,6 +3893,7 @@ class Field(LedRing):
             if F["drawn"] is not None:
                 fx[F["fid"]] = F["drawn"]
         return {"fx": fx,
+                "cab": self.cab.dyn(),
                 "coil": {"%s:%s" % k: 1 if v else 0
                          for k, v in self.coil_drawn.items()},
                 "sw": {str(s): v for s, v in self._dot_drawn.items()},
@@ -3245,13 +3907,20 @@ class Field(LedRing):
         """THE SWITCH TABLE IS THE ONE PART THAT NEEDS A RUN - the game builds
         it on the heap, so the first run of a title opens this window without
         it. A stat every SWITCH_POLL_S while it is missing, nothing after."""
-        if self.switches or time.monotonic() < self._sw_next:
+        # PAD-1179: the back panel's switches join on the same table
+        want_panel = not self.panel_sw and bool(panel_switch_rows())
+        if ((self.switches and not want_panel)
+                or time.monotonic() < self._sw_next):
             return False
         self._sw_next = time.monotonic() + SWITCH_POLL_S
+        if self.switches:
+            self.panel_sw = self._panel_switches()
+            return bool(self.panel_sw)
         rows = load_switches()
         if not rows:
             return False
         self.switches = rows
+        self.panel_sw = self._panel_switches()
         if not self.sw.positions and not self.sw.set_rows(rows):
             self.sw.set_rows(load_switch_list())
         self.sw_rows = list(rows)
@@ -3274,6 +3943,13 @@ class Field(LedRing):
 
     # ---- tooltips -----------------------------------------------------------
     def describe(self, kind, k):
+        if kind == "cab":
+            return self.cab.describe(k)
+        if kind == "panelsw":
+            d = self.panel_sw[k]
+            return ("SWITCH  %s\nid %d   node %d  bit %d\non the back panel\n"
+                    "hold to keep it closed\nright-hold to RIP it"
+                    % (d["name"], d["id"], d["node"], d["bit"]))
         if kind == "switch":
             d = self.sw_rows[k]
             C = self.kicker(d["id"])
@@ -3312,8 +3988,29 @@ class Field(LedRing):
                  % (d.get("group", -1), idx))
         if "W" in d["channels"]:
             node, idx = d["channels"]["W"]
-            return ("LED  %s\n%s\nvalue %s"
-                    % (d["name"], where(node, idx), fmt(vals.get("W"))))
+            # PAD-668: a mode's colour here is what it ASKED for; a
+            # one-colour insert shows its lens's colour whatever it asks
+            asked = coilmap.paint_tints(self.last, GROUP_NODE).get((node, idx))
+            lens = own_lens(d["name"])
+            if asked and self.insert_look == "rgb":
+                asks = ("\ndrawn #%02x%02x%02x, the mode's colour (All RGB);"
+                        "\non the machine it glows in its own colour" % asked)
+            elif asked:
+                asks = ("\na mode asks for #%02x%02x%02x; one colour, so it"
+                        "\nglows in its own colour on the machine" % asked)
+            else:
+                asks = ""
+            if lens and lens_of(d["name"]):
+                own = "its colour %s, as set under INSERT COLOURS" % _hex(lens)
+            elif lens:
+                own = ("its colour %s, from its name (INSERT COLOURS can"
+                       " change it)" % _hex(lens))
+            else:
+                own = ("its colour not set (white) - the card does not say"
+                       " it: see INSERT COLOURS")
+            return ("LED  %s   (one colour)\n%s\nvalue %s\n%s%s"
+                    % (d["name"], where(node, idx), fmt(vals.get("W")), own,
+                       asks))
         lines = ["LED  %s   (RGB fixture)" % d["name"]]
         for chan in "RGB":
             if chan in d["channels"]:
@@ -3428,7 +4125,7 @@ class Field(LedRing):
         emulator is there), d only once the shim has stamped its magic."""
         try:
             with open(LED_PATH, "rb") as f:
-                raw = f.read(PADLED_DRIVE_READ)
+                raw = f.read(max(PADLED_DRIVE_READ, PADLED_HI_READ, coilmap.PAINT_READ))
         except OSError:
             return None, None
         if len(raw) < LED_HDR or struct.unpack_from("<I", raw, 0)[0] != PADLED_MAGIC:
@@ -3475,8 +4172,15 @@ class Field(LedRing):
         decoded state moves - the honest picture rate - not tween frames."""
         lit = 0
         changed = 0
+        if state_changed():
+            # the Modes tab changed a colour or the switch (PAD-668)
+            self.insert_look = insert_look()
+            self.lens_changed(None)
+        tints = (coilmap.paint_tints(d, GROUP_NODE)
+                 if self.insert_look == "rgb" else None)
         for F in self.fixtures:
-            rgb, level = fixture_color(self._chan_vals(F, d, now))
+            rgb, level = fixture_color(
+                tinted(self._chan_vals(F, d, now), F, tints), own_lens(F["name"]))
             if rgb:
                 lit += 1
             st = (rgb, level)
@@ -3592,6 +4296,14 @@ class Field(LedRing):
             self.animate_fixtures(t0, fx)
             if fx:
                 frame["fx"] = fx
+            # PAD-500: the cabinet column - a section that comes alive lays
+            # the page out again, so its CABINET LIGHTS line stops saying
+            # "nothing from it yet"
+            cab, grew = self.cab.tick(d)
+            if cab:
+                frame["cab"] = cab
+            if grew:
+                frame["layout"] = True
             live = [["Inserts lit", "%d of %d" % (lit, len(self.fixtures)),
                      "", False],
                     ["LED rate", "%.1f Hz" % _rate(self._draw_ev, t0), "",
@@ -3706,22 +4418,61 @@ class Schematic:
                             % (sw["name"], sw["id"], sw.get("num", -1),
                                sw["node"], sw["bit"]))})
         self.leds = LedGrid(load_led_names())
+        # PAD-500: no artwork to put a cabinet column beside, but the same
+        # tick box - with "Expression lights" off the blades' and speakers'
+        # own boards leave the swatch grid
+        self.cab = CabinetLights(expression_on())
+        # PAD-551: the cabinet's own boards are in the grid from the start,
+        # dark until they light - a topper or speaker ring the game leaves
+        # off in attract read as missing when its block waited for the wire
+        self.leds.seed(self.cab.channels())
+        # PAD-551: and the shaker panel, which only the artwork view had - so
+        # every title with no playfield picture lost it (Aerosmith, Venom...)
+        self.shaker = load_shaker()
         self.led_lit, self.led_total = 0, 0
         self._grid_gen = 0
         self.status = ""
         self.live = []
 
+    def _hidden(self):
+        return set() if self.cab.expression else set(self.cab.expression_nodes)
+
     def spec(self):
+        grid = self.leds.spec()
+        hide = self._hidden()
+        shapes = self.cab.grid_shapes(self.leds.cells)
+        grid = dict(grid, blocks=[dict(b, **shapes.get(b["node"], {}))
+                                  for b in grid["blocks"]
+                                  if b["node"] not in hide])
         return {"kind": "schematic", "bar": self.bar, "info": self.info,
                 "entries": self.entries,
-                "grid": self.leds.spec(),
+                "grid": grid,
+                "cab_panel": self.cab.panel(heard=False),
+                "shaker": self.shaker.spec() if self.shaker else None,
                 "trough": self.trough.spec() if (
                     self.trough is not None and self.trough.clickable)
-                else None}
+                else None,
+                "lens": self.lens_spec()}
+
+    def lens_spec(self):
+        """PAD-668: INSERT COLOURS for a title with no artwork - the named
+        single-colour lamps of the grid's name table (Field.lens_spec)."""
+        chans = {}
+        for name in self.leds.names.values():
+            stem, chan = split_channel(name)
+            chans.setdefault(stem, set()).add(chan)
+        return [[name, _hex(lens_of(name)), [], _hex(cablights.named_colour(name))]
+                for name in sorted(n for n, c in chans.items() if c == {"W"})]
+
+    def lens_changed(self, name):
+        for C in self.leds.cells:
+            if C["name"] == name:
+                C["state"] = None
 
     def dyn(self):
         return {"sw": {str(s): v for s, v in self._dot_drawn.items()},
                 "grid": self.leds.dyn(),
+                "shaker": self.shaker.drawn if self.shaker else None,
                 "trough": self.trough.dyn() if (
                     self.trough is not None and self.trough.clickable)
                 else None}
@@ -3740,7 +4491,7 @@ class Schematic:
     def tick(self, now_mono):
         try:
             with open(LED_PATH, "rb") as f:
-                d = f.read(PADLED_READ)
+                d = f.read(PADLED_HI_READ)
         except OSError:
             d = None
         if emu_gone(self, bool(d)):
@@ -3757,6 +4508,10 @@ class Schematic:
                 frame["layout"] = True
             if changes:
                 frame["grid"] = changes
+            if self.shaker is not None and len(d) >= PADLED_READ:
+                shk = self.shaker.tick(d, time.monotonic() * 1000.0)
+                if shk is not None:
+                    frame["shaker"] = shk
         trough = (["Balls", self.sw.balls.text(), "", False]
                   if self.sw.positions else
                   ["Trough", "no switches identified", "", True])
@@ -3816,6 +4571,47 @@ AUDIO_CTL = os.environ.get("PAD_AUDIO_CTL") or None
 RUN_POLL_S = 0.3
 
 
+def clip_watch():
+    """PAD-827: the CLIPS list's reader, or None where there is no run log to
+    read. The names and the record go beside the Emulate tab's volume file, so
+    a window started by hand (no PAD_AUDIO_CTL) lists clips by file and keeps
+    no record."""
+    d = padpath.logdir()
+    if not d:
+        return None
+    ctl = os.path.dirname(AUDIO_CTL) if AUDIO_CTL else None
+    n = padpath.slot()
+    return clipwatch.ClipWatch(
+        os.path.join(d, "padvid.log"),
+        os.path.join(ctl, "clip_names_%d.json" % n) if ctl else None,
+        os.path.join(ctl, "clips_seen_%d.jsonl" % n) if ctl else None,
+        game=GAME or "")
+
+
+def sound_watch():
+    """PAD-1071: the Sound and video log's sounds, read off the run's mode.log
+    and written beside the Emulate tab's volume file - or None where there is
+    no run to read, or no tab to read the record (a window started by hand)."""
+    d = padpath.dump()
+    if not d or not AUDIO_CTL:
+        return None
+    return soundwatch.SoundWatch(
+        os.path.join(d, "mode.log"),
+        os.path.join(os.path.dirname(AUDIO_CTL),
+                     "sounds_seen_%d.jsonl" % padpath.slot()))
+#: Restart game in flight (PAD-744): the button says Restarting… while the app
+#: has not taken the request (its poll) or the run has not taken dump/reboot.req
+#: (watch.sh), then until the old boot's log is gone (the new launch truncates
+#: it; bootprog.py) - or, with no log to read, RESTART_GRACE_S over the gap -
+#: and never longer than RESTART_CAP_S. The window stays open on a restart
+#: since PAD-738, so nothing else puts the button back.
+RESTART_GRACE_S = 4.0
+RESTART_CAP_S = 30.0
+#: How far the game has booted (PAD-744), read off its log this often while it
+#: boots: the bar beside Pause, in the app footer's steps.
+BOOT_POLL_S = 1.0
+
+
 def read_paused():
     """padsw's `paused` - 1 while padglhost holds the game frozen - or None
     with no live block."""
@@ -3854,18 +4650,48 @@ def write_audio_ctl(path, gain, muted):
         return False
 
 
+def restart_req_path(ctl_path):
+    """The Restart game request file (PAD-735), beside the app's volume file
+    and one per rig: the Emulate tab's restart_req_file() names the same."""
+    if not ctl_path:
+        return None
+    return os.path.join(os.path.dirname(ctl_path),
+                        "restart_game_%d.req" % padpath.slot())
+
+
+def stop_req_path(ctl_path):
+    """The Stop emulator request file (PAD-1198), beside the Restart one and
+    one per rig: the Emulate tab's stop_req_file() names the same. The window
+    cannot end the run itself - the run is the app's, Spike 2 or Spike 3 - so
+    it asks, as Restart game does."""
+    if not ctl_path:
+        return None
+    return os.path.join(os.path.dirname(ctl_path),
+                        "stop_emulator_%d.req" % padpath.slot())
+
+
 class RunCtl:
     """The status bar's Pause button and volume (PAD-204): what the page shows
     for them, polled every RUN_POLL_S. The pause flag is padglhost's, read off
     the switch block, so the button says Resume however the game was frozen -
     this button, Pause or F9 in either window. The volume is the tab's file."""
 
-    def __init__(self, ctl_path=None):
+    def __init__(self, ctl_path=None, logdir=False):
         self.ctl_path = ctl_path
         self.paused = False
         self.audio = load_audio_ctl(ctl_path) if ctl_path else None
         self._mtime = self._stat()
         self._next = 0.0
+        self.restarting = False
+        self.stopping = False      # Stop emulator asked (PAD-1198)
+        self._restart_t = None     # when Restart game was asked
+        self._taken_t = None       # when that request was last seen in flight
+        self._booted_again = False  # the old boot's log is gone since then
+        # the boot's progress (PAD-744); logdir False = the rig's own
+        self._logdir = logdir
+        self._boot_log = None
+        self._boot_next = 0.0
+        self.boot = None           # {"pct", "words"} while booting, else None
 
     def _stat(self):
         try:
@@ -3879,7 +4705,8 @@ class RunCtl:
             return False
         self._next = now + RUN_POLL_S
         changed = False
-        paused = bool(read_paused())
+        raw = read_paused()
+        paused = bool(raw)
         if paused != self.paused:
             self.paused, changed = paused, True
         if self.ctl_path:
@@ -3889,7 +4716,69 @@ class RunCtl:
                 audio = load_audio_ctl(self.ctl_path)
                 if audio != self.audio:
                     self.audio, changed = audio, True
+        if now >= self._boot_next:
+            self._boot_next = now + BOOT_POLL_S
+            boot = self._poll_boot(raw is not None)
+            if boot != self.boot:
+                self.boot, changed = boot, True
+        if self.restarting != self._restart_pending(time.time()):
+            self.restarting, changed = not self.restarting, True
         return changed
+
+    def _poll_boot(self, live):
+        """{"pct", "words"} while the game boots, None once it is up (or with
+        no run or no log to read)."""
+        # A SPIKE 3 RUN says it outright (PAD-1090): tools/spike3_emu/s3prog.py
+        # writes dump/s3boot, "<step> <pct> <words>", the same steps the app's
+        # footer shows; "run" is up. It has none of the Spike 2 logs below.
+        dump = padpath.dump()
+        s3 = dump and os.path.join(dump, "s3boot")
+        if s3 and os.path.exists(s3):
+            try:
+                with open(s3, encoding="utf-8", errors="replace") as f:
+                    step, pct, words = (f.read().strip().split(" ", 2) + ["", ""])[:3]
+                pct = int(pct)
+            except (OSError, ValueError):
+                return None
+            if step == "run" or not live:
+                return None
+            self._booted_again = True
+            return {"pct": pct, "words": words}
+        if self._boot_log is None:
+            d = padpath.logdir() if self._logdir is False else self._logdir
+            if not d:
+                return None
+            self._boot_log = bootprog.BootLog(d)
+        got = self._boot_log.poll()
+        if got is None:
+            return None
+        state, pct, words = got
+        if state != "attract":
+            self._booted_again = True
+        if state == "attract" or not live:
+            return None
+        return {"pct": pct, "words": words}
+
+    def _restart_pending(self, now):
+        """Restart game still on its way (RESTART_GRACE_S)."""
+        if self._restart_t is None:
+            return False
+        if now - self._restart_t > RESTART_CAP_S:
+            self._restart_t = None
+            return False
+        dump = padpath.dump()
+        for p in (restart_req_path(self.ctl_path),
+                  dump and os.path.join(dump, "reboot.req")):
+            if p and os.path.exists(p):
+                self._taken_t = now
+                return True
+        if self._boot_log is not None:
+            if not self._booted_again:
+                return True
+        elif now - (self._taken_t or self._restart_t) < RESTART_GRACE_S:
+            return True
+        self._restart_t = None
+        return False
 
     def set_audio(self, gain=None, muted=None):
         if not self.ctl_path:
@@ -3902,8 +4791,45 @@ class RunCtl:
         self.audio, self._mtime = (g, m), self._stat()
         return True
 
+    def ask_restart(self):
+        """PAD-735: Restart game - asked of the app that launched this run,
+        which has the run boot the game again while this window stays open
+        (PAD-738). False with no app to ask."""
+        path = restart_req_path(self.ctl_path)
+        if not path:
+            return False
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("%d\n" % padpath.slot())
+        except OSError:
+            return False
+        self._restart_t = self._taken_t = time.time()
+        self._booted_again = False
+        self.restarting = True
+        return True
+
+    def ask_stop(self):
+        """PAD-1198: Stop emulator - asked of the app that launched this run,
+        whose Stop ends it (and this window with it, when the run goes).
+        False with no app to ask."""
+        path = stop_req_path(self.ctl_path)
+        if not path:
+            return False
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("%d\n" % padpath.slot())
+        except OSError:
+            return False
+        self.stopping = True
+        return True
+
     def dyn(self):
         return {"paused": self.paused,
+                "restart": bool(self.ctl_path),
+                "stop": bool(self.ctl_path),
+                "stopping": self.stopping,
+                "restarting": self.restarting,
+                "boot": self.boot,
                 "audio": ({"gain": self.audio[0], "muted": self.audio[1]}
                           if self.audio is not None else None)}
 
@@ -3939,12 +4865,21 @@ class Playfield:
         self.slot_labels = {}
         self._state_busy = False
         self._state_msg = None
+        self._slot_msg = None      # the SAVE STATES section's own line (PAD-1237)
         self._stop = threading.Event()
         self._closed = False
+        self._run_left = False     # gone(): the run ended first (PAD-1198)
         self.pos = {}
         self.lcd = LcdPanel(GAME, on_build=self._open_lcd)
         self.lcd.drv = self.drv
         self.run = RunCtl(AUDIO_CTL)
+        # PAD-827: which clip the game plays, and the switch made before it
+        self.clips = clip_watch()
+        # PAD-1071: and which sounds, for the Emulate tab's Sound and video log
+        self.sounds = sound_watch()
+        self._clip_mrg = None
+        self._sw_names = {}
+        self._sw_names_next = 0.0
         self._wait_deadline = time.time() + TABLES_TIMEOUT_S
         self._wait_next = time.monotonic() + TABLES_EVERY_S
         self._build_view()
@@ -4016,7 +4951,8 @@ class Playfield:
         section. Every change is gated: a still machine costs the read."""
         if not view.sw.poll():
             return False
-        ids = ([S["id"] for S in view.sw_rows] if view.kind == "field"
+        ids = ([S["id"] for S in view.sw_rows + view.panel_sw]
+               if view.kind == "field"
                else [e["id"] for e in view.entries
                      if "id" in e and e["live"]])
         changes = {}
@@ -4093,10 +5029,14 @@ class Playfield:
         def done(r):
             text = helper_message(script, r)
             with self.lock:
-                self.flash(text)
-                if script == "plunge.py" and self.key_panel is not None:
+                # a plunge answer goes in the BALLS note when there is one,
+                # and only there (PAD-1237: it used to show twice)
+                if (script == "plunge.py" and self.key_panel is not None
+                        and self.key_panel.ball_dots is not None):
                     self.key_panel.ball_say("%s: %s" % (arg, text)
                                             if arg else text)
+                else:
+                    self.flash(text)
         if arg is None:
             self.drv.run_script(script, done=done)
         else:
@@ -4119,14 +5059,39 @@ class Playfield:
                 vals.append("%d · %s" % (i + 1, label or "unnamed"))
         return vals
 
+    def slot_say(self, text, secs=8.0):
+        """A save state's own message - "saving state...", the helper's
+        answer, an empty slot - for the SAVE STATES section's line, not the
+        balls' (PAD-1237), for `secs` (None = until replaced)."""
+        self._slot_msg = (text, None if secs is None
+                          else time.monotonic() + secs)
+
+    def slot_msg(self):
+        """[text, seconds left or None]; text is "" once it has run out."""
+        m = self._slot_msg
+        if not m:
+            return ["", None]
+        text, until = m
+        if until is None:
+            return [text, None]
+        left = until - time.monotonic()
+        if left <= 0:
+            self._slot_msg = None
+            return ["", None]
+        return [text, round(left, 1)]
+
+    def slots_payload(self, busy=None):
+        return {"values": self.slot_values(), "labels": self.slot_labels,
+                "busy": self._state_busy if busy is None else busy,
+                "msg": self.slot_msg()}
+
     def slots_refresh(self):
         def work():
             info = state_slots()
             with self.lock:
                 self.slot_labels = {s: info[s] for s in info}
-            self.publish("slots", {"values": self.slot_values(),
-                                   "labels": self.slot_labels,
-                                   "busy": self._state_busy})
+                payload = self.slots_payload()
+            self.publish("slots", payload)
         threading.Thread(target=work, daemon=True).start()
 
     def run_state(self, script, slot, label=None):
@@ -4137,15 +5102,14 @@ class Playfield:
             return False
         self._state_busy = True
         verb = "saving" if script.startswith("save") else "loading"
-        self.flash("%s state..." % verb, None)
-        self.publish("slots", {"values": self.slot_values(),
-                               "labels": self.slot_labels, "busy": True})
+        self.slot_say("%s state..." % verb, None)
+        self.publish("slots", self.slots_payload(busy=True))
 
         def work():
             r = state_run(script, slot, label)
             with self.lock:
                 self._state_busy = False
-                self.flash(state_reply(script, r))
+                self.slot_say(state_reply(script, r))
             self.slots_refresh()
         threading.Thread(target=work, daemon=True).start()
         return True
@@ -4197,12 +5161,35 @@ class Playfield:
                 self.publish("layout")
             if frame:
                 self.publish("frame", frame)
+        self._clips_tick(now)
         self.lcd.poll()
         if self.lcd.dirty:
             self.lcd.dirty = False
             self.publish("lcd", self.lcd.dyn())
         if self.run.poll(now):
             self.publish("run", self.run.dyn())
+
+    def _clips_tick(self, now):
+        """PAD-827: the switch edges the view's paced read saw, then the run
+        log; the list goes to the page when it changed."""
+        cw = self.clips
+        if cw is None:
+            return
+        sw = getattr(self.view, "sw", None)
+        mrg = sw.mrg if sw is not None else None
+        if mrg is not None and mrg is not self._clip_mrg:
+            self._clip_mrg = mrg
+            if not self._sw_names and now >= self._sw_names_next:
+                self._sw_names_next = now + 5.0
+                self._sw_names = {r["id"]: r["name"] for r in load_switch_list()
+                                  if r.get("name")}
+            cw.feed_switches(mrg, self._sw_names, now)
+        cw.poll(now)
+        if self.sounds is not None:
+            self.sounds.poll(now)
+        if cw.dirty:
+            cw.dirty = False
+            self.publish("clips", cw.dyn())
 
     # ---- windows ---------------------------------------------------------------
     def window_spec(self):
@@ -4213,6 +5200,10 @@ class Playfield:
         panel_w = 340 if keybinds.load(BINDS_PATH) else 0
         if self.kind == "field":
             bw, bh = self.view.base
+            # PAD-500: room for the cabinet column from the start, on a title
+            # that has one, so the artwork does not shrink when it appears
+            if self.view.cab.sections:
+                bw += int(round(bw * CAB_W_FRAC))
             env = os.environ.get("PAD_PF_SCALE")
             try:
                 scale = max(1.0, float(env)) if env else None
@@ -4276,6 +5267,7 @@ class Playfield:
     def gone(self):
         """The run ended (its LED block went): save first - leaving with the
         run is the COMMON way this window closes - then close everything."""
+        self._run_left = True      # closing now is not a Stop (PAD-1198)
         self.save_state()
         self.publish("close")
         self._stop.set()
@@ -4316,7 +5308,10 @@ class Playfield:
                   "rig": {"slot": padpath.slot(), "label": padpath.label()},
                   "savestates": SAVESTATES, "slots": self.slot_values(),
                   "state_busy": self._state_busy,
+                  "slot_msg": self.slot_msg(),
                   "run": self.run.dyn(),
+                  "clips": (self.clips.dyn() if self.clips is not None
+                            else None),
                   "acts":([[i, a[0]] for i, a in enumerate(WINDOW_ACTIONS)]
                            if self.acts_shown and self.view is not None
                            else []),
@@ -4464,6 +5459,30 @@ class Playfield:
             return False
         return self.keys.pipe.pause()
 
+    def api_restart(self):
+        """The status bar's Restart game (PAD-735)."""
+        return self.run.ask_restart()
+
+    def api_stop(self):
+        """The status bar's Stop emulator (PAD-1198)."""
+        ok = self.run.ask_stop()
+        if ok:
+            self.publish("run", self.run.dyn())
+        return ok
+
+    def closed_by_user(self):
+        """The window's own close (its X): the run goes with it (PAD-1198),
+        as closing the game window ends it - unless the run left first
+        (gone(): the app's Stop, or the game ending), which closes this
+        window too and must not ask for a second Stop. A window that never
+        came up is not closed by anyone."""
+        if not self._run_left and not self._closed and \
+                getattr(self.host, "_ready", True):
+            if self.run.ask_stop():
+                print("playfield: window closed; asked the app to stop the "
+                      "emulator", flush=True)
+        self.bye()
+
     def api_volume(self, pct):
         ok = self.run.set_audio(gain=float(pct) / 100.0)
         if ok:
@@ -4480,6 +5499,89 @@ class Playfield:
         if self.key_panel is not None:
             self.key_panel.door_click()
         return True
+
+    def api_expression(self, on):
+        """PAD-500: the CABINET LIGHTS box's "Expression lights" tick - the
+        blades and the speaker lights in or out of this window. Kept in the
+        window's own state file, so the next run opens the way this one was
+        left; the game is untouched either way."""
+        on = bool(on)
+        try:
+            st = load_state()
+            st["expression_lights"] = on
+            with open(STATE, "w") as f:
+                json.dump(st, f, indent=1)
+        except Exception:                                   # noqa: BLE001
+            pass
+        old = getattr(self.view, "cab", None)
+        if old is not None:
+            new = CabinetLights(on)
+            # what had already spoken stays shown: no blink while the column
+            # waits a frame to hear from boards it heard from a moment ago
+            alive = {S["key"] for S in old.sections if S["alive"]}
+            for S in new.sections:
+                S["alive"] = S["key"] in alive
+            self.view.cab = new
+            self.publish("layout")
+        return on
+
+    def api_cab_open(self, on):
+        """PAD-532: the CABINET LIGHTS box folded or unfolded, kept for the
+        next run beside the tick box. Nothing to redraw: the page did it."""
+        on = bool(on)
+        try:
+            st = load_state()
+            st["cab_panel_open"] = on
+            with open(STATE, "w") as f:
+                json.dump(st, f, indent=1)
+        except Exception:                                   # noqa: BLE001
+            pass
+        return on
+
+    def api_lens(self, name, colour):
+        """PAD-668: the INSERT COLOURS table - one single-colour insert's
+        colour set ('#rrggbb') or put back to the default (None), kept for
+        the next run. Returns what the row now holds."""
+        name = str(name)
+        try:
+            save_lens_colour(name, colour)
+        except Exception:                                   # noqa: BLE001
+            pass
+        v = self.view
+        if v is not None and hasattr(v, "lens_changed"):
+            v.lens_changed(name)
+        rgb = lens_of(name)
+        return "#%02x%02x%02x" % rgb if rgb else ""
+
+    def api_insert_look(self, look):
+        """PAD-668: the picture's Real LEDs / All RGB switch, kept for the
+        next run; every insert is drawn again in the new look."""
+        look = look if look in INSERT_LOOKS else INSERT_LOOKS[0]
+        try:
+            st = load_state()
+            st["insert_look"] = look
+            with open(STATE, "w") as f:
+                json.dump(st, f, indent=1)
+        except Exception:                                   # noqa: BLE001
+            pass
+        v = self.view
+        if v is not None and hasattr(v, "insert_look"):
+            v.insert_look = look
+            v.lens_changed(None)
+        return look
+
+    def api_art_look(self, look):
+        """PAD-628: the picture's X-ray / Drawing switch, kept for the next
+        run beside the tick boxes. Nothing to redraw: the page did it."""
+        look = look if look in ART_LOOKS else ART_LOOKS[0]
+        try:
+            st = load_state()
+            st["art_look"] = look
+            with open(STATE, "w") as f:
+                json.dump(st, f, indent=1)
+        except Exception:                                   # noqa: BLE001
+            pass
+        return look
 
     def api_clear_alerts(self):
         label, script, arg = next(a for a in WINDOW_ACTIONS
@@ -4514,8 +5616,9 @@ class Playfield:
             return False
         slot = SLOT_IDS[int(idx)]
         if slot not in self.slot_labels:
-            self.flash("slot %d is empty - nothing to load" % (int(idx) + 1),
-                       5.0)
+            self.slot_say("slot %d is empty - nothing to load" % (int(idx) + 1),
+                          5.0)
+            self.publish("slots", self.slots_payload())
             return False
         return self.run_state("loadgame.sh", slot)
 
@@ -4557,7 +5660,7 @@ def main():
     host.start()
     ctl.start()
     try:
-        host.run(ctl.window_spec(), on_close=ctl.bye)
+        host.run(ctl.window_spec(), on_close=ctl.closed_by_user)
     finally:
         ctl.bye()
         ctl.stop()

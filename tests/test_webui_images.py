@@ -151,15 +151,20 @@ def test_tab_shows_exactly_where_the_plugin_replaces_images(tmp_path, mkey):
             assert w.window.pending_image_assignments(str(tmp_path)) is None
 
 
-def test_stern_spike2_only(tmp_path):
+def test_stern_images_eras(tmp_path):
     with web_app(tmp_path, mfr="stern") as w:
         tabs = {t["ns"]: t for t in w.state("shell")["tabs"]}
         assert tabs["images"]["visible"]
         assert tabs["images"]["label"] == "Images"
-        for era in ("spike1", "whitestar"):
-            w.call("ui.set_era", era)
-            tabs = {t["ns"]: t for t in w.state("shell")["tabs"]}
-            assert not tabs["images"]["visible"]
+        # PAD-870: Spike 1's DMD pictures, shades of one colour (no Scenes or
+        # Color Profile); Whitestar is capture-only
+        w.call("ui.set_era", "spike1")
+        tabs = {t["ns"]: t for t in w.state("shell")["tabs"]}
+        assert tabs["images"]["visible"]
+        assert not tabs.get("scenes", {}).get("visible")
+        w.call("ui.set_era", "whitestar")
+        tabs = {t["ns"]: t for t in w.state("shell")["tabs"]}
+        assert not tabs["images"]["visible"]
 
 
 def test_exports_are_on_the_window(tmp_path):
@@ -215,7 +220,7 @@ def test_cancel_scan(scanned):
     w.call("images.cancel_scan")
     st = w.state("images")
     assert st["scanning"] is False and st["view"] == []
-    assert st["empty"]["text"] == "Scan cancelled — click Scan to try again."
+    assert st["empty"]["text"] == "Scan canceled — click Scan to try again."
 
 
 def test_on_show_rescans_when_the_folder_changed(tmp_path):
@@ -359,6 +364,35 @@ def test_group_blank_and_clear(scanned):
 
 
 # ------------------------------------------------------------ picking
+def test_a_file_dropped_on_a_row_is_its_replacement(scanned):
+    """PAD-838: an image dropped on a row from the desktop answers the
+    row's picker (the page arms the drop, then asks for the pick)."""
+    w, assets, reps, _st = scanned
+    rep = os.path.join(reps, "SpaceGodzilla.png")
+    n = len(w.asked)
+    w.ctx.drops.put([rep])
+    assert w.call("ui.drop_arm", ["SpaceGodzilla.png"]) is True
+    assert w.call("images.choose", BANNER) == BANNER
+    assert len(w.asked) == n                     # no picker opened
+    row = _by_rel(w.state("images"))[BANNER]
+    assert row["p"] == "SpaceGodzilla.png" and row["t"] == "assigned"
+    assert w.window.pending_image_assignments(assets)[1] == {
+        BANNER: os.path.normpath(rep)}
+    # a folder is not a picture: said so, and the pick stays
+    w.ctx.drops.put([reps])
+    assert w.call("ui.drop_arm", [os.path.basename(reps)]) is True
+    assert w.call("images.choose", PLAIN) is None
+    assert w.asked[-1]["message"] == (
+        "This asks for a file, not a folder: drop the file itself here.")
+    assert _by_rel(w.state("images"))[PLAIN]["t"] != "assigned"
+    # a folder on Replace from folder… is that folder
+    w.ctx.drops.put([reps])
+    assert w.call("ui.drop_arm", [os.path.basename(reps)]) is True
+    w.answers = ["yes"]                          # "Use 1 file(s) from ..."
+    assert w.call("images.from_folder") == 1     # backglass.jpg
+    assert _by_rel(w.state("images"))[PLAIN]["p"] == "backglass.jpg"
+
+
 def test_choose_keep_size_and_the_build_tuple(scanned):
     w, assets, reps, _st = scanned
     rep = os.path.join(reps, "SpaceGodzilla.png")
@@ -386,7 +420,9 @@ def test_choose_keep_size_and_the_build_tuple(scanned):
     assert pend[2] == frozenset()
     w.call("images.set_keep", BANNER, True)
     p = w.state("images")["preview"]
-    assert p["keep"]["on"] is True and "the scene grows" in p["keep"]["text"]
+    assert p["keep"]["on"] is True and p["keep"]["text"].startswith(
+        "Kept at 90×22 (the original is 40×20): it shows in the original's place "
+        "and size")
     assert _by_rel(w.state("images"))[BANNER]["k"] is True
     assert w.window.pending_image_assignments(assets)[2] == frozenset(
         {BANNER})
@@ -459,6 +495,106 @@ def test_clear_one_selected_and_all(scanned):
     w.answers = ["yes"]
     assert w.call("images.clear_all") == 1
     assert "Clear all 1 replacement on this tab?" in w.asked[-1]["message"]
+
+
+def test_same_picture(tmp_path):
+    """PAD-1016: the same picture saved again, an RGB copy of an opaque one
+    and color under fully clear pixels all count as the same; one pixel, the
+    size or the alpha changed does not, nor does a file that is no picture."""
+    from pinball_decryptor.webui.tabs.images import same_picture
+    p = lambda n: str(tmp_path / n)                         # noqa: E731
+    im = Image.new("RGBA", (16, 8), (10, 20, 30, 255))
+    im.putpixel((3, 3), (200, 0, 0, 255))
+    im.save(p("a.png"))
+    im.save(p("a_again.png"), compress_level=1)
+    assert open(p("a.png"), "rb").read() != open(p("a_again.png"), "rb").read()
+    assert same_picture(p("a.png"), p("a_again.png"))
+    im.convert("RGB").save(p("a_rgb.png"))
+    assert same_picture(p("a.png"), p("a_rgb.png"))
+    one = im.copy()
+    one.putpixel((0, 0), (10, 20, 31, 255))
+    one.save(p("one.png"))
+    assert not same_picture(p("a.png"), p("one.png"))
+    im.resize((16, 9)).save(p("big.png"))
+    assert not same_picture(p("a.png"), p("big.png"))
+    clear = im.copy()
+    clear.putpixel((0, 0), (10, 20, 30, 0))
+    clear.save(p("clear.png"))
+    assert not same_picture(p("a.png"), p("clear.png"))
+    under = clear.copy()
+    under.putpixel((0, 0), (255, 255, 255, 0))
+    under.save(p("under.png"))
+    assert same_picture(p("clear.png"), p("under.png"))
+    (tmp_path / "junk.png").write_bytes(b"not a picture")
+    assert not same_picture(p("a.png"), p("junk.png"))
+    assert not same_picture(p("a.png"), p("gone.png"))
+
+
+def _same_done(w):
+    _wait(w, lambda st: not st.get("same"))
+
+
+def test_clear_same(scanned):
+    """PAD-1016 (DoomWalrus666): More > Clear replacements identical to the
+    original clears just the picks that are the game's own picture again."""
+    w, assets, reps, _st = scanned
+    same = os.path.join(reps, "banner_again.png")
+    Image.open(os.path.join(assets, BANNER)).save(same, compress_level=1)
+    sprite = os.path.join(reps, "sprite_again.png")
+    Image.open(os.path.join(assets, SPRITE)).save(sprite, compress_level=1)
+    other = os.path.join(reps, "SpaceGodzilla.png")
+    for rel, rep in ((BANNER, same), (SPRITE, sprite), (PLAIN, other)):
+        w.answers = [rep]
+        w.call("images.choose", rel)
+    # the answer is no: nothing goes
+    w.answers = ["no"]
+    assert w.call("images.clear_same") is True
+    _same_done(w)
+    q = w.asked[-1]["message"]
+    assert q.startswith("2 of the 3 replacements on this tab are the same "
+                        "picture as the original"), q
+    assert len(w.window.pending_image_assignments(assets)[1]) == 3
+    # yes: the two copies go, the real change stays
+    w.answers = ["yes"]
+    assert w.call("images.clear_same") is True
+    _same_done(w)
+    _wait(w, lambda st: len(
+        w.window.pending_image_assignments(assets)[1]) == 1)
+    assert w.window.pending_image_assignments(assets)[1] == {PLAIN: other}
+    log = " ".join(l["text"] for l in w.window._log["stern"])
+    assert "cleared 2 replacements" in log
+    # nothing left that is the same: says so, clears nothing
+    assert w.call("images.clear_same") is True
+    _same_done(w)
+    assert w.asked[-1]["message"].startswith(
+        "None of the 1 replacement on this tab is the same picture")
+    assert w.window.pending_image_assignments(assets)[1] == {PLAIN: other}
+
+
+def test_clear_same_clears_colour_corrected(scanned):
+    """A same-picture pick with its colors corrected for the machine is
+    cleared too (DoomWalrus666's follow-up: the box is often on for all), and
+    the question says the game's own picture goes back uncorrected."""
+    w, assets, reps, _st = scanned
+    same = os.path.join(reps, "banner_again.png")
+    Image.open(os.path.join(assets, BANNER)).save(same, compress_level=1)
+    sprite = os.path.join(reps, "sprite_again.png")
+    Image.open(os.path.join(assets, SPRITE)).save(sprite, compress_level=1)
+    for rel, rep in ((BANNER, same), (SPRITE, sprite)):
+        w.answers = [rep]
+        w.call("images.choose", rel)
+    tab = w.window.service("images")
+    w.run(lambda: tab._color.__setitem__(BANNER, True))
+    w.run(lambda: setattr(tab, "_per_file_colour", lambda: True))
+    w.answers = ["yes"]
+    assert w.call("images.clear_same") is True
+    _same_done(w)
+    q = w.asked[-1]["message"]
+    assert q.startswith("2 of the 2 replacements on this tab are the same "
+                        "picture as the original"), q
+    assert "1 of them has “Correct its colors for the machine” on" in q, q
+    _wait(w, lambda st: w.window.pending_image_assignments(assets) is None)
+    assert BANNER not in tab._color
 
 
 def test_replace_from_folder(scanned):

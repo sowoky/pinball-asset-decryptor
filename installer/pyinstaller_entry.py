@@ -10,9 +10,16 @@ import sys
 
 
 if __name__ == "__main__":
+    # Linux: the system's programs (ffmpeg above all) get the system's
+    # libraries, not the bundle's older ones (PAD-837).  Before
+    # freeze_support, which runs a multiprocessing worker and exits there:
+    # workers start system programs too (PAD-875).
+    from pinball_decryptor.core.desktop import guard_child_env
+    guard_child_env()
+
     # Required so PyInstaller-frozen child processes spawned by multiprocessing
     # (Stern Spike 2 parallel audio decode) bootstrap instead of re-running the
-    # app.  Must be the first thing the frozen entry does.
+    # app.  Must come before any app code runs.
     multiprocessing.freeze_support()
 
     # Elevated flash-helper re-invocation (see core.elevated_flash): the frozen
@@ -20,6 +27,40 @@ if __name__ == "__main__":
     if "--flash-helper" in sys.argv:
         from pinball_decryptor.core.elevated_flash import run_helper_main
         sys.exit(run_helper_main(sys.argv))
+
+    # The MCP server an AI agent starts (PAD-844): the frozen binary with
+    # --mcp, as ``python -m pinball_decryptor.mcp`` is on Windows.
+    if "--mcp" in sys.argv:
+        from pinball_decryptor.mcp import main as mcp_main
+        sys.exit(mcp_main())
+
+    # The Mac emulator's sound cushion (PAD-1109): the frozen binary with
+    # --pace runs tools/spike2_emu/padrelay.py's pacer between docker exec and
+    # ffplay, so the speaker is never starved by a lumpy transport. The app's
+    # own Python, because a Mac has no other for certain; nothing of the GUI
+    # is imported for it.
+    if "--pace" in sys.argv:
+        import importlib.util
+        import os
+        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        # a Mac bundle keeps its data under Contents/Resources (PyInstaller 6
+        # symlinks it from Contents/Frameworks, where _MEIPASS points); a
+        # source tree keeps it beside installer/
+        relay = ""
+        for d in (base, os.path.join(base, os.pardir, "Resources"),
+                  os.path.join(base, os.pardir)):
+            cand = os.path.join(d, "tools", "spike2_emu", "padrelay.py")
+            if os.path.isfile(cand):
+                relay = cand
+                break
+        if not relay:
+            print("[pace] no tools/spike2_emu/padrelay.py near %s" % base,
+                  file=sys.stderr)
+            sys.exit(2)
+        spec = importlib.util.spec_from_file_location("padrelay", relay)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        sys.exit(mod.pace_main(sys.argv[sys.argv.index("--pace") + 1:]))
 
     from pinball_decryptor.webui.host import main
     sys.exit(main(sys.argv[1:]))

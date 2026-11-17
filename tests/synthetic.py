@@ -534,7 +534,8 @@ def make_ext2_fs(files, fs_blocks=512):
 
     *files* is ``{path: bytes}`` with ``/``-separated paths; intermediate
     directories are created.  Small scale only: every file must fit in 12
-    direct blocks (12 KB) and everything in one block group.
+    direct blocks and one single-indirect block (268 KB) and everything in
+    one block group.
     """
     BS = 1024
     INODE_SIZE = 128
@@ -564,12 +565,21 @@ def make_ext2_fs(files, fs_blocks=512):
     next_ino = [11]                     # first non-reserved inode
 
     def alloc_blocks(data):
+        """The inode's i_block list: 12 direct blocks, then one single-
+        indirect block (a game ELF is bigger than 12 KB, PAD-869)."""
         n = max(1, (len(data) + BS - 1) // BS)
-        assert n <= 12, "make_ext2_fs: file too big for direct blocks"
+        assert n <= 12 + BS // 4, "make_ext2_fs: file too big"
         start = next_block[0]
         next_block[0] += n
         img[start * BS:start * BS + len(data)] = data
-        return list(range(start, start + n))
+        blocks = list(range(start, start + n))
+        if n <= 12:
+            return blocks
+        ind = next_block[0]
+        next_block[0] += 1
+        for i, b in enumerate(blocks[12:]):
+            struct.pack_into("<I", img, ind * BS + 4 * i, b)
+        return blocks[:12] + [ind]
 
     def write_inode(ino, mode, size, blocks):
         off = 3 * BS + (ino - 1) * INODE_SIZE
@@ -622,40 +632,207 @@ def make_ext2_fs(files, fs_blocks=512):
     return bytes(img)
 
 
-def make_spike1_sidx(game_dir, image_bin):
+def make_spike1_sidx(game_dir, image_bin, extra=None):
     """A real FINF ``.sidx`` manifest whose ``<game_dir>/image.bin`` record
     carries the true HMAC + MD5 of *image_bin* (same key/scheme the shipping
-    sidx module validates)."""
+    sidx module validates); *extra* ``{path: bytes}`` adds a record per
+    file (the game program's, PAD-869)."""
     import hashlib
     import hmac as hmac_mod
 
     from pinball_decryptor.plugins.stern.sidx import SIDX_KEY
 
-    h = hmac_mod.new(SIDX_KEY, image_bin, hashlib.sha1).digest()
-    m = hashlib.md5(image_bin).digest()
-    paths = ("%s/image.bin" % game_dir).encode() + b"\x00"
-    payload = bytearray(57)
-    struct.pack_into("<I", payload, 4, len(image_bin))
-    struct.pack_into("<I", payload, 12, len(image_bin))
-    payload[21:41] = h
-    payload[41:57] = m
+    files = [("%s/image.bin" % game_dir, image_bin)] + list(
+        (extra or {}).items())
+    paths = b"".join(p.encode() + b"\x00" for p, _d in files)
+    recs = b""
+    for _p, data in files:
+        payload = bytearray(57)
+        struct.pack_into("<I", payload, 4, len(data))
+        struct.pack_into("<I", payload, 12, len(data))
+        payload[21:41] = hmac_mod.new(SIDX_KEY, data, hashlib.sha1).digest()
+        payload[41:57] = hashlib.md5(data).digest()
+        recs += b"FINF" + struct.pack("<I", len(payload)) + bytes(payload)
     return (b"SIDX" + b"\x00" * 0x34
-            + b"STRS" + struct.pack("<I", len(paths)) + paths
-            + b"FINF" + struct.pack("<I", len(payload)) + bytes(payload))
+            + b"STRS" + struct.pack("<I", len(paths)) + paths + recs)
 
 
-def make_spike1_card(out_path, game_dir="GAME_LE", **image_kwargs):
+def make_spike1_game_elf(texts=("SELECT SONG", "BLACK DIAMOND"),
+                         spare=True):
+    """A tiny static-armel-shaped Spike 1 game ELF (PAD-869): a text PT_LOAD
+    holding *texts* as NUL-separated C strings, a data PT_LOAD holding one
+    five-language ``lang_text`` group (5 pointers + NULL) per text, the
+    page-aligned hole between them, PT_NOTE / PT_GNU_STACK headers, and an
+    unloaded ``.debug_frame`` section (*spare*) longer text can be mapped
+    from.  Returns ``(elf_bytes, {text: string_va})``."""
+    page = 0x1000
+    raw = bytearray(17 * page)      # spike1 only takes a game ELF >= 64 KB
+    # the strings at 0x100 in the text segment (va 0x8000 + offset)
+    vas, off = {}, 0x100
+    for t in texts:
+        off += 1
+        vas[t] = 0x8000 + off
+        raw[off:off + len(t)] = t.encode("latin1")
+        off += len(t) + 3                   # some NUL padding after each
+    # the lang_text groups at file 0x1000 (va 0x11000)
+    o = page
+    for t in texts:
+        for _ in range(5):
+            struct.pack_into("<I", raw, o, vas[t])
+            o += 4
+        o += 4                              # the NULL that ends a group
+    names = b"\x00.debug_frame\x00.shstrtab\x00"
+    shstr_off = 5 * page
+    raw[shstr_off:shstr_off + len(names)] = names
+    shoff = shstr_off + 0x100
+    secs = [(0, 0, 0, 0)]
+    if spare:
+        secs.append((1, 1, 2 * page, 3 * page))         # .debug_frame
+    secs.append((names.index(b".shstrtab"), 3, shstr_off, len(names)))
+    for i, (nm, typ, so, sz) in enumerate(secs):
+        struct.pack_into("<10I", raw, shoff + i * 40, nm, typ, 0, 0, so, sz,
+                         0, 0, 1, 0)
+    phdrs = [(1, 0, 0x8000, page, page, 5, page),           # text
+             (1, page, 0x11000, page, 2 * page, 6, page),   # data (+bss)
+             (4, 0x100, 0x8100, 0x20, 0x20, 4, 4),          # PT_NOTE
+             (0x6474E551, 0, 0, 0, 0, 7, 0x10)]             # PT_GNU_STACK
+    raw[0:16] = b"\x7fELF\x01\x01\x01" + b"\x00" * 9
+    struct.pack_into("<HHIIIIIHHHHHH", raw, 16, 2, 40, 1, 0x8000, 0x34,
+                     shoff, 0x5000000, 0x34, 32, len(phdrs), 40, len(secs),
+                     len(secs) - 1)
+    for i, (t, po, va, fs, ms, fl, al) in enumerate(phdrs):
+        struct.pack_into("<8I", raw, 0x34 + i * 32, t, po, va, va, fs, ms,
+                         fl, al)
+    return bytes(raw), vas
+
+
+def make_spike1_pictures(base):
+    """A Spike 1 picture area (PAD-870) to sit at file offset *base* of an
+    ``image.bin``: one font (``A``, ``B``: 4x3 raw glyphs) and a seven-entry
+    picture table - the two glyphs, a raw 16x8 still, a row run-length
+    keyframe (flag 4) with a row delta on it, a column run-length frame and a
+    4-bit frame, records 8-byte aligned.  Returns ``(area bytes, layout
+    kwargs for spike1_images.Layout, {number: frame})``."""
+    import numpy as np
+
+    from pinball_decryptor.plugins.pinmame_classic import sam_anim
+
+    yy, xx = np.mgrid[:8, :16]
+    glyph_a = np.array([[0, 15, 15, 0], [15, 0, 0, 15], [15, 15, 15, 15]],
+                       np.uint8)
+    glyph_b = np.array([[15, 15, 15, 0], [15, 15, 0, 15], [15, 15, 15, 0]],
+                       np.uint8)
+    still = ((xx + yy) % 16).astype(np.uint8)
+    key = np.where(xx < 8, 0, 15).astype(np.uint8)
+    key[3, 2] = sam_anim.TRANSPARENT
+    delta = key.copy()
+    delta[4:6, 4:12] = 9
+    col = np.zeros((8, 16), np.uint8)
+    col[2:6, 3:13] = 7
+    nib = ((xx * 3 + yy) % 16).astype(np.uint8)
+    frames = {0: glyph_a, 1: glyph_b, 2: still, 3: key, 4: delta, 5: col,
+              6: nib}
+
+    def rec(rid, flags, fmt, body, f):
+        h, w = f.shape
+        return struct.pack("<IIhhB", rid, flags, w, h, fmt) + body
+
+    def scan(f, colm=False):
+        return sam_anim._to_scan(f, colm)
+
+    nib_px = nib.reshape(-1)
+    recs = [
+        rec(1, 0, 0, glyph_a.tobytes(), glyph_a),
+        rec(2, 0, 0, glyph_b.tobytes(), glyph_b),
+        rec(3, 0, 0, still.tobytes(), still),
+        rec(10, 4, 7, sam_anim.rle_encode(scan(key)), key),
+        rec(11, 0, 9, sam_anim.delta_encode(scan(key), scan(delta)), delta),
+        rec(20, 0, 1, sam_anim.rle_encode(scan(col, True)), col),
+        rec(30, 0, 12, (nib_px[0::2] | (nib_px[1::2] << 4))
+            .astype(np.uint8).tobytes(), nib),
+    ]
+    fonts = base
+    charset = base + 0x20
+    glyphs = base + 0x28
+    table = base + 0x48
+    at = base + 0x80
+    offs = []
+    area = bytearray(0x80)
+    for r in recs:
+        offs.append(at)
+        area += r + bytes((-len(r)) % 8)
+        at = base + len(area)
+    struct.pack_into("<4Q", area, 0, charset, glyphs, 3, 0)
+    area[0x20:0x24] = b"AB\x00\x00"
+    struct.pack_into("<QqQq", area, 0x28, offs[0], 0, offs[1], 0)
+    struct.pack_into("<7Q", area, 0x48, *offs)
+    return bytes(area), dict(table=table, count=len(recs), fonts=fonts,
+                             font_count=1), frames
+
+
+def add_spike1_pictures(image_bin):
+    """*image_bin* (:func:`make_spike1_image_bin`) with the picture area of
+    :func:`make_spike1_pictures` appended, header2's size word kept true.
+    Returns ``(blob, layout kwargs, frames)``."""
+    from pinball_decryptor.plugins.stern import spike1
+    base = (len(image_bin) + 7) & ~7
+    area, lay, frames = make_spike1_pictures(base)
+    blob = bytearray(image_bin) + bytes(base - len(image_bin)) + area
+    h2 = spike1.find_header2(image_bin)
+    struct.pack_into("<Q", blob, h2 + 32, len(blob) - 5)
+    return bytes(blob), lay, frames
+
+
+def make_spike1_picture_elf(hooks):
+    """A >= 64 KB ARM ELF32 whose symbol table names *hooks* (``{name:
+    (value, size)}``, a .data word each), the way the Spike 1 game program
+    names ``hook_image_table_flash_offset`` and the rest (PAD-870)."""
+    shdr = struct.Struct("<IIIIIIIIII")
+    sym = struct.Struct("<IIIBBH")
+    data_va, data_off = 0x2000, 0x2000
+    data = bytearray()
+    strtab = bytearray(b"\x00")
+    syms = sym.pack(0, 0, 0, 0, 0, 0)
+    for name, (value, size) in hooks.items():
+        va = data_va + len(data)
+        data += struct.pack("<Q" if size == 8 else "<I", value)
+        syms += sym.pack(len(strtab), va, size, 1, 0, 1)
+        strtab += name.encode() + b"\x00"
+    str_off, sym_off, shoff = 0x3000, 0x6000, 0x9000
+    raw = bytearray(0x10000 + 0x100)
+    raw[data_off:data_off + len(data)] = data
+    raw[str_off:str_off + len(strtab)] = strtab
+    raw[sym_off:sym_off + len(syms)] = syms
+    raw[0:16] = b"\x7fELF\x01\x01\x01" + b"\x00" * 9
+    struct.pack_into("<HHIIIIIHHHHHH", raw, 16, 2, 40, 1, 0x8000, 0, shoff,
+                     0x5000000, 0x34, 32, 0, shdr.size, 4, 0)
+    sh = shdr.pack(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    sh += shdr.pack(0, 1, 3, data_va, data_off, len(data), 0, 0, 8, 0)
+    sh += shdr.pack(0, 3, 0, 0, str_off, len(strtab), 0, 0, 1, 0)
+    sh += shdr.pack(0, 2, 0, 0, sym_off, len(syms), 2, 0, 4, sym.size)
+    raw[shoff:shoff + len(sh)] = sh
+    return bytes(raw)
+
+
+def make_spike1_card(out_path, game_dir="GAME_LE", game_elf=None,
+                     **image_kwargs):
     """A complete synthetic Spike 1 card: the fixed MBR/EBR signature with a
     real ext2 filesystem on the first logical partition holding
     ``<game_dir>/image.bin`` (from :func:`make_spike1_image_bin`) and a valid
     ``/spk/index/<game_dir>-0_1.sidx``.  Returns ``(out_path, expected,
     image_bin)`` — enough to run extract_all / write_image / revert_assets
-    end to end without a multi-GB fixture."""
+    end to end without a multi-GB fixture.  ``pictures=True`` appends the
+    DMD picture area of :func:`add_spike1_pictures` (PAD-870)."""
+    pictures = image_kwargs.pop("pictures", False)
     image_bin, expected = make_spike1_image_bin(**image_kwargs)
-    sidx = make_spike1_sidx(game_dir, image_bin)
+    if pictures:
+        image_bin = add_spike1_pictures(image_bin)[0]
+    sidx = make_spike1_sidx(game_dir, image_bin,
+                            {"%s/game" % game_dir: game_elf}
+                            if game_elf else None)
     fs = make_ext2_fs({
         "%s/image.bin" % game_dir: image_bin,
-        "%s/game" % game_dir: b"\x7fELF" + b"\x00" * 60,
+        "%s/game" % game_dir: game_elf or b"\x7fELF" + b"\x00" * 60,
         "spk/index/%s-0_1.sidx" % game_dir: sidx,
     })
     make_spike1_mbr(out_path)

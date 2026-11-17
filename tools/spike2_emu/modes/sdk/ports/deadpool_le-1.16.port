@@ -13,6 +13,8 @@ site tick             0x002e2dcc 0xe92d4038 0xe3a00037
 site shot_dispatch    0x00100094 0xe92d4ff0 0xe1a07003
 site ball_end         0x000fee68 0xe92d4038 0xe1a05000
 site sound_lookup     0x00462f30 0xe92d4038 0xe1a05000
+# PAD-494/724 music modes: get_asset_descriptor, WRAPPED (sounds.cfg)
+site sound_resolve    0x003c928c 0xe92d41f0 0xe1a05820
 site score_add        0x0021dbc0 0xe30a16fe 0xe3401073
 site callout          0x003ca440 0xe92d4010 0xe30beb30
 site callout_nth      0x003ca5f4 0xe92d4010 0xe30beb30
@@ -242,6 +244,31 @@ lamp 381          0              TRUCK FLASH  # lamp 183, I/O group 7 index 30, 
 lamp 382          0              POP BUMPER FLASH  # lamp 184, I/O group 8 index 40, at 214,146
 lamp 383          0              DISCO BALL FLASH (X2)  # lamp 185, I/O group 8 index 26, at 58,177
 lamp 389          0              EJECT FLASH  # lamp 191, I/O group 8 index 41, at 112,168
+# ---- cabinet: cablamp <light ids R,G,B | one> <u> <name> - the expression lights, read by lamp_map.py ----
+# 0 blade pixel(s), 23 speaker light(s), placed on the cabinet drawing (PAD-1040)
+cablamp 408,409,410  41  SPEAKER 1  # lamp 207, I/O group 6 index 1, at 95,28, speaker L
+cablamp 411,412,413  125 SPEAKER 2  # lamp 208, I/O group 6 index 4, at 116,34, speaker L
+cablamp 414,415,416  208 SPEAKER 3  # lamp 209, I/O group 6 index 7, at 131,49, speaker L
+cablamp 417,418,419  291 SPEAKER 4  # lamp 210, I/O group 6 index 10, at 137,70, speaker L
+cablamp 420,421,422  375 SPEAKER 5  # lamp 211, I/O group 6 index 13, at 131,91, speaker L
+cablamp 423,424,425  458 SPEAKER 6  # lamp 212, I/O group 6 index 16, at 116,106, speaker L
+cablamp 426,427,428  541 SPEAKER 7  # lamp 213, I/O group 6 index 19, at 95,112, speaker L
+cablamp 429,430,431  625 SPEAKER 8  # lamp 214, I/O group 6 index 22, at 74,106, speaker L
+cablamp 432,433,434  708 SPEAKER 9  # lamp 215, I/O group 6 index 25, at 59,91, speaker L
+cablamp 435,436,437  791 SPEAKER 10  # lamp 216, I/O group 6 index 28, at 53,70, speaker L
+cablamp 438,439,440  875 SPEAKER 11  # lamp 217, I/O group 6 index 31, at 59,49, speaker L
+cablamp 441,442,443  958 SPEAKER 12  # lamp 218, I/O group 6 index 34, at 74,34, speaker L
+cablamp 444,445,446  45  SPEAKER 13  # lamp 219, I/O group 6 index 37, at 205,28, speaker R
+cablamp 447,448,449  136 SPEAKER 14  # lamp 220, I/O group 6 index 40, at 228,35, speaker R
+cablamp 450,451,452  227 SPEAKER 15  # lamp 221, I/O group 6 index 43, at 243,53, speaker R
+cablamp 453,454,455  318 SPEAKER 16  # lamp 222, I/O group 6 index 46, at 247,76, speaker R
+cablamp 456,457,458  409 SPEAKER 17  # lamp 223, I/O group 6 index 49, at 237,98, speaker R
+cablamp 459,460,461  500 SPEAKER 18  # lamp 224, I/O group 6 index 52, at 217,110, speaker R
+cablamp 462,463,464  590 SPEAKER 19  # lamp 225, I/O group 6 index 55, at 193,110, speaker R
+cablamp 465,466,467  681 SPEAKER 20  # lamp 226, I/O group 6 index 58, at 173,98, speaker R
+cablamp 468,469,470  772 SPEAKER 21  # lamp 227, I/O group 6 index 61, at 163,76, speaker R
+cablamp 471,472,473  863 SPEAKER 22  # lamp 228, I/O group 6 index 64, at 167,53, speaker R
+cablamp 474,475,476  954 SPEAKER 23  # lamp 229, I/O group 6 index 67, at 182,35, speaker R
 
 # PAD-363: the game's own modes a mode of ours may keep from starting (game_mode_blocks.py, from the
 # game program: each mode's start = its vtable + 8 + 4 * the title's start slot). Never a multiball.
@@ -447,3 +474,121 @@ text shake_setting_ms      0 1024 1024 1024
 text shake_short            0:200:0
 text shake_medium           0:384:0
 text shake_long             0:1024:0
+
+# ---- PAD-473: the game's own mini-wizards (MODE_SDK.md "The game's own mini-wizards on the other titles"): each one's
+# mode object, started by its own START (v[13]) as the game's rules start it and asked its ACTIVE (v[23]);
+# the names and what earns each are the game's rulesheet's, the objects this build's own (stock_scan_cpp).
+data  wizard_obj_1    0x006b54c8   # cmrsinister_rex
+text  wizard_name_1   Megakrakolodonus Rex
+text  wizard_film_1   both quests won and Sauron Multiball
+data  wizard_obj_2    0x006b5658   # cmrsinister_clones, a multiball
+text  wizard_name_2   Clone Multiball
+text  wizard_film_2   the three level 2 battles won
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+data  game_flags          0x00733f64
+value game_flags_at       4
+data  game_flag_count     0x00566678
+value challenge_on_flag   18
+site  challenge_balls     0x00220318 0xe92d4030 0xe1a05000
+site  challenge_extra_ball 0x0025fc70 0xe30c3ee4 0xe3403072
+site  challenge_menu      0x00073de0 0xe1a07000 0xe3170080
+site  challenge_menu_pick 0x00073fc4 0xe2433001 0xe3530006
+value challenge_menu_list_at   240
+value challenge_menu_count_at  32
+value challenge_menu_cap       8
+value challenge_menu_entry     12
+value challenge_menu_kind      3
+value challenge_menu_slot      -1
+value challenge_menu_caption   1921
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x002a6a7c 0xe30a26fe 0xe3402073
+
+# ---- PAD-645: the framework's switch drain, for the flipper buttons' sounds in attract (portswitch.py; no `switch` lines: the shots keep their own route) ----
+#   switch_edge: the framework's per-switch call in its switch drain (generation B: r0 = the switch id, called for every edge after the new level is stored) - press the switches to prove it
+site switch_edge      0x0027ea68 0xe30e3c2c 0xe340306b
+#   switch_drain: the drain itself, never hooked: an edge counts only when switch_edge is called from it
+site switch_drain     0x0027f748 0xe92d4ff0 0xe30f9a10
+data switch_records         0x0072da18
+data switch_count           0x006bec2c
+value switch_drain_size     384
+value switch_record_size    32
+value switch_level_at       24
+value switch_desc_via       8
+value switch_flags_at       26
+value switch_polarity_at    28
+#   the drain's edges are not this port's shots (they keep their own route): only the flipper buttons' sounds in attract use it
+value switch_edge_shots     0
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x002a28ec 0xe92d4010 0xe30f4e04
+value ball_launch_flag       12
+value ball_launch_wait_flag  13
+
+# ---- PAD-663: the game's champions for a mode's challenge game, read off this build's own code (portchallenge.py) ----
+# PAD-640: the game's end-of-game high scores (a mode's challenge game keeps the mode's own)
+site  challenge_scores       0x0033644c 0xe92d4ff0 0xe24dd0bc
+site  challenge_score_entry  0x00335980 0xe1a03000 0xe30a01e0
+# PAD-663: its question to the bus before it files a player under a category's entry ({player, category +2, entry +4}): in a mode's challenge game only the mode's record says yes
+site  challenge_scores_gate  0x003366b8 0xebf866b0 0xe3500000
+value challenge_scores_gate_id       91
+value challenge_scores_gate_cat_at   2
+value challenge_scores_gate_entry_at 4
+# PAD-663: the category table (36 bytes each; +28 the entry list a category's insert shifts) and its count
+data  challenge_scores_table 0x00657414
+data  challenge_scores_count 0x00566f2c
+# PAD-663: HIGHEST SCORES, whose first entry a mode's challenge game goes in as the mode's own record
+value challenge_scores_cat   1
+# PAD-663: the champion page function(s) (each called per category; the attract mode's is the one it calls): a mode's challenge champion is shown on it after the lowest category the attract mode shows
+site  challenge_pages_0     0x0002375c 0xe92d4ff0 0xe1a07000
+site  challenge_pages_1     0x000da5e8 0xe92d4ff0 0xe1a05000
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x0033644c 0xe92d4ff0 0xe24dd0bc
+
+# PAD-710: the game's own mode framework (mode_framework.py, from this build's program): what one of its
+# modes writes as it starts and stops, so a mode of ours in one's place counts as it
+site  mode_player            0x002202e8 0xe3013bd4 0xe3403064
+value mode_slot_stop         18
+value mode_stopped_at        0x17
+value mode_starts_at         0x3c
+site  mode_started           0x000fd4ec 0xe3510019 0x812fff1e
+data  mode_manager           0x006aecbc
+value mode_id_at             4
+
+# PAD-782: the attract mode's page table (portattract.py); an owner's attract items play between its pages
+data  attract_table       0x0063b980
+value attract_entry_size  12
+value attract_page_at     4
+value attract_count       55
+site  attract_sleep       0x002f64f4 0xe3013480 0xe3403073
+# PAD-782: the scene show an attract item's page puts the video bank's scene on the glass with
+site  attract_show        0x0015f26c 0xe92d4070 0xe3014484
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x005201fc 0xe5d13000 0xe3530008
+site coil_off              0x0051c2e8 0xe3510008 0xe1a02001
+data sw_struct             0x0072da18
+
+# ---- PAD-1017: co-op play (portcoop.py, read off this build's program) ----
+site  coop_player_change 0x00220448 0xe92d41f0 0xe24dd008
+site  coop_add_player    0x00220288 0xe92d4038 0xe3a00051
+data  coop_player        0x00641bd4
+data  coop_players       0x0072c3f4
+site  coop_first_ball    0x0026e648 0xebfec74b 0xe1a04000
+site  coop_icon_draw         0x003bd5ec 0xebfffdf3 0xe1560004
+
+# ---- PAD-1017: more for co-op play (the message table and its BALL line; the end-of-game high scores) ----
+value coop_ball_msg          1255
+
+# ---- PAD-1316: co-op play - the game start's adds of the Insider lobby's players, made while ball 1 waits (portcoop.py) ----
+site  coop_start_game        0x0026e868 0xe92d47f0 0xe30c4489
+site  coop_lobby_add         0x0026e990 0xebfffea3 0xe2506000
+
+# ---- PAD-1028: co-op awards - the game's audit add (portcoop.py, read off this build's program) ----
+site  audit_add              0x00220924 0xe92d43f0 0xe2505000

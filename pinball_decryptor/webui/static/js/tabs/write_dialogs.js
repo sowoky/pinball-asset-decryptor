@@ -100,7 +100,7 @@ export function FlashDialog({ f }) {
         <div class="wr-frow">
           <span class="lbl">Image file:</span>
           <${Field} value=${f.image_path} mono cls="grow" disabled=${!f.image_enabled} ...${imagePath} />
-          <${Button} disabled=${!f.image_enabled} onClick=${() => call("write.flash_browse", "image")}>Browse…<//>
+          <${Button} drop disabled=${!f.image_enabled} onClick=${() => call("write.flash_browse", "image")}>Browse…<//>
         </div>
         ${f.targets && f.targets.length ? html`<div class="wr-frow top">
           <span class="lbl">Onto:</span>
@@ -116,13 +116,18 @@ export function FlashDialog({ f }) {
         ${f.show_from ? html`<div class="wr-frow">
           <span class="lbl">From ISO:</span>
           <${Field} value=${f.from_path} mono cls="grow" ...${fromPath} />
-          <${Button} onClick=${() => call("write.flash_browse", "from")}>Browse…<//>
+          <${Button} drop onClick=${() => call("write.flash_browse", "from")}>Browse…<//>
         </div>` : null}
         ${f.menu_offered ? html`<div class="stack" style="gap:2px">
           <${Check} checked=${f.menu} disabled=${!f.menu_enabled}
             label="Only the boot menu — fast, and the machine keeps its settings and scores"
             onChange=${(v) => set("menu", v)} />
           ${f.menu_note ? html`<div class="small muted wr-ind">${f.menu_note}</div>` : null}
+        </div>` : null}
+        ${f.keep_offered ? html`<div class="stack" style="gap:2px">
+          <${Check} checked=${f.keep_data} disabled=${!f.keep_enabled}
+            label=${f.keep_label} onChange=${(v) => set("keep_data", v)} />
+          ${f.keep_note ? html`<div class="small muted wr-ind">${f.keep_note}</div>` : null}
         </div>` : null}
         ${f.verify_offered ? html`<div class="stack" style="gap:2px">
           <${Check} checked=${f.skip_verify} disabled=${!f.skip_verify_enabled}
@@ -195,14 +200,15 @@ export function InfoDialog({ info }) {
   };
   const footer = html`
     <${Button} onClick=${() => call("write.image_info_refresh")}>Refresh<//>
-    <${Button} disabled=${!(info.sections || []).length} onClick=${copy}>Copy Report<//>
+    <${Button} disabled=${info.busy || !(info.sections || []).length} onClick=${copy}>Copy Report<//>
     <span class="small muted grow">${info.busy ? "" : info.status}</span>
     <${Button} onClick=${() => call("write.image_info_close")}>Close<//>`;
   return html`<${Modal} title="Image Info" icon="info" wide onClose=${close} footer=${footer} cls="wr-infodlg">
     <div class="mono small dim wr-path">${info.path}</div>
-    ${info.busy
+    ${info.busy && !(info.sections || []).length
       ? html`<div class="wr-scan" role="status"><${Spinner} /><div class="msg">Reading image…</div></div>`
       : html`<div class="wr-info-list">
+        ${info.busy ? html`<div class="wr-scan" role="status"><${Spinner} /><div class="msg">${info.status}</div></div>` : null}
         ${(info.sections || []).map((sec) => html`<div class="wr-info-sec">
           <div class="wr-info-hd">${sec.title}</div>
           ${(sec.rows || []).map((r) => html`<div class="wr-info-row"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`)}

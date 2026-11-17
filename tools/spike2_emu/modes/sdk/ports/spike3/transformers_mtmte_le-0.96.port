@@ -1,0 +1,502 @@
+# transformers_mtmte_le 0.96 - Spike 3 (64-bit ARM): drafted by s3port.py (PAD-1287) from the Spike 3 port star_wars_elg-1.10.port (star_wars_elg 1.10).
+# Functions paired across the two titles: 9883 of 18297 reference functions (8366 anchored by vtable slots and strings, 376 through calls that line up, the rest grown through calls); half of them line up 100% or better.
+# Written: what the reference port carries that is the FRAMEWORK's (each site's function at least 75% alike its
+# reference's, each global and offset read at the lined-up instruction, the engines' layouts re-read off this program's
+# own code); the switch lines from this program's own device table. The reference game's own content (shows, lamps,
+# callouts, scenes, held coils, its modes) is not this title's: written as comments, for its own port.
+# Emulator-proven 2026-11-16 (PAD-1293) on the Spike 3 rig (tools/spike3_emu/proofs/s3proof.sh TITLE=transformers_mtmte_le,
+# slots 160-163, hidden, muted, prebuilt/mode64.so): the runtime took this port whole (30 sites, 37 shots), held back
+# the Insider achievement query (type 28) and took its shots from the switch drain's edges (switch_edge). CLOCK TEST (a
+# mode file: trigger 0x4 x3, 25 s, shots 0x202000002) started on the third Megatron target left hit, scored 6 shots
+# through the game's score_add (+21,000,000: score 275,000 -> 21,477,650) and ended when its 25 s ran out.
+# Program sha1 a3b67ca1f27d43de47bb15f73cc2a7808ea36439 (games/game).
+# Ball save (PROOF=ballsave): SAVE TEST's 15 s save through multiball_serve, the drain inside it served back (trough
+# eject, auto plunger), 3 shots scored on that ball, the drain after the save ended it; the control (no ball_save) ended
+# the ball on its first drain. Multiball (PROOF=mb): a mode file's `multiball 3 10` had the game serve 3 balls, ran its
+# 40 s clock and gave the game its multiball back at one ball.
+# Switch ids are MEASURED (proofs/s3census.sh, proofs/titles/transformers_mtmte_le-0.96.switch_ids): all 37 switch lines
+# reached the modes, each 3 below its device-table rank. Not carried: the game's own modes, shows, lamps, callouts,
+# screens and held coils (ELG's coil_take / coil_give are its own), for later work.
+
+game           transformers_mtmte_le
+version        0.96
+
+# ---- functions: site <name> <address> <first two instruction words> ----
+#   tick: its calls and callers (score 17.0) (98% alike)
+site tick             0x004fa530 0xd2800001 0x528006e0
+#   sound_lookup: the same instructions, found once on each (100% alike)
+site sound_lookup     0x0051fe30 0xf9400c02 0xb5000142
+#   sound_resolve: the same instructions, found once on each (100% alike)
+site sound_resolve    0x00520040 0xaa0103e2 0xa9bd53f3
+#   score_add: the same instructions, found once on each (100% alike)
+site score_add        0x00573f80 0xf0002143 0xf944c063
+#   callout: the same instructions, found once on each (100% alike)
+site callout          0x005255b0 0xf0002de8 0x913b8108
+#   callout_nth: the same instructions, found once on each (100% alike)
+site callout_nth      0x00525680 0xf0002de8 0x913b8108
+#   lamp_group: its calls and callers (score 4.0) (83% alike)
+site lamp_group       0x006024d0 0xa9be53f3 0x92403c14
+#   show_priority: the same instructions, found once on each (100% alike)
+site show_priority    0x005ac5a0 0xd0001f81 0xf9418c21
+# not carried - the screen and clip features name this title's hud / video bank scenes: site dynamic_cast     0x001f37d0 0xd0003d50 0xf944ca11
+# not carried - the screen and clip features name this title's hud / video bank scenes: site resource_get     0x0061b630 0xf0001c03 0xf9474c63
+# not carried - the screen and clip features name this title's hud / video bank scenes: site find_node        0x00746dc0 0x900012c2 0xf9474c42
+# not carried - the screen and clip features name this title's hud / video bank scenes: site set_text         0x0072ca20 0xa9bc7bfd 0x910003fd
+# not carried - the screen and clip features name this title's hud / video bank scenes: site surface_state    0x00738420 0xf9464400 0x91002000
+#   switch_hit: the call that lines up in a paired function (2 places) (95% alike)
+site switch_hit       0x00481dd0 0xb00028e1 0xf9474c21
+#   switch_hit2: the call that lines up in a paired function (2 places) (94% alike)
+site switch_hit2      0x00481e60 0xb00028e1 0xf9474c21
+#   sound_play: the same instructions, found once on each (100% alike)
+site sound_play       0x005255b0 0xf0002de8 0x913b8108
+#   sound_nth: the same instructions, found once on each (100% alike)
+site sound_nth        0x00525680 0xf0002de8 0x913b8108
+#   sound_active: the same instructions, found once on each (100% alike)
+site sound_active     0x005227d0 0xb0002e03 0x91378063
+#   sound_stop: the same instructions, found once on each (100% alike)
+site sound_stop       0x00522980 0xa9bc53f3 0xa9015bf5
+#   sound_worker: read off the sound engine's code
+site sound_worker     0x00524c30 0xd00023c8 0xf9474d08
+#   hook_dispatch: the same instructions, found once on each (100% alike)
+site hook_dispatch    0x006a5fb0 0xa9be53f3 0x7103401f
+#   show_start: the same instructions, found once on each (100% alike)
+site show_start       0x005ac330 0xa9bc53f3 0x72003c14
+#   event_post_replacing: the same instructions, found once on each (100% alike)
+site event_post_replacing 0x005485e0 0xa9be53f3 0x12003c14
+#   event_cancel: the same instructions, found once on each (100% alike)
+site event_cancel     0x005484e0 0xa9bc53f3 0xa9015bf5
+# not carried - the screen and clip features name this title's hud / video bank scenes: site surface_find     0x00747080 0xf00012a2 0xf9474c42
+# not carried - the screen and clip features name this title's hud / video bank scenes: site surface_set_video 0x0073f050 0xf00012e2 0xf9474c42
+# not carried - the screen and clip features name this title's hud / video bank scenes: site surface_play     0x0073b320 0xf0001303 0xf9474c63
+# not carried - the screen and clip features name this title's hud / video bank scenes: site surface_stop     0x00739840 0xb0001321 0xf9474c21
+# not carried - the screen and clip features name this title's hud / video bank scenes: site surface_duration 0x00739f60 0xb0001321 0xf9474c21
+# not carried - the screen and clip features name this title's hud / video bank scenes: site surface_position 0x00739be0 0xb0001321 0xf9474c21
+#   balls_in_play: the same instructions, found once on each (100% alike)
+site balls_in_play    0x00456e70 0xa9be53f3 0xb0003413
+# not carried - the screen and clip features name this title's hud / video bank scenes: site find_text        0x007468b0 0x900012c2 0xf9474c42
+#   agent_header: the same instructions, found once on each (100% alike)
+site agent_header     0x007abc70 0xb40002a0 0x4f000400
+#   agent_begin: its calls and callers (score 37.0) (100% alike)
+site agent_begin      0x007b5200 0xaa0003e4 0xaa0103e0
+#   multiball_serve: the same instructions, found once on each (100% alike)
+site multiball_serve  0x004570e0 0xf0002a26 0xf944c0c6
+#   proc_exists: the same instructions, found once on each (100% alike)
+site proc_exists      0x00548ac0 0xb0002ce2 0x91134042
+#   proc_create: the same instructions, found once on each (100% alike)
+site proc_create      0x00548260 0xb0002ce4 0x91134084
+#   proc_sleep: the same instructions, found once on each (100% alike)
+site proc_sleep       0x005483f0 0xb0002ce1 0x91134021
+#   adjustment: the same instructions, found once on each (100% alike)
+site adjustment       0x00678d80 0x72003c00 0x540000c0
+#   coil_fire: the same instructions, found once on each (100% alike)
+site coil_fire        0x0060beb0 0x72003c00 0x12001c21
+# site coil_take        NOT PLACED: no counterpart found
+# site coil_give        NOT PLACED: no counterpart found
+#   lamp_free_owner: read off the lamp layer / processes's code
+site lamp_free_owner  0x0040a6f0 0xa9bf7bf3 0xaa0003f3
+#   switch_edge: the 64-bit drain's per-edge point - every switch edge passes it after its level is written, before its handler bits are read (PAD-1322)
+site switch_edge      0x004a49b4 0xf9400a78 0x79405f1c
+value switch_record_reg         19    # read off the drain's own code (PAD-1322)
+value switch_id_at              0x20    # read off the drain's own code (PAD-1322)
+value switch_level_at           0x28    # read off the drain's own code (PAD-1322)
+value switch_desc_via           0x10    # read off the drain's own code (PAD-1322)
+value switch_flags_at           0x2e    # read off the drain's own code (PAD-1322)
+value switch_polarity_at        0x30    # read off the drain's own code (PAD-1322)
+
+# ---- globals: data <name> <address> ----
+data cur_player             0x009aabb8   # 10 of 10 lined-up instructions
+data scores                 0x00aec630   # 13 of 13 lined-up instructions
+data score_mult             0x009ac2d2   # 2 of 2 lined-up instructions
+data mode_mask              0x00b2e51c   # 273 of 273 lined-up instructions
+data event_head             0x00ae54d8   # read off the engine's own code
+data event_current          0x00ae54e0   # read off the engine's own code
+# not carried (screens/clips): data resource_manager       0x00ab7148   # 11 of 11 lined-up instructions
+# not carried (screens/clips): data typeinfo_resource      0x00979668   # 15 of 15 lined-up instructions
+# not carried (screens/clips): data typeinfo_scene_player  0x00995fe8   # 11 of 11 lined-up instructions
+data sound_channels         0x00ae3f00   # read off the engine's own code
+data sound_requests         0x00a78a30   # read off the engine's own code
+data sound_request_count    0x00834a98   # read off the engine's own code
+data lamp_layers            0x00ab67e0   # read off the engine's own code
+data light_count            0x00ad8040   # read off the engine's own code
+data game_flags             0x00b34770   # 10 of 10 lined-up instructions
+data game_flag_count        0x00834988   # 29 of 29 lined-up instructions
+value game_flags_at             0    # PAD-1327: the 64-bit flag bitmap's layout (Star Wars ELG's), lost in the draft
+data coil_count             0x00b31a20   # 63 of 63 lined-up instructions
+data coil_table             0x00b2f060   # 47 of 47 lined-up instructions
+
+# ---- PAD-1329: spare switch inputs and driver outputs (PAD-826), read off this program's own code: the node-bus
+# fire-by-address (mov x3,#0; mov w2,#0; b <the frame builder>; outputs above 15 refused) and the board's OFF
+# (8n 02 4d <coil>); the switch service's struct (+0 the 48-byte entries, +0x20 its mutex) and its node blocks
+# (176 bytes each: +32 the current bits, +40 the ids) ----
+site coil_frame       0x00777e70 0xd2800003 0x52800002
+site coil_off         0x007717d0 0xb0001162 0xf9474c42
+data sw_struct             0x00ad8e10
+data sw_blocks             0x00ad90a8
+# data right_gate_obj         not carried: the reference game's own (data right_gate_obj         0x00711730)
+
+# ---- values: the reference's framework offsets and counts, each read at the lined-up instruction or off the engine's own code ----
+value mode_mask_busy            0x210    # 8 of 8 lined-up instructions of the placed sites
+value sound_channel_count       8    # the engine's layout, 90 of 90 lined-up instructions
+value sound_channel_size        288    # the engine's layout, 8 of 8 lined-up instructions
+value sound_channel_request     272    # the engine's layout, 6 of 6 lined-up instructions
+value sound_channel_voices      276    # the engine's layout, 3 of 3 lined-up instructions
+value sound_channel_bus         277    # the engine's layout, 1 of 1 lined-up instructions
+value sound_channel_voice_ptrs  144    # the engine's layout, 4 of 5 lined-up instructions
+value sound_voice_volume        56    # the engine's layout, 20 of 20 lined-up instructions
+value lamp_group_next           32    # read off this program's own code, 156 of 156 lined-up instructions
+value lamp_group_prio           8    # read off this program's own code, 90 of 90 lined-up instructions
+value lamp_slot_size            40    # read off this program's own code, 31 of 31 lined-up instructions
+value lamp_slot_level           2    # the engine's layout, 29 of 30 lined-up instructions
+value lamp_slot_alpha           3    # the engine's layout, 18 of 18 lined-up instructions
+value lamp_slot_fade            8    # the engine's layout, 90 of 90 lined-up instructions
+value lamp_slot_used            36    # the engine's layout, 4 of 4 lined-up instructions
+value event_next                232    # read off this program's own code, 18 of 18 lined-up instructions
+value proc_exit_hooks           392    # read off this program's own code, 4 of 5 lined-up instructions
+value proc_exit_slots           4    # read off this program's own code, 40 of 41 lined-up instructions
+value event_flags               2    # read off this program's own code, 29 of 30 lined-up instructions
+value event_show_flag           0x20    # read off this program's own code, 156 of 156 lined-up instructions
+value event_show_id             258    # read off this program's own code, 7 of 7 lined-up instructions
+# not carried (screens/clips): value scene_player_scene        0x38    # 20 of 20 lined-up instructions of the placed sites
+# not carried (screens/clips): value node_visible_vfn          0x150    # 5 of 5 lined-up instructions of the placed sites
+# not carried (screens/clips): value surface_playing           0x2    # 29 of 30 lined-up instructions of the placed sites
+
+# ---- events: the framework's bus ids (each one the constant the lined-up code passes here) ----
+event game_start   0x4d   # 1 of 1 lined-up places
+event ball_start   0x25   # 1 of 1 lined-up places
+event ball_end     0x34   # 1 of 1 lined-up places
+event bonus_start  0x27   # 1 of 1 lined-up places
+event bonus_end    0x28   # 1 of 1 lined-up places
+event game_over    0x47   # 1 of 1 lined-up places
+value ball_end_event 0x34    # the end of a ball, from the bus (no ball_end site on Spike 3)
+
+# ---- switches: the playfield switches of this program's own device table that are shots (switch <id> <shot mask> <name>) ----
+# ids measured on the rig (a census: each switch pressed in a game, the id it reached the modes with), not the table's ranks
+switch 39   0x1                Pf target 3
+switch 40   0x2                Right orbit
+switch 41   0x4                Megatron target left
+switch 42   0x8                Megatron target right
+switch 45   0x10               Left outlane
+switch 46   0x20               Left return lane
+switch 47   0x40               Right return lane
+switch 48   0x80               Right outlane
+switch 49   0x100              Right pop bumper
+switch 51   0x200              Paddle target
+switch 56   0x400              Right slingshot
+switch 57   0x800              Left slingshot
+switch 69   0x1000             Grimlock target left
+switch 70   0x2000             Grimlock target right
+switch 71   0x4000             Grimlock enter
+switch 72   0x8000             Upper left sling
+switch 73   0x10000            Grimlock exit opto
+switch 74   0x20000            Soundwave lock 1 opto
+switch 75   0x40000            Soundwave lock 2 opto
+switch 76   0x80000            Right ramp exit opto
+switch 77   0x100000           3 Bank drop left
+switch 78   0x200000           3 Bank drop center
+switch 79   0x400000           3 Bank drop right
+switch 80   0x800000           Optimus ramp exit opto
+switch 81   0x1000000          Pf target 2
+switch 82   0x2000000          Center loop
+switch 83   0x4000000          Subway opto
+switch 84   0x8000000          Megatron enter
+switch 85   0x10000000         Combiner target
+switch 86   0x20000000         Captive ball target
+switch 87   0x40000000         Megatron hit
+switch 88   0x80000000         Pf target 1
+switch 89   0x100000000        Optimus hit
+switch 90   0x200000000        Left orbit
+switch 91   0x400000000        Left ramp exit opto
+switch 92   0x800000000        Vuk opto
+switch 93   0x1000000000       Spinner opto
+
+# ---- text ----
+text example_start_shot     Pf target 3
+
+# not carried - the reference game's own content, for this title's own port: 1 callout, 67 lamp, 2 scene, 8 site, 17 text, 20 value
+
+# ---- checks ----
+# value sound_channel_voice_ptrs: 1 of the 5 lined-up instructions holding 144 on the reference hold 112 here
+# value lamp_slot_level: 1 of the 30 lined-up instructions holding 2 on the reference hold 0 here
+# value proc_exit_hooks: 1 of the 5 lined-up instructions holding 312 on the reference hold 312 here
+# value proc_exit_hooks: 312 on the reference, 392 here
+# value proc_exit_slots: 1 of the 41 lined-up instructions holding 4 on the reference hold 1 here
+# value event_flags: 1 of the 30 lined-up instructions holding 2 on the reference hold 0 here
+
+# PAD-1326: co-op play - the framework's player change, add player and player bytes, read off the program by
+# portcoop.lines_a64 (the same shapes as Star Wars ELG 1.10's paired lines; the ball is the byte after the player's),
+# and the message table with its "BALL %d" line (portcoop.message_lines_a64), the line that says whose turn it is
+site coop_player_change 0x004cf170 0xf0002662 0xf9474c42
+site coop_add_player  0x004ced30 0xa9be53f3 0x528009e0
+data coop_player            0x009aabb8
+data coop_players           0x00adba00
+data message_table          0x00a1c3a8
+value coop_ball_msg          1256
+
+# ---- PAD-1327 (emulator-proven 2026-11-16: entry on the menu, picked, game 1 played as Competition): the start
+# menu (CHOOSE YOUR MODE OF PLAY), a menu of game-mode table indices read off this program's
+# own menu function 0x27fbd0; the frame point `ldr w23, [x27, w20, sxtw #2]`: the index under the cursor once the press
+# has moved it (w20), the list x27 = sp+0x1d0 (room for 12: 0x200 is the next object), the count in w22.
+# Prolonged Competition (comp.cfg) appends Competition's index again and letters its name message while the cursor
+# is on it; the game itself plays the pick as Competition (Standard's index once it is on).
+site comp_menu_frame     0x002809d0 0xb874db77 0x9409bac3
+value comp_menu_frame_moved      1
+value comp_menu_frame_list_at    464
+value comp_menu_frame_count_reg  22
+value comp_menu_frame_cap        12
+value comp_menu_frame_cursor_reg 20
+value comp_menu_index            3   # COMPETITION (its flag alone)
+value comp_menu_index_msg        1921   # ALL RANDOMNESS REMOVED
+value comp_menu_end_index        1   # STANDARD
+value comp_menu_end_msg          1916   # NORMAL PLAY
+# the message lookup's: a u64 count, a pointer to the u16 remap (the table is PAD-1326's line above)
+data message_count          0x00834a08
+data message_remap          0x00ae3618
+
+# ---- PAD-1327: the champion framework (records on the high scores), read off this program by the same shapes as
+# Star Wars ELG 1.10's: the end-of-game high scores (wrapped), the (category, n) entry lookup, the gate - the bus
+# question 91 whose {player +0, category +2, entry +4} the game asks before filing - and the categories' table
+# object {base, count, stride 72} at 0x9a5cd0 (64-byte entries; HIGHEST SCORES = category 1)
+site challenge_scores        0x00694240 0xd0001842 0xf9474c42
+site game_scores             0x00694240 0xd0001842 0xf9474c42
+site challenge_score_entry   0x00693400 0xa9bf7bf3 0x2a0103f3
+site challenge_scores_gate   0x006945d8 0x94004676 0x36000600
+data challenge_scores_table   0x009c81e0
+data challenge_scores_count   0x009a5cd8
+site  audit_add              0x00644e50 0xd0001ac2 0xf9474c42   # PAD-1327: the audit add (id w0, amount w1): 62 distinct ids handed it with an amount of 1, the next callee 9
+value challenge_scores_cat   1
+value challenge_scores_desc_size    72
+value challenge_scores_gate_id       91
+value challenge_scores_gate_cat_at   2
+value challenge_scores_gate_entry_at 4
+value challenge_record_check_at   88
+value challenge_record_score_at   72
+value challenge_record_score_size 8
+
+# PAD-1327: no champion page function here: the attract mode's champion screens ask each category through binding
+# thunks (0x24d350 .. 0x24d3f0, traced on the rig), as Fallout LE's and Pokemon LE's do
+
+# ---- cabinet: cablamp <light ids R,G,B | one> <u> <name> - the expression lights, read off the 64-bit device and light tables (PAD-1328) ----
+# 144 blade pixel(s), 40 speaker light(s), placed on the cabinet drawing (PAD-1040)
+cablamp 5,6,7        25  SPEAKER L 1  # lamp 5, I/O group 3 index 1, at 95,28, speaker L
+cablamp 8,9,10       75  SPEAKER L 2  # lamp 6, I/O group 3 index 4, at 108,30, speaker L
+cablamp 11,12,13     125 SPEAKER L 3  # lamp 7, I/O group 3 index 7, at 120,36, speaker L
+cablamp 14,15,16     175 SPEAKER L 4  # lamp 8, I/O group 3 index 10, at 129,45, speaker L
+cablamp 17,18,19     225 SPEAKER L 5  # lamp 9, I/O group 3 index 13, at 135,57, speaker L
+cablamp 20,21,22     275 SPEAKER L 6  # lamp 10, I/O group 3 index 16, at 137,70, speaker L
+cablamp 23,24,25     325 SPEAKER L 7  # lamp 11, I/O group 3 index 19, at 135,83, speaker L
+cablamp 26,27,28     375 SPEAKER L 8  # lamp 12, I/O group 3 index 22, at 129,95, speaker L
+cablamp 29,30,31     425 SPEAKER L 9  # lamp 13, I/O group 3 index 25, at 120,104, speaker L
+cablamp 32,33,34     475 SPEAKER L 10  # lamp 14, I/O group 3 index 28, at 108,110, speaker L
+cablamp 35,36,37     525 SPEAKER L 11  # lamp 15, I/O group 3 index 31, at 95,112, speaker L
+cablamp 38,39,40     575 SPEAKER L 12  # lamp 16, I/O group 3 index 34, at 82,110, speaker L
+cablamp 41,42,43     625 SPEAKER L 13  # lamp 17, I/O group 3 index 37, at 70,104, speaker L
+cablamp 44,45,46     675 SPEAKER L 14  # lamp 18, I/O group 3 index 40, at 61,95, speaker L
+cablamp 47,48,49     725 SPEAKER L 15  # lamp 19, I/O group 3 index 43, at 55,83, speaker L
+cablamp 50,51,52     775 SPEAKER L 16  # lamp 20, I/O group 3 index 46, at 53,70, speaker L
+cablamp 53,54,55     825 SPEAKER L 17  # lamp 21, I/O group 3 index 49, at 55,57, speaker L
+cablamp 56,57,58     875 SPEAKER L 18  # lamp 22, I/O group 3 index 52, at 61,45, speaker L
+cablamp 59,60,61     925 SPEAKER L 19  # lamp 23, I/O group 3 index 55, at 70,36, speaker L
+cablamp 62,63,64     975 SPEAKER L 20  # lamp 24, I/O group 3 index 58, at 82,30, speaker L
+cablamp 65,66,67     25  SPEAKER R 1  # lamp 25, I/O group 3 index 61, at 205,28, speaker R
+cablamp 68,69,70     75  SPEAKER R 2  # lamp 26, I/O group 3 index 64, at 218,30, speaker R
+cablamp 71,72,73     125 SPEAKER R 3  # lamp 27, I/O group 3 index 67, at 230,36, speaker R
+cablamp 74,75,76     175 SPEAKER R 4  # lamp 28, I/O group 3 index 70, at 239,45, speaker R
+cablamp 77,78,79     225 SPEAKER R 5  # lamp 29, I/O group 3 index 73, at 245,57, speaker R
+cablamp 80,81,82     275 SPEAKER R 6  # lamp 30, I/O group 3 index 76, at 247,70, speaker R
+cablamp 83,84,85     325 SPEAKER R 7  # lamp 31, I/O group 3 index 79, at 245,83, speaker R
+cablamp 86,87,88     375 SPEAKER R 8  # lamp 32, I/O group 3 index 82, at 239,95, speaker R
+cablamp 89,90,91     425 SPEAKER R 9  # lamp 33, I/O group 3 index 85, at 230,104, speaker R
+cablamp 92,93,94     475 SPEAKER R 10  # lamp 34, I/O group 3 index 88, at 218,110, speaker R
+cablamp 95,96,97     525 SPEAKER R 11  # lamp 35, I/O group 3 index 91, at 205,112, speaker R
+cablamp 98,99,100    575 SPEAKER R 12  # lamp 36, I/O group 3 index 94, at 192,110, speaker R
+cablamp 101,102,103  625 SPEAKER R 13  # lamp 37, I/O group 3 index 97, at 180,104, speaker R
+cablamp 104,105,106  675 SPEAKER R 14  # lamp 38, I/O group 3 index 100, at 171,95, speaker R
+cablamp 107,108,109  725 SPEAKER R 15  # lamp 39, I/O group 3 index 103, at 165,83, speaker R
+cablamp 110,111,112  775 SPEAKER R 16  # lamp 40, I/O group 3 index 106, at 163,70, speaker R
+cablamp 113,114,115  825 SPEAKER R 17  # lamp 41, I/O group 3 index 109, at 165,57, speaker R
+cablamp 116,117,118  875 SPEAKER R 18  # lamp 42, I/O group 3 index 112, at 171,45, speaker R
+cablamp 119,120,121  925 SPEAKER R 19  # lamp 43, I/O group 3 index 115, at 180,36, speaker R
+cablamp 122,123,124  975 SPEAKER R 20  # lamp 44, I/O group 3 index 118, at 192,30, speaker R
+cablamp 125,126,127  989 CABINET L-IN UPPER 1  # lamp 45, I/O group 1 index 1, at 22,145, blade L in
+cablamp 128,129,130  968 CABINET L-IN UPPER 2  # lamp 46, I/O group 1 index 4, at 22,154, blade L in
+cablamp 131,132,133  947 CABINET L-IN UPPER 3  # lamp 47, I/O group 1 index 7, at 22,164, blade L in
+cablamp 134,135,136  927 CABINET L-IN UPPER 4  # lamp 48, I/O group 1 index 10, at 22,174, blade L in
+cablamp 137,138,139  906 CABINET L-IN UPPER 5  # lamp 49, I/O group 1 index 13, at 22,183, blade L in
+cablamp 140,141,142  885 CABINET L-IN UPPER 6  # lamp 50, I/O group 1 index 16, at 22,193, blade L in
+cablamp 143,144,145  864 CABINET L-IN UPPER 7  # lamp 51, I/O group 1 index 19, at 22,202, blade L in
+cablamp 146,147,148  843 CABINET L-IN UPPER 8  # lamp 52, I/O group 1 index 22, at 22,212, blade L in
+cablamp 149,150,151  822 CABINET L-IN UPPER 9  # lamp 53, I/O group 1 index 25, at 22,221, blade L in
+cablamp 152,153,154  802 CABINET L-IN UPPER 10  # lamp 54, I/O group 1 index 28, at 22,231, blade L in
+cablamp 155,156,157  781 CABINET L-IN UPPER 11  # lamp 55, I/O group 1 index 31, at 22,241, blade L in
+cablamp 158,159,160  760 CABINET L-IN UPPER 12  # lamp 56, I/O group 1 index 34, at 22,250, blade L in
+cablamp 161,162,163  739 CABINET L-IN UPPER 13  # lamp 57, I/O group 1 index 37, at 22,260, blade L in
+cablamp 164,165,166  718 CABINET L-IN UPPER 14  # lamp 58, I/O group 1 index 40, at 22,269, blade L in
+cablamp 167,168,169  697 CABINET L-IN UPPER 15  # lamp 59, I/O group 1 index 43, at 22,279, blade L in
+cablamp 170,171,172  677 CABINET L-IN UPPER 16  # lamp 60, I/O group 1 index 46, at 22,289, blade L in
+cablamp 173,174,175  656 CABINET L-IN UPPER 17  # lamp 61, I/O group 1 index 49, at 22,298, blade L in
+cablamp 176,177,178  635 CABINET L-IN UPPER 18  # lamp 62, I/O group 1 index 52, at 22,308, blade L in
+cablamp 179,180,181  614 CABINET L-IN UPPER 19  # lamp 63, I/O group 1 index 55, at 22,317, blade L in
+cablamp 182,183,184  593 CABINET L-IN UPPER 20  # lamp 64, I/O group 1 index 58, at 22,327, blade L in
+cablamp 185,186,187  572 CABINET L-IN UPPER 21  # lamp 65, I/O group 1 index 61, at 22,336, blade L in
+cablamp 188,189,190  552 CABINET L-IN UPPER 22  # lamp 66, I/O group 1 index 64, at 22,346, blade L in
+cablamp 191,192,193  531 CABINET L-IN UPPER 23  # lamp 67, I/O group 1 index 67, at 22,356, blade L in
+cablamp 194,195,196  510 CABINET L-IN UPPER 24  # lamp 68, I/O group 1 index 70, at 22,365, blade L in
+cablamp 197,198,199  489 CABINET L-IN LOWER 25  # lamp 69, I/O group 1 index 73, at 22,375, blade L in
+cablamp 200,201,202  468 CABINET L-IN LOWER 26  # lamp 70, I/O group 1 index 76, at 22,384, blade L in
+cablamp 203,204,205  447 CABINET L-IN LOWER 27  # lamp 71, I/O group 1 index 79, at 22,394, blade L in
+cablamp 206,207,208  427 CABINET L-IN LOWER 28  # lamp 72, I/O group 1 index 82, at 22,404, blade L in
+cablamp 209,210,211  406 CABINET L-IN LOWER 29  # lamp 73, I/O group 1 index 85, at 22,413, blade L in
+cablamp 212,213,214  385 CABINET L-IN LOWER 30  # lamp 74, I/O group 1 index 88, at 22,423, blade L in
+cablamp 215,216,217  364 CABINET L-IN LOWER 31  # lamp 75, I/O group 1 index 91, at 22,432, blade L in
+cablamp 218,219,220  343 CABINET L-IN LOWER 32  # lamp 76, I/O group 1 index 94, at 22,442, blade L in
+cablamp 221,222,223  322 CABINET L-IN LOWER 33  # lamp 77, I/O group 1 index 97, at 22,451, blade L in
+cablamp 224,225,226  302 CABINET L-IN LOWER 34  # lamp 78, I/O group 1 index 100, at 22,461, blade L in
+cablamp 227,228,229  281 CABINET L-IN LOWER 35  # lamp 79, I/O group 1 index 103, at 22,471, blade L in
+cablamp 230,231,232  260 CABINET L-IN LOWER 36  # lamp 80, I/O group 1 index 106, at 22,480, blade L in
+cablamp 233,234,235  239 CABINET L-IN LOWER 37  # lamp 81, I/O group 1 index 109, at 22,490, blade L in
+cablamp 236,237,238  218 CABINET L-IN LOWER 38  # lamp 82, I/O group 1 index 112, at 22,499, blade L in
+cablamp 239,240,241  197 CABINET L-IN LOWER 39  # lamp 83, I/O group 1 index 115, at 22,509, blade L in
+cablamp 242,243,244  177 CABINET L-IN LOWER 40  # lamp 84, I/O group 1 index 118, at 22,519, blade L in
+cablamp 245,246,247  156 CABINET L-IN LOWER 41  # lamp 85, I/O group 1 index 121, at 22,528, blade L in
+cablamp 248,249,250  135 CABINET L-IN LOWER 42  # lamp 86, I/O group 1 index 124, at 22,538, blade L in
+cablamp 251,252,253  114 CABINET L-IN LOWER 43  # lamp 87, I/O group 1 index 127, at 22,547, blade L in
+cablamp 254,255,256  93  CABINET L-IN LOWER 44  # lamp 88, I/O group 1 index 130, at 22,557, blade L in
+cablamp 257,258,259  72  CABINET L-IN LOWER 45  # lamp 89, I/O group 1 index 133, at 22,566, blade L in
+cablamp 260,261,262  52  CABINET L-IN LOWER 46  # lamp 90, I/O group 1 index 136, at 22,576, blade L in
+cablamp 263,264,265  31  CABINET L-IN LOWER 47  # lamp 91, I/O group 1 index 139, at 22,586, blade L in
+cablamp 266,267,268  10  CABINET L-IN LOWER 48  # lamp 92, I/O group 1 index 142, at 22,595, blade L in
+cablamp 269,270,271  989 CABINET R-IN LOWER 49  # lamp 93, I/O group 1 index 145, at 278,145, blade R in
+cablamp 272,273,274  968 CABINET R-IN LOWER 50  # lamp 94, I/O group 1 index 148, at 278,154, blade R in
+cablamp 275,276,277  947 CABINET R-IN LOWER 51  # lamp 95, I/O group 1 index 151, at 278,164, blade R in
+cablamp 278,279,280  927 CABINET R-IN LOWER 52  # lamp 96, I/O group 1 index 154, at 278,174, blade R in
+cablamp 281,282,283  906 CABINET R-IN LOWER 53  # lamp 97, I/O group 1 index 157, at 278,183, blade R in
+cablamp 284,285,286  885 CABINET R-IN LOWER 54  # lamp 98, I/O group 1 index 160, at 278,193, blade R in
+cablamp 287,288,289  864 CABINET R-IN LOWER 55  # lamp 99, I/O group 1 index 163, at 278,202, blade R in
+cablamp 290,291,292  843 CABINET R-IN LOWER 56  # lamp 100, I/O group 1 index 166, at 278,212, blade R in
+cablamp 293,294,295  822 CABINET R-IN LOWER 57  # lamp 101, I/O group 1 index 169, at 278,221, blade R in
+cablamp 296,297,298  802 CABINET R-IN LOWER 58  # lamp 102, I/O group 1 index 172, at 278,231, blade R in
+cablamp 299,300,301  781 CABINET R-IN LOWER 59  # lamp 103, I/O group 1 index 175, at 278,241, blade R in
+cablamp 302,303,304  760 CABINET R-IN LOWER 60  # lamp 104, I/O group 1 index 178, at 278,250, blade R in
+cablamp 305,306,307  739 CABINET R-IN LOWER 61  # lamp 105, I/O group 1 index 181, at 278,260, blade R in
+cablamp 308,309,310  718 CABINET R-IN LOWER 62  # lamp 106, I/O group 1 index 184, at 278,269, blade R in
+cablamp 311,312,313  697 CABINET R-IN LOWER 63  # lamp 107, I/O group 1 index 187, at 278,279, blade R in
+cablamp 314,315,316  677 CABINET R-IN LOWER 64  # lamp 108, I/O group 1 index 190, at 278,289, blade R in
+cablamp 317,318,319  656 CABINET R-IN LOWER 65  # lamp 109, I/O group 1 index 193, at 278,298, blade R in
+cablamp 320,321,322  635 CABINET R-IN LOWER 66  # lamp 110, I/O group 1 index 196, at 278,308, blade R in
+cablamp 323,324,325  614 CABINET R-IN LOWER 67  # lamp 111, I/O group 1 index 199, at 278,317, blade R in
+cablamp 326,327,328  593 CABINET R-IN LOWER 68  # lamp 112, I/O group 1 index 202, at 278,327, blade R in
+cablamp 329,330,331  572 CABINET R-IN LOWER 69  # lamp 113, I/O group 1 index 205, at 278,336, blade R in
+cablamp 332,333,334  552 CABINET R-IN LOWER 70  # lamp 114, I/O group 1 index 208, at 278,346, blade R in
+cablamp 335,336,337  531 CABINET R-IN LOWER 71  # lamp 115, I/O group 1 index 211, at 278,356, blade R in
+cablamp 338,339,340  510 CABINET R-IN LOWER 72  # lamp 116, I/O group 1 index 214, at 278,365, blade R in
+cablamp 341,342,343  489 CABINET R-IN UPPER 73  # lamp 117, I/O group 1 index 217, at 278,375, blade R in
+cablamp 344,345,346  468 CABINET R-IN UPPER 74  # lamp 118, I/O group 1 index 220, at 278,384, blade R in
+cablamp 347,348,349  447 CABINET R-IN UPPER 75  # lamp 119, I/O group 1 index 223, at 278,394, blade R in
+cablamp 350,351,352  427 CABINET R-IN UPPER 76  # lamp 120, I/O group 1 index 226, at 278,404, blade R in
+cablamp 353,354,355  406 CABINET R-IN UPPER 77  # lamp 121, I/O group 1 index 229, at 278,413, blade R in
+cablamp 356,357,358  385 CABINET R-IN UPPER 78  # lamp 122, I/O group 1 index 232, at 278,423, blade R in
+cablamp 359,360,361  364 CABINET R-IN UPPER 79  # lamp 123, I/O group 1 index 235, at 278,432, blade R in
+cablamp 362,363,364  343 CABINET R-IN UPPER 80  # lamp 124, I/O group 1 index 238, at 278,442, blade R in
+cablamp 365,366,367  322 CABINET R-IN UPPER 81  # lamp 125, I/O group 1 index 241, at 278,451, blade R in
+cablamp 368,369,370  302 CABINET R-IN UPPER 82  # lamp 126, I/O group 1 index 244, at 278,461, blade R in
+cablamp 371,372,373  281 CABINET R-IN UPPER 83  # lamp 127, I/O group 1 index 247, at 278,471, blade R in
+cablamp 374,375,376  260 CABINET R-IN UPPER 84  # lamp 128, I/O group 1 index 250, at 278,480, blade R in
+cablamp 377,378,379  239 CABINET R-IN UPPER 85  # lamp 129, I/O group 1 index 253, at 278,490, blade R in
+cablamp 380,381,382  218 CABINET R-IN UPPER 86  # lamp 130, I/O group 1 index 256, at 278,499, blade R in
+cablamp 383,384,385  197 CABINET R-IN UPPER 87  # lamp 131, I/O group 1 index 259, at 278,509, blade R in
+cablamp 386,387,388  177 CABINET R-IN UPPER 88  # lamp 132, I/O group 1 index 262, at 278,519, blade R in
+cablamp 389,390,391  156 CABINET R-IN UPPER 89  # lamp 133, I/O group 1 index 265, at 278,528, blade R in
+cablamp 392,393,394  135 CABINET R-IN UPPER 90  # lamp 134, I/O group 1 index 268, at 278,538, blade R in
+cablamp 395,396,397  114 CABINET R-IN UPPER 91  # lamp 135, I/O group 1 index 271, at 278,547, blade R in
+cablamp 398,399,400  93  CABINET R-IN UPPER 92  # lamp 136, I/O group 1 index 274, at 278,557, blade R in
+cablamp 401,402,403  72  CABINET R-IN UPPER 93  # lamp 137, I/O group 1 index 277, at 278,566, blade R in
+cablamp 404,405,406  52  CABINET R-IN UPPER 94  # lamp 138, I/O group 1 index 280, at 278,576, blade R in
+cablamp 407,408,409  31  CABINET R-IN UPPER 95  # lamp 139, I/O group 1 index 283, at 278,586, blade R in
+cablamp 410,411,412  10  CABINET R-IN UPPER 96  # lamp 140, I/O group 1 index 286, at 278,595, blade R in
+cablamp 413,414,415  979 CABINET L-OUT 97  # lamp 141, I/O group 1 index 289, at 4,150, blade L out
+cablamp 416,417,418  937 CABINET L-OUT 98  # lamp 142, I/O group 1 index 292, at 4,169, blade L out
+cablamp 419,420,421  895 CABINET L-OUT 99  # lamp 143, I/O group 1 index 295, at 4,188, blade L out
+cablamp 422,423,424  854 CABINET L-OUT 100  # lamp 144, I/O group 1 index 298, at 4,207, blade L out
+cablamp 425,426,427  812 CABINET L-OUT 101  # lamp 145, I/O group 1 index 301, at 4,226, blade L out
+cablamp 428,429,430  770 CABINET L-OUT 102  # lamp 146, I/O group 1 index 304, at 4,245, blade L out
+cablamp 431,432,433  729 CABINET L-OUT 103  # lamp 147, I/O group 1 index 307, at 4,265, blade L out
+cablamp 434,435,436  687 CABINET L-OUT 104  # lamp 148, I/O group 1 index 310, at 4,284, blade L out
+cablamp 437,438,439  645 CABINET L-OUT 105  # lamp 149, I/O group 1 index 313, at 4,303, blade L out
+cablamp 440,441,442  604 CABINET L-OUT 106  # lamp 150, I/O group 1 index 316, at 4,322, blade L out
+cablamp 443,444,445  562 CABINET L-OUT 107  # lamp 151, I/O group 1 index 319, at 4,341, blade L out
+cablamp 446,447,448  520 CABINET L-OUT 108  # lamp 152, I/O group 1 index 322, at 4,360, blade L out
+cablamp 449,450,451  479 CABINET L-OUT 109  # lamp 153, I/O group 1 index 325, at 4,380, blade L out
+cablamp 452,453,454  437 CABINET L-OUT 110  # lamp 154, I/O group 1 index 328, at 4,399, blade L out
+cablamp 455,456,457  395 CABINET L-OUT 111  # lamp 155, I/O group 1 index 331, at 4,418, blade L out
+cablamp 458,459,460  354 CABINET L-OUT 112  # lamp 156, I/O group 1 index 334, at 4,437, blade L out
+cablamp 461,462,463  312 CABINET L-OUT 113  # lamp 157, I/O group 1 index 337, at 4,456, blade L out
+cablamp 464,465,466  270 CABINET L-OUT 114  # lamp 158, I/O group 1 index 340, at 4,475, blade L out
+cablamp 467,468,469  229 CABINET L-OUT 115  # lamp 159, I/O group 1 index 343, at 4,495, blade L out
+cablamp 470,471,472  187 CABINET L-OUT 116  # lamp 160, I/O group 1 index 346, at 4,514, blade L out
+cablamp 473,474,475  145 CABINET L-OUT 117  # lamp 161, I/O group 1 index 349, at 4,533, blade L out
+cablamp 476,477,478  104 CABINET L-OUT 118  # lamp 162, I/O group 1 index 352, at 4,552, blade L out
+cablamp 479,480,481  62  CABINET L-OUT 119  # lamp 163, I/O group 1 index 355, at 4,571, blade L out
+cablamp 482,483,484  20  CABINET L-OUT 120  # lamp 164, I/O group 1 index 358, at 4,590, blade L out
+cablamp 485,486,487  979 CABINET R-OUT 121  # lamp 165, I/O group 1 index 361, at 296,150, blade R out
+cablamp 488,489,490  937 CABINET R-OUT 122  # lamp 166, I/O group 1 index 364, at 296,169, blade R out
+cablamp 491,492,493  895 CABINET R-OUT 123  # lamp 167, I/O group 1 index 367, at 296,188, blade R out
+cablamp 494,495,496  854 CABINET R-OUT 124  # lamp 168, I/O group 1 index 370, at 296,207, blade R out
+cablamp 497,498,499  812 CABINET R-OUT 125  # lamp 169, I/O group 1 index 373, at 296,226, blade R out
+cablamp 500,501,502  770 CABINET R-OUT 126  # lamp 170, I/O group 1 index 376, at 296,245, blade R out
+cablamp 503,504,505  729 CABINET R-OUT 127  # lamp 171, I/O group 1 index 379, at 296,265, blade R out
+cablamp 506,507,508  687 CABINET R-OUT 128  # lamp 172, I/O group 1 index 382, at 296,284, blade R out
+cablamp 509,510,511  645 CABINET R-OUT 129  # lamp 173, I/O group 1 index 385, at 296,303, blade R out
+cablamp 512,513,514  604 CABINET R-OUT 130  # lamp 174, I/O group 1 index 388, at 296,322, blade R out
+cablamp 515,516,517  562 CABINET R-OUT 131  # lamp 175, I/O group 1 index 391, at 296,341, blade R out
+cablamp 518,519,520  520 CABINET R-OUT 132  # lamp 176, I/O group 1 index 394, at 296,360, blade R out
+cablamp 521,522,523  479 CABINET R-OUT 133  # lamp 177, I/O group 1 index 397, at 296,380, blade R out
+cablamp 524,525,526  437 CABINET R-OUT 134  # lamp 178, I/O group 1 index 400, at 296,399, blade R out
+cablamp 527,528,529  395 CABINET R-OUT 135  # lamp 179, I/O group 1 index 403, at 296,418, blade R out
+cablamp 530,531,532  354 CABINET R-OUT 136  # lamp 180, I/O group 1 index 406, at 296,437, blade R out
+cablamp 533,534,535  312 CABINET R-OUT 137  # lamp 181, I/O group 1 index 409, at 296,456, blade R out
+cablamp 536,537,538  270 CABINET R-OUT 138  # lamp 182, I/O group 1 index 412, at 296,475, blade R out
+cablamp 539,540,541  229 CABINET R-OUT 139  # lamp 183, I/O group 1 index 415, at 296,495, blade R out
+cablamp 542,543,544  187 CABINET R-OUT 140  # lamp 184, I/O group 1 index 418, at 296,514, blade R out
+cablamp 545,546,547  145 CABINET R-OUT 141  # lamp 185, I/O group 1 index 421, at 296,533, blade R out
+cablamp 548,549,550  104 CABINET R-OUT 142  # lamp 186, I/O group 1 index 424, at 296,552, blade R out
+cablamp 551,552,553  62  CABINET R-OUT 143  # lamp 187, I/O group 1 index 427, at 296,571, blade R out
+cablamp 554,555,556  20  CABINET R-OUT 144  # lamp 188, I/O group 1 index 430, at 296,590, blade R out
+# ---- PAD-1369: the game's challenge games, read off this program's own code (Star Wars ELG's PAD-1330 sites
+# paired across and checked by shape) ----
+# The balls-per-game getter (setting 80 / the player's game mode's own / Insider Connected's) is built into its
+# callers, as on ELG: the balls of a player and of the current player are whole functions; the ball-number set
+# (two ways), the last-ball test and the ball's end read it into a register and compare - set to 1 there in a
+# mode's challenge game. The take-an-extra-ball test is the ball's end's first call after its bus question; the
+# end of the ball (end(w0, w1): status bits 0x202, devices off) and the launch button's handler (flags 13 / 12,
+# fire 8) as ELG's
+site challenge_balls      0x004cede0 0x90002681 0xf9474c21
+site challenge_balls_2    0x004ceea0 0xd100c3ff 0x90002681
+site challenge_balls_at_0 0x004cefc8 0x6b1302bf 0x54000308
+site challenge_balls_at_1 0x004cf01c 0x6b1302bf 0xf0002660
+site challenge_balls_at_2 0x004cf0b0 0x6b13029f 0x52800000
+site challenge_balls_at_3 0x004cf26c 0x912ee2c0 0x39400401
+site challenge_extra_ball 0x0069c8d0 0x900024c2 0x39588041
+site challenge_end_ball   0x00459c80 0xb0002a22 0xf944c042
+site ball_launch          0x004543a0 0xa9be53f3 0xf0003413
+value challenge_on_flag   18   # FG_PLAYER_CHALLENGE_MODE_ACTIVE, read off the program's FG_ names
+value challenge_balls_at_0_reg 19
+value challenge_balls_at_1_reg 19
+value challenge_balls_at_2_reg 19
+value challenge_balls_at_3_reg 20
+value ball_launch_flag       12   # FG_MBDEV_AUTO_PLUNGER_BALL_IN_DEVICE
+value ball_launch_wait_flag  13   # FG_MBDEV_AUTO_PLUNGER_PLAYER_CONTROL
+value challenge_menu_slot      -1   # a plain challenge: nothing of the game's to stop
+# The start menu lists game-mode indices (Prolonged Competition's frame point, PAD-1327). One MODE CHALLENGE
+# entry, Standard's index again, lettered CHALLENGE and the mode's name: its flippers step through the modes'
+# own, the game plays a plain game and the ball's start makes it the mode's one-ball challenge game
+site challenge_menu_frame 0x002809d0 0xb874db77 0x9409bac3
+value challenge_menu_frame_moved       1
+value challenge_menu_frame_list_at     464
+value challenge_menu_frame_count_reg   22
+value challenge_menu_frame_cap         12
+value challenge_menu_frame_cursor_reg  20
+value challenge_menu_frame_entry        1   # STANDARD
+value challenge_menu_frame_caption_msg  1915   # STANDARD, lettered CHALLENGE while the cursor is on ours
+value challenge_menu_frame_name_msg     1916   # NORMAL PLAY, lettered the mode's name
+value challenge_menu_caption   1922   # CHALLENGE
+value challenge_menu_sets_on   1    # the pick is a challenge game of the mode's (no flag of the game's)

@@ -247,6 +247,13 @@ def _load_state_model():
 
 
 COIL_SHOW_S = 0.25       # a fired coil stays lit this long in the window
+# The block holds nodes 0-15 (spike1_emulate.MAX_NODES); the bus addresses up
+# to 31.  Ghostbusters LE has a board at 24, and its switch reads, written as
+# switches[1536:1600] on the 1024-byte area, GREW the area by 64 bytes a time
+# (a bytearray slice past the end appends) to 1600 - every lamp after it then
+# sat 576 bytes on, three nodes up (PAD-979).  Nodes past the block are left
+# out: no title names a switch, lamp or coil on one.
+STATE_NODES = 16
 
 
 class HwStateWriter:
@@ -274,6 +281,8 @@ class HwStateWriter:
         self.written_at = -1e9
 
     def set_switches(self, node, closed_idx):
+        if not 0 <= node < STATE_NODES:
+            return
         base = node * 64
         cur = self.state.switches[base:base + 64]
         new = bytearray(64)
@@ -286,6 +295,8 @@ class HwStateWriter:
 
     def lamp_frame(self, node, cmd, data):
         start = cmd & 0x7F
+        if not 0 <= node < STATE_NODES:
+            return
         for i, level in enumerate(data):
             ch = start + i
             if ch >= 64:
@@ -295,10 +306,33 @@ class HwStateWriter:
                 self.dirty = True
 
     def coil_fire(self, node, coil):
-        if 0 <= coil < 64:
-            self.coil_until[(node, coil)] = self.clock() + COIL_SHOW_S
+        self.coil_on(node, coil, COIL_SHOW_S)
+
+    # PAD-943: the DMD era's responder (nodebus.py) writes the block too, and
+    # its wire says how long a coil is driven, so these take the time.
+    def lamp_level(self, node, ch, level):
+        """One mono lamp at *level* (a Spike 1 lamp has no colour)."""
+        if 0 <= node < STATE_NODES and 0 <= ch < 64 and self.state.get_lamp(node, ch) != (level, level, level):
+            self.state.set_lamp(node, ch, level)
+            self.dirty = True
+
+    def coil_on(self, node, coil, seconds):
+        """A coil energized for *seconds* (None: until coil_off)."""
+        if 0 <= node < STATE_NODES and 0 <= coil < 64:
+            key = (node, coil)
+            if seconds is None:
+                self.coil_until.pop(key, None)
+            else:
+                self.coil_until[key] = self.clock() + seconds
             if not self.state.get_coil(node, coil):
                 self.state.set_coil(node, coil, True)
+                self.dirty = True
+
+    def coil_off(self, node, coil):
+        if 0 <= node < STATE_NODES and 0 <= coil < 64:
+            self.coil_until.pop((node, coil), None)
+            if self.state.get_coil(node, coil):
+                self.state.set_coil(node, coil, False)
                 self.dirty = True
 
     def flush(self, force=False):

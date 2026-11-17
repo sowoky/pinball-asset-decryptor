@@ -10,13 +10,26 @@ page that reloads shows them again.
 File pickers are native when the desktop host provides them (pywebview's
 dialogs: the real Windows / macOS / GTK-Qt panels); otherwise the page shows
 its own folder browser, served by :func:`list_dir`.
+
+Files dropped on a Browse… / Choose… button or a row answer the picker that
+button opens instead (PAD-838): the page arms them (:meth:`Dialogs.arm_drop`)
+and then clicks, and the next open / folder picker takes them without
+showing, through every check a picked file goes through.
 """
 
+import fnmatch
 import itertools
+import logging
 import os
 import string
 import sys
 import threading
+import time
+
+log = logging.getLogger(__name__)
+
+#: how long armed drops wait for the picker their click opens
+DROP_WAIT_S = 5.0
 
 
 class DialogClosed(Exception):
@@ -33,6 +46,8 @@ class Dialogs:
         self._open = []             # specs shown, oldest first
         #: set by the desktop host: fn(kind, spec) -> answer, runs off-loop
         self.native_file_dialog = None
+        self._drop = None           # (time armed, [paths]) for the next picker
+        self._picking = False       # a file picker is open (PAD-1227)
 
     # ------------------------------------------------------------------
     def ask(self, spec):
@@ -95,6 +110,7 @@ class Dialogs:
     def file(self, mode, title="", initialdir="", initialfile="",
              filetypes=None, multiple=False, defaultextension="",
              confirmoverwrite=True):
+        dropped = self._take_drop(mode)
         spec = {
             "kind": "file", "mode": mode, "title": title or "",
             "initialdir": initialdir or "", "initialfile": initialfile or "",
@@ -104,12 +120,85 @@ class Dialogs:
             "defaultextension": defaultextension or "",
             "confirmoverwrite": bool(confirmoverwrite),
         }
+        if dropped is not None and mode == "save":
+            return self._normalise(dropped[0], spec)
+        if dropped is not None:
+            return self._normalise(self._drop_answer(dropped, spec), spec)
+        # PAD-1227: one picker at a time.  The loop keeps turning while a
+        # picker is up, so a second click on Choose... (or the clicks made
+        # while a slow picker was coming up) ran here again and opened a
+        # picker over the first, which could not answer until the last one
+        # closed: a stack that grew with every click.  A click while one is
+        # open is a cancelled pick; the open picker is the one to answer.
+        if self._picking:
+            log.info("a file picker is already open: %r not opened", title)
+            return self._normalise("", spec)
+        self._picking = True
+        try:
+            return self._pick(spec)
+        finally:
+            self._picking = False
+
+    def _pick(self, spec):
         native = self.native_file_dialog
         if native is not None:
+            # the OS draws this one: its file-type names in the app's
+            # language (PAD-458); the page's own picker is translated as shown
+            try:
+                from .i18n import translator
+                tr = translator(self._store.get("shell", "lang"))
+                spec = dict(spec, filetypes=[[tr(d), p] for d, p in spec["filetypes"]])
+            except Exception:                           # noqa: BLE001
+                pass
             result = self._run_native(native, spec)
             if result is not NotImplemented:
                 return self._normalise(result, spec)
         return self._normalise(self.ask(spec), spec)
+
+    # ------------------------------------------------------------------
+    # files dropped on what opens a picker (PAD-838)
+    # ------------------------------------------------------------------
+    def arm_drop(self, paths, wait=DROP_WAIT_S, save=False):
+        """The next open / folder picker (within *wait* seconds) answers
+        with *paths* instead of showing; with *save*, a Save As takes the
+        first path too (an agent picking where a file goes, PAD-844)."""
+        self._drop = (time.monotonic() + wait,
+                      [os.path.normpath(p) for p in paths], bool(save))
+
+    def _take_drop(self, mode="open"):
+        drop, self._drop = self._drop, None
+        if drop and mode == "save" and not drop[2]:
+            return None             # a drop never answers a Save As
+        if drop and drop[1] and time.monotonic() < drop[0]:
+            return drop[1]
+        return None
+
+    def _drop_answer(self, paths, spec):
+        """What the picker *spec* answers for the dropped *paths*: what
+        picking them would have given, or nothing after saying why not."""
+        def no(text):
+            from . import compat
+            compat.messagebox.showinfo("Drop", text)
+            return None
+        if spec["mode"] == "folder":
+            if len(paths) != 1 or not os.path.isdir(paths[0]):
+                return no("This asks for a folder: drop one folder here.")
+            return paths[0]
+        if len(paths) > 1 and not spec["multiple"]:
+            return no("This takes one file: drop just one here.")
+        if any(os.path.isdir(p) for p in paths):
+            return no("This asks for a file, not a folder: drop the file "
+                      "itself here.")
+        pats = [pat.lower() for _label, pats in spec["filetypes"]
+                for pat in str(pats).split()]
+        bad = [p for p in paths if pats and not any(
+            fnmatch.fnmatch(os.path.basename(p).lower(), pat)
+            for pat in pats)]
+        if bad:
+            kinds = " ".join(pats)
+            return no("%s is not a file this takes (%s), so it was not used."
+                      % (os.path.basename(bad[0]), kinds))
+        return list(paths) if spec["multiple"] else paths[0]
 
     def _run_native(self, native, spec):
         """Run the native picker off the loop and keep the loop turning."""

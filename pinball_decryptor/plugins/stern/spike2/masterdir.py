@@ -319,6 +319,38 @@ def header_geometry(header):
     return _u32(header, HDR_MD_OFF), _u32(header, HDR_COUNT)
 
 
+def grow_md_off(md_off, count, file_size):
+    """Where a grow puts the record array of a bank whose header says
+    ``(md_off, count)`` and whose file is *file_size* bytes.
+
+    A stock bank ends at its record array's tail, so the array grows in place.
+    One an earlier build grew carries that build's bodies past the tail
+    (PAD-593): growing the array in place would run over them, so it moves to
+    the end of the file instead (:func:`plan_grow_records`).  Only a whole
+    appended body past the tail counts (:data:`GROWN_TAIL_MIN`): a few bytes of
+    padding after it are not one."""
+    if file_size is not None and \
+            int(file_size) >= md_off + tail_len(count) + GROWN_TAIL_MIN:
+        return align16(int(file_size))
+    return md_off
+
+
+#: The least an earlier build leaves past the record array's tail: one appended
+#: body behind its pad, and every appended body is at least 4096 bytes
+#: (``engine._grown_body_bytes``).
+GROWN_TAIL_MIN = BODY_PAD + 4096
+
+
+def image_grow_geometry(image_path):
+    """``(md_off, count)`` a grow of *image_path* works from: the header's,
+    with the array moved past an earlier build's bodies (:func:`grow_md_off`)."""
+    with open(image_path, "rb") as f:
+        md_off, count = header_geometry(f.read(0x100))
+        f.seek(0, 2)
+        size = f.tell()
+    return grow_md_off(md_off, count, size), count
+
+
 # --------------------------------------------------------------------------
 # the cipher layer, with the key supplied
 # --------------------------------------------------------------------------
@@ -352,13 +384,33 @@ def unpack_tail(blob, count, key, iv, md_off=0):
 # --------------------------------------------------------------------------
 # appending records
 # --------------------------------------------------------------------------
+#: The appended records a grow leaves room for, in steps of this many
+#: (:func:`grow_slots`).
+GROW_SLOTS = 64
+
+
+def grow_slots(n):
+    """The records' room a grow of *n* appended records lays its bodies past:
+    *n* rounded up to :data:`GROW_SLOTS` (PAD-677).  A body's offset is part
+    of everything the firmware's chain derives from it, so with room for
+    exactly *n* every body moved whenever a mode gained or lost one sound, and
+    every appended sound (a mode's three songs) was encoded again for it.  The
+    room past the array is never read: the header names the array and each
+    record its own body."""
+    n = int(n)
+    return -(-n // GROW_SLOTS) * GROW_SLOTS if n > 0 else 0
+
+
+#: ``src`` is the record the appended copy is made from when it is not ``idx``
+#: itself: a sound an earlier build already grew plays its appended record, so
+#: growing it again copies that one (PAD-593).
 GrowEdit = collections.namedtuple(
-    "GrowEdit", "idx old_length new_length body_bytes")
+    "GrowEdit", "idx old_length new_length body_bytes src", defaults=(None,))
 Placement = collections.namedtuple(
     "Placement", "idx new_idx body_off length body_bytes")
 
 
-def plan_grow_records(directory, edits, body_pad=BODY_PAD):
+def plan_grow_records(directory, edits, body_pad=BODY_PAD, file_size=None):
     """Append one record per edit, each pointing at a body past the old tail.
 
     ``edits`` are :class:`GrowEdit` tuples: the record to grow, its current
@@ -371,30 +423,48 @@ def plan_grow_records(directory, edits, body_pad=BODY_PAD):
     Editing a record in place is deliberately not offered.  Changing one
     record's length word shifts every later record's decode parameters --
     including its sound-container identity key -- with its body untouched, so
-    there is no arrangement of restored bytes that makes it safe."""
+    there is no arrangement of restored bytes that makes it safe.
+
+    A bank an earlier build already grew (PAD-593) has that build's bodies
+    right after its record array, so one more record would run over the first
+    of them and the new bodies over the rest.  Given the image's *file_size*,
+    such a bank keeps every body where it is and gets its record array moved
+    past the end of the file instead (``hdr[0x40]`` follows it, see
+    :func:`write_directory`); the old array is left behind as dead bytes."""
     edits = [GrowEdit(*e) for e in edits]
     if not edits:
         raise MasterDirError("plan_grow_records called with no edits")
     seen = set()
     for e in edits:
+        if e.src is not None and not 0 <= e.src < directory.count:
+            raise MasterDirError("record %d is not in this directory (%d records)"
+                                 % (e.src, directory.count))
         if not 0 <= e.idx < directory.count:
             raise MasterDirError("record %d is not in this directory (%d records)"
                                  % (e.idx, directory.count))
         if e.idx in seen:
             raise MasterDirError("record %d appears twice in the grow plan" % e.idx)
         seen.add(e.idx)
-        if e.new_length <= e.old_length:
+        if e.new_length == e.old_length:
+            # (PAD-800: a SHORTER one is appended as a longer one is, so the
+            # game plays it for its own length, not the stock one's)
             raise MasterDirError(
-                "record %d: new length %d is not longer than %d -- a sound that "
-                "fits its slot is written in place, not grown"
-                % (e.idx, e.new_length, e.old_length))
+                "record %d: new length %d is the length it has -- a sound that "
+                "fills its slot is written in place, not grown"
+                % (e.idx, e.new_length))
+        if e.new_length <= 0:
+            raise MasterDirError("record %d: new length %d is not a length"
+                                 % (e.idx, e.new_length))
         if e.body_bytes <= 0:
             raise MasterDirError("record %d: body_bytes must be positive" % e.idx)
 
     # The length word and the decoded length differ by one constant per build.
     # Every edit must agree on it, which catches a caller passing the wrong
     # "old" length far more cheaply than a failed Write does.
-    xors = {(directory.length_word(e.idx) ^ (e.old_length & 0xffffffff))
+    def src(e):
+        return e.idx if e.src is None else e.src
+
+    xors = {(directory.length_word(src(e)) ^ (e.old_length & 0xffffffff))
             for e in edits}
     if len(xors) > 1:
         raise MasterDirError(
@@ -404,19 +474,23 @@ def plan_grow_records(directory, edits, body_pad=BODY_PAD):
             % ", ".join("0x%08x" % v for v in sorted(xors)))
 
     new_count = directory.count + len(edits)
-    off = directory.md_off + tail_len(new_count) + body_pad
+    md_off = grow_md_off(directory.md_off, directory.count, file_size)
+    # the bodies start past room for grow_slots() records, not just these:
+    # one more or one fewer appended sound leaves every body where it was
+    off = md_off + tail_len(directory.count + grow_slots(len(edits))) + body_pad
     appended = []
     places = []
     for n, e in enumerate(edits):
-        word = directory.length_word(e.idx) ^ (e.old_length & 0xffffffff) \
+        word = directory.length_word(src(e)) ^ (e.old_length & 0xffffffff) \
             ^ (e.new_length & 0xffffffff)
-        appended.append(set_geometry(directory.record(e.idx), body_off=off,
+        appended.append(set_geometry(directory.record(src(e)), body_off=off,
                                      length_word=word))
         places.append(Placement(e.idx, directory.count + n, off, e.new_length,
                                 e.body_bytes))
         off += e.body_bytes + body_pad
     grown = directory.with_records(
         directory.records + b"".join(appended), new_count)
+    grown.md_off = md_off
     return grown, places
 
 
@@ -600,12 +674,22 @@ def read_directory(image_path, emu):
 def write_directory(directory, emu):
     """``{file_offset: bytes}`` that turn an image into one carrying
     ``directory``: the rebuilt tail at its directory offset, and the record
-    count in the header.  ``hdr[0x40]`` never moves.
+    count in the header.  ``hdr[0x40]`` names the tail's offset; it changes
+    only when :func:`plan_grow_records` moved the array (PAD-593).
 
     The seed is chosen, not kept: the firmware demands a checksum that is a
     permutation of the seed word, so the seed is whatever maps to the checksum
     of the records being written."""
     session = _session(emu)
+    if session.keylen is None:
+        # The key length is confirmed only by a directory that passes the
+        # firmware's checksum (read_directory); the shape guess keygen falls
+        # back on picked 32 bytes on Godzilla LE 1.16 (its AES-192 key's spare
+        # words were not zero), and the bank packed under it was one the game
+        # refused (PAD-595).  Read one of this card's directories first.
+        raise MasterDirError(
+            "the sound-bank cipher's key length is not settled: read a directory "
+            "of this card before writing one")
     n = directory.count
     want = crc(session.crc_init, directory.records + directory.padded_plain)
     seed = session.seed_map().invert(want)
@@ -613,4 +697,5 @@ def write_directory(directory, emu):
         raise MasterDirError("no seed word produces checksum 0x%08x" % want)
     key, iv = keygen(emu, seed)
     return {directory.md_off: pack_tail(directory, key, iv, seed),
+            HDR_MD_OFF: _p32(directory.md_off),
             HDR_COUNT: _p32(n)}

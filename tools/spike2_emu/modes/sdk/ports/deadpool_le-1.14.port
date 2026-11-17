@@ -306,29 +306,31 @@ lamp 405          0              BACK RIGHT 6  # lamp 203, I/O group 9 index 12,
 lamp 406          0              HAND SPOTLIGHT  # lamp 204, I/O group 9 index 13, at 0,0
 lamp 407          0              MAIN LED STRIP  # lamp 205, I/O group 9 index 0, at 0,0
 lamp 477          0              MOTOR  # lamp 206, I/O group 9 index 15, at 0,0
-lamp 408,409,410  0              SPEAKER 1  # lamp 207, I/O group 6 index 1, at 0,0
-lamp 411,412,413  0              SPEAKER 2  # lamp 208, I/O group 6 index 4, at 0,0
-lamp 414,415,416  0              SPEAKER 3  # lamp 209, I/O group 6 index 7, at 0,0
-lamp 417,418,419  0              SPEAKER 4  # lamp 210, I/O group 6 index 10, at 0,0
-lamp 420,421,422  0              SPEAKER 5  # lamp 211, I/O group 6 index 13, at 0,0
-lamp 423,424,425  0              SPEAKER 6  # lamp 212, I/O group 6 index 16, at 0,0
-lamp 426,427,428  0              SPEAKER 7  # lamp 213, I/O group 6 index 19, at 0,0
-lamp 429,430,431  0              SPEAKER 8  # lamp 214, I/O group 6 index 22, at 0,0
-lamp 432,433,434  0              SPEAKER 9  # lamp 215, I/O group 6 index 25, at 0,0
-lamp 435,436,437  0              SPEAKER 10  # lamp 216, I/O group 6 index 28, at 0,0
-lamp 438,439,440  0              SPEAKER 11  # lamp 217, I/O group 6 index 31, at 0,0
-lamp 441,442,443  0              SPEAKER 12  # lamp 218, I/O group 6 index 34, at 0,0
-lamp 444,445,446  0              SPEAKER 13  # lamp 219, I/O group 6 index 37, at 0,0
-lamp 447,448,449  0              SPEAKER 14  # lamp 220, I/O group 6 index 40, at 0,0
-lamp 450,451,452  0              SPEAKER 15  # lamp 221, I/O group 6 index 43, at 0,0
-lamp 453,454,455  0              SPEAKER 16  # lamp 222, I/O group 6 index 46, at 0,0
-lamp 456,457,458  0              SPEAKER 17  # lamp 223, I/O group 6 index 49, at 0,0
-lamp 459,460,461  0              SPEAKER 18  # lamp 224, I/O group 6 index 52, at 0,0
-lamp 462,463,464  0              SPEAKER 19  # lamp 225, I/O group 6 index 55, at 0,0
-lamp 465,466,467  0              SPEAKER 20  # lamp 226, I/O group 6 index 58, at 0,0
-lamp 468,469,470  0              SPEAKER 21  # lamp 227, I/O group 6 index 61, at 0,0
-lamp 471,472,473  0              SPEAKER 22  # lamp 228, I/O group 6 index 64, at 0,0
-lamp 474,475,476  0              SPEAKER 23  # lamp 229, I/O group 6 index 67, at 0,0
+# ---- cabinet: cablamp <light ids R,G,B | one> <u> <name> - the expression lights, read by lamp_map.py ----
+# 0 blade pixel(s), 23 speaker light(s), placed on the cabinet drawing (PAD-1040)
+cablamp 408,409,410  41  SPEAKER 1  # lamp 207, I/O group 6 index 1, at 95,28, speaker L
+cablamp 411,412,413  125 SPEAKER 2  # lamp 208, I/O group 6 index 4, at 116,34, speaker L
+cablamp 414,415,416  208 SPEAKER 3  # lamp 209, I/O group 6 index 7, at 131,49, speaker L
+cablamp 417,418,419  291 SPEAKER 4  # lamp 210, I/O group 6 index 10, at 137,70, speaker L
+cablamp 420,421,422  375 SPEAKER 5  # lamp 211, I/O group 6 index 13, at 131,91, speaker L
+cablamp 423,424,425  458 SPEAKER 6  # lamp 212, I/O group 6 index 16, at 116,106, speaker L
+cablamp 426,427,428  541 SPEAKER 7  # lamp 213, I/O group 6 index 19, at 95,112, speaker L
+cablamp 429,430,431  625 SPEAKER 8  # lamp 214, I/O group 6 index 22, at 74,106, speaker L
+cablamp 432,433,434  708 SPEAKER 9  # lamp 215, I/O group 6 index 25, at 59,91, speaker L
+cablamp 435,436,437  791 SPEAKER 10  # lamp 216, I/O group 6 index 28, at 53,70, speaker L
+cablamp 438,439,440  875 SPEAKER 11  # lamp 217, I/O group 6 index 31, at 59,49, speaker L
+cablamp 441,442,443  958 SPEAKER 12  # lamp 218, I/O group 6 index 34, at 74,34, speaker L
+cablamp 444,445,446  45  SPEAKER 13  # lamp 219, I/O group 6 index 37, at 205,28, speaker R
+cablamp 447,448,449  136 SPEAKER 14  # lamp 220, I/O group 6 index 40, at 228,35, speaker R
+cablamp 450,451,452  227 SPEAKER 15  # lamp 221, I/O group 6 index 43, at 243,53, speaker R
+cablamp 453,454,455  318 SPEAKER 16  # lamp 222, I/O group 6 index 46, at 247,76, speaker R
+cablamp 456,457,458  409 SPEAKER 17  # lamp 223, I/O group 6 index 49, at 237,98, speaker R
+cablamp 459,460,461  500 SPEAKER 18  # lamp 224, I/O group 6 index 52, at 217,110, speaker R
+cablamp 462,463,464  590 SPEAKER 19  # lamp 225, I/O group 6 index 55, at 193,110, speaker R
+cablamp 465,466,467  681 SPEAKER 20  # lamp 226, I/O group 6 index 58, at 173,98, speaker R
+cablamp 468,469,470  772 SPEAKER 21  # lamp 227, I/O group 6 index 61, at 163,76, speaker R
+cablamp 471,472,473  863 SPEAKER 22  # lamp 228, I/O group 6 index 64, at 167,53, speaker R
+cablamp 474,475,476  954 SPEAKER 23  # lamp 229, I/O group 6 index 67, at 182,35, speaker R
 
 # ---- the game's own modes (item 164): its mode TABLE, walked by the runtime (MODE_SDK.md "The game's own
 # modes"): the array the get-mode-by-id accessor reads, the cmode class's ACTIVE slot (Godzilla's 14, found
@@ -455,3 +457,68 @@ site block_rule_10         0x001281c0 0xe590c000 0xe3071048  # RuleWeapons::v[31
 text block_rule_name_10    Weapons
 site block_rule_11         0x00129120 0xe2022010 0xe3a03000  # RuleWolverineSpinner::v[31]
 text block_rule_name_11    Wolverine Spinner
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+data  game_flags          0x00662bfc
+value game_flags_at       4
+data  game_flag_count     0x004f729c
+value challenge_on_flag   17
+site  challenge_balls     0x002edadc 0xe92d4030 0xe1a05000
+site  challenge_extra_ball 0x00152280 0xe3083108 0xe3403063
+site  challenge_menu      0x000731e4 0xe1a07000 0xe3170080
+site  challenge_menu_pick 0x000733b4 0xe2433001 0xe3530005
+value challenge_menu_list_at   236
+value challenge_menu_count_at  24
+value challenge_menu_cap       7
+value challenge_menu_entry     12
+value challenge_menu_kind      2
+value challenge_menu_slot      -1
+value challenge_menu_caption   1911
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x0019639c 0xe30d278a 0xe340206a
+
+# ---- PAD-645: the framework's switch drain, for the flipper buttons' sounds in attract (portswitch.py; no `switch` lines: the shots keep their own route) ----
+#   switch_edge: the framework's per-switch call in its switch drain (generation B: r0 = the switch id, called for every edge after the new level is stored) - press the switches to prove it
+site switch_edge      0x002f4f7c 0xe3093cd8 0xe340306a
+#   switch_drain: the drain itself, never hooked: an edge counts only when switch_edge is called from it
+site switch_drain     0x002f5ba4 0xe92d4ff0 0xe3099838
+data switch_records         0x006a7840
+data switch_count           0x006a9cd8
+value switch_drain_size     384
+value switch_record_size    32
+value switch_level_at       24
+value switch_desc_via       8
+value switch_flags_at       26
+value switch_polarity_at    28
+#   the drain's edges are not this port's shots (they keep their own route): only the flipper buttons' sounds in attract use it
+value switch_edge_shots     0
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x001921d0 0xe92d4010 0xe3074ea4
+value ball_launch_flag       12
+value ball_launch_wait_flag  13
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x00325de8 0xe92d4ff0 0xe24dd0c4
+
+# PAD-710: the game's own mode framework (mode_framework.py, from this build's program): what one of its
+# modes writes as it starts and stops, so a mode of ours in one's place counts as it
+data  mode_player_at         0x005c0d50
+value mode_slot_stop         18
+value mode_stopped_at        0x17
+value mode_starts_at         0x3c
+site  mode_started           0x000fc02c 0xe3510019 0x812fff1e
+data  mode_manager           0x006284d0
+value mode_id_at             4
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x004b4370 0xe5d13000 0xe3530008
+site coil_off              0x004b0430 0xe3510008 0xe1a02001
+data sw_struct             0x006a7840
+data coil_count            0x00657d10
+data coil_table            0x006384d8

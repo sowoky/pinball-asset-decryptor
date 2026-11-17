@@ -17,6 +17,10 @@ conflicts later (PAD-421).  The table answers the question from the bytes:
   the release's ``scene.radium`` files -- the same digits the extract puts at
   the end of a ``radimg_..._<md5[:8]>`` file name, so a project folder can be
   checked against stock without touching a card.
+* ``videos``: which of ``files`` are videos (the ``ftyp`` sniff), so a card
+  read knows them without opening each one (PAD-626: on a spinning disk
+  that sniff took a cold Stranger Things card 93 s).  A table made before
+  PAD-626 has no ``videos``: the card is then sniffed as before.
 
 Hashes only: nothing of Stern's ships in the table.
 
@@ -108,6 +112,24 @@ def picture_set(release):
     blob = (release or {}).get("pictures") or ""
     return {blob[i:i + PICTURE_DIGITS]
             for i in range(0, len(blob), PICTURE_DIGITS)}
+
+
+def video_set(release):
+    """The release's video paths as a set, or ``None`` when the table has no
+    record of them (made before PAD-626)."""
+    vids = (release or {}).get("videos")
+    return set(vids) if isinstance(vids, list) else None
+
+
+def release_videos(reader, files):
+    """The paths of *files* (``{path: ...}``, card-relative) that are videos
+    on the partition *reader* reads, by sniffing every one: the generator's
+    half of :func:`video_set`."""
+    from .info import _sniff_videos
+    todo = [(p, nd) for p, nd in sorted(_file_nodes(reader).items())
+            if p in files and nd["size"] >= 0x1000]
+    found = _sniff_videos(reader, {"to_sniff": todo}, stock=False)
+    return sorted(found["video_paths"])
 
 
 def folder_name(folder):
@@ -215,6 +237,7 @@ def make_release(card_path, verify=True, log=None, cancel=None,
                     bad.append("%s: bytes differ from the manifest" % rel)
             if i % 200 == 0:
                 log("  %d/%d files" % (i, len(files)))
+        videos = release_videos(reader, files)
     if bad:
         raise ValueError("%s is not consistent with its own manifest "
                          "(%d file(s)), e.g. %s"
@@ -228,6 +251,7 @@ def make_release(card_path, verify=True, log=None, cancel=None,
         "files": {rel: [size, md5[:FILE_DIGITS]]
                   for rel, (size, md5) in sorted(files.items())},
         "pictures": "".join(sorted(pictures)),
+        "videos": videos,
     }
     return probe["sidx_name"].lower(), release
 
@@ -338,9 +362,13 @@ def _unreadable(text, sidx_name=""):
 
 def _file_nodes(reader):
     """``{path: inode}`` for every regular file on the partition (one
-    metadata walk; no file bytes are read)."""
+    metadata walk; no file bytes are read).  The primary image's only: a
+    compact multi-boot card's other games (``img1/`` ...) are not this card's
+    files (PAD-1100, :func:`.info.other_image_path`)."""
+    from .info import other_image_path
     return {fp.lstrip("/"): nd for fp, _i, nd in
-            reader.iter_regular_files(min_size=0, max_depth=20)}
+            reader.iter_regular_files(min_size=0, max_depth=20)
+            if not other_image_path(fp)}
 
 
 # ---------------------------------------------------------------------------
@@ -408,10 +436,15 @@ def card_print(card_path, table=None):
         for pt in parts:
             reader = card.reader(pt.index)
             nodes = _file_nodes(reader)
-            sidx_path = next((p for p in nodes if p.endswith(".sidx")
-                              and p.startswith("spk/index/")), None)
-            if sidx_path is None:
+            # PAD-1100: the card's own versioned index, whatever order the
+            # directory lists it in beside a bare <game>.sidx
+            from .info import index_name
+            name = index_name(p[len("spk/index/"):] for p in nodes
+                              if p.startswith("spk/index/")
+                              and p.count("/") == 2)
+            if not name:
                 continue
+            sidx_path = "spk/index/" + name
             try:
                 manifest = sidx_mod.manifest_files(
                     reader.read_file_bytes(nodes[sidx_path]))
@@ -438,10 +471,11 @@ def card_files(reader, manifest, paths, deep=False, cancel=None, nodes=None):
     """``({path: (size, md5)}, stale)``: what the card really holds at each
     of *paths*, and how many of its own manifest records are out of date.
 
-    The manifest is NOT the whole truth.  PAD rewrites the records of the
-    files it changes, but a card built elsewhere can leave them as Stern
-    wrote them: DragonRR's Heisei card replaced 541 videos and kept every
-    one's stock size and MD5 in its manifest.  So each file's size is taken
+    The manifest is NOT the whole truth.  A build can leave the records of
+    the files it changed as Stern wrote them: DragonRR's Heisei card replaced
+    541 videos and kept every one's stock size and MD5 in its manifest, and
+    PAD's own Spike 2 builds did the same for every video they copied on
+    whole until PAD-1242.  So each file's size is taken
     from the filesystem (free: the walk already read the inodes), and a size
     that disagrees with the record marks the file changed.  With *deep*, the
     bytes of every file whose size still agrees are hashed as well, which
@@ -519,8 +553,10 @@ def check_walked(reader, found, table=None, deep=False, cancel=None):
     status = "official" if not diff["changed"] else "modified"
     text = describe(status, label, diff)
     if stale:
-        text += (" Its own manifest still lists %s as Stern's, so it was "
-                 "not built by PAD." % _plural(stale, "changed file"))
+        # Not proof of who built it (PAD-1242): PAD's own Spike 2 builds left
+        # the records of the videos they copied on whole as Stern's
+        text += (" Its own manifest still lists %s as Stern's."
+                 % _plural(stale, "changed file"))
     if status == "official" and not deep:
         text = ("Official %s - every file matches the card Stern released "
                 "(by the card's manifest and file sizes)." % label)

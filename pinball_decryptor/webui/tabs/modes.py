@@ -30,16 +30,21 @@ import tempfile
 import threading
 
 from ...plugins.stern import block_modes as BM   # PAD-232
+from ...plugins.stern import insert_colours as IC   # PAD-668
 from ...plugins.stern import mode_assets as MA
 from ...plugins.stern import mode_project as MP
 from ...plugins.stern import mode_tryit as MT
+from ...plugins.stern import spike3 as S3   # PAD-1269: tell a Spike 3 card apart
 from .. import compat
 from .. import modes_filmcut as FCD
 from ..modes_reading import TitleReadMixin
 from ..modes_stock_remap import StockRemapMixin
 from ..modes_stock_rewrite import StockRewriteMixin   # item 161
 from ..modes_check import GameCheckMixin
+from ..modes_sheet import RulesSheetMixin     # PAD-664
+from ..modes_how import HowItWorksMixin       # PAD-1064
 from ..modes_tryit import TryItMixin
+from ..modes_jjp import JjpModesMixin         # PAD-1350: the tab on a JJP game
 from .base import TabService, rpc
 
 SAVE_DELAY_MS = 500
@@ -48,6 +53,7 @@ SAVE_DELAY_MS = 500
 _BOOL_FIELDS = ("screen", "countdown", "lights", "advanced", "stack", "light_shots_on", "multiball",
                 "start_save",                                                      # PAD-225
                 "magnet", "scoop", "coil_on_0", "coil_on_1", "coil_on_2",          # PAD-381
+                "coil_wait_0", "coil_wait_1", "coil_wait_2",                       # PAD-621
                 "shield",                                                          # PAD-392
                 "shake_on_start", "shake_on_shot", "shake_on_end",                 # PAD-414
                 "seq_reset_any")                                                   # PAD-314
@@ -63,6 +69,7 @@ _STR_FIELDS = (
     "callout_secs_2", "callout_id_2", "callout_secs_3", "callout_id_3",
     "balls", "ball_save", "add_ball_shot", "add_ball_max", "mb_on_shot",       # item 167, PAD-228
     "also_shot_0", "also_count_0", "also_shot_1", "also_count_1", "after_mode", "after_when",  # PAD-227
+    "start_or_0", "start_or_1",                                                       # PAD-518
     "start_save_s",  # PAD-225
     "magnet_s", "scoop_s",   # PAD-381
     "coil_s_0", "coil_s_1", "coil_s_2", "coil_when_0", "coil_when_1", "coil_when_2",   # PAD-381
@@ -71,8 +78,13 @@ _STR_FIELDS = (
     "game_modes",                                                                     # PAD-363
     "shake_what_start", "shake_what_shot", "shake_what_end",                          # PAD-414
     "shake_s_start", "shake_s_shot", "shake_s_end", "shake_shot",
-    "show_start", "show_end",                                                         # PAD-418
-    "game_wizard", "wizard_how")                                                      # PAD-436
+    "show_start", "show_end", "show_hit",                                             # PAD-418; PAD-642
+    "game_wizard", "wizard_how",                                                      # PAD-436
+    "building_floor", "building_shot", "roster_slot",                                 # PAD-589
+    "challenge",                                                                      # PAD-615
+    "challenge_launch", "challenge_launch_s",                                         # PAD-643
+    "place_mode",                                                                     # PAD-710
+    "done_count")                                                                     # PAD-747
 _DEFAULTS = {
     "screen": True, "countdown": True, "lights": False, "advanced": False, "stack": True,
     "light_shots_on": False, "panel_color": "#000000", "title_color": "#000000",
@@ -88,6 +100,12 @@ _DEFAULTS = {
     "magnet": False, "magnet_s": "2",                                          # PAD-381
     "scoop": False, "scoop_s": "3",                                            # PAD-381
     "shield": False,                                                           # PAD-392
+    "building_floor": "(leave it where it is)", "building_shot": "(when it starts)",   # PAD-589
+    "roster_slot": "",                                                              # PAD-589
+    "challenge": "",                                                                # PAD-615: by its name
+    "challenge_launch": "clip", "challenge_launch_s": "4",                          # PAD-643: clip, time or player
+    "place_mode": "",                                                               # PAD-710: by its name
+    "done_count": "4",                                                              # PAD-747
     # PAD-414: the shaker - as it starts, on a shot, as it ends; a shake of the mode's own (strength + seconds) or
     # one of the game's ("game:<name>")
     "shake_on_start": False, "shake_on_shot": False, "shake_on_end": False,
@@ -95,12 +113,14 @@ _DEFAULTS = {
     "shake_s_start": "0.5", "shake_s_shot": "0.5", "shake_s_end": "1", "shake_shot": "",
     "coil_on_0": False, "coil_on_1": False, "coil_on_2": False, "coil_s_0": "2", "coil_s_1": "2", "coil_s_2": "2",
     "coil_when_0": "(when it starts)", "coil_when_1": "(when it starts)", "coil_when_2": "(when it starts)",
+    "coil_wait_0": False, "coil_wait_1": False, "coil_wait_2": False,                 # PAD-621
     "mb_on_shot": "(when it starts)",
     "also_shot_0": "(nothing else)", "also_count_0": "1", "also_shot_1": "(nothing else)",
     "also_count_1": "1", "after_mode": "(any time)", "after_when": "game",
+    "start_or_0": "(no other shot)", "start_or_1": "(no other shot)",              # PAD-518
     "seq_reset_any": False,                                                        # PAD-314
     "game_modes": "block",                                                         # PAD-363; PAD-398
-    "show_start": "(none)", "show_end": "(none)",                                  # PAD-418
+    "show_start": "(none)", "show_end": "(none)", "show_hit": "(none)",            # PAD-418; PAD-642
     "game_wizard": "(none)", "wizard_how": "light",                                # PAD-436
     **{"seq_shot_%d" % i: "(no more shots)" for i in range(8)},
 }
@@ -127,6 +147,7 @@ _PROBLEM_PAGES = tuple((re.compile(rx), page) for rx, page in (
     (r"(?i)magnet", "mode"),                                                   # PAD-381
     (r"(?i)scoop", "mode"),                                                    # PAD-381
     (r"(?i)shield targets", "mode"),                                           # PAD-392
+    (r"(?i)the building", "mode"),                                             # PAD-589
     (r"(?i)shake", "mode"),                                                    # PAD-414
     (r"(?i)mechanism|holds \d", "mode"),                                       # PAD-381
     # Scoring: the first shot's points, the ladder, a shot's own points, the early end
@@ -141,10 +162,10 @@ _PROBLEM_PAGES = tuple((re.compile(rx), page) for rx, page in (
     (r"^The sound's time in the film|^A sound cut from a film", "sounds"),
     (r"(?i)callout", "sounds"),
     # Lights: the sweep's colour, the lit shots, the game's own light shows (PAD-418)
-    (r"^The light colour|lit shots", "lights"),
+    (r"^The light color|lit shots", "lights"),
     (r"(?i)light show", "lights"),
     # Show: the screen, its colours and picture, both clips, the screen's time, priority
-    (r"^The (panel|title) colour|^The screen art file|^The picture's", "show"),
+    (r"^The (panel|title) color|^The screen art file|^The picture's", "show"),
     (r"clip", "show"),
     (r"^The film .* is in the mode's folder", "show"),
     (r"^The screen stays up|^The display priority", "show"),
@@ -182,7 +203,8 @@ def fix_chip(problems):
     return dict(PAGES)[pages[0]] + (" •" if len(pages) == 1 else " +%d •" % (len(pages) - 1))
 
 
-class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, StockRewriteMixin, TabService):
+class ModesTab(JjpModesMixin, TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, StockRewriteMixin,
+               RulesSheetMixin, HowItWorksMixin, TabService):
     ns = "modes"
     key = "Modes"
     label = "Modes"
@@ -208,16 +230,16 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                  "three times, and so on. The game's own scoring is used, so its playfield "
                  "multiplier applies. Advanced can change this: Award ladder Fixed pays every "
                  "shot once, and Points per shot gives a shot its own points.")
-    RAW_TIP = ("Replace the colour sweep with light commands of your own, in the game's own "
-               "light language. Leave both empty to use the colour above.")
+    RAW_TIP = ("Replace the color sweep with light commands of your own, in the game's own "
+               "light language. Leave both empty to use the color above.")
     START_EVENT_TIP = ("Something the game itself does: a ball starting, a multiball starting, "
                        "the skill shot being made. The mode starts the moment the game does it.")
     END_EVENT_TIP = ("The mode ends when the game does this, when its time runs out, or when "
                      "the ball drains, whichever comes first.")
     SCREEN_TITLE_TIP = ("The title on the panel. Empty uses the mode's name. Under it, the "
                         "mode writes what each shot paid, and the total at the end.")
-    CLIP_TITLE_TIP = ("The title card's words, over the panel colour with a sweep in the title "
-                      "colour. Empty uses the mode's name.")
+    CLIP_TITLE_TIP = ("The title card's words, over the panel color with a sweep in the title "
+                      "color. Empty uses the mode's name.")
     COOLDOWN_TIP = ("0 = no wait. The wait runs from the moment the mode ends, and carries on "
                     "through the end of a ball.")
     STARTS_TIP = ("Counted for each player. Once a ball starts again on the player's next "
@@ -226,7 +248,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                  "game's own battles or multiballs. Off: it waits until the game's own battle "
                  "or multiball ends, and the next start shot after that starts it.")
     LIT_TIP = ("While the mode runs, the insert in front of every shot that scores (and every "
-               "shot with its own points) shows this colour and pattern, over the game's own "
+               "shot with its own points) shows this color and pattern, over the game's own "
                "light shows; every other insert keeps doing what the game wants. They go back "
                "to the game the moment the mode ends. Blink and Pulse repeat about twice a "
                "second and every 1.6 s; Chase lights one of them at a time.")
@@ -259,8 +281,9 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
     _LIGHT_PATTERN_WORDS = (("solid", "Solid"), ("blink", "Blink"), ("pulse", "Pulse"),
                             ("chase", "Chase"))
     _PART_SECTIONS = ("lights", "screen", "clip", "multiball", "ball_save", "magnet", "scoop", "coils", "shield",
-                      "shaker", "shows", "wizard")
+                      "building", "shaker", "shows", "wizard", "roster", "challenge", "place", "done")
     _TWO_COLUMN_SHOTS = 18
+    CHALLENGE_NEW = "A new challenge of its own"       # PAD-615 round 2: the Starts on choice that adds one
     _PROBE_TRIES = 240
     _FILM_PARTS = (("clip", "clip", "a clip"), ("still", "screen", "a picture for the screen"),
                    ("sound", "own_sound", "a sound"))
@@ -272,6 +295,8 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
     BALL_NONE = "(none)"
     #: PAD-418: the light-show lists' first entry
     SHOW_NONE = "(none)"
+    #: PAD-589: the building list's first entry: the mode leaves it where it is
+    BUILDING_NONE = "(leave it where it is)"
     #: PAD-436: the mini-wizard list's first entry: a mode of its own
     WIZARD_NONE = "(none)"
     #: PAD-228: the multiball's balls come when the mode starts, not on a shot
@@ -280,18 +305,20 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
     ALSO_NONE = "(nothing else)"
     AFTER_NONE = "(any time)"
     ALSO_ROWS = 2
+    #: PAD-518: the "or" lists beside the start shot (their hits count with its own), and their first entry
+    START_OR_NONE = "(no other shot)"
     #: PAD-314: the "these shots in order" lists' first entry, and the rows the form has
     SEQ_NONE = "(no more shots)"
     SEQ_ROWS = MP.SEQUENCE_MAX
     PARAM_SECOND_CLIP = (("none", "None"), ("same", "The same clip"), ("title", "A title card"),
                          ("file", "My video…"))
-    CODE_EXAMPLE_SUFFIX = " (code mode)"
-    VIDEO_TYPES = [("Videos", "*.mp4 *.mov *.m4v *.mkv *.avi *.webm"), ("All files", "*.*")]
+    #: PAD-693: an animated GIF is a clip too (ffmpeg makes it a video like any other; it plays once)
+    VIDEO_TYPES = [("Videos", "*.mp4 *.mov *.m4v *.mkv *.avi *.webm *.gif"), ("All files", "*.*")]
     #: the Tk tab's ttk.Spinbox bounds (from_, to[, step]), keyed by the form field; the
     #: page draws each as a number field with arrows. ``callout_secs`` is the four callout
     #: rows' seconds. (The film dialog's length is bounded by its own ``film.max``.)
     SPINBOXES = {
-        "start_count": [1, 20], "seconds": [0, 300], "clip_seconds": [1, 30, "any"],   # 0: a multiball with no clock
+        "start_count": [1, MP.START_COUNT_MAX], "seconds": [0, 300], "clip_seconds": [1, 30, "any"],   # 0: a multiball with no clock
         "sound_shot_every": [1, 20], "starts_count": [1, MP.STARTS_MAX],
         "cooldown": [0, MP.COOLDOWN_MAX], "priority": [0, 255],
         "clip_both_seconds": [1, 30, "any"], "callout_secs": [0, 300],
@@ -301,9 +328,15 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         "start_save_s": [1, MP.BALL_SAVE_MAX],                                  # PAD-225
         "magnet_s": [MP.MAGNET_MIN_MS / 1000, MP.MAGNET_MAX_MS / 1000, "any"],  # PAD-381
         "scoop_s": [MP.SCOOP_MIN_MS / 1000, MP.SCOOP_MAX_MS / 1000, "any"],     # PAD-381
-        "coil_s": [MP.COIL_MIN_MS / 1000, MP.COIL_MAX_MS / 1000, "any"],        # PAD-381: coil_s_0..2
-        "also_count": [1, 20],                                                  # PAD-227
+        "coil_s": [MP.COIL_MIN_MS / 1000, MP.COIL_LONGEST_MS / 1000, "any"],    # PAD-381: coil_s_0..2 (PAD-621: a
+                                                                                # coil's own longest, checked per coil)
+        "also_count": [1, MP.START_COUNT_MAX],                                  # PAD-227; PAD-518
+        "done_count": [1, MP.DONE_EXTRA + MP.DONE_EXTRA_MAX],                   # PAD-747: checked against the ticks
+        "challenge_launch_s": [1, 60],                                          # PAD-643
     }
+
+    #: PAD-707: the battle list's "A new monster, in <battle>'s place" (modes.js MORE_PREFIX)
+    MORE_PREFIX = "A new monster, in "
 
     def __init__(self, window):
         super().__init__(window)
@@ -314,6 +347,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self._block_on = set()             # PAD-363: the game's modes ticked under "hold these off" (ids)
         self._block_touched = False        # ... and whether a tick changed since the mode opened
         self._keep_on = set()              # PAD-398: the game's features ticked to keep counting (names)
+        self._done_on = set()              # PAD-747: the game's modes ticked to count toward starting it (ids)
         self._shot_awards = {n: "" for n in self._shot_names}
         self._slugs = []
         self._found = {}
@@ -363,12 +397,34 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self._init_tryit()
         self._init_check()
         self._init_reading()
+        self._init_sheet()
+        self._init_how()
+        self.set(coop_on=False, coop_locked=False, coop_note="", coop_note_kind="", coop_shown=False,   # PAD-1017
+                 coop_awards_ok=False,
+                 coop_aw={"why": "", "note": "", "rows": [], "max_words": 27}, coop_awards_tip="",   # PAD-1028
+                 coop_ch={"why": "", "note": "", "pick": False, "rows": [], "abilities": [], "preset": "",
+                          "max_name": 27, "max": 16}, coop_chars_tip="",                      # PAD-1031
+                 coop_tip=self.COOP_TIP)
+        self.set(recs_shown=False, recs_n=0,                                                   # PAD-1280
+                 recs={"why": "", "how": "", "rows": [], "modes": [], "counts": [], "max": 12, "max_words": 27,
+                       "error": "", "saved": ""})
+        self.set(idle_on=False, idle_note="", idle_note_kind="", idle_shown=False,   # PAD-1022
+                 idle_tip=self.IDLE_TIP)
+        self.set(hand_on=False, hand_note="", hand_note_kind="", hand_shown=False,   # PAD-1033
+                 hand_levels={"why": "", "rows": []},
+                 hand_tip=self.HAND_TIP)
+        self.set(comp_on=False, comp_note="", comp_note_kind="", comp_shown=False,   # PAD-1041
+                 comp_tip=self.COMP_TIP)
+        from ...plugins.stern import mode_project as _MPk
+        self.set(keeps_ic_head=_MPk.KEEPS_IC_HEAD, keeps_ic_note=_MPk.KEEPS_IC_NOTE)   # PAD-1204: their own group
+        self.set(feed_on=False, feed_url="", feed_note="", feed_note_kind="", feed_shown=False,   # PAD-1204
+                 feed_tip=self.FEED_TIP, feed_url_tip=self.FEED_URL_TIP, feed_placeholder="", feed_contract=None)
         self.set(project="", project_label="", title_text="", title_note="", no_port="",
                  profile=self._profile_payload(None), rows=[], sel=None, game_rows=[],
                  game_mode=None, title_origin="",
                  cap_text="", new_ok=False, ex_ok=False, dup_ok=False, del_ok=False, copy_ok=False,
                  port_ok=False, port_shown=False, port_word="", port_targets=[],                 # PAD-396
-                 examples=[], open=False, editor_on=False, form=dict(self.f),
+                 examples=[], blocks_examples=[], open=False, editor_on=False, form=dict(self.f),
                  shots_on=[], end_shots_on=[], awards=dict(self._shot_awards), shots_text="", status="",
                  save_state="", labels={}, files={}, starts_words="", preview=None,
                  reasons={}, dis={}, code=None, code_words="", cut_ok=False,
@@ -377,8 +433,8 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                  film=None, about=self.ABOUT_TIP, n_form=0, n_code=0, n_blocks=0, ready=False,
                  fix_pages=[], spin=dict(self.SPINBOXES), sdk_doc=self.sdk_doc(),
                  no_port_details="", ex_tip="", own_extra_ok=True, write_waits=False,
-                 game_hidden=0, check_offer=False, check_wanted=False, check_done=None,
-                 check_tip=self.CHECK_TIP, insider_note="")
+                 check_offer=False, check_wanted=False, check_done=None,
+                 check_tip=self.CHECK_TIP, insider_note="", sheet=None)
         self._show_starts_words()
 
     # ------------------------------------------------------------------
@@ -488,6 +544,10 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             self.ctx.loop.post(fn, *args)
 
     def _on_project_changed(self):
+        if self._jjp_on():
+            if getattr(self, "_visible", False):
+                self._post(self.jjp_refresh)        # the sound folder may follow the project
+            return
         if not getattr(self, "_visible", False) or not self._preview_on():
             return
         self._post(self._refresh_all)
@@ -499,7 +559,16 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self.refresh_stock_rewrite()           # item 161: the rewrite rows
 
     # -- hooks ------------------------------------------------------------
+    def rail_needs(self):
+        # PAD-1350: a JJP title's modes need no project (they are the person's own folder)
+        return "none" if self._jjp_on() else None
+
     def on_manufacturer(self, mfr):
+        if self._jjp_on():
+            if getattr(self, "_visible", False):
+                self.jjp_refresh()
+            return
+        self.set(jjp={"on": False})
         self._hook_vars()
         if getattr(self, "_visible", False):
             self._refresh_all()
@@ -510,6 +579,9 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         (another tab or the person may have changed the modes folder); the open mode is
         reopened only when the project changed or it is gone, or the card the modes are for
         changed (PAD-434: a card saved into the same folder)."""
+        if self._jjp_on():
+            self.jjp_refresh()
+            return
         self._hook_vars()
         if self.project() != (self.get("project") or "") or (
                 self._slug is not None and not os.path.isfile(
@@ -555,6 +627,8 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             self._edit_block(key[6:], bool(value))
         elif key.startswith("keep:"):                    # PAD-398
             self._edit_keep(key[5:], bool(value))
+        elif key.startswith("done:"):                    # PAD-747
+            self._edit_done(key[5:], bool(value))
         elif key.startswith("award:"):
             self._edit_award(key[6:], "" if value is None else str(value))
         elif key == "try_on":
@@ -624,6 +698,12 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self._apply_project_title(project)
         self._refresh_port_targets(project)                 # PAD-396: after the card's title is known
         self._show_cap(project, len(found))
+        self._publish_coop(project)                          # PAD-1017
+        self._publish_idle(project)                          # PAD-1022
+        self._publish_handicap(project)                      # PAD-1033
+        self._publish_comp(project)                          # PAD-1041
+        self._publish_feed(project)                          # PAD-1204
+        self._publish_records_count(project)                 # PAD-1280
         codes = [s for s, _n in self._code_list]
         game = self._game_ids()
         if select_game is not None and select_game in game:
@@ -659,17 +739,1151 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             return
         self._open(want, self._found[want])
 
+    #: PAD-1017: co-op play (plugins/stern/coop_play.py), the card's game-wide option beside the modes: it runs on the
+    #: mode runtime, and a card with it keeps its scores off Insider Connected as a card with modes does
+    COOP_TIP = (
+        "Lets 2 to 4 players play one game together on a game that has no co-op of its own. On the machine, hold "
+        "the right flipper button and press Start to add a teammate. The team shares one score and all of the "
+        "game's progress, and takes turns ball by ball. Each team size has its own high score board. Like a card "
+        "with modes, its scores and achievements stay off Insider Connected. Write puts it on the card.")
+
+    def _publish_coop(self, project):
+        """PAD-1017: the Co-op play tick, and under it how a teammate joins, or in red why this game cannot have it.
+        PAD-1062: a game that has co-op of its own (or no port to add it) greys the tick out, with why under it; an
+        unread title (NO_TITLE) leaves it as it was, as Write may still find the card."""
+        from ...plugins.stern import coop_play as _CP
+        on = bool(project) and _CP.load(project)
+        menu = on and _CP.menu_asked(project)
+        prof = _CP.project_title(project) if project else None
+        why = _CP.title_refusal(prof) if project else ""
+        a64 = getattr(prof, "arch", "arm") == "a64"                      # PAD-1326: a Spike 3 game's co-op
+        locked = self._coop_locked(why) and not on
+        note, kind = (why, "") if locked else ("", "")
+        if on:
+            if why:
+                note, kind = why, "err"
+            elif a64:
+                note = (("On the card: CO-OP PLAY in the game's service menu (%s), 0 (Off) to start with. At 1 (On) "
+                         % self.COOP_MENU_WHERE_A64 if menu else "On the card: ")
+                        + (_CP.HOW_A64 if menu else _CP.HOW_A64[0].upper() + _CP.HOW_A64[1:]) + ". "
+                        + ("At 1 most Insider Connected features are off; at 0 the game plays and reports as it "
+                           "always has. " if menu else "Its scores stay off Insider Connected. ")
+                        + _CP.A64_LEFT_OUT[0].upper() + _CP.A64_LEFT_OUT[1:] + ".")
+            elif menu:
+                note = ("On the card: CO-OP PLAY in the game's service menu (%s), 0 (Off) to start with. At 1 "
+                        "(Classic) or 2 (Enhanced) the game's start menu (both flipper buttons in attract) offers "
+                        "CO-OP PLAY (each Start then adds a teammate; or the right flipper button + Start adds one), "
+                        "TEAM PLAY 2 VS 2 (players 1 and 3 a team against players 2 and 4, one Start adding all four), "
+                        "TEAM PLAY 2 VS 1 (players 1 and 3 against player 2) and TEAM PLAY 3 VS 1 (players 1, 3 "
+                        "and 4 against player 2); at 2 also ENHANCED STANDARD (a normal game of competing players, "
+                        "each with their own score and progress and a character). Classic: the players pick "
+                        "characters, but none has a special ability; Enhanced: with the abilities. With characters, a "
+                        "player starting a game alone with the right flipper button held picks one too. 1 or 2 "
+                        "disables most "
+                        "Insider Connected features (scores, high scores and achievements stay on the machine); at 0 "
+                        "the game plays and reports as it always has%s."
+                        % (self.COOP_MENU_WHERE, "" if not getattr(self, "_slugs", ()) and not getattr(self, "_code_list", ())
+                           else " (this project's modes keep the card's scores off Insider Connected anyway)"))
+            else:
+                note = "On the card: " + _CP.HOW[0].upper() + _CP.HOW[1:] + ". Its scores stay off Insider Connected."
+        self.set(coop_shown=bool(project), coop_on=on, coop_locked=locked, coop_menu=menu, coop_note=note,
+                 coop_note_kind=kind,
+                 coop_menu_tip=self.COOP_MENU_TIP,
+                 coop_awards_ok=on and kind != "err" and not a64,                               # PAD-1028/1326
+                 coop_awards_tip=self.COOP_AWARDS_TIP,
+                 coop_chars_tip=self.COOP_CHARS_TIP,                                            # PAD-1031
+                 coop_save_tip=self.COOP_SAVE_TIP, coop_load_tip=self.COOP_LOAD_TIP)            # PAD-1053
+
+    @staticmethod
+    def _coop_locked(why):
+        """PAD-1062: whether :func:`coop_play.title_refusal`'s *why* greys the Co-op play tick out."""
+        from ...plugins.stern import coop_play as _CP
+        return bool(why) and why != _CP.NO_TITLE
+
+    #: PAD-1326: where a Spike 3 game's CO-OP PLAY row goes (spike3_menu: beside the game's own attract settings)
+    COOP_MENU_WHERE_A64 = "Adjustments > Machine Settings > Attract Mode"
+    #: round 2 (DoomWalrus666): co-op switched in the game's own service menu
+    COOP_MENU_WHERE = "Adjustments > Machine Settings > Attract Mode, or at the end of Standard Adjustments"
+    COOP_MENU_TIP = (
+        "Adds CO-OP PLAY to the game's own service menu: 0 Off, 1 Classic (characters picked, no special "
+        "abilities), 2 Enhanced (with the abilities). At 1 or 2 the game's start menu (both flipper buttons in "
+        "attract) offers the games below. CO-OP PLAY: picked, each Start in the first ball adds a teammate; or teammates "
+        "join with the right flipper button and Start. TEAM PLAY 2 VS 2: players 1 and 3 play as a team against "
+        "players 2 and 4, each team with its own score and progress, taking turns; one Start "
+        "adds all four. TEAM PLAY 2 VS 1: players 1 and 3 against player 2, who plays both of team 2's turns. "
+        "TEAM PLAY 3 VS 1: players 1, 3 and 4 against player 2, who plays all three of team 2's turns. ENHANCED "
+        "STANDARD (at 2 only): the game's own game of competing players, each Start in the first ball adding one, "
+        "each with their own score and progress, and each picking a character at their first ball. A "
+        "plain Start stays a one-player game. 1 or 2 disables most Insider "
+        "Connected features (the "
+        "card's scores, high scores and achievements stay on the machine). At 0 the game plays and "
+        "reports to Insider Connected as it always has. A card that also carries modes keeps its scores off Insider "
+        "Connected either way.")
+
+    @rpc
+    def set_coop_menu(self, on):
+        """Round 2: co-op switched in the service menu (CO-OP PLAY), or always on."""
+        from ...core import history_log
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project or not _CP.load(project):
+            return False
+        was = _CP.menu_asked(project)
+        _CP.save(project, True, menu=bool(on))
+        hist = history_log.diff_scalar("modes  co-op play in the service menu", "on" if was else "off",
+                                       "on" if on else "off")
+        history_log.record(project, [hist] if hist else [])
+        self._say("co-op play: %s" % ("switched in the game's service menu (CO-OP PLAY)" if on else "always on"))
+        self._publish_coop(project)
+        return True
+
+    #: PAD-1028: the co-op game's awards (plugins/stern/coop_play.py "a co-op game's awards")
+    COOP_AWARDS_TIP = (
+        "After each co-op game the machine shows who did best at each award you tick here: most points, most ball "
+        "saves, the longest ball, and any count of the game's own (on Godzilla, the jet fighters destroyed). They "
+        "show in the attract mode the way the game shows its champions, in the game's own look, until the next game "
+        "starts.")
+
+    def _publish_coop_awards(self, project):
+        from ...plugins.stern import coop_play as _CP
+        why, rows = _CP.project_awards(project) if project else ("", [])
+        on = sum(1 for a in rows if a["on"] and a["words"])
+        note = ("%d of %d ticked. The card takes the first %d ticked." % (on, len(rows), _CP.MAX_AWARDS)
+                if on > _CP.MAX_AWARDS else "%d ticked." % on if rows else "")
+        self.set(coop_aw={"why": why, "note": note, "max_words": _CP.MAX_WORDS,
+                          "rows": [{"key": a["key"], "words": a["words"], "on": bool(a["on"]), "counts": a["counts"],
+                                    "stock_words": a["stock_words"], "kind": a["kind"]} for a in rows]})
+
+    @rpc
+    def coop_awards_refresh(self):
+        """PAD-1028: the Co-op awards dialog's rows, read off the project's card (cached)."""
+        self._publish_coop_awards(self.project())
+        return True
+
+    @rpc
+    def coop_award_set(self, key, on=None, words=None):
+        """PAD-1028: tick, untick or rename one co-op award."""
+        from ...core import history_log
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project or not key:
+            return False
+        rows = {a["key"]: a for a in (self.get("coop_aw") or {}).get("rows") or []}
+        was = rows.get(key) or {}
+        if words is not None and not _CP.clean_words(words):
+            words = was.get("stock_words") or None
+        _CP.save_award(project, key, on=on, words=words)
+        hist = []
+        if on is not None:
+            hist.append(history_log.diff_scalar("modes  co-op award %s" % (was.get("words") or key),
+                                                "on" if was.get("on") else "off", "on" if on else "off"))
+        if words is not None:
+            hist.append(history_log.diff_scalar("modes  co-op award %s words" % key, was.get("words") or "",
+                                                _CP.clean_words(words)))
+        history_log.record(project, [h for h in hist if h])
+        self._publish_coop_awards(project)
+        return True
+
+    @rpc
+    def coop_awards_defaults(self):
+        """PAD-1028: every co-op award as the game's defaults again."""
+        from ...core import history_log
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project:
+            return False
+        _CP.save_award(project, None)
+        hist = history_log.diff_scalar("modes  co-op awards", "changed", "defaults")
+        history_log.record(project, [hist] if hist else [])
+        self._publish_coop_awards(project)
+        return True
+
+    # ---- PAD-1280: records of the owner's own on the game's high scores (plugins/stern/mode_records.py) ----
+    def _publish_records_count(self, project):
+        """The High scores button under the mode list: shown for a project, with the number of its records."""
+        from ...plugins.stern import mode_records as _MR
+        self.set(recs_shown=bool(project), recs_n=len(_MR.load(project)) if project else 0)
+
+    def _own_mode_choices(self):
+        """The project's own modes a record can count in: ``own:<the name the runtime gives it>``, each once."""
+        out, seen = [], set()
+        for r in self.get("rows") or []:
+            name = " ".join(str(r.get("name") or "").split())
+            if name and name.upper() not in seen:
+                seen.add(name.upper())
+                out.append({"value": "own:" + name, "label": name})
+        return out
+
+    def _publish_records(self, project, error="", saved=""):
+        from ...plugins.stern import mode_records as _MR
+        why, got = _MR.project_choices(project) if project else (_MR.NO_TITLE, {"modes": [], "counts": []})
+        own = self._own_mode_choices()
+        names = {m["value"]: m["label"] for m in (got.get("modes") or []) + own}
+        counts = {c["key"]: c["label"] for c in got.get("counts") or []}
+        rows = []
+        for r in _MR.load(project) if project else []:
+            gone = r["mode"] and r["mode"] not in names
+            rows.append(dict(r, what=_MR.describe(r, names),
+                             counts_words=[counts.get(c, c) for c in r["counts"]],
+                             note=("Its mode is not in this project's game any more: the record is left off the card."
+                                   if gone and r["mode"].startswith("game:") else
+                                   "No mode of this project is called that any more: it never counts." if gone
+                                   else "")))
+        note = _MR.attract_note(_MR.project_title(project)) if project else ""     # PAD-1327
+        self.set(recs={"why": why, "how": _MR.HOW + (" " + note if note else ""), "rows": rows,
+                       "modes": [{"value": "", "label": "The whole game"}]
+                       + [dict(m, group="The game's own modes") for m in got.get("modes") or []]
+                       + [dict(m, group="Your modes") for m in own],
+                       "counts": got.get("counts") or [], "max": _MR.MAX_RECORDS, "max_words": _MR.MAX_WORDS,
+                       "max_desc": _MR.MAX_DESC, "error": error, "saved": saved},
+                 recs_shown=bool(project), recs_n=len(rows))
+
+    @rpc
+    def records_refresh(self):
+        """PAD-1280: the High scores dialog's records and what this card's game offers them (read off the card,
+        cached)."""
+        self._publish_records(self.project())
+        return True
+
+    @rpc
+    def record_save(self, key, rec):
+        """PAD-1280: keep a record of the owner's (a new one when *key* is empty). False with the reason in the
+        dialog's ``error`` when it cannot be kept."""
+        from ...core import history_log
+        from ...plugins.stern import mode_records as _MR
+        project = self.project()
+        if not project or not isinstance(rec, dict):
+            return False
+        was = next((r for r in _MR.load(project) if r["key"] == key), None) if key else None
+        try:
+            got = _MR.save_record(project, key or "", rec)
+        except _MR.RecordError as e:
+            self._publish_records(project, error=str(e))
+            return False
+        now = next((r for r in _MR.load(project) if r["key"] == got), None) or {}
+        hist = history_log.diff_scalar("modes  high score record %s" % (now.get("name") or got),
+                                       _MR.describe(was) if was else "none", _MR.describe(now) if now else "none")
+        history_log.record(project, [hist] if hist else [])
+        self._say("high scores: %s %s" % ("changed" if was else "added", now.get("name") or got))
+        self._publish_records(project, saved=got)
+        return got
+
+    @rpc
+    def record_delete(self, key):
+        """PAD-1280: take a record of the owner's out of the project."""
+        from ...core import history_log
+        from ...plugins.stern import mode_records as _MR
+        project = self.project()
+        if not project or not key:
+            return False
+        gone = _MR.delete_record(project, key)
+        if gone is not None:
+            hist = history_log.diff_scalar("modes  high score record %s" % gone["name"], _MR.describe(gone), "none")
+            history_log.record(project, [hist] if hist else [])
+            self._say("high scores: deleted %s" % gone["name"])
+        self._publish_records(project)
+        return gone is not None
+
+    #: PAD-1031: co-op characters (plugins/stern/coop_play.py "co-op characters")
+    COOP_CHARS_TIP = (
+        "Each teammate picks a character at the start of their first ball: the machine shows its picture, its name "
+        "and what it does, the flippers move to the next one (one another teammate has is skipped), the Action button "
+        "takes it, and when the time to pick runs out (the seconds count down on the machine) the one shown is taken. "
+        "RANDOM picks one nobody has. Its ability holds while that teammate is up. A player alone picks one too by "
+        "holding the right flipper button while pressing Start to begin the game.")
+
+    def _publish_coop_chars(self, project):
+        from ...plugins.stern import coop_play as _CP
+        why, abil = _CP.project_abilities(project) if project else ("", [])
+        _why, pw = _CP.project_powers(project) if project else ("", [])      # round 6: the powers a character is made of
+        chars = _CP.load_characters(project)
+        parts = {p["key"]: p for p in pw}
+        wf = {k: p["words"] for k, p in parts.items() if p["cfg"]}
+        prof = _CP.project_title(project) if project else None
+        preset = _CP.preset_for(prof)
+        rows = []
+        for c in chars["list"]:
+            got = _CP.compose(c["powers"], parts, c["times"]) if pw else {
+                "cfg": "", "line": "", "missing": list(c["powers"]), "over": []}
+            shown, cut = _CP.badge_on_card(c, wf if pw else None)
+            rows.append({"name": c["name"], "sub": c["sub"], "ability": c["ability"], "powers": list(c["powers"]),
+                         # PAD-1367: each timed power's time, its own or the stock one
+                         "times": {k: c["times"].get(k, t[1]) for k, t in _CP.TIMED.items()},
+                         "header": c["header"], "words": _CP.character_words(c, wf if pw else None),
+                         "badge_cut": shown if cut else "",       # PAD-1083: too long for its card: what shows
+                         # PAD-1363: its own card text in place of its powers' lines ("" theirs)
+                         "text": c["text"], "powers_line": got["line"], "line": c["text"] or got["line"],
+                         "text_cut": _CP.text_on_card(c["text"])[0] if c["text"] and _CP.text_on_card(c["text"])[1]
+                         else "",
+                         "missing": got["missing"], "over": got["over"],
+                         "lost": bool(c["powers"]) and not got["cfg"],
+                         "picture": bool(_CP.picture_path(project, c)), "colour": c.get("colour") or "",
+                         "video": bool(_CP.video_path(project, c)),                          # PAD-1079
+                         # PAD-1123: what plays once it is picked
+                         "picked_clip": os.path.basename(_CP.picked_clip_path(project, c)),
+                         "picked_still": _CP.is_still(_CP.picked_clip_path(project, c)),
+                         "picked_sound": os.path.basename(_CP.picked_sound_path(project, c))})
+        lost = sum(1 for r in rows if r["lost"])
+        partly = sum(1 for r in rows if r["missing"] and not r["lost"])
+        note = ("%d character(s). " % len(rows) if rows else "") + (
+            "%d of them ask only for powers this game has not got; they have none on the card. " % lost if lost
+            else "") + ("%d of them ask for a power this game has not got; it is left off their card." % partly
+                        if partly else "")
+        self.set(coop_ch={"why": why, "note": note.strip(), "pick": chars["pick"], "rows": rows,
+                          "time": chars["time"], "times": list(_CP.PICK_TIMES),                 # PAD-1044
+                          "abilities": [{"key": a["key"], "words": a["words"], "does": a["does"], "ok": bool(a["cfg"]),
+                                         "why": a["why"], "powers": a.get("powers", [])} for a in abil],
+                          "powers": [{"key": p["key"], "group": p["group"], "words": p["words"], "line": p["line"],
+                                      "does": p["does"], "ok": bool(p["cfg"]), "why": p["why"],
+                                      # PAD-1367: a timed power's drop-down
+                                      "timed": [{"value": v, "label": _CP.time_label(p["key"], v)}
+                                                for v in _CP.TIMED[p["key"]][2]] if p["key"] in _CP.TIMED else []}
+                                     for p in pw],
+                          "groups": list(_CP.POWER_GROUPS), "refused": getattr(self, "_coop_refused", ""),
+                          "preset": _CP.read_preset(preset)["game"] if preset else "",
+                          "preview": self._coop_preview(project, chars),                        # PAD-1031
+                          "look": self._coop_look(project, chars),                              # PAD-1079
+                          "intro": os.path.basename(_CP.intro_path(project, chars)) if project else "",   # PAD-1114
+                          # PAD-1219: the awards ceremony's own video
+                          "ceremony": os.path.basename(_CP.ceremony_path(project, chars)) if project else "",
+                          # PAD-1317: and its own music
+                          "ceremony_sound": os.path.basename(_CP.ceremony_sound_path(project, chars)) if project else "",
+                          "ceremony_max": _CP.CEREMONY_SOUND_MAX_SECONDS,
+                          "bonus": bool(chars.get("bonus")),                                     # PAD-1123
+                          "picked_max": _CP.PICKED_MAX_SECONDS, "still_s": _CP.PICKED_STILL_SECONDS,
+                          "videos": "" if prof is None or _CP.can_video(prof) else (
+                              "%s cannot play a video behind its pick screen yet: a character's video is kept, and "
+                              "its picture shows." % prof.label),
+                          "max_name": _CP.MAX_NAME, "max_sub": _CP.MAX_SUB, "max_header": _CP.MAX_HEADER, "max_text": _CP.MAX_TEXT,
+                          "max": _CP.MAX_CHARACTERS})
+        self._coop_refused = ""
+
+    def _coop_look(self, project, chars):
+        """PAD-1079: the pick's look for the dialog's Look section: the title, each colour as the cards draw it
+        (``own``: the owner set it), the background picture and how dark it is."""
+        from ...plugins.stern import coop_play as _CP
+        th = _CP.theme_of(chars.get("theme"))
+        own = chars.get("theme") or {}
+        colours = [{"key": k, "label": label, "value": th[k] or (_CP.PANEL_STOCK if k == "panel" else th["accent"]),
+                    "own": bool(own.get(k)), "follows": not th[k],
+                    "hint": ("the stock dark panel until you pick one" if k == "panel"
+                             else "the frame's color until you pick one") if not th[k] else ""}
+                   for k, label in _CP.COLOUR_ROLES]
+        return {"title": th["title"], "colours": colours, "backdrop": bool(_CP.backdrop_path(project, th)),
+                "dim": th["dim"], "dims": list(_CP.DIMS)}
+
+    def _save_coop_chars(self, project, chars, what, was, now):
+        from ...core import history_log
+        from ...plugins.stern import coop_play as _CP
+        _CP.save_characters(project, chars)
+        hist = history_log.diff_scalar("modes  co-op characters %s" % what, was, now)
+        history_log.record(project, [hist] if hist else [])
+        self._publish_coop_chars(project)
+        return True
+
+    def _coop_preview(self, project, chars):
+        """The Characters dialog's still of the machine's pick screen for the row picked (``coop_ch_at``), written
+        to the app's cache; ``{"path", "at", "seq"}`` or None."""
+        from ...plugins.stern import coop_play as _CP
+        from ...plugins.stern import title_reader as TR
+        if not project or not chars["list"]:
+            return None
+        at = max(0, min(int(self.get("coop_ch_at") or 0), len(chars["list"])))
+        try:
+            png = _CP.preview(project, dict(chars, pick=True), _CP.words_for(), at)
+        except Exception as e:                          # noqa: BLE001 - a picture that will not load: say so
+            self._say("co-op characters: the preview could not be drawn: %s" % e)
+            return None
+        self._coop_seq = getattr(self, "_coop_seq", 0) + 1
+        path = os.path.join(TR.cache_dir("coop_preview"), "pick_%d.png" % (self._coop_seq % 4))
+        with open(path, "wb") as f:
+            f.write(png)
+        return {"path": path, "at": at, "seq": self._coop_seq}
+
+    @rpc
+    def coop_chars_show(self, i):
+        """PAD-1031: the preview shows the pick screen of character *i* (RANDOM after the last)."""
+        self.set(coop_ch_at=int(i))
+        self._publish_coop_chars(self.project())
+        return True
+
+    @rpc
+    def coop_char_picture(self, i, clear=False):
+        """PAD-1031: Picture... on a character: a picture of the owner's copied into the project (``coop/``), shown on
+        its pick screen; *clear* puts the generated panel back."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        chars = _CP.load_characters(project) if project else None
+        if not chars or not 0 <= int(i) < len(chars["list"]):
+            return False
+        if clear:
+            chars["list"][int(i)]["picture"] = ""
+            _CP.save_characters(project, chars)
+        else:
+            path = self.window.ask_open("modes_file", "Choose %s's picture" % chars["list"][int(i)]["name"],
+                                        [("Pictures", "*.png *.jpg *.jpeg")])
+            if not path:
+                return False
+            try:
+                _CP.save_picture(project, int(i), path)
+            except _CP.CoopError as e:
+                self._say(str(e))
+                return False
+            self._say("co-op characters: %s's picture is %s" % (chars["list"][int(i)]["name"], os.path.basename(path)))
+        self.set(coop_ch_at=int(i))
+        self._publish_coop_chars(project)
+        return True
+
+    @rpc
+    def coop_char_video(self, i, clear=False):
+        """PAD-1079: Video... on a character: a video of the owner's copied into the project (``coop/``), played in
+        its pick card's portrait frame; *clear* puts its picture back."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        chars = _CP.load_characters(project) if project else None
+        if not chars or not 0 <= int(i) < len(chars["list"]):
+            return False
+        name = chars["list"][int(i)]["name"]
+        if clear:
+            _CP.save_video(project, int(i), None)
+        else:
+            path = self.window.ask_open("modes_file", "Choose %s's video" % name,
+                                        [("Videos", " ".join("*" + e for e in _CP.VIDEO_EXTS))])
+            if not path:
+                return False
+            try:
+                _CP.save_video(project, int(i), path)
+            except _CP.CoopError as e:
+                self._say(str(e))
+                return False
+            self._say("co-op characters: %s's video is %s" % (name, os.path.basename(path)))
+        self.set(coop_ch_at=int(i))
+        self._publish_coop_chars(project)
+        return True
+
+    @rpc
+    def coop_chars_pictures(self):
+        """PAD-1031: Pictures from folder...: every picture in a folder named after a character becomes its picture
+        (the set a game's owners share: godzilla_1954.png ...)."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project or not _CP.load_characters(project)["list"]:
+            return False
+        folder = self.window.ask_folder("modes_file", "Choose the folder of character pictures")
+        if not folder:
+            return False
+        try:
+            found, missing = _CP.pictures_from_folder(project, folder)
+        except _CP.CoopError as e:
+            self._say(str(e))
+            return False
+        self._say("co-op characters: %d picture(s) from %s%s" % (found, os.path.basename(folder) or folder,
+                  "; none for " + ", ".join(missing) if missing else ""))
+        self._publish_coop_chars(project)
+        return True
+
+    @rpc
+    def coop_chars_look(self, key, value=None):
+        """PAD-1079: one part of the pick's look: its title, a colour (``#rrggbb``; ``""`` the default again) or how
+        dark its background picture is drawn."""
+        from ...core import history_log
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project or not _CP.load_characters(project)["list"]:
+            return False
+        was = _CP.theme_of(_CP.load_characters(project).get("theme")).get(key, "")
+        try:
+            chars = _CP.save_look(project, str(key), value)
+        except _CP.CoopError as e:
+            self._say(str(e))
+            return False
+        now = _CP.theme_of(chars.get("theme")).get(key, "")
+        hist = history_log.diff_scalar("modes  co-op pick look %s" % key, str(was) or "default", str(now) or "default")
+        history_log.record(project, [hist] if hist else [])
+        self._publish_coop_chars(project)
+        return True
+
+    @rpc
+    def coop_chars_look_default(self):
+        """PAD-1079: the pick's look as the game's set has it (the owner's title, colours and background gone)."""
+        from ...core import history_log
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project:
+            return False
+        _CP.save_look_default(project)
+        hist = history_log.diff_scalar("modes  co-op pick look", "changed", "default")
+        history_log.record(project, [hist] if hist else [])
+        self._publish_coop_chars(project)
+        return True
+
+    @rpc
+    def coop_intro(self, clear=False):
+        """PAD-1114: Intro video...: a video of the owner's, with its own sound, that opens each co-op and team game
+        (both flipper buttons skip it); *clear* takes it off."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project:
+            return False
+        if clear:
+            _CP.save_intro(project, None)
+            self._say("co-op intro: none - co-op and team games start as the game's own do")
+        else:
+            path = self.window.ask_open("modes_file", "Choose the co-op and team games' intro video",
+                                        [("Videos", " ".join("*" + e for e in _CP.VIDEO_EXTS))])
+            if not path:
+                return False
+            try:
+                _CP.save_intro(project, path)
+            except _CP.CoopError as e:
+                self._say(str(e))
+                return False
+            self._say("co-op intro: %s opens each co-op and team game" % os.path.basename(path))
+        self._publish_coop_chars(project)
+        return True
+
+    @rpc
+    def coop_ceremony(self, clear=False):
+        """PAD-1219: Awards video...: a video of the owner's that plays behind the co-op award cards at a co-op game's
+        end (looped, silent, the game's HUD off the glass); *clear* takes it off (the game's End of Ball Bonus loop
+        plays there instead)."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project:
+            return False
+        if clear:
+            _CP.save_ceremony(project, None)
+            self._say("co-op awards: no video of your own - the game's End of Ball Bonus loop plays behind the cards")
+        else:
+            path = self.window.ask_open("modes_file", "Choose the co-op awards ceremony's background video",
+                                        [("Videos", " ".join("*" + e for e in _CP.VIDEO_EXTS))])
+            if not path:
+                return False
+            try:
+                _CP.save_ceremony(project, path)
+            except _CP.CoopError as e:
+                self._say(str(e))
+                return False
+            self._say("co-op awards: %s plays behind the award cards" % os.path.basename(path))
+        self._publish_coop_chars(project)
+        return True
+
+    @rpc
+    def coop_char_picked(self, i, clear=False):
+        """PAD-1123: a character's When picked clip: a video, or a picture, of the owner's that plays full screen once a
+        teammate picks it; *clear* takes it off."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        chars = _CP.load_characters(project) if project else None
+        if not chars or not 0 <= int(i) < len(chars["list"]):
+            return False
+        name = chars["list"][int(i)]["name"]
+        if clear:
+            _CP.save_picked_clip(project, int(i), None)
+            self._say("co-op characters: %s plays no clip once picked" % name)
+        else:
+            path = self.window.ask_open("modes_file", "Choose the video or picture %s shows once picked" % name,
+                                        [("Videos and pictures", " ".join("*" + e for e in _CP.VIDEO_EXTS
+                                                                          + _CP._PICTURE_EXTS))])
+            if not path:
+                return False
+            try:
+                _CP.save_picked_clip(project, int(i), path)
+            except _CP.CoopError as e:
+                self._say(str(e))
+                return False
+            self._say("co-op characters: %s shows %s once picked" % (name, os.path.basename(path)))
+        self._publish_coop_chars(project)
+        return True
+
+    @rpc
+    def coop_ceremony_sound(self, clear=False):
+        """PAD-1317: Awards music...: a music track of the owner's (a sound file, or a video's sound) played while the
+        co-op award cards show at a co-op or team game's end; *clear* takes it off (the cards show with the game's own
+        sounds)."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project:
+            return False
+        if clear:
+            _CP.save_ceremony_sound(project, None)
+            self._say("co-op awards: no music of your own - the award cards show with the game's own sounds")
+        else:
+            path = self.window.ask_open("modes_file", "Choose the music the co-op awards ceremony plays",
+                                        [("Sounds", " ".join("*" + e for e in _CP.SOUND_EXTS)),
+                                         ("A video's sound", " ".join("*" + e for e in _CP.VIDEO_EXTS))])
+            if not path:
+                return False
+            try:
+                _CP.save_ceremony_sound(project, path)
+            except _CP.CoopError as e:
+                self._say(str(e))
+                return False
+            self._say("co-op awards: %s plays while the award cards show" % os.path.basename(path))
+        self._publish_coop_chars(project)
+        return True
+
+    @rpc
+    def coop_char_picked_sound(self, i, clear=False):
+        """PAD-1123: a character's When picked sound: a sound file of the owner's (or a video's sound) played once a
+        teammate picks it; *clear* takes it off (a picked video's own sound plays then, if it has one)."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        chars = _CP.load_characters(project) if project else None
+        if not chars or not 0 <= int(i) < len(chars["list"]):
+            return False
+        name = chars["list"][int(i)]["name"]
+        if clear:
+            _CP.save_picked_sound(project, int(i), None)
+            self._say("co-op characters: %s plays no sound of its own once picked" % name)
+        else:
+            path = self.window.ask_open("modes_file", "Choose the sound %s plays once picked" % name,
+                                        [("Sounds", " ".join("*" + e for e in _CP.SOUND_EXTS)),
+                                         ("A video's sound", " ".join("*" + e for e in _CP.VIDEO_EXTS))])
+            if not path:
+                return False
+            try:
+                _CP.save_picked_sound(project, int(i), path)
+            except _CP.CoopError as e:
+                self._say(str(e))
+                return False
+            self._say("co-op characters: %s plays %s once picked" % (name, os.path.basename(path)))
+        self._publish_coop_chars(project)
+        return True
+
+    @rpc
+    def coop_chars_bonus(self, on):
+        """PAD-1123: whether each teammate's character shows on their End of Ball Bonus (its picture, or its video, and its
+        name across the picture's foot: the portrait in the bottom-right corner)."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project or not _CP.load_characters(project)["list"]:
+            return False
+        was = bool(_CP.load_characters(project).get("bonus"))
+        return self._save_coop_chars(project, dict(_CP.load_characters(project), bonus=bool(on)), "on the bonus",
+                                     "on" if was else "off", "on" if on else "off")
+
+    @rpc
+    def coop_chars_backdrop(self, clear=False):
+        """PAD-1079: Background...: a picture of the owner's behind every pick card (and award card); *clear* puts
+        the panel back."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project or not _CP.load_characters(project)["list"]:
+            return False
+        if clear:
+            _CP.save_backdrop(project, None)
+        else:
+            path = self.window.ask_open("modes_file", "Choose the pick screen's background picture",
+                                        [("Pictures", "*.png *.jpg *.jpeg")])
+            if not path:
+                return False
+            try:
+                _CP.save_backdrop(project, path)
+            except _CP.CoopError as e:
+                self._say(str(e))
+                return False
+            self._say("co-op characters: the pick's background is %s" % os.path.basename(path))
+        self._publish_coop_chars(project)
+        return True
+
+    @rpc
+    def coop_char_colour(self, i, colour=""):
+        """PAD-1079: one character's own frame colour on its cards (``""``: the look's)."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        chars = _CP.load_characters(project) if project else None
+        if not chars or not 0 <= int(i) < len(chars["list"]):
+            return False
+        c = chars["list"][int(i)]
+        was, c["colour"] = c.get("colour") or "", _CP.clean_colour(colour)
+        self.set(coop_ch_at=int(i))
+        return self._save_coop_chars(project, chars, "%s color" % c["name"], was or "the look's",
+                                     c["colour"] or "the look's")
+
+    @rpc
+    def coop_chars_refresh(self):
+        """PAD-1031: the Co-op characters dialog's rows and the abilities read off the project's card (cached)."""
+        self._publish_coop_chars(self.project())
+        return True
+
+    @rpc
+    def coop_chars_pick(self, on):
+        """PAD-1031: whether each teammate picks a character at their first ball."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project:
+            return False
+        chars = _CP.load_characters(project)
+        was = chars["pick"]
+        chars["pick"] = bool(on)
+        return self._save_coop_chars(project, chars, "pick", "on" if was else "off", "on" if on else "off")
+
+    @rpc
+    def coop_chars_time(self, seconds):
+        """PAD-1044: the seconds each teammate has to pick (0: no limit, the Action button takes one)."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project:
+            return False
+        chars = _CP.load_characters(project)
+        was = chars["time"]
+        chars["time"] = _CP.pick_time(seconds)
+        name = lambda t: "%d s" % t if t else "no limit"                                   # noqa: E731
+        return self._save_coop_chars(project, chars, "time to pick", name(was), name(chars["time"]))
+
+    @rpc
+    def coop_char_set(self, i, name=None, ability=None, sub=None, header=None, text=None):
+        """PAD-1031: rename one character, or start it from one of the set abilities ("" none: no powers); PAD-1056:
+        or another sub header (the smaller line under its name on its cards, "" none); round 6: or its own header
+        (the badge's words in place of its powers', "" the powers'); PAD-1363: or its own card text (the words under
+        the badge in place of its powers' lines, "" the powers')."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        chars = _CP.load_characters(project) if project else None
+        if not chars or not 0 <= int(i) < len(chars["list"]):
+            return False
+        c = chars["list"][int(i)]
+        if name is not None:
+            if not _CP.clean_name(name):
+                return False
+            was, c["name"] = c["name"], _CP.clean_name(name)
+            return self._save_coop_chars(project, chars, "%d name" % (int(i) + 1), was, c["name"])
+        if sub is not None:
+            was, c["sub"] = c["sub"], _CP.clean_sub(sub)
+            return self._save_coop_chars(project, chars, "%s sub header" % c["name"], was or "none", c["sub"] or "none")
+        if header is not None:
+            was, c["header"] = c["header"], _CP.clean_header(header)
+            return self._save_coop_chars(project, chars, "%s header" % c["name"], was or "its powers'",
+                                         c["header"] or "its powers'")
+        if text is not None:
+            was, c["text"] = c["text"], _CP.clean_text(text)
+            return self._save_coop_chars(project, chars, "%s card text" % c["name"], was or "its powers'",
+                                         c["text"] or "its powers'")
+        was = ", ".join(c["powers"]) or "none"
+        c["powers"] = list(_CP.ABILITY_POWERS.get(str(ability or ""), []))
+        c["ability"] = _CP.bundle_of(c["powers"])
+        return self._save_coop_chars(project, chars, "%s powers" % c["name"], was, ", ".join(c["powers"]) or "none")
+
+    @rpc
+    def coop_char_power(self, i, key, on):
+        """Round 6: one power on or off a character. Refused (False, and the dialog's note says so) when it would
+        ask the runtime for more of a kind than one character has room for (coop_play.LIMITS)."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        chars = _CP.load_characters(project) if project else None
+        if not chars or not 0 <= int(i) < len(chars["list"]) or str(key) not in {p[0] for p in _CP.POWERS}:
+            return False
+        c = chars["list"][int(i)]
+        keys = [k for k in c["powers"] if k != key]
+        if on:
+            keys.append(str(key))
+            _why, pw = _CP.project_powers(project)
+            got = _CP.compose(keys, {p["key"]: p for p in pw})
+            if got["over"]:
+                self._coop_refused = ("%s cannot take %s too: one character has room for %s. Take a power off "
+                                      "first." % (c["name"], _CP.character_words({"powers": [key]}),
+                                                  ", ".join("%d %s parts" % (_CP.LIMITS[k], k) if k != "length"
+                                                            else "%d characters of abilities" % _CP.MAX_CFG
+                                                            for k in got["over"])))
+                self._publish_coop_chars(project)
+                return False
+        was = ", ".join(c["powers"]) or "none"
+        c["powers"] = keys
+        c["ability"] = _CP.bundle_of(keys)
+        return self._save_coop_chars(project, chars, "%s powers" % c["name"], was, ", ".join(keys) or "none")
+
+    @rpc
+    def coop_char_time(self, i, key, value):
+        """PAD-1367: the time of one of a character's timed powers (coop_play.TIMED: the Action save's seconds, the
+        seconds added to the battle timers, how much longer a ball save or timer lasts)."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        chars = _CP.load_characters(project) if project else None
+        key = str(key)
+        if not chars or not 0 <= int(i) < len(chars["list"]) or key not in _CP.TIMED:
+            return False
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return False
+        if value not in _CP.TIMED[key][2]:
+            return False
+        c = chars["list"][int(i)]
+        stock = _CP.TIMED[key][1]
+        was = _CP.time_label(key, c["times"].get(key, stock))
+        c["times"] = dict(c["times"], **{key: value})
+        return self._save_coop_chars(project, chars, "%s %s time" % (c["name"], key), was,
+                                     _CP.time_label(key, value))
+
+    @rpc
+    def coop_char_add(self):
+        """PAD-1031: one more character (named CHARACTER n, no ability yet); each teammate picks once there is one."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project:
+            return False
+        chars = _CP.load_characters(project)
+        if len(chars["list"]) >= _CP.MAX_CHARACTERS:
+            return False
+        names = {c["name"] for c in chars["list"]}
+        n = len(chars["list"]) + 1
+        while "CHARACTER %d" % n in names:
+            n += 1
+        chars["list"].append({"name": "CHARACTER %d" % n, "sub": "", "ability": "", "picture": ""})
+        chars["pick"] = True
+        return self._save_coop_chars(project, chars, "count", str(len(chars["list"]) - 1), str(len(chars["list"])))
+
+    @rpc
+    def coop_char_remove(self, i):
+        """PAD-1031: take one character out."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        chars = _CP.load_characters(project) if project else None
+        if not chars or not 0 <= int(i) < len(chars["list"]):
+            return False
+        gone = chars["list"].pop(int(i))
+        return self._save_coop_chars(project, chars, "removed", gone["name"], "")
+
+    @rpc
+    def coop_chars_preset(self):
+        """PAD-1031: the game's own set (coop_presets/<title>.json, the customization file shipped beside the app's
+        co-op code) in place of the project's characters."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        path = _CP.preset_for(_CP.project_title(project)) if project else ""
+        if not path:
+            return False
+        got = _CP.read_preset(path)
+        was = len(_CP.load_characters(project)["list"])
+        self.log("[modes] co-op characters: %s's set loaded from %s" % (got["game"], path))
+        return self._save_coop_chars(project, got["characters"], "set", "%d character(s)" % was,
+                                     "%s's %d" % (got["game"], len(got["characters"]["list"])))
+
+    @rpc
+    def set_coop(self, on):
+        """Tick or untick co-op play for this project (PAD-1017)."""
+        from ...core import history_log
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project:
+            return False
+        if on and self._coop_locked(_CP.title_refusal(_CP.project_title(project))):   # PAD-1062: co-op of its own
+            self._publish_coop(project)
+            return False
+        was = _CP.save(project, bool(on))
+        hist = history_log.diff_scalar("modes  co-op play", "on" if was else "off", "on" if on else "off")
+        history_log.record(project, [hist] if hist else [])
+        self._say("co-op play: %s" % ("the card gets co-op play at the next Write" if on else "no co-op play on the card"))
+        self._publish_coop(project)
+        return True
+
+    #: PAD-1053 (DoomWalrus666): the co-op settings file (plugins/stern/coop_play.py "the co-op settings file")
+    COOP_SAVE_TIP = ("Saves every co-op setting of this project to one file: co-op on, the service menu switch, the "
+                     "awards, the characters with their abilities and time to pick, and each character's picture. "
+                     "Load... puts them into any project.")
+    COOP_LOAD_TIP = ("Loads a co-op settings file Save... wrote (or a characters file) in place of this project's "
+                     "co-op settings, pictures included.")
+
+    @rpc
+    def coop_settings_save(self, path=None):
+        """PAD-1053: Save... - the project's co-op settings to a zip (pictures included) or a .json. Returns the
+        file's path, or None."""
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project or not _CP.settings_saved(project):
+            return None
+        if not path:
+            prof = _CP.project_title(project)
+            stem = re.sub(r'[\\/:*?"<>|]+', "_", "%s co-op" % (prof.label if prof is not None else
+                          os.path.basename(os.path.normpath(project)))).strip()
+            path = self.window.ask_save("modes_file", "Save the co-op settings to a file", initialfile=stem + ".zip",
+                                        filetypes=[("PAD co-op settings", "*.zip"), ("Without pictures", "*.json")],
+                                        defaultextension=".zip")
+        if not path:
+            return None
+        try:
+            got = _CP.export_settings(project, path)
+        except _CP.CoopError as e:
+            compat.messagebox.showinfo("Save co-op settings", str(e))
+            return None
+        self._say("co-op settings saved to %s: %d character(s), %d picture(s)%s" % (
+            path, got["characters"], got["pictures"],
+            "; a .json carries no pictures, %d left out (save a .zip to keep them)" % got["left_out"]
+            if got["left_out"] else ""))
+        return path
+
+    @rpc
+    def coop_settings_load(self, path=None, _sure=False):
+        """PAD-1053: Load... - a co-op settings file in place of the project's co-op settings, asked first when it
+        has some. Returns what came in (:func:`coop_play.import_settings`), or None."""
+        from ...core import history_log
+        from ...plugins.stern import coop_play as _CP
+        project = self.project()
+        if not project:
+            return None
+        if not path:
+            path = self.window.ask_open("modes_file", "Load co-op settings from a file",
+                                        [("PAD co-op settings", "*.zip *.json"), ("All files", "*.*")])
+        if not path:
+            return None
+        if not _sure and _CP.settings_saved(project) and not compat.messagebox.askyesno(
+                "Load co-op settings", "Load %s in place of this project's co-op settings?"
+                % os.path.basename(path)):
+            return None
+        try:
+            got = _CP.import_settings(project, path)
+        except _CP.CoopError as e:
+            compat.messagebox.showinfo("Load co-op settings", str(e))
+            return None
+        hist = history_log.diff_scalar("modes  co-op settings", "", "loaded from %s" % os.path.basename(path))
+        history_log.record(project, [hist] if hist else [])
+        prof = _CP.project_title(project)
+        other = got["made_for"] and prof is not None and got["made_for"] != prof.label
+        pics = " with %d picture(s)" % got["pictures"] if got["pictures"] else ""
+        if got["preset"]:
+            text = "Loaded %d character(s) from %s." % (got["characters"], os.path.basename(path))
+        else:
+            text = "Loaded the co-op settings in %s: co-op play %s, %d character(s)%s, and the awards." % (
+                os.path.basename(path), "on" if _CP.load(project) else "off", got["characters"], pics)
+        if other:
+            text += ("\n\nThey were made for %s. An ability or award this game has not got is left off the card."
+                     % got["made_for"])
+        self._say(text.replace("\n\n", " "))
+        self.set(coop_ch_at=0)
+        self._publish_coop(project)                     # the dialogs read the rest when they open
+        compat.messagebox.showinfo("Load co-op settings", text)
+        return got
+
+    #: PAD-1022: inactivity pausing the timers (plugins/stern/idle_pause.py), offered on the games whose own timers
+    #: ignore their ALLOW INACTIVITY TO PAUSE TIMERS setting (Guardians of the Galaxy). It runs on the mode runtime; a
+    #: card with it and no modes keeps its scores on Insider Connected, as the picture settings do
+    IDLE_TIP = (
+        "This game has the setting ALLOW INACTIVITY TO PAUSE TIMERS but ignores it. With this on, the card makes it "
+        "work: while the setting is on (it is by default), the missions' clocks and the hurry-ups wait when nobody "
+        "has scored for 6 seconds, as on Stern's other games, and run on at the next score. The music keeps playing. "
+        "Write puts it on the card.")
+
+    def _publish_idle(self, project):
+        """PAD-1022: the Inactivity pauses timers tick, shown only for a game that ignores its own setting, and under
+        it what the card does, or in red why it cannot."""
+        from ...plugins.stern import idle_pause as _IP
+        prof = _IP.project_title(project) if project else None
+        shown = bool(project) and prof is not None and not _IP.title_refusal(prof)
+        on = bool(project) and _IP.load(project)
+        note, kind = "", ""
+        if on:
+            why = _IP.title_refusal(prof)
+            if why:
+                note, kind = why, "err"
+            else:
+                note = _IP.NOTE
+        self.set(idle_shown=shown or on, idle_on=on, idle_note=note, idle_note_kind=kind)
+
+    @rpc
+    def set_idle_pause(self, on):
+        """Tick or untick inactivity pausing the timers for this project (PAD-1022)."""
+        from ...core import history_log
+        from ...plugins.stern import idle_pause as _IP
+        project = self.project()
+        if not project:
+            return False
+        was = _IP.save(project, bool(on))
+        hist = history_log.diff_scalar("modes  inactivity pauses timers", "on" if was else "off", "on" if on else "off")
+        history_log.record(project, [hist] if hist else [])
+        self._say("inactivity pauses timers: %s" % ("the card gets it at the next Write" if on
+                                                    else "not on the card"))
+        self._publish_idle(project)
+        return True
+
+    #: PAD-1041: Prolonged Competition on the start menu (plugins/stern/prolonged_comp.py), as Venom and Dungeons &
+    #: Dragons have it: every game a Competition game until the machine is switched off. It runs on the mode runtime and,
+    #: like the game's own Competition, keeps the card on Insider Connected
+    COMP_TIP = (
+        "Adds PROLONGED COMPETITION to the game's start menu (hold both flipper buttons in attract), as Venom and "
+        "Dungeons & Dragons have it. Picked, every game is a Competition game (all randomness removed) until the "
+        "machine is switched off; picked again, it ends. Write puts it on the card.")
+
+    def _publish_comp(self, project):
+        """PAD-1041: the Prolonged Competition tick, shown for a game whose start menu the app knows (and that has none
+        of its own), and under it what the card does, or in red why it cannot."""
+        from ...plugins.stern import prolonged_comp as _PCo
+        prof = _PCo.project_title(project) if project else None
+        shown = bool(project) and prof is not None and not _PCo.title_refusal(prof)
+        on = bool(project) and _PCo.load(project)
+        note, kind = "", ""
+        if on:
+            why = _PCo.title_refusal(prof)
+            if why:
+                note, kind = why, "err"
+            else:
+                note = _PCo.NOTE
+        self.set(comp_shown=shown or on, comp_on=on, comp_note=note, comp_note_kind=kind)
+
+    @rpc
+    def set_prolonged_comp(self, on):
+        """Tick or untick Prolonged Competition for this project (PAD-1041)."""
+        from ...core import history_log
+        from ...plugins.stern import prolonged_comp as _PCo
+        project = self.project()
+        if not project:
+            return False
+        was = _PCo.save(project, bool(on))
+        hist = history_log.diff_scalar("modes  prolonged competition", "on" if was else "off", "on" if on else "off")
+        history_log.record(project, [hist] if hist else [])
+        self._say("prolonged competition: %s" % ("the card gets it at the next Write" if on else "not on the card"))
+        self._publish_comp(project)
+        return True
+
+    #: PAD-1204: the score feed (plugins/stern/score_feed.py): each game's final scores posted to the owner's own server,
+    #: for a scoreboard of their own (C0untDeM0net: "a high score display external from the games running on a TV")
+    FEED_TIP = (
+        "After every game the machine sends the players' final scores, and the Insider Connected account of each "
+        "player who was logged in, to a server of your own on your network (a high-score board on a TV, a "
+        "spreadsheet, a home automation hub...). It is one JSON message a game, posted to the address you give. "
+        "Nothing goes to Stern, and the game's own scoring is not touched. Write puts it on the card.")
+    FEED_URL_TIP = (
+        "Where the machine posts each game's scores: http://, your server's IP address on your network, its port "
+        "and path, like http://192.168.1.50:8080/scores. The machine looks no names up and does not do https.")
+
+    def _publish_feed(self, project):
+        """PAD-1204: the Score feed tick, shown for a game whose end the app can see, its address box once ticked, and
+        under it what the card does, or in red why it cannot."""
+        from ...plugins.stern import score_feed as _SF
+        prof = _SF.project_title(project) if project else None
+        shown = bool(project) and prof is not None and not _SF.title_refusal(prof)
+        on, url = _SF.load(project) if project else (False, "")
+        note, kind = "", ""
+        if on:
+            why = _SF.title_refusal(prof) or _SF.url_problem(url)
+            if why:
+                note, kind = why, "err"
+            else:
+                note = _SF.NOTE
+        self.set(feed_shown=shown or on, feed_on=on, feed_url=url, feed_note=note, feed_note_kind=kind,
+                 feed_placeholder=_SF.PLACEHOLDER, feed_contract=_SF.contract(url))   # the Play options tab shows it
+
+    @rpc
+    def set_score_feed(self, on, url=None):
+        """Tick or untick the score feed for this project, or (*url*) change where it posts (PAD-1204)."""
+        from ...core import history_log
+        from ...plugins.stern import score_feed as _SF
+        project = self.project()
+        if not project:
+            return False
+        was_on, was_url = _SF.save(project, bool(on), url)
+        now_on, now_url = _SF.load(project)
+        hist = [h for h in (
+            history_log.diff_scalar("modes  score feed", "on" if was_on else "off", "on" if now_on else "off"),
+            history_log.diff_scalar("modes  score feed address", was_url or "(none)", now_url or "(none)"))
+            if h]
+        history_log.record(project, hist)
+        why = _SF.url_problem(now_url)
+        self._say("score feed: %s" % ("not on the card" if not now_on
+                                      else "the card gets it at the next Write (posting to %s)" % now_url if not why
+                                      else "not on the card until the address is right: %s" % why))
+        self._publish_feed(project)
+        return True
+
+    #: PAD-1033: a handicap for each player (plugins/stern/handicap.py): the game's own settings read easier or harder
+    #: while that player is up. It runs on the mode runtime and, like the operator's own settings, keeps the card on
+    #: Insider Connected
+    HAND_TIP = (
+        "Each player picks a handicap from -3 (hardest) to +3 (easiest) at their first ball: the top of the screen "
+        "shows P1 HANDICAP 0, the left flipper button makes it harder, the right easier, and the ball's first score "
+        "takes it. 0 is the game's own settings. A level makes the game's own settings (ball save time, how hard its "
+        "modes and multiballs are to light) easier or harder for that player only, the way the operator could in the "
+        "service menu, so the card stays on Insider Connected. Levels... shows what each level changes, and each "
+        "can be set to any value the game's own setting offers. The service menu gets a HANDICAP row, Off to start "
+        "with: set it On to play with handicaps. Write puts it on the card.")
+
+    def _publish_handicap(self, project):
+        """PAD-1033: the Handicap per player tick, and under it what each level does, or in red why this game cannot
+        have it."""
+        from ...plugins.stern import handicap as _HC
+        prof = _HC.project_title(project) if project else None
+        on = bool(project) and _HC.load(project)
+        note, kind = "", ""
+        why = _HC.title_refusal(prof) if project else ""
+        if on:
+            if why:
+                note, kind = why, "err"
+            elif getattr(prof, "arch", "arm") == "a64" and _hand_coop_on(project):
+                from ...plugins.stern import spike3_modes as _S3M          # PAD-1326: not beside co-op on Spike 3
+                note, kind = "Left out of the card: " + _S3M.HAND_WITH_COOP + ".", "err"
+            else:
+                note = _HC.NOTE
+        self.set(hand_shown=bool(project) and (on or not why), hand_on=on, hand_note=note, hand_note_kind=kind)
+
+    @rpc
+    def handicap_levels_refresh(self):
+        """PAD-1033: the Levels dialog's rows, worked out of the project's card's game program (cached)."""
+        from ...plugins.stern import handicap as _HC
+        project = self.project()
+        why, fx = _HC.project_facts(project) if project else (_HC.NO_CARD, None)
+        custom = _HC.load_custom(project) if project else {}
+        grid = _HC.grid(fx, custom) if fx else []
+        said = _HC.describe_levels(_HC.levels_from(fx, custom)) if fx else []
+        self.set(hand_levels={"why": why, "grid": grid, "levels": list(reversed(_HC.LEVEL_KEYS)),
+                              "said": [{"level": "%+d" % lv, "words": "; ".join(words) or "the game's own"}
+                                       for lv, words in reversed(said)],
+                              "changed": sum(len(v) for v in custom.values())})
+        return True
+
+    @rpc
+    def handicap_cell(self, level, name, value):
+        """PAD-1033: one cell of the Levels dialog: *value* "" the app's own, "own" the game's own, else a number in
+        the setting's range (DoomWalrus666: "customize the settings per handicap level within the scope of what the
+        game difficulty settings already offers")."""
+        from ...core import history_log
+        from ...plugins.stern import handicap as _HC
+        project = self.project()
+        if not project or level not in _HC.LEVEL_KEYS or not name:
+            return False
+        was = (_HC.load_custom(project).get(level) or {}).get(name)
+        v = None if value in ("", None) else _HC.OWN if value == _HC.OWN else int(value)
+        _HC.save_custom(project, level, name, v)
+        hist = history_log.diff_scalar("modes  handicap %s %s" % (level, name), "app's" if was is None else str(was),
+                                       "app's" if v is None else str(v))
+        history_log.record(project, [hist] if hist else [])
+        return self.handicap_levels_refresh()
+
+    @rpc
+    def handicap_defaults(self):
+        """PAD-1033: every level as the app worked it out again."""
+        from ...core import history_log
+        from ...plugins.stern import handicap as _HC
+        project = self.project()
+        if not project:
+            return False
+        _HC.save_custom(project, None, None, None)
+        hist = history_log.diff_scalar("modes  handicap levels", "customized", "the app's")
+        history_log.record(project, [hist] if hist else [])
+        return self.handicap_levels_refresh()
+
+    @rpc
+    def set_handicap(self, on):
+        """Tick or untick a handicap for each player for this project (PAD-1033)."""
+        from ...core import history_log
+        from ...plugins.stern import handicap as _HC
+        project = self.project()
+        if not project:
+            return False
+        was = _HC.save(project, bool(on))
+        hist = history_log.diff_scalar("modes  handicap per player", "on" if was else "off", "on" if on else "off")
+        history_log.record(project, [hist] if hist else [])
+        self._say("handicap per player: %s" % ("the card gets it at the next Write" if on else "not on the card"))
+        self._publish_handicap(project)
+        return True
+
     def _no_modes_words(self):
         """The empty editor's sentence: what to press, for the shown title."""
         p = self._profile
         if p is None:
             text = "No modes of your own yet."
-        elif any(n == "KAIJU RUSH" for n, _s in MP.examples_for(p)):
-            text = ("No modes yet. Start from an example (KAIJU RUSH is the one that has run on "
-                    "a machine), or make a blank one.")
         else:
             text = "No modes yet. Start from an example, or make a blank one."
-        if self._game_ids():
+        if self._game_changeable_ids():
             text += (" The game's own modes are listed under yours: pick one to see and change "
                      "its timers and awards.")
         return text
@@ -687,25 +1901,19 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self._publish_examples()
 
     def _publish_examples(self):
-        """The Examples menu for the CARD's title: Godzilla's four (and its code examples)
-        only on Godzilla, a plain starter mode on any other title, nothing with no title."""
+        """The Examples menu for the CARD's title: one starter mode, TARGET RUSH, on every title (as a form mode and
+        in blocks), nothing with no title. PAD-691 (David: "we don't need game-specific demo modes like this committed
+        to the app"): no title has examples of its own, and none is in C."""
         p = self._profile
         items = [{"name": name, "code": False, "disabled": bool(self._at_cap)}
                  for name, _s in (MP.examples_for(p) if p is not None else ())]
-        from ...plugins.stern import code_modes as CM
-        if self._code_examples_ok():
-            for name in CM.example_names():
-                items.append({"name": name, "label": name + self.CODE_EXAMPLE_SUFFIX,
-                              "code": True, "disabled": False})
+        # PAD-675 (David: the modes converted from C to blocks "don't look normal like what a human would program"):
+        # the one blocks example is TARGET RUSH on this card's own shots, on every game
+        blocks = [{"name": BM.BASIC_EXAMPLE, "about": BM.BASIC_ABOUT, "lost": [], "based_on": False}] \
+            if p is not None else []
         ex_ok = bool(self._ex_ok and not self._no_port)
-        self.set(examples=items, new_ok=bool(self._new_ok and not self._no_port), ex_ok=ex_ok,
+        self.set(examples=items, blocks_examples=blocks, new_ok=bool(self._new_ok and not self._no_port), ex_ok=ex_ok,
                  ex_tip="" if ex_ok else (self._no_port or MP.NO_PROJECT_HELP))
-
-    def _code_examples_ok(self):
-        """The code examples are Godzilla's (their shots, films and sounds): offered, and
-        accepted by the server, only when the card's title is Godzilla."""
-        p = self._profile
-        return p is not None and str(getattr(p, "game_dir", "")).startswith("godzilla")
 
     _new_ok = False
     _ex_ok = False
@@ -728,6 +1936,8 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                                       "saves it. Until then its file is unchanged, and a "
                                       "build refuses it.")
             problems = MP.validate(spec, MP.mode_folder(project, slug))
+            if self._is_own_challenge(spec):                # PAD-615 round 3: a twin, or past the menu's room
+                problems += self._own_challenge_problems().get(slug, [])
         except Exception:                                   # noqa: BLE001
             return "", ""
         if not problems:
@@ -814,6 +2024,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                  end_shots_on=[n for n in self._shot_names if n in self._end_shots],   # PAD-314
                  block_on=sorted(self._block_on),                                       # PAD-363
                  keep_on=sorted(self._keep_on),                                         # PAD-398
+                 done_on=sorted(self._done_on),                                         # PAD-747
                  awards=dict(self._shot_awards))
 
     def _open(self, slug, spec):
@@ -1004,6 +2215,32 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self._changed()
         return True
 
+    def _done_defaults(self, p):
+        """PAD-747: the ticks a mode starting on the game's modes completed opens with: the game's modes the app names a
+        start of (its main modes), else every one whose completion it sees."""
+        have = [i for i, _n in getattr(p, "done_modes", ()) or ()] if p is not None else []
+        main = [i for i in have if i < MP.DONE_EXTRA]
+        return set(main or have)
+
+    def _edit_done(self, key, on):
+        """PAD-747: a tick under Starts on > the player completing: one of the title's modes, by id. The last one stays."""
+        p = self._title()
+        try:
+            i = int(key)
+        except ValueError:
+            return False
+        if p is None or i not in {j for j, _n in getattr(p, "done_modes", ()) or ()} or (i in self._done_on) == bool(on):
+            return False
+        if not on and self._done_on == {i}:
+            return False
+        if on:
+            self._done_on.add(i)
+        else:
+            self._done_on.discard(i)
+        self._publish_form()
+        self._changed()
+        return True
+
     def _edit_block(self, key, on):
         """A tick under "hold these off": one of the title's modes, by id."""
         p = self._title()
@@ -1089,6 +2326,8 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         problems = MP.validate(spec, folder) if spec else []
         if spec is not None:                      # PAD-227: a mode it waits for that is not here
             problems += MP.after_problems([(self._slug, spec)] + self._other_modes()).get(self._slug, [])
+        if spec is not None and self._is_own_challenge(spec):     # PAD-615 round 3: the menu's room, its names
+            problems += self._own_challenge_problems(form=(self._slug, spec)).get(self._slug, [])
         status = ("Ready to build." if not problems
                   else "To fix before it can be built: " + " ".join(problems))
         self._problems = list(problems)
@@ -1247,6 +2486,10 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         f["scoop"] = bool(ms)
         f["scoop_s"] = "%g" % (ms / 1000.0) if ms else "3"
         f["shield"] = getattr(spec, "shield", False) is True                       # PAD-392
+        floor = MP._int_or_none(getattr(spec, "building_floor", 0))               # PAD-589
+        f["building_floor"] = MP.BUILDING_FLOORS.get(floor, self.BUILDING_NONE)
+        shot = getattr(spec, "building_shot", "")
+        f["building_shot"] = shot if isinstance(shot, str) and shot else self.MB_ON_START
         self._load_shakes(f, spec)                                                 # PAD-414
         # PAD-381: the other mechanisms, one row each in the profile's held_coils order
         rows = {r[0]: r for r in (getattr(spec, "coil_holds", None) or []) if r}
@@ -1257,6 +2500,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             f["coil_on_%d" % i] = bool(row)
             f["coil_s_%d" % i] = "%g" % (ms / 1000.0) if ms else "2"
             f["coil_when_%d" % i] = (row[2] if row and len(row) > 2 and row[2] else self.MB_ON_START)
+            f["coil_wait_%d" % i] = bool(row and len(row) > 3 and row[3])                    # PAD-621
 
     def _collect_multiball(self, spec):
         def number(text):
@@ -1278,14 +2522,20 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         spec.magnet_ms = self._magnet_ms(self.f["magnet_s"]) if self.f["magnet"] else 0   # PAD-381
         spec.scoop_hold_ms = self._magnet_ms(self.f["scoop_s"]) if self.f["scoop"] else 0  # PAD-381
         spec.shield = bool(self.f["shield"])                                                 # PAD-392
+        spec.building_floor = {lab: n for n, lab in MP.BUILDING_FLOORS.items()}.get(          # PAD-589
+            str(self.f["building_floor"]).strip(), 0)
+        shot = str(self.f["building_shot"]).strip()
+        spec.building_shot = "" if not spec.building_floor or shot == self.MB_ON_START else shot
         spec.shakes = self._collect_shakes()                                                 # PAD-414
         held = list(getattr(self._shown or self._profile, "held_coils", ()) or ())      # PAD-381
         spec.coil_holds = []
         for i, (name, _label) in enumerate(held[:self.COIL_ROWS]):
             if self.f["coil_on_%d" % i]:
                 when = str(self.f["coil_when_%d" % i]).strip()
-                spec.coil_holds.append([name, self._magnet_ms(self.f["coil_s_%d" % i]),
-                                        "" if when == self.MB_ON_START else when])
+                row = [name, self._magnet_ms(self.f["coil_s_%d" % i]), "" if when == self.MB_ON_START else when]
+                if self.f["coil_wait_%d" % i]:
+                    row.append(True)            # PAD-621: its clock waits while it holds
+                spec.coil_holds.append(row)
 
     #: PAD-414: the form's shake choices of the mode's own, by strength (MP.SHAKE_STRENGTHS); one of the game's
     #: shakes is "game:<name>"
@@ -1358,7 +2608,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self.f["priority"] = str(spec.priority)
         # PAD-418: the game's own light shows, by name; a name this title does not have is kept as typed, so
         # validate_shows names it
-        for k in ("show_start", "show_end"):
+        for k in ("show_start", "show_end", "show_hit"):                                # PAD-642: and a hit's
             v = getattr(spec, k, "")
             self.f[k] = v if isinstance(v, str) and v else self.SHOW_NONE
 
@@ -1369,7 +2619,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         spec.light_shots_pattern = keys.get(shown, shown)
         text = str(self.f["priority"]).strip()
         spec.priority = int(text) if text.isdigit() else (text or 0)
-        for k in ("show_start", "show_end"):                                            # PAD-418
+        for k in ("show_start", "show_end", "show_hit"):                                # PAD-418; PAD-642
             v = str(self.f[k]).strip()
             setattr(spec, k, "" if v in ("", self.SHOW_NONE) else v)
 
@@ -1387,6 +2637,43 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         spec.wizard_how = self.f["wizard_how"] if self.f["wizard_how"] in MP.WIZARD_HOW else "light"
 
     # PAD-227: more than one thing to meet before it starts
+    @staticmethod
+    def _is_own_challenge(spec):
+        return MP.starts_on_challenge(spec) and MP._int_or_none(spec.challenge) == MP.CHALLENGE_NEW
+
+    @staticmethod
+    def _blocks_own_challenge(program):
+        return any((s.get("hat") or {}).get("kind") == "challenge"
+                   and (s.get("hat") or {}).get("challenge") == BM.CHALLENGE_NEW for s in program.get("scripts") or [])
+
+    def _own_challenge_problems(self, form=None, blocks=None):
+        """PAD-615 round 3: MP.own_challenge_problems over every mode of the project that is a new challenge of its
+        own - the form modes as found, the blocks modes as saved - with the open one as it is now (``form`` or
+        ``blocks``: ``(slug, spec or program)``)."""
+        p = self._shown or self._profile
+        room = int(getattr(p, "challenge_menu", 0) or 0) if p is not None else 0
+        entries = []
+        for slug, spec in (self._found or {}).items():
+            if form and slug == form[0]:
+                spec = form[1]
+            if self._is_own_challenge(spec):
+                entries.append((slug, spec.name.strip(), "the form mode %s" % spec.name.strip()))
+        if form and form[0] not in (self._found or {}) and self._is_own_challenge(form[1]):
+            entries.append((form[0], form[1].name.strip(), "the form mode %s" % form[1].name.strip()))
+        project = self.project()
+        for slug, name in (self._blocks_modes() if project else []):
+            if blocks and slug == blocks[0]:
+                program = blocks[1]
+            else:
+                try:
+                    program = BM.load(project, slug)
+                except (OSError, ValueError):
+                    continue
+            if self._blocks_own_challenge(program):
+                title = str(program.get("name") or name).strip()
+                entries.append((slug, title, "the blocks mode %s" % title))
+        return MP.own_challenge_problems(entries, room)
+
     def _other_modes(self):
         """``[(slug, ModeSpec)]`` of the project's other form modes."""
         return [(slug, spec) for slug, spec in (self._found or {}).items() if slug != self._slug]
@@ -1399,6 +2686,9 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             f["also_shot_%d" % i] = str(row[0]) if row else self.ALSO_NONE
             f["also_count_%d" % i] = str(row[1]) if row else "1"
         self._also_beyond = list(rows[self.ALSO_ROWS:])   # a hand-edited 3rd row is kept
+        more = spec.start_or if isinstance(spec.start_or, list) else []   # PAD-518
+        for i in range(MP.START_OR_MAX):
+            f["start_or_%d" % i] = str(more[i]) if i < len(more) and more[i] else self.START_OR_NONE
         after = spec.after.strip() if isinstance(spec.after, str) else ""
         f["after_mode"] = after or self.AFTER_NONE
         f["after_when"] = spec.after_when if spec.after_when in MP.AFTER_WHEN else "game"
@@ -1414,6 +2704,8 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             text = str(self.f["also_count_%d" % i]).replace(",", "").strip()
             rows.append([shot, int(text) if text.isdigit() else text])
         spec.start_also = rows + list(self._also_beyond)
+        more = [str(self.f["start_or_%d" % i]).strip() for i in range(MP.START_OR_MAX)]   # PAD-518
+        spec.start_or = [s for s in more if s and s != self.START_OR_NONE]
         after = str(self.f["after_mode"]).strip()
         spec.after = "" if after == self.AFTER_NONE else after
         spec.after_when = self.f["after_when"]
@@ -1430,7 +2722,31 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         by_name = {n: label for label, n in self._event_choices()}
         by_name.update({n: label for n, label in MP.EVENT_LABELS.items() if n not in by_name})
         start = MP.starts_on_event(spec)
-        self.f["starts_kind"] = "event" if start else "sequence" if MP.starts_on_sequence(spec) else "shot"
+        self.f["starts_kind"] = ("event" if start else "sequence" if MP.starts_on_sequence(spec)
+                                 else "battle" if MP.starts_on_battle(spec)
+                                 else "challenge" if MP.starts_on_challenge(spec)
+                                 else "game_mode" if MP.starts_on_place(spec)
+                                 else "completed" if MP.starts_on_done(spec) else "shot")
+        roster = list(getattr(self._shown or self._profile, "roster", ()) or ())     # PAD-589: by its name
+        slot = MP._int_or_none(getattr(spec, "roster_slot", -1))
+        self.f["roster_slot"] = ((self.MORE_PREFIX + roster[slot] + "'s place" if getattr(spec, "roster_more", False)
+                                  else roster[slot]) if slot is not None and 0 <= slot < len(roster) else "")   # PAD-707
+        picks = list(getattr(self._shown or self._profile, "challenges", ()) or ())  # PAD-615: by its name
+        n = MP._int_or_none(getattr(spec, "challenge", -1))
+        self.f["challenge"] = (self.CHALLENGE_NEW if n == MP.CHALLENGE_NEW
+                               else picks[n] if n is not None and 0 <= n < len(picks) else "")
+        places = {i: nm for i, nm, _c in getattr(self._shown or self._profile, "places", ()) or ()}   # PAD-710
+        n = MP._int_or_none(getattr(spec, "place_mode", -1))
+        self.f["place_mode"] = places.get(n, "") if n is not None else ""
+        p = self._shown or self._profile                                                # PAD-747
+        n = MP._int_or_none(getattr(spec, "done_count", 4))
+        self.f["done_count"] = str(n if n is not None and n > 0 else 4)
+        picked = getattr(spec, "done_modes", None)
+        self._done_on = (set(MP.done_ids(spec, p)) if MP.starts_on_done(spec) and isinstance(picked, list) and picked
+                         and p is not None else self._done_defaults(p))
+        launch = MP._int_or_none(getattr(spec, "challenge_launch", 0)) or 0                # PAD-643
+        self.f["challenge_launch"] = "player" if launch < 0 else "time" if launch > 0 else "clip"
+        self.f["challenge_launch_s"] = str(max(1, min(60, launch // 1000))) if launch > 0 else "4"
         self.f["start_event"] = by_name.get(start, start or "")
         kind, name = MP.ends_on_parts(spec)
         self.f["ends_kind"] = kind if kind in ("drain", "clock", "event") else "drain"
@@ -1454,8 +2770,37 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             spec.starts_on = ("event %s" % name_of("start_event")).strip()
         elif self.f["starts_kind"] == "sequence":        # PAD-314
             spec.starts_on = "sequence"
+        elif self.f["starts_kind"] == "battle":          # PAD-589
+            spec.starts_on = "battle"
+        elif self.f["starts_kind"] == "challenge":       # PAD-615
+            spec.starts_on = "challenge"
+        elif self.f["starts_kind"] == "game_mode":       # PAD-710
+            spec.starts_on = "game_mode"
+        elif self.f["starts_kind"] == "completed":       # PAD-747
+            spec.starts_on = "completed"
         else:
             spec.starts_on = "shot"
+        roster = list(getattr(self._shown or self._profile, "roster", ()) or ())     # PAD-589
+        name = str(self.f["roster_slot"]).strip()
+        more = name.startswith(self.MORE_PREFIX) and name.endswith("'s place")      # PAD-707: a new monster on the screen
+        if more:
+            name = name[len(self.MORE_PREFIX):-len("'s place")]
+        spec.roster_slot = roster.index(name) if spec.starts_on == "battle" and name in roster else -1
+        spec.roster_more = bool(more and spec.roster_slot >= 0)
+        picks = list(getattr(self._shown or self._profile, "challenges", ()) or ())  # PAD-615
+        name = str(self.f["challenge"]).strip()
+        spec.challenge = (MP.CHALLENGE_NEW if spec.starts_on == "challenge" and name == self.CHALLENGE_NEW
+                          else picks.index(name) if spec.starts_on == "challenge" and name in picks else -1)
+        by_name = {nm: i for i, nm, _c in getattr(self._shown or self._profile, "places", ()) or ()}   # PAD-710
+        name = str(self.f["place_mode"]).strip()
+        spec.place_mode = by_name.get(name, -1) if spec.starts_on == "game_mode" else -1
+        n = MP._int_or_none(self.f["done_count"])                                        # PAD-747
+        spec.done_count = n if n is not None else 4
+        spec.done_modes = sorted(self._done_on) if spec.starts_on == "completed" else []
+        how = self.f["challenge_launch"]                                                    # PAD-643
+        secs = MP._int_or_none(self.f["challenge_launch_s"])
+        spec.challenge_launch = (-1 if how == "player" else max(1, min(60, secs or 4)) * 1000 if how == "time"
+                                 else 0) if spec.starts_on == "challenge" else 0
         rows = [str(self.f["seq_shot_%d" % i]).strip() for i in range(self.SEQ_ROWS)]
         spec.start_sequence = [s for s in rows if s and s != self.SEQ_NONE] + list(self._seq_beyond)
         spec.sequence_reset_any = bool(self.f["seq_reset_any"])
@@ -1573,6 +2918,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self._end_shots = set()
         self._block_on = set()                                                    # PAD-363
         self._keep_on = set()                                                     # PAD-398
+        self._done_on = set()                                                     # PAD-747
         self._shot_awards = {n: "" for n in self._shot_names}
         self._clip2_file = ""
         self._publish_form()
@@ -1584,7 +2930,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         card, or a card whose build has no port) the refusal says why."""
         if self._profile is None or self._no_port:
             raise MP.ModeProjectError(self._no_port or MP.NO_CARD_HELP)
-        return MP.blank_spec(self._profile)
+        return MP.blank_spec(self._profile, taken=MP.start_shots_taken(self.project()))  # PAD-666
 
     # ------------------------------------------------------------------
     # the title: which card, which port (item 148)
@@ -1599,8 +2945,10 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                     "callouts": [], "callouts_none": "", "events": [],
                     "end_shots": [self.PARAM_NEVER], "ball_shots": [self.BALL_NONE],
                     "mb_on_shots": [self.MB_ON_START], "game_modes": [], "magnet_shot": "",
-                    "held_coils": [], "shield_rule": "", "game_shows": [], "shakes": [], "shake_max": [],
-                    "game_wizards": [], "wizard_shot": ""}
+                    "held_coils": [], "shield_rule": "", "building_floors": [], "building_rule": "", "roster": [], "challenges": [],
+                    "places": [], "place_found": False, "done_modes": [], "done_found": False,
+                    "game_shows": [], "shakes": [], "shake_max": [],
+                    "game_wizards": [], "wizard_shot": "", "wizard_lights": [], "wizard_claims": False}
         names = [n for n, _m in p.shots]
         choices = [{"label": "%s (%d)" % (label, number), "number": number}
                    for label, number in MP.callout_choices(p) if number]
@@ -1616,9 +2964,35 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                 "game_modes": self._game_mode_rows(p),                           # PAD-363
                 "game_rules": [n for _i, n in getattr(p, "game_rules", ())],      # PAD-398
                 "magnet_shot": getattr(p, "magnet_shot", ""),                    # PAD-381
-                "held_coils": [{"name": n, "label": lab}
+                "held_coils": [{"name": n, "label": lab, "max_s": MP.coil_max_ms(p, n) / 1000}   # PAD-621: max_s
                                for n, lab in getattr(p, "held_coils", ())[:self.COIL_ROWS]],
                 "shield_rule": getattr(p, "shield_rule", ""),                   # PAD-392
+                # PAD-589: the floors a mode may send the building to, and the game's own feature it waits on
+                "building_floors": [self.BUILDING_NONE] + list(MP.BUILDING_FLOORS.values()),
+                "building_rule": getattr(p, "building_rule", ""),
+                "roster": list(getattr(p, "roster", ()) or ()),                   # PAD-589: the battle slots
+                # ... and whether the game has a battle selection at all (a game without one shows no such start)
+                "roster_found": bool(getattr(p, "roster", ())) or "has found" in p.why_not("roster"),
+                # PAD-706: ... and whether a pick counts as the battle it replaced (Completed, the city's win)
+                "roster_counts": bool(getattr(p, "roster_counts", False)),
+                # PAD-615: the game's challenges a mode may take the place of, and whether it names any at all
+                "challenges": list(getattr(p, "challenges", ()) or ()),
+                # PAD-619: a build whose start menu takes only challenges of the modes' own (Deadpool, Mando, Star Wars,
+                # ...) names none of the game's - and hid the row that picks one of its own
+                "challenge_found": (bool(getattr(p, "challenges", ())) or bool(getattr(p, "challenge_menu", 0))
+                                    or "has found" in p.why_not("challenge")),
+                # ... and, round 2, whether a mode may be a challenge of its own on the game's start menu (how many fit)
+                "challenge_new": self.CHALLENGE_NEW if getattr(p, "challenge_menu", 0) else "",
+                "challenge_room": int(getattr(p, "challenge_menu", 0) or 0),
+                "challenge_by_default": bool(getattr(p, "challenge_by_default", False)),   # PAD-619
+                # PAD-710: the game's own modes a mode may run in the place of (and whether it counts as each there),
+                # and whether the game names any at all
+                "places": [{"id": i, "name": nm, "counts": bool(c)} for i, nm, c in getattr(p, "places", ()) or ()],
+                "place_found": bool(getattr(p, "places", ())) or "has found" in p.why_not("place"),
+                # PAD-747: the game's own modes whose completion the app sees (a mode may start once some are completed;
+                # main: one the app names a start of, else one the game only keeps books of), and whether there are any
+                "done_modes": [{"id": i, "name": nm, "main": i < MP.DONE_EXTRA} for i, nm in getattr(p, "done_modes", ()) or ()],
+                "done_found": bool(getattr(p, "done_modes", ())) or "has found" in p.why_not("done"),
                 # PAD-414: what a shake can be - one of the mode's own at a strength, or one of the game's
                 # (PAD-474: only the strengths the game itself shakes at; a one-power shaker has hard alone)
                 "shakes": ([{"value": w, "label": "a %s shake" % w} for k, w in MP.SHAKE_STRENGTHS.items()
@@ -1628,7 +3002,11 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                 "game_shows": self._game_show_rows(p),                           # PAD-418
                 # PAD-436: the game's own mini-wizards a mode can hand over, and the shot that starts a lit one
                 "game_wizards": [{"name": n, "film": film} for n, film in getattr(p, "game_wizards", ()) or ()],
-                "wizard_shot": getattr(p, "wizard_shot", "")}
+                "wizard_shot": getattr(p, "wizard_shot", ""),
+                # PAD-473: the ones a mode can light for the start shot (the rest are started), and whether one a mode
+                # hands out is left unlit by the game's own lighting (Bond's) or the game's rules still start it too
+                "wizard_lights": list(getattr(p, "wizard_lights", ()) or ()),
+                "wizard_claims": bool(getattr(p, "wizard_claims", False))}
 
     @staticmethod
     def _game_show_rows(p):
@@ -1693,6 +3071,31 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             return prof, "", self._with_switch_note(self._derived_words(prof), prof)
         return prof, "", self._port_note(prof)
 
+    def _heal_card_record(self, project, card, tr, profile, label):
+        """PAD-1100: ``(card, label)`` once the project's record says the build its card IS.
+
+        A read (``tr``) names the card's game program: a SHIPPED port matched on that very
+        program is that build (a port matches its own build and edition only), else the card's
+        own primary index says it. A record naming another build (Brombomb's dual-boot GZ 1.16
+        card recorded as 1.13) is corrected (:func:`.mode_project.heal_card_record`) so Load
+        modes, Copy to, Write and Try it ask for the build the tab shows."""
+        game, version = tr.game, tr.version
+        if (profile is not None and tr.port_origin == "shipped"
+                and profile.game_dir == tr.game and profile.version):
+            parts = str(profile.version).split(".")
+            game, version = profile.game_dir, ".".join(parts + ["0"] * (3 - len(parts)))
+        if not MP.heal_card_record(project, card, game, version):
+            return card, label
+        healed = MP.project_card(project)
+        if healed is None or not healed.game_dir:
+            return card, label
+        new = MP.title_label(healed.game_dir, healed.version)
+        self._say("the project recorded its card %s as %s; the card's game program is %s, so "
+                  "the record now says so" % (MP.file_name(card.image), label, new))
+        self._title_key = self._card_key(healed, "project")
+        self._title_files = self._title_files_sig(project)
+        return healed, new
+
     def _derived_words(self, profile):
         from ...plugins.stern import mode_write as MW
         return (self.DERIVED_UNPROVEN if MW.derived_not_run(profile)
@@ -1739,6 +3142,12 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                 self._probe_card(card.image)
                 text = "Card: %s. Reading which game it is from the card..." % MP.file_name(card.image)
                 no_port = "Reading which game the card is."
+            elif card.image and not os.path.isfile(card.image):
+                # PAD-623: said apart from a card that would not read, so the fix is plain
+                text = ("Card: %s is not on this computer any more (moved or deleted?), so which "
+                        "game it is cannot be read and modes cannot be made for it. Select card "
+                        "to point the project at it." % MP.file_name(card.image))
+                no_port = note = text
             else:
                 text = ("Card: %s. Which game it is could not be read, so modes cannot be made "
                         "for it." % MP.file_name(card.image))
@@ -1752,10 +3161,12 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                 self._title_read = got
                 profile, why, note = self._profile_of_read(got, label)
                 origin = got.port_origin
+                if via == "project":
+                    card, label = self._heal_card_record(project, card, got, profile, label)
             else:
                 # a port already on this machine (shipped, or worked out earlier) is used at
                 # once; a read that runs meanwhile only adds what it finds
-                profile = MP.profile_for_card(card.game_dir, card.version)
+                profile = MP.profile_for_card(card.game_dir, card.version, arch=MP.card_arch(card.image))
                 if profile is not None:
                     note = self._port_note(profile)
                     origin = "shipped" if not os.path.isabs(profile.port) else "derived"
@@ -1781,7 +3192,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         if profile is not None and not profile.insider_gate:
             no_port = note = MP.insider_gate_words(profile.label)   # item 166: no gate, no modes
         elif profile is not None:
-            insider_note = MP.INSIDER_NOTE
+            insider_note = MP.INSIDER_TAB_NOTE              # PAD-1204: says what keeps Insider Connected
         self._no_port = no_port
         self._profile = profile
         self._card_bound = bool(card is not None and card.game_dir and profile is not None)
@@ -1792,7 +3203,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                 and kind not in ("reading", "cancelled", "failed")):
             # a card with no port: what still works, and the SDK pointer in a tooltip
             details = MP.NO_PORT_DETAILS
-            if self._game_ids():
+            if self._game_changeable_ids():
                 note = "%s %s" % (note, MP.NO_PORT_STILL)
         self._title_note = note
         from ...plugins.stern import mode_write as MW
@@ -1850,6 +3261,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self._end_shots = {n for n in self._end_shots if n in names}             # PAD-314
         self._block_on = {i for i in self._block_on if i in {j for j, _n, _on in p.game_modes}}   # PAD-363
         self._keep_on = {r for r in self._keep_on if r in {n for _i, n in getattr(p, "game_rules", ())}}   # PAD-398
+        self._done_on = {i for i in self._done_on if i in {j for j, _n in getattr(p, "done_modes", ()) or ()}}   # PAD-747
         self._shot_awards = {n: self._shot_awards.get(n, "") for n in names}
         self._applied_key = p.key
         self._say(said or "modes here are for %s: %d shots, from %s" % (p.label, len(names), p.port))
@@ -1896,11 +3308,15 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                                      "end_game", "clip_both", "stack", "events", "film_clip",
                                      "film_still", "film_sound", "own_extra", "lit_shots",
                                      "show_order", "multiball", "ball_save", "give_way", "block",
-                                     "magnet", "scoop", "coils", "shield", "shaker", "shows", "wizard")}
-            self.set(reasons={}, dis=dis, hide={}, editor_on=False, dup_ok=False,
+                                     "magnet", "scoop", "coils", "shield", "building", "shaker", "shows",
+                                     "wizard", "roster", "challenge", "place", "done")}
+            self.set(reasons={}, limits={}, dis=dis, hide={}, editor_on=False, dup_ok=False,
                      del_ok=bool(on or self._code_slug))
             return
-        reasons, dis = {}, {}
+        # PAD-479: a reason in `limits` is the game's own limit (nothing left for the app to find): the page
+        # says it in grey, not yellow
+        reasons, dis, limits = {}, {}, {}
+        is_limit = getattr(p, "limit", lambda part: False)
         # PAD-420: a part the machine has no hardware for is left out of the page, not explained
         absent = set(getattr(p, "absent", ()) or ())
         hide = {part: True for part in absent}
@@ -1909,26 +3325,40 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             dis[part] = bool(why) or part in absent
             if why and part not in absent:
                 reasons[part] = "Not on this game: " + why
-        sound = []
+                limits[part] = is_limit(part)          # PAD-475: Magnet where the game uses it itself
+        sound, sound_limit = [], []
         dis["countdown"] = bool(p.why_not("countdown"))
         if dis["countdown"]:
-            sound.append(p.why_not("countdown"))
+            (sound_limit if is_limit("countdown") else sound).append(p.why_not("countdown"))
         dis["own_sound"] = bool(p.why_not("own_sound"))
         dis["end_game"] = not p.callout_time_up
-        if not p.callout_time_up:
+        own_end = "" if dis["own_sound"] else " A sound of the mode's own (My sound…) can play then instead."
+        if not p.callout_time_up and is_limit("end_game"):
+            sound_limit.append("%s's voice has no time-is-up line (every callout on the card was checked), so "
+                               "the game's own call cannot play when time is up.%s" % (p.label, own_end))
+        elif not p.callout_time_up and not dis["own_sound"]:
+            sound.append("The app does not know %s's time-up callout, so the game's own call cannot play when "
+                         "time is up.%s" % (p.label, own_end))
+        elif not p.callout_time_up:
             sound.append("The app does not know %s's time-up callout, so nothing plays when time "
                          "is up and a sound of the mode's own has no call to replace." % p.label)
         elif p.why_not("own_sound"):
             sound.append(p.why_not("own_sound"))
         if sound:
             reasons["sound"] = "Not on this game: " + " ".join(sound)
+        if sound_limit:
+            reasons["sound_limit"] = "Not on this game: " + " ".join(sound_limit)
+            limits["sound_limit"] = True
         why = self._own_extra_why(p)
         dis["own_extra"] = bool(why)
         if why:
             reasons["own_extra"] = "Not on this game yet: " + why
         why = "" if why else self._own_music_why(p)
         dis["own_music"] = bool(why)
-        if why:
+        if why and is_limit("own_music"):
+            reasons["own_music"] = "Not on this game: " + why
+            limits["own_music"] = True
+        elif why:
             reasons["own_music"] = "Not on this game yet: " + why
         dis["lit_shots"] = getattr(p, "lamps", -1) == 0
         if dis["lit_shots"]:
@@ -1957,6 +3387,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             reasons["stack"] = "Not on this game: " + why
         elif getattr(p, "stack_note", ""):
             reasons["stack"] = p.stack_note         # item 164: live, but multiballs only
+            limits["stack"] = is_limit("stack")     # PAD-479: Beatles' songs always run
         # PAD-363: giving way needs what stack no needs (knowing a game's mode runs); holding them off needs
         # the port's block lines (game_mode_blocks.py)
         dis["give_way"] = dis["stack"]
@@ -1980,7 +3411,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         if why:
             reasons["events"] = "Not on this game: " + why
         editor_on = on and not self._no_port
-        self.set(reasons=reasons, dis=dis, hide=hide, editor_on=editor_on,
+        self.set(reasons=reasons, limits={k: True for k, v in limits.items() if v}, dis=dis, hide=hide, editor_on=editor_on,
                  dup_ok=bool(editor_on or (self._code_slug and not self._no_port)),
                  del_ok=bool(on or self._code_slug))
 
@@ -1993,8 +3424,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         from ...plugins.stern import mode_sounds as MS
         if p is None:
             return ""
-        game, version = MS.title_version(p.key)
-        if game and MS.carriers(game, version) is not None:
+        if MS.profile_carriers(p.key) is not None:
             return ""
         return ("the app has not found spare sounds on %s to carry a mode's own start sound, "
                 "shot sound and music, so they cannot be picked here." % p.label)
@@ -2006,9 +3436,12 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         from ...plugins.stern import mode_sounds as MS
         if p is None:
             return ""
-        c = MS.carriers(*MS.title_version(p.key))
+        c = MS.profile_carriers(p.key)
         if c is None or c.music:
             return ""
+        if MP.own_music_none(p.game_dir, p.version, p.arch):            # PAD-479: a game limit
+            return ("every piece of music on %s is one the game itself plays, so none is spare to carry a "
+                    "mode's own music, and the game's music plays on under the mode." % p.label)
         return ("the app has not found a stock tune on %s to carry a mode's own music, so it "
                 "cannot be picked here." % p.label)
 
@@ -2458,6 +3891,9 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                                         filetypes=[("PAD modes", "*.zip"), ("All files", "*.*")])
         if not path:
             return None
+        from ...plugins.stern import coop_play as _CP
+        if not _from and _CP.file_about(path) is not None:                 # PAD-1053: co-op settings, not modes
+            return self.coop_settings_load(path)
         shown = os.path.basename(_from or path)
         # PAD-402 (DragonRR): a mode of the file named as one here with other contents is a
         # collaborator's version of it: asked about, each one replacing or not, mine saved first
@@ -2543,6 +3979,21 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             self._slug, self._spec = None, None
         self.refresh()
 
+    def forget_reset(self, assets_dir, kinds):
+        """PAD-569 Reset…: modes reset deletes the modes folder; an edit waiting to be
+        saved must not write a mode back into it."""
+        if "modes" not in kinds:
+            return
+        if self._save_job is not None:
+            self.ctx.loop.after_cancel(self._save_job)
+            self._save_job = None
+        self._dirty = False
+        self._slug, self._spec, self._code_slug = None, None, None
+
+    def refresh_after_revert(self):
+        """PAD-569 Reset…: the modes folder may be gone; list what is there now."""
+        self.refresh()
+
     @rpc
     def delete(self):
         if self._code_slug:
@@ -2571,8 +4022,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             return str(e)
         if not code:
             return ("No code modes in this project. New code mode… starts one from the SDK's "
-                    "template; Examples has six written in C, with clips, music and calls cut "
-                    "from the films.")
+                    "template.")
         parts = []
         for slug, spec in code:
             parts.append(self._code_words_one(spec))
@@ -2586,13 +4036,10 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                                 ("picture", spec.screen_art), ("music", spec.music)) if on]
         if spec.calls:
             have.append("%d call(s)" % len(spec.calls))
-        recipe = (spec.film or {}).get("recipe")
         if have:                                    # the HUD is built by Write, not cut: only beside assets
             if getattr(spec, "hud", None):
                 have.insert(1 if clips else 0, "its HUD")
             return "%s (%s)" % (spec.name, ", ".join(have))
-        if recipe:
-            return "%s (its film assets are not cut yet)" % spec.name
         return "%s (the game's own sounds)" % spec.name
 
     def _refresh_code_modes(self, project):
@@ -2654,8 +4101,6 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                 path = os.path.join(folder, wav) if wav else ""
                 calls.append({"cue": cue, "wav": wav, "priority": prio,
                               "path": path if path and os.path.isfile(path) else ""})
-            film = spec.film or {}
-            needs, needs_files = self._films_needed(spec, folder)
             try:
                 words = CM.describe(slug, spec, prof=self._profile)
             except Exception:                               # noqa: BLE001
@@ -2668,8 +4113,6 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                 music=spec.music, calls=calls, clips=clips, hud=dict(spec.hud or {}), files=files, describe=words,
                 summary=self._code_words_one(spec),
                 game_modes=self._code_game_modes(spec),                       # PAD-363
-                recipe=CM.recipe_lines(film.get("recipe")),
-                needs_films=needs, needs_files=needs_files,
                 status=("Cannot be built for this card yet: " + self._refusal()
                         if self._refusal() else
                         "Ready to build." if not problems
@@ -2722,8 +4165,13 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                 "shield_off": ("Not on this game: " + p.why_not("shield")) if p is not None and not p.can("shield")
                               else "" if p is not None else "No card picked yet.",
                 "shield_feature": getattr(p, "shield_rule", "") if p is not None else "",
+                # PAD-589: the building, and the game's own feature it waits on
+                "building_off": ("Not on this game: " + p.why_not("building")) if p is not None
+                                and not p.can("building") else "" if p is not None else "No card picked yet.",
                 # PAD-420: the mechanisms this machine does not have: their blocks are left out of the palette
                 "absent": list(getattr(p, "absent", ()) or ()) if p is not None else [],
+                # PAD-826: spare switch inputs ("in") / driver outputs ("out") a block may use here ([] = neither)
+                "spare": list(getattr(p, "spare", ()) or ()) if p is not None else [],
                 # PAD-414: the shaker - the game's own shakes a block can play, and why the blocks are greyed if not
                 "shaker_off": ("Not on this game: " + p.why_not("shaker")) if p is not None and not p.can("shaker")
                               else "" if p is not None else "No card picked yet.",
@@ -2738,12 +4186,42 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                 "game_wizards": ([{"name": n, "film": film} for n, film in getattr(p, "game_wizards", ())]
                                  if p is not None and p.can("wizard") else []),
                 "wizard_shot": getattr(p, "wizard_shot", "") if p is not None else "",
+                "wizard_lights": list(getattr(p, "wizard_lights", ()) or ()) if p is not None else [],   # PAD-473
+                "wizard_claims": bool(getattr(p, "wizard_claims", False)) if p is not None else False,
+                # PAD-503: the inserts a Light the mode at block may light beside its shot's (a villain's)
+                "inserts": list(getattr(p, "inserts", ()) or ()) if p is not None else [],
+                # PAD-615: the game's challenges a script may take the place of ([] = none on this game)
+                "challenges": (list(getattr(p, "challenges", ()) or ())
+                               + ([BM.CHALLENGE_NEW] if getattr(p, "challenge_menu", 0) else [])) if p is not None else [],
+                # PAD-706: the battle selection's slots a script may take the place of ([] = none on this game)
+                "roster": list(getattr(p, "roster", ()) or ()) if p is not None else [],
+                # PAD-710: the game's own modes a script may run in the place of ([] = none on this game)
+                "places": ([{"id": i, "name": nm, "counts": bool(c)} for i, nm, c in getattr(p, "places", ()) or ()]
+                           if p is not None else []),
+                # PAD-747: the game's own modes a When the player has completed script may count ([] = none on this game)
+                "done": ([{"id": i, "name": nm, "main": i < MP.DONE_EXTRA} for i, nm in getattr(p, "done_modes", ()) or ()]
+                         if p is not None and p.can("done") else []),
+                # PAD-521: the game's own status bar a mode's name, colour and clock can go in (Bond LE)
+                "status_bar": bool(getattr(p, "status_bar", False)) if p is not None else False,
+                # PAD-889: the game's own Bond Women multiplier a value block can read (Bond LE / Pro)
+                "bond_women": bool(getattr(p, "bond_women", False)) if p is not None else False,
+                # PAD-547: an info line is a screen of its own, so it goes on every title that takes screens
+                "info_line": p is None or bool(p.can("screen")),
+                # PAD-600: the project's other blocks modes, whose light a Put out the light of block may put out
+                "modes": [{"slug": s, "name": n} for s, n in self._blocks_modes() if s != self._code_slug],
                 "game_wizards_off": ("Not on this game: " + p.why_not("wizard")) if p is not None and not p.can("wizard")
                                     else "" if p is not None else "No card picked yet.",
                 "block_off": ("" if gms or p is None else
                               "Not on this game yet: the app has not found where %s starts its own modes, so a "
                               "mode cannot keep them from starting; set to hold them off, it gives way to them "
                               "instead." % p.label)}
+
+    def _blocks_modes(self):
+        """PAD-600: ``[(slug, name)]`` of the project's modes made of blocks."""
+        project = self.project()
+        if not project:
+            return []
+        return [(s, n) for s, n in self._code_list if BM.is_blocks(project, s)]
 
     @staticmethod
     def _blocks_mechs(p):
@@ -2771,17 +4249,23 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         """``(problems, notes)`` of a program on the shown title (its shots, events and mechanisms),
         its own clips and sounds looked for in ``folder``."""
         p = self._shown or self._profile
-        shots = [n for n, _m in p.shots] if p is not None else None
-        events = list(p.events or ()) if p is not None else None
-        mechs = self._blocks_mechs(p) if p is not None else None
-        scoop = p.can("scoop") if p is not None else None
-        shield = (getattr(p, "shield_rule", "") if p.can("shield") else False) if p is not None else None   # PAD-392
-        shaker = ({"shakes": [n for n, _l in p.shakes], "max": list(p.shake_max_ms)} if p.can("shaker") else False) \
-            if p is not None else None                                                                          # PAD-414
-        shows = [n for n, _k, _s in getattr(p, "game_shows", ())] if p is not None else None   # PAD-418
-        wizards = ([n for n, _f in getattr(p, "game_wizards", ())] if p.can("wizard") else []) if p is not None else None
-        return (BM.problems(program, shots, events, folder, mechs, scoop, shield, shows, shaker, wizards),   # PAD-436
-                BM.notes(program))
+        modes = [s for s, _n in self._blocks_modes()] if self.project() else None                     # PAD-600
+        problems = BM.problems(program, folder=folder, modes=modes, **BM.card_checks(p))             # PAD-658: one list
+        if self._code_slug and self.project() and self._blocks_own_challenge(program):   # PAD-615 round 3
+            problems += self._own_challenge_problems(blocks=(self._code_slug, program)).get(self._code_slug, [])
+        notes = BM.notes(program)
+        notes += BM.white_shot_notes(program, getattr(p, "white_shots", ()) if p is not None else ())   # PAD-733
+        if (p is not None and getattr(p, "roster", ()) and not getattr(p, "roster_counts", False)
+                and any((s.get("hat") or {}).get("kind") == "battle" for s in program.get("scripts") or [])):
+            notes.append("On %s the pick counts only toward the player's city: the game does not count the mode as "
+                         "its battle (no Completed, no city win), and its end lights the ramps again." % p.label)   # PAD-706
+        counts = {i: c for i, _nm, c in getattr(p, "places", ()) or ()} if p is not None else {}
+        for sc in program.get("scripts") or []:                                                   # PAD-710
+            h = sc.get("hat") or {}
+            if h.get("kind") == "game_mode" and BM._int_ok(h.get("mode"), 0, BM.PLACE_MAX - 1)                     and int(h["mode"]) in counts and not counts[int(h["mode"])]:
+                notes.append("On %s the mode runs in the place of the game's %s but does not count as it: the app "
+                             "does not know this build's mode framework." % (p.label, BM.place_name(h)))
+        return problems, notes
 
     def _add_blocks(self, data, project, slug):
         """A code mode made of blocks: its program, what is wrong with it, and the C it makes,
@@ -2810,8 +4294,9 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         data["summary"] = BM.summary(program)
 
     @rpc
-    def new_blocks_mode(self, name):
-        """New ▸ Blocks: a mode made of blocks, from a starter program on the card's shots."""
+    def new_blocks_mode(self, name, shots=None):
+        """New mode ▸ Blocks: a mode made of blocks, from a starter program on the card's shots (``shots``: in this
+        order, its start shot and jackpot first)."""
         if not self.project():
             self._tryit_note(MP.NO_PROJECT_HELP)
             return None
@@ -2823,7 +4308,10 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             return None
         self._save_if_edited()
         p = self._shown or self._profile
-        shots = [n for n, _m in p.shots] if p is not None else list(self._shot_names)
+        if shots is None:
+            shots = [n for n, _m in p.shots] if p is not None else list(self._shot_names)
+            taken = MP.start_shots_taken(self.project())    # PAD-666: start on a shot no other mode starts on
+            shots = [n for n in shots if n not in taken] + [n for n in shots if n in taken]
         try:
             slug, _path = BM.new_blocks_mode(self.project(), str(name).strip(), shots=shots)
         except (MT.TryItError, OSError) as e:
@@ -2833,6 +4321,17 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self._say("made modes/%s: a mode made of blocks" % slug)
         self.refresh(select_code=slug)
         return slug
+
+    @rpc
+    def blocks_example(self, name, dirs=None, wait=False):
+        """New mode ▸ Blocks ▸ the blocks example: TARGET RUSH on the card's own shots (PAD-675), the only one."""
+        p = self._shown or self._profile
+        if name != BM.BASIC_EXAMPLE or p is None:
+            self._tryit_note("%s is not a blocks example for %s." % (name, p.label if p is not None else "this card"))
+            return False
+        spec = MP.blank_spec(p, name, taken=MP.start_shots_taken(self.project()))
+        first = [spec.start_shot] + [s for s in spec.scoring_shots if s != spec.start_shot]
+        return bool(self.new_blocks_mode(name, shots=first + [n for n, _m in p.shots if n not in first]))
 
     @rpc
     def blocks_save(self, slug, program):
@@ -2854,6 +4353,109 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         return {"problems": b.get("problems", []), "notes": b.get("notes", [])}
 
     @rpc
+    def blocks_playfield(self):
+        """PAD-612: what the Playfield view draws for the shown title: the game's own playfield picture off the
+        project's card (a data: URL, "" with ``why`` when there is none) and the port's inserts on it, each with the
+        shots it lights for. ``{"art", "w", "h", "why", "inserts": [{name, x, y, mono, shots}], "game", "lens", "look"}``:
+        ``mono`` a single-colour insert, ``lens`` the colours the user gave them ({name: "#rrggbb"}), ``look`` the
+        Real LEDs / All RGB switch (insert_colours, PAD-668)."""
+        from pinball_decryptor.plugins.stern import playfield_art as PA
+        from ..shellx_common import off_loop
+        p = self._shown or self._profile
+        out = {"art": "", "w": 0, "h": 0, "why": "", "inserts": []}
+        if p is None:
+            out["why"] = "No card picked yet."
+            return out
+        port = p.port if os.path.isabs(p.port) else os.path.join(MP.PORTS_DIR, p.port)
+        for i in PA.insert_places(port):
+            # ``own``: the colour a one-colour insert's NAME says ("TOP GI-BLU (x10)"), its colour until the user
+            # sets one (PAD-1144); "" = white
+            out["inserts"].append({"name": i["name"], "x": i["x"], "y": i["y"], "mono": i["mono"],
+                                   "own": (IC.named_colour(i["name"]) or "") if i["mono"] else "",
+                                   "shots": [n for n, m in p.shots if m & i["shot"]]})
+        game = p.game_dir
+        # PAD-668: the single-colour inserts' own colours and the Real LEDs / All RGB switch, shared with the
+        # emulator's playfield window
+        out["game"], out["lens"], out["look"] = game, IC.table(game), IC.look()
+        card, _via = self._title_card(self.project())
+        # PAD-623: the project's card first, then any other card of this game the app was pointed at, then the
+        # picture kept from an earlier read - a moved or deleted card still shows the playfield
+        images = self._playfield_cards(card, game)
+        try:
+            data, where = off_loop(self.ctx, PA.game_art, images, game)
+        except OSError as e:
+            data, where = None, str(e)
+        if data:
+            import base64
+            out["w"], out["h"] = PA.png_size(data)
+            out["art"] = "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+        elif card is None or not card.image:
+            out["why"] = "The project has no card to read the playfield picture from."
+        elif card.game_dir != game:
+            out["why"] = "The project's card is another game's (%s)." % (card.game_dir or "not read")
+        else:
+            out["why"] = "No playfield picture: %s." % str(where).rstrip(".")
+        return out
+
+    @rpc
+    def blocks_insert_colour(self, game, name, colour):
+        """PAD-668: one single-colour insert's own colour set ("#rrggbb") or put back to white (None), in the table
+        the emulator's playfield window reads too. Returns the game's table."""
+        return IC.set_colour(game, name, colour)
+
+    @rpc
+    def blocks_insert_look(self, look):
+        """PAD-668: the Real LEDs / All RGB switch, shared with the emulator's playfield window."""
+        return IC.set_look(look)
+
+    #: the remembered card paths (Settings' path history) a playfield picture may be read from
+    PLAYFIELD_HISTORY = ("extract_input", "write_original", "partition_image", "compare_a", "compare_b")
+
+    def _playfield_cards(self, card, game):
+        """PAD-623: card images of ``game`` to read its playfield picture from, best first: the project's card, the
+        "Try it on" card, then the cards the app was pointed at before whose Stern name or earlier read says
+        ``game``. Never opens an image."""
+        out = []
+        if card is not None and card.image and card.game_dir == game:
+            out.append(card.image)
+        var = self._export("emulate_card_var")
+        paths = [((var.get() if var is not None else "") or "").strip().strip('"')]
+        history = getattr(self.window, "path_history", None)
+        for field in self.PLAYFIELD_HISTORY:
+            try:
+                paths += list(history(field) or ()) if history else []
+            except Exception:                               # noqa: BLE001 - a history is a nicety
+                continue
+        for path in paths:
+            if not path or path in out:
+                continue
+            got = MP.card_from_name(path)
+            if not got[0]:
+                got = MP.probed_card_title(path) or (None, None)
+            if got[0] == game:
+                out.append(path)
+        return out
+
+    @rpc
+    def blocks_script(self, program):
+        """PAD-614: the Script tab's text: ``program`` (the page's blocks.json) as a script, the settings left at
+        their defaults left out. ``{"text"}``."""
+        from pinball_decryptor.plugins.stern import mode_script as MS
+        return {"text": MS.to_script(BM.normalize(program), defaults=BM.normalize({}))}
+
+    @rpc
+    def blocks_read_script(self, text):
+        """PAD-614: the program typed script text is, for the Script tab to put in place of the blocks (one step of
+        the mode's history): ``{"program"}``, or ``{"error", "line"}`` saying what is wrong and on which line."""
+        from pinball_decryptor.plugins.stern import mode_script as MS
+        try:
+            return {"program": BM.normalize(MS.from_script(str(text or "")))}
+        except MS.ScriptError as e:
+            return {"error": str(e), "line": e.line}
+        except (ValueError, TypeError, RecursionError, MemoryError) as e:   # literal_eval on something odd
+            return {"error": "this text could not be read: %s" % e, "line": 0}
+
+    @rpc
     def blocks_pick(self, what, taken=()):
         """PAD-374: "+ Clip…", "+ Sound…" and "Music…" in the block editor: pick a video or a
         WAV, copy it into the open blocks mode's folder and return ``{"name", "file", "path"}``
@@ -2862,18 +4464,22 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         project, slug = self.project(), self._code_slug
         if not project or not slug or not BM.is_blocks(project, slug):
             return None
+        if what == "monster":                       # PAD-707: its picture on the selection screen, as monster.png
+            return self._blocks_pick_monster(project, slug)
         ch = self._blocks_choices()
-        why = {"clip": ch["why_clip"], "sound": ch["why_sound"], "music": ch["why_music"]}.get(what)
+        why = {"clip": ch["why_clip"], "sound": ch["why_sound"], "music": ch["why_music"],
+               "bed": ch["why_music"]}.get(what)                                   # PAD-658: another music bed
         if why is None:
             return None
         if why:
             self._say("%s: %s" % ({"clip": "A clip of its own", "sound": "A sound of its own",
-                                   "music": "Its own music"}[what], why))
+                                   "music": "Its own music", "bed": "Another music bed"}[what], why))
             return None
         if what == "clip":
             path = self.window.ask_open("modes_file", "Choose a clip for the mode", self.VIDEO_TYPES)
         else:
             path = self.window.ask_open("modes_file", "Choose the mode's music" if what == "music"
+                                        else "Choose another music bed for the mode" if what == "bed"
                                         else "Choose a sound for the mode", [("WAV sounds", "*.wav")])
         if not path:
             return None
@@ -2887,7 +4493,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             return None
         name = "music" if what == "music" else BM.media_name(stem, taken)
         folder = MP.mode_folder(project, slug)
-        dest = name + ext
+        dest = ("music_" + name if what == "bed" else name) + ext
         n = 2
         while os.path.isfile(os.path.join(folder, dest)) and not _same_file(path, os.path.join(folder, dest)):
             dest = "%s_%d%s" % (name, n, ext)
@@ -2902,48 +4508,59 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self._say("modes/%s: copied %s in as %s" % (slug, os.path.basename(path), dest))
         return {"name": name, "file": dest, "path": os.path.join(folder, dest)}
 
+    def _blocks_pick_monster(self, project, slug):
+        """PAD-707: Picture… on a new monster's battle hat: a PNG copied into the mode's folder as ``monster.png`` (the
+        build draws its page and tile from it); ``{"file"}`` or None."""
+        from pinball_decryptor.plugins.stern import more_kaiju as MK
+        path = self.window.ask_open("modes_file", "Choose the monster's picture", [("PNG pictures", "*.png")])
+        if not path:
+            return None
+        try:
+            from PIL import Image
+            with Image.open(path) as im:
+                im.verify()
+        except Exception:
+            self._say("%s is not a picture the build can read." % os.path.basename(path))
+            return None
+        folder = MP.mode_folder(project, slug)
+        dest = os.path.join(folder, MK.PICTURE_FILE)
+        try:
+            os.makedirs(folder, exist_ok=True)
+            if not _same_file(path, dest):
+                shutil.copyfile(path, dest)
+        except OSError as e:
+            self._say("%s could not be copied into the mode's folder: %s" % (os.path.basename(path), e))
+            return None
+        self._say("modes/%s: copied %s in as %s (its picture on the battle selection screen)" % (slug, os.path.basename(path),
+                                                                                MK.PICTURE_FILE))
+        return {"name": "monster", "file": MK.PICTURE_FILE, "path": dest}
+
     @rpc
     def blocks_to_code(self):
-        """Edit as C: the open blocks mode keeps the C its blocks made and becomes a code mode."""
+        """Edit as C: the open blocks mode keeps the C its blocks made and becomes a code mode - ONE WAY (PAD-611):
+        C cannot be read back into blocks, so the question says so, and keeping the blocks is what Enter and Escape
+        answer."""
         slug = self._code_slug
         project = self.project()
         if not slug or not BM.is_blocks(project, slug):
             return False
-        if not compat.messagebox.askyesno(
-                "Edit as C", "Carry on with %s in C? Its C file stays as its blocks made it, and "
-                "the blocks are put away (as blocks.json.bak in its folder), so the tab no longer "
-                "edits it with blocks." % ((self.get("code") or {}).get("name") or slug)):
+        name = (self.get("code") or {}).get("name") or slug
+        answer = compat.ctx().dialogs.message(
+            "warning", "Edit as C: a one-way step",
+            "Turn %s into C for good? This is a one-way step: once it is C, the Modes tab can't turn it back "
+            "into blocks." % name,
+            [{"id": "yes", "label": "Turn it into C"}, {"id": "no", "label": "Keep the blocks", "style": "primary"}],
+            default="no",
+            detail="Its C file stays as the blocks made it, and from then on you change the C yourself. A copy of "
+                   "the blocks is kept in its folder (blocks.json.bak), but changes you make to the C never go back "
+                   "into it. To try C and keep this mode as blocks, press Duplicate first and turn the copy into C.")
+        if answer != "yes":
             return False
         BM.detach(project, slug)
-        self._say("modes/%s is a code mode now; its blocks are in blocks.json.bak" % slug)
+        self._say("modes/%s is a code mode now, for good (Edit as C is one way); its blocks are in blocks.json.bak" % slug)
         self._refresh_list()
         self.open_path(os.path.join(MP.mode_folder(project, slug), slug + ".c"))
         return True
-
-    @staticmethod
-    def _films_needed(spec, folder):
-        """``(titles, files)``: the films a C example's recipe cuts from ("Godzilla (1954) and
-        ...") and the file names looked for, while a part it names (clip, picture, music, calls)
-        is not in its folder yet; ``("", "")`` once it is cut, or with no recipe."""
-        from ...plugins.stern import code_modes as CM
-        r = (spec.film or {}).get("recipe") or {}
-        if not r:
-            return "", ""
-        have = {"clip": spec.clip, "art": spec.screen_art, "music": spec.music}
-        cut = all(have[k] and os.path.isfile(os.path.join(folder, have[k]))
-                  for k in ("clip", "art", "music") if r.get(k))
-        if r.get("calls"):
-            cut = cut and bool(spec.calls) and all(
-                wav and os.path.isfile(os.path.join(folder, wav)) for _c, wav, _p in spec.call_list())
-        if r.get("clips"):                                  # hud-layers: every clip of the recipe cut
-            names = dict(spec.clip_list())
-            cut = cut and all(names.get(cue) and os.path.isfile(os.path.join(folder, names[cue])) for cue in r["clips"])
-        if cut:
-            return "", ""
-        keys = CM.recipe_films({"recipe": r})
-        titles = [CM.FILM_TITLES.get(k, k) for k in keys]
-        words = titles[0] if len(titles) == 1 else ", ".join(titles[:-1]) + " and " + titles[-1]
-        return words, ", ".join(CM.FILMS.get(k, k) for k in keys)
 
     @rpc
     def new_code_mode(self, name):
@@ -2975,6 +4592,40 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         from ...plugins.stern import code_modes as CM
         self.open_path(CM.source_path(self.project(), self._code_slug))
         return True
+
+    @rpc
+    def code_text(self):
+        """PAD-614: the selected code mode's C, for the editor on its Code page: ``{"text", "error"}``."""
+        if not self._code_slug:
+            return {"text": "", "error": "No mode written in C is open."}
+        from ...plugins.stern import code_modes as CM
+        try:
+            with open(CM.source_path(self.project(), self._code_slug), encoding="utf-8", errors="replace") as f:
+                return {"text": f.read(), "error": ""}
+        except OSError as e:
+            return {"text": "", "error": "Its C could not be read: %s" % e}
+
+    @rpc
+    def code_save(self, text):
+        """PAD-614: the editor's text written over the selected code mode's C (whole, then put in place); the mode
+        is read again so its summary and checks follow. ``{"ok", "error"}``."""
+        if not self._code_slug:
+            return {"ok": False, "error": "No mode written in C is open."}
+        from ...plugins.stern import code_modes as CM
+        slug = self._code_slug
+        path = CM.source_path(self.project(), slug)
+        tmp = path + ".saving"
+        try:
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(str(text or ""))
+            os.replace(tmp, path)
+        except OSError as e:
+            return {"ok": False, "error": "It could not be saved: %s" % e}
+        try:
+            self._show_code(slug)
+        except Exception:                                   # noqa: BLE001 - the file is saved; the page shows what it can
+            pass
+        return {"ok": True, "error": ""}
 
     @rpc
     def open_sdk_doc(self):
@@ -3020,47 +4671,6 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         self.refresh()
         return True
 
-    def _ask_films_dir(self, why):
-        return self.window.ask_folder("modes_films", why) or ""
-
-    def add_code_example(self, name, dirs=None, wait=False):
-        from ...plugins.stern import code_modes as CM
-        project = self.project()
-        if not project:
-            self._tryit_note(MP.NO_PROJECT_HELP)
-            return None
-        ex = CM.example(name)
-        if ex is None:
-            return None
-        if not self._code_examples_ok():
-            self._tryit_note("%s is an example for Godzilla; this card is not." % name)
-            return None
-        title = self._profile.key
-        if os.path.exists(MP.mode_folder(project, ex["slug"])):
-            self._tryit_note("%s is already in this project (modes/%s)." % (name, ex["slug"]))
-            return None
-        dirs = list(dirs or ()) + CM.film_dirs(project)
-        ffmpeg = self._ffmpeg_path()
-        self._tryit_note("adding the example %s (code mode)…" % name)
-
-        def work():
-            try:
-                slug, missing = CM.add_example(project, name, dirs=dirs, ffmpeg=ffmpeg,
-                                               log=lambda m, *a: self._say(m))
-            except Exception as e:                          # noqa: BLE001
-                self._tryit_note("%s could not be added: %s" % (name, e))
-                self._post_refresh_code()
-                return
-            self.stamp_code_title(project, slug, title)
-            self._tryit_note(self._code_example_note(name, slug, missing, CM))
-            self._post_refresh_code(slug)
-
-        t = threading.Thread(target=work, daemon=True, name="modes-code-example")
-        t.start()
-        if wait:
-            t.join()
-        return t
-
     def _post_refresh_code(self, select_code=None):
         def again():
             if self.project():
@@ -3094,97 +4704,6 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             self._show_code(self._code_slug)
         self._show_cap(project, len(self._slugs))
         self._publish_rows()
-
-    @staticmethod
-    def _code_example_note(name, slug, missing, CM):
-        if missing:
-            return ("added the example %s as modes/%s with its code. Its clip, picture, music and "
-                    "calls are cut from your copy of %s, which was not found, so for now it plays "
-                    "the game's own sounds on a plain panel. On its page, press Choose your films "
-                    "folder… and pick the folder that holds the film%s." % (name, slug, CM.missing_words(missing),
-                                                       "s" if len(missing) > 1 else ""))
-        return ("added the example %s as modes/%s: its code, and its own clip, picture, music and "
-                "calls cut from the films. Try it builds it in; Write puts it on the card."
-                % (name, slug))
-
-    @rpc
-    def code_example(self, name):
-        from ...plugins.stern import code_modes as CM
-        project = self.project()
-        why = self._refusal() if project else ""
-        if not why and project and not self._code_examples_ok():
-            why = ("%s is an example for Godzilla; this card is %s."
-                   % (name, self._profile.label if self._profile is not None else "not Godzilla"))
-        if why:
-            self._tryit_note(why)
-            return False
-        ex = CM.example(name)
-        if not project or ex is None:
-            return bool(self.add_code_example(name))
-        dirs = CM.film_dirs(project)
-        missing = [k for k in CM.recipe_films(ex) if not CM.find_film(k, dirs)]
-        extra = []
-        if missing:
-            got = self._ask_films_dir("Where are the films? %s's assets are cut from %s"
-                                      % (name, CM.missing_words(missing)))
-            if got:
-                extra = [got]
-        return bool(self.add_code_example(name, dirs=extra))
-
-    def recut_code_modes(self, dirs, wait=False, only=None):
-        from ...plugins.stern import code_modes as CM
-        project = self.project()
-        if not project:
-            return None
-        try:
-            code = [(s, c) for s, c in CM.list_code(project) if (c.film or {}).get("recipe")
-                    and (only is None or s == only)]
-        except CM.CodeModeError as e:
-            self._tryit_note(str(e))
-            return None
-        if not code:
-            self._tryit_note("no code mode here has a film recipe to cut from.")
-            return None
-        ffmpeg = self._ffmpeg_path()
-
-        def work():
-            done, left = [], {}
-            for slug, spec in code:
-                try:
-                    missing = CM.recut_example(project, slug, list(dirs) + CM.film_dirs(project),
-                                               ffmpeg=ffmpeg, log=lambda m, *a: self._say(m))
-                except Exception as e:                      # noqa: BLE001
-                    self._tryit_note("%s could not be cut: %s" % (spec.name, e))
-                    continue
-                if missing:
-                    left[spec.name] = missing
-                else:
-                    done.append(spec.name)
-            words = []
-            if done:
-                words.append("cut the film assets of %s" % ", ".join(done))
-            for n, m in left.items():
-                words.append("%s needs %s, which is not in that folder" % (n, CM.missing_words(m)))
-            self._tryit_note("; ".join(words) + ".")
-            self._post_refresh_code()
-
-        t = threading.Thread(target=work, daemon=True, name="modes-recut")
-        t.start()
-        if wait:
-            t.join()
-        return t
-
-    @rpc
-    def cut_films(self, slug=None):
-        """Choose your films folder… on a C example's page (``slug``), or every C example's
-        film assets at once (no slug)."""
-        if not self.project():
-            self._tryit_note(MP.NO_PROJECT_HELP)
-            return None
-        got = self._ask_films_dir("Pick the folder that holds the Godzilla films")
-        if not got:
-            return None
-        return bool(self.recut_code_modes([got], only=slug or None))
 
     # ------------------------------------------------------------------
     # Try it: the footer's calls
@@ -3244,6 +4763,12 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                 made_for, run = None, None
             if not os.path.isfile(card):
                 out = ("not found", "err", "There is no file at %s." % card)
+            elif S3.is_spike3_card(card) and self._spike3_no_port(card, run):
+                # PAD-1269/1272: a Spike 3 card (a quick partition-table peek) takes modes
+                # once the app knows how to run them on its game build: until then, the
+                # tab says so rather than letting Try it find out
+                out = ("a Spike 3 card, no modes for its build yet", "info",
+                       self._spike3_no_port(card, run))
             elif made_for is not None and made_for.image and \
                     os.path.normcase(os.path.abspath(made_for.image)) == \
                     os.path.normcase(os.path.abspath(card)):
@@ -3270,6 +4795,17 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
                     out = ("another game build", "warn", tip)
         self._verdict_cache = (key, out)
         return out
+
+    @staticmethod
+    def _spike3_no_port(card, run):
+        """PAD-1272: why the Spike 3 card *card* (*run*: its title, as project_cards read it)
+        cannot take modes yet - its build has no port - or "" when it can (or its build
+        cannot be read from its name: the verdict then goes on as for any card)."""
+        game_dir, version = ((run.game_dir, run.version) if run is not None and run.game_dir
+                             else (MP.card_from_name(card) or ("", "")))
+        if not game_dir or MP.profile_for_card(game_dir, version, arch="a64") is not None:
+            return ""
+        return MP.no_port_words(MP.title_label(game_dir, version))
 
     _try_on_probing = None
 
@@ -3741,16 +5277,23 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
 
     # -- the game's own modes in the list, and a page for each ---------------------------
     def _game_ids(self):
-        """The ids of the game's own modes the list shows, in the game's order: the ones with
-        a number the person can change, and the rules the card's port names (their page takes
-        another shot or a rewrite in C). A mode with neither has nothing to do here and is left
-        out; the stock dialog still lists every row."""
+        """The ids of the game's own modes the list shows, in the game's order: every one the
+        card's read found. PAD-834 (Dustin): the list used to leave out a mode with nothing to
+        change, so Iron Maiden showed no Two Minutes to Midnight; one like that now says so
+        (:meth:`_game_changeable_ids`) and its page says why."""
         build = self._stock_build
         if build is None:
             return []
-        editable = {n.mode_id for n in build.numbers if n.is_player_facing and n.editable}
-        editable |= self._port_rule_ids()
-        return sorted(m for m in build.modes if m in editable)
+        return sorted(build.modes)
+
+    def _game_changeable_ids(self):
+        """The game's own modes with something to change here: a number the person can change,
+        or a rule the card's port names (their page takes another shot or a rewrite in C)."""
+        build = self._stock_build
+        if build is None:
+            return set()
+        ids = {n.mode_id for n in build.numbers if n.is_player_facing and n.editable}
+        return ids | self._port_rule_ids()
 
     def _port_rule_ids(self):
         """The ids of the game's rules the card's port names (``rule`` lines), when its runtime
@@ -3779,7 +5322,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             return []
         rows = {r["key"]: r for r in (self.get("stock") or {}).get("rows", [])}
         out = []
-        self.set(game_hidden=max(0, len(build.modes) - len(self._game_ids())))
+        can = self._game_changeable_ids()
         for mid in self._game_ids():
             mine = [r for r in rows.values() if r.get("mode_id") == mid]
             changed = sum(1 for r in mine if r["changed"])
@@ -3787,8 +5330,11 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             out.append({"slug": str(mid), "kind": "game", "name": build.mode_name(mid),
                         "chip": "%d changed" % changed if changed else "",
                         "chip_tip": ("%d of its numbers are staged for the next Write"
-                                     % changed) if changed else "",
-                        "n": n})
+                                     % changed) if changed else
+                        "" if mid in can else
+                        "Nothing of it to change here: the app found no timer, shot count or "
+                        "award of it that it can change",
+                        "bare": mid not in can, "n": n})
         return out
 
     def _after_stock(self):
@@ -3814,6 +5360,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
         if mode_id in self._port_rule_ids():     # its Shots and Advanced sections
             self.refresh_stock_remap()
             self.refresh_stock_rewrite()
+        self._how_kick()                         # PAD-1064: its clips and sounds, off the card
         self._publish_game_mode()
         self._publish_rows()
 
@@ -3847,6 +5394,7 @@ class ModesTab(TitleReadMixin, TryItMixin, GameCheckMixin, StockRemapMixin, Stoc
             "id": mid, "name": build.mode_name(mid), "rows": rows, "rule": rule,
             "build": MP.title_label(build.game, build.version),
             "about": about, "starts": list(getattr(mode, "starts", []) or [])[:3],
+            "how": self._how_for(build, mid),
             "note": keep_note if note is None else note,
             "n_changed": sum(1 for r in rows if r["changed"])})
 
@@ -4050,3 +5598,12 @@ def _why_words(num):
 
 
 TAB = ModesTab
+
+
+def _hand_coop_on(project):
+    """PAD-1326: whether *project* has co-op play ticked (a Spike 3 card then carries no handicaps)."""
+    from ...plugins.stern import coop_play as _CP
+    try:
+        return bool(_CP.load(project))
+    except Exception:                                   # noqa: BLE001 - an unreadable sidecar: no co-op
+        return False

@@ -12,13 +12,13 @@ with the loop below. Everything you need is in these files.
 |---|---|
 | `pad_mode.h` | The API. Every call a mode can make, documented. |
 | `template_mode.c` | A complete mode (TARGET RUSH) that uses nearly every call. Start here. |
-| `examples/powerline_blitz.c` | A second mode: each target pays once, completing ends it, a shield ends it early, and a test trigger feeds shots by name. An AI agent given only this folder wrote it, and it ran correctly in the emulator the first time. |
-| `examples/README.md` | Five INTRICATE modes and their rules sheets (item 152): a boss battle with health, a hurry-up, a combo chain started by the skill shot event, a multi-phase wizard mode, and an ally that stacks with the game's own battle. They share `examples/intricate_kit.h` (a shot debounce, screen lines, lights, countdown, a pack ledger). `examples/desk_harness.c` plays any mode at the desk against a fake game. Each has its own clip, picture, music and calls cut from the films (`examples/film_recipes.json`). |
+| `examples/README.md` | The kit every code and blocks mode can build with, `examples/intricate_kit.h` (a shot debounce, the HUD at the glass's edges, the playfield's inserts, light shows, the display priority, a countdown, a pack ledger), and `examples/desk_harness.c`, which plays any mode at the desk against a fake game. No example modes: the app ships none written for one title (PAD-691). |
 | `pad_mode_assets.h` | A code mode's OWN clip, screen, music and calls, as the build carried them (see "A code mode's own clip, screen, music and calls"). |
 | `mode_file.c` | The mode that runs the Modes tab's mode files. It is an ordinary mode on this API. |
 | `MODE_PARAMETERS.md` | Every key a mode file takes, every field the Modes tab saves, every call above, and what is measured about each. |
 | `pad_mode_runtime.c` | The runtime, compiled into every mode. You do not edit it. |
 | `ports/<game>-<version>.port` | One per game build: where the game's functions are, plus its shot names, scenes and callouts. |
+| `ports/spike3/<game>-<version>.port` | The same for a Stern Spike 3 build (64-bit ARM). A build Spike 2 also has (Star Wars ELG 1.10) keeps the same file name: the folder says which machine it is for. |
 | `build_mode.sh` | Compiles your modes and the runtime into one `mode.so`. |
 | `port_words.py` | Fills in, or checks, a port's instruction words from the game's program. |
 | `port_tool.py` | Drafts a port for another game or version from one that works. |
@@ -27,7 +27,7 @@ with the loop below. Everything you need is in these files.
 
 ## The mode maker is a preview feature (in the app)
 
-In the app the mode maker ships DARK: the Modes tab, its Examples and film cutter, Try it,
+In the app the mode maker ships DARK: the Modes tab, its example (TARGET RUSH) and film cutter, Try it,
 the Write tab's "Pending (Modes)" rows, a Write carrying a project's modes and code modes,
 and the game's own modes' numbers (item 145) reaching a card all ride on one preview
 switch, and it is off in every copy until a personal code turns it on (Settings, the gear,
@@ -109,7 +109,10 @@ shots no switch table covers.
 
 On a machine, `mode.so` goes in `/usr/local/padmode/` on the card's root filesystem,
 with the game's port as `/usr/local/padmode/game.port`. The app's Write step does this;
-it is not something you copy by hand.
+it is not something you copy by hand. On a Spike 3 card (64-bit ARM, `prebuilt/mode64.so`)
+the same files go in `/games/pad/padmode/` on the games partition, and `/games/game`
+becomes `pad/padmode/padmode.sh`, which preloads the object into the game; the 64-bit
+runtime opens every `/usr/local/padmode/...` path there (docs/plans/spike3_modes.md).
 
 ## The pinned object
 
@@ -303,11 +306,16 @@ static void stop(void) { pm_lamp_release_all(); pm_end(); }
 
 Patterns: `PM_LAMP_SOLID`; `PM_LAMP_BLINK` (on half the period, off half; 500 ms); `PM_LAMP_PULSE`
 (breathes between dim and full, never dark; 1600 ms); `PM_LAMP_CHASE` (one insert of the list
-lit at a time, in the order given, stepping every period; 150 ms). A period of 0 takes the
+lit at a time, in the order given, stepping every period; 150 ms; over ONE insert - most of Godzilla's shots have
+one - it blinks at that step instead, where it was lit at every step: solid, PAD-707). A period of 0 takes the
 pattern's own. A single-colour insert (`MASER`, `POWERLINE LEFT`) is lit at the colour's
 brightest part; an RGB one shows the colour. Names are the game's, any case. A mode that holds
 an insert another of ours holds takes it (`[pad] lamps: X takes LEFT RAMP from Y`); a mode
-releases only what it holds; every held insert is handed back when the game leaves play.
+releases only what it holds, and an insert it took from another of ours goes back to that one,
+as it was (`[pad] lamps: LEFT RAMP back to Y`), while Y still holds it (PAD-601: one insert for
+two states, the lower mode's light under the higher one's); else to the game. A mode releasing
+an insert it is under no longer comes back there. Every held insert is handed back to the game
+when the game leaves play.
 `pm_can(PM_CAN_LAMPS)` is 0, and every call does nothing, on a port without `lamp` lines.
 
 **How the game layers its lights, and the rule.** Read off Premium 1.16 and Pro 1.15 and
@@ -355,13 +363,19 @@ picture** (Pro 1.15: 585, 260, 86); 24 lines carry a shot. The inserts of the sh
 | Left / right return lane | LEFT / RIGHT RETURN LANE | | the outlanes (0x8, 0x20) | LEFT / RIGHT OUTLANE |
 | the left spinner (0x800000000) | LEFT SPINNER (RGB) | | the top spinner (0x800, 0x1000) | TOP SPINNER (RGB) |
 | 0x2000000000 | SELECT CITY | | 0x4000000000 | MECHA LANE (RGB) |
+| the shield ramp spinner (0x20000; a Pro's right spinner) | ATTACK MECHA | | | |
+
+PAD-658 and PAD-669 added ties the game's shot table lacks: the Left spinner's, Top spinner's and Mecha exit
+bottom's switch shots (0x200, 0x2000, 0x10000000000) to LEFT SPINNER, TOP SPINNER and MECHA LANE, and the shield
+ramp spinner's (0x20000) to ATTACK MECHA - the insert in front of it, the one the game's own Ebirah battle lights
+for that spinner (`ebirah_stage_lamp_shield`).
 
 The rest are named but tied to no shot by the game: the feature inserts in front of each ramp
 (TANK 2, ADV TRAIN, MAGNA GRAB, TANK 3, ATTACK BRIDGE before the left ramp; TANK 5, HEAT RAY L1-L3,
 HEAT RAY before the right; LITE DESTRUCTION JACKPOT, TANK 4, TESLA STRIKE, BUILDING FIRE LEFT/RIGHT
 1-3 at the building; DESTRUCTION JACKPOT, TAIL WHIP inside the big loop), the scoop's SCOOP BB-BATTLE
 / -GODZILLA PWR UP / -SUMMON ALLY (the scoop dispatches only 0x1), the saucers and allies (TOP /
-BOTTOM SAUCER, SAUCER, MOTHRA, RODAN, ANGUIRUS, ATTACK MECHA, TANK 6), the cities and wizard modes
+BOTTOM SAUCER, SAUCER, MOTHRA, RODAN, ANGUIRUS, TANK 6), the cities and wizard modes
 (NY, LONDON, PARIS, TOKYO, PLANET X, KAIJU, BRIDGE, POWER, TANKS, the three WIZ), the fighters, lanes
 and SHOOT AGAIN, and the GI strings and flashers (their lines carry one light each). The
 port's lines say where each is (`# lamp N, I/O group G index I, at x,y` on the playfield picture).
@@ -608,7 +622,8 @@ yours at the carriers' stock priority 2 is dropped while any other speech plays.
 
 | To... | Call |
 |---|---|
-| change how a request competes | `pm_sound_priority(request, priority, flags)` - -1 leaves one as it is; returns the old `priority << 8 \| flags`, or -1 without `data sound_requests` / `sound_request_count` in the port |
+| change how a request competes | `pm_sound_priority(request, priority, flags)` - -1 leaves one as it is; returns the old `priority << 8 \| flags`, or -1 without `data sound_requests` / `sound_request_count` in the port, or on a record whose priority byte is past 9 that it never changed (real ones go up to 255: Godzilla's "player added" is 196; one it changed itself it takes past 9 and back, PAD-1220) |
+| give a request its own priority and flags back (PAD-682) | `pm_sound_priority_stock(request)` - as `pm_sound_priority` first found them, also on a swap still armed on it; a mode's music carrier gets them back once its music has faded at the end, since a carrier can still be one the game plays (Bond LE 1.06: 94 is Bird One Multiball's music, and with its steal flag left cleared the game's next music could not take the bus from it) |
 
 start and end calls to priority 4, shot calls to priority 3, all three without the steal flag
 since the item 150 follow-up (with it, an equal-priority sound cut them mid-sound), and the music
@@ -617,6 +632,15 @@ see below) and is never cut by an equal one; a shot call waits under the game's 
 (multiball intros, super jackpots, the ball-start lines); a start or end call cuts that too. Use
 it only on a request the game never plays itself. MODE_API.md, "Sound BUSES and priority", has
 the measurements.
+
+**A carrier playing yours is not the game's song (PAD-740).** Some games keep speech and light cues in step with
+a song of theirs: every tick their music sync asks the sound engine which of its synced songs plays (the engine's
+"which of these requests plays", `sound_active` + 0x40 on all 53 newest Spike 2 builds) and plays that song's cues at its
+position. Bond LE 1.06's music carrier 94 is Bird One Multiball's music, and its 31 speech cues (requests
+1019-1049, from 55 s in) played over a mode's own music on 94. While a music carrier carries a record of yours (a
+`pm_sound_swap` with priority -1 armed on it - the music's - or `pm_sound_sid` pointing it at a bed), the runtime hands the engine the list
+without it, so no game code takes your sound for the game's own. No port line: the runtime finds the function
+after `sound_active` by its six words and says so in mode.log ("does not count a carrier playing ours").
 
 #### A music bed of your own, and no clicks (item 150 follow-up)
 
@@ -630,6 +654,7 @@ carrier at its bed while it runs:
 |---|---|
 | make a request play ONE sound id | `pm_sound_sid(request, sid)`; `pm_sound_sid(request, 0)` puts the request's own list back. 1 = done; 0 without the port's request table |
 | fade a request out, then stop it | `pm_sound_fade(request, ms)` - linear in dB (the codec's volume step, 1/3 dB each, on every voice of every channel playing it) down to -86 dB, then the stop, in silence. Without the port's `value sound_channel_*` / `sound_voice_volume` lines it stops at once. `pm_sound` on a request still fading ends that fade first |
+| duck a request under another (PAD-678) | `pm_sound_duck(request, steps, ms)` - takes `steps` more (1/3 dB each) off every voice playing it, on top of its own volume, ramped over `ms`; `steps` 0 ramps it back. A stop or a `pm_sound_fade` ends it. A mode file's music goes down 28 steps this way while one of its own calls plays: the game's speech carriers already duck it 20, and the game's own clip sounds duck its music 48 (Bond LE 1.06, measured) |
 | see what plays | `pm_sound_playing(requests, buses, max)` - the request and bus bits (0x01 music, 0x02 voice) of every channel playing; -1 without `data sound_channels` |
 
 The mode file says it with a second number: `music 125 618` = carrier 125 playing bed sid 618.
@@ -787,10 +812,7 @@ whenever that changes and a second after the end (`own sound: the music bus now 
 
 On the card the files sit beside `mode.so` in `/usr/local/padmode` (`mode_install.py --asset`); a
 card of code modes only carries no mode file at all. The emulator's card reader (`../cardmodes.sh`)
-and Try it's installer (`../tryit.sh install`) put them in `/dump`. The Modes tab's Examples offer
-the five intricate modes this way: each brings its code and a recipe of film times
-(`examples/film_recipes.json`) that the tab cuts with the film cutter from the person's own films.
-Emulator-proven on Godzilla Premium 1.16 (the showcase card, 2026-09-18).
+and Try it's installer (`../tryit.sh install`) put them in `/dump`. Emulator-proven on Godzilla Premium 1.16 (the showcase card, 2026-09-18).
 
 ### What is measured, and what is not
 
@@ -884,6 +906,17 @@ these lines from "How often it can start"; a mode written in C keeps its own cou
   scores or `pm_in_game()` falls. `pm_in_game()` rising alone would miss the held-Start
   restart. The last game's scores survive a reboot of the card (measured once), so the
   first game after that boot is also seen by the score falling to 0.
+- **`pm_in_game()` also falls in the middle of a game** (James Bond LE 1.06, PAD-503). At the end of
+  each of its multiballs and wizard modes (Dr. No, Disco Volante, Aston Martin, Little Nellie, Powerpack,
+  Helicopter, James Bond and Wizard mode multiballs, Ahoy Mr. Bond, Goldfinger's wizard) the game calls
+  `0x3f79bc`, which sets mode-mask bits `0x202` and shuts play down as its tilt does; only its end of
+  ball (`0x1e2624`) clears them. So `pm_in_game()` is 0 from that moment until the ball drains, and rises
+  again for the next ball of the same game. The game's own rules test `mask & 0x310` and ignore play
+  meanwhile. A mode that took `pm_in_game()` rising for a new game wiped what it kept per game there:
+  blocks modes did (their lit mode, their "each game" values and their timers) until PAD-503 gave them
+  this witness. Measured in the emulator (stock card, the game's own `0x3f79bc(0, 1)` as its Wizard mode
+  multiball's end calls it, player 1 scored): `in_game 1 -> 0` with mask `0x0202`, the drain's
+  `ball_end`, then `in_game 0 -> 1` with mask `0x0005` at the next ball.
 - **Trigger files bypass it.** `/dump/mode.start`, `/dump/modeK.start` are a test path: they
   start the mode whatever `starts` and `cooldown` say, and that run is neither counted nor
   starts a cooldown (`ONCE GAME: a trigger file starts it whatever starts/cooldown say, and
@@ -949,6 +982,23 @@ Pro 1.15's instruction for instruction). On another title, find `cmode_manager` 
 `rtti_tree.py` and compare its virtuals 10, 15 and 22 with Godzilla's; a title without a
 `cmode_manager` (TMNT Pro's `crule_manager`) has no port lines, and the call returns -1.
 
+**Modes that run beside everything (PAD-733).** "Any" counts every active mode of the game's, and some run for most
+of a ball under the game's own battles and multiballs: Godzilla's Tesla Strike starts from the powerlines and is over
+only when its lit arrows are made or the ball ends. On David's Premium every mode of ours waited from 208 s into a ball
+to its drain at 854 s (two KUMONGA picks refused, the progress panel down). A port names such modes by their `rule`
+labels:
+
+```
+text stock_any_beside        Tesla Strike    # comma-separated rule labels
+```
+
+When "any" says a mode runs, the runtime asks the port's rules one by one (their ACTIVE slot, at most every 100 ms):
+if only those named run, the answer is 0 (mode.log: `stock modes: Tesla Strike runs - beside ours ...`); otherwise
+the label of the one found names it (`not started (a block): Super Train is running`). A battle picked on the game's own
+selection screen (or a mode that takes the place of one of the game's) never waits at all: the game let its own start.
+
+**A pick wins over the game's mini modes (PAD-768).** The game opens its selection screen while one of its own timed modes runs - David picked KING CAESAR with Jet Fighter Attack going, and the next tick of KING CAESAR saw "one of the game's modes running" and ended it, the battle lost, Jet Fighter Attack carrying on. David: "Anything from the Kaiju Battle select screen should override the mini modes." So as a picked mode that keeps to itself (blocks `game_modes` give way / block, a mode file's `game_modes give_way|block`) starts, `pm_game_modes_end()` ends every mode of the game's running for the player up that it would give way to, each through its own STOP as lost (as its clock running out would: its lights, words and music go the game's own way, and it can be earned again) - at the pick, on the next tick, so its ending runs under the screen's close. Its TOTAL screen is skipped: Jet Fighter's own stop queued JET FIGHTER ATTACK TOTAL (its clip "fighter_total" on the one video surface), which waited out the close and then covered KING CAESAR's start clip for 4.5 s; the game's END shows it only when the mode's points this time are not 0, so the runtime zeroes them first (the award object's per-player total, `value stock_award_at` / `battle_total_at`, the field a picked battle's START zeroes too - the points are in the player's score already). Never a multiball, a battle, a mode whose kind says it runs beside everything (0x20, which the game's own query skips too), or one named in `stock_any_beside`. The modes are the ones the port names a start of (`block_name_<id>` with its `block_obj_<id>`); their ACTIVE and KIND virtuals are the ones the game's own "any" query calls, read off `site stock_any_running` (`ldr r3,[r3,#A]; blx r3`, then `ldr r3,[r3,#K]; cmp r3,r6`: v[14] and v[17] on Godzilla), or `value mode_slot_active` / `value mode_slot_kind`. mode.log: `game modes: the game's Jet Fighter Attack (mode 21) was running - a battle picked on the selection screen wins over it: its own stop ran (v[11], lost), active now 0`. A pick in one of the game's multiballs (its balls stay in play) runs through that multiball instead of ending.
+
 **What is proven.** In the emulator on Godzilla Pro 1.15 and Premium 1.16 (`godzilla_le`),
 with a mode file set to `stack no` beside one with no stack key: both started in plain
 play; during a battle the game started itself (Titanosaurus on Pro, Ebirah on Premium:
@@ -999,6 +1049,30 @@ What steps aside, and how:
   the badge is hidden during a battle rather than drawn over the game's.
 - **A mode of your own in C**: ask `pm_aside()` in your tick and keep your words out of the
   game's places while it is not 0.
+
+**The game's own words, any screen (PAD-662).** `pm_aside()` knows only the game's modes its port
+can ask about. Other screens of the game's letter their words in the same places: in PAD-658's
+emulator run kiryu_r2 (k15), SUPER X2's instruction line sat on Godzilla's own SHOOT TARGETS TO
+DISABLE BARRIER, Mechagodzilla's DEFENSE NEO BARRIER, which no list names. Every such screen comes
+up as a BACKGROUND of the layered display other than the main play (the city), with its own scene
+and words (the emulator probe saw the game write that line into the barrier background's own text
+node). So the runtime watches what is drawn: `pm_game_words()` is 1 while a background of the
+game's other than the city has its scene shown, kept up for 300 ms, and goes back to 0 after
+several ticks and 400 ms with none. A mode's clip drawn in that screen's place (a mode that keeps
+the game's modes from starting gets the barrier's place, PAD-658) means its words are not drawn,
+so it is 0 then. Each change is logged:
+
+```
+[pad] game words: a screen of the game's is on the glass (background 0x007b8db8, vtable 0x00645de8) - its words are where a mode's are, so a mode's step aside
+[pad] game words: gone - the main play is back (or a mode's clip is in its place)
+```
+
+While it is 1 the examples' HUDs step aside as for a mode of the game's (the lines in the award
+line, the counters hidden; the badge stays in its own slot), a qualification note goes in the award
+line (those screens keep it clear), and a mode file's own screen and a blocks mode's own screen and
+info line are hidden (`aside keep` still keeps a mode file's up). Unlike `pm_aside()` it never ends a
+`give_way` mode or holds a start. 0 on a port without the backdrop lines (it watches the same
+`backdrop_draw` / `scene_show` hooks).
 
 The examples' single-ball modes also wait out a MULTIBALL now (David: "when I was in multi-ball
 and I did the outlane oxygen destroyer mode, it should not have triggered because I had multiple
@@ -1070,6 +1144,20 @@ from its shot handler: Godzilla's Saucer Attack counts the pop bumper toward lig
 MORE TO LIGHT SAUCER ATTACK", over KING GHIDORAH's words on David's Premium). A port names up to eight such
 handlers (`site block_rule_<n>`, `value block_rule_lo_<n>` / `block_rule_hi_<n>`, `text
 block_rule_name_<n>`), each shown the shot without those bits while a mode blocks, as the battle rule's is.
+
+**A rule that asks first (PAD-1026).** A plain-C title has no rule base to hook, but a rule of its own may ask
+ONE check before it counts, plays its clip or lights its inserts. James Bond's gadget countdowns do: the DB5
+countdown (the right scoop, LE 1.06 `0x6533c`), the Powerpack countdown (the left eject, `0x156568`) and the
+Attache Case countdown (`0xc6608`, a Right ramp shot) each ask the game's "nothing of mine in the way" (`0x651ec`,
+`0x156424`, `0xc6410`: its multiballs `0x9f460`, its mini-wizards `0x110b20`, ...) and stop there when it says
+0 - which is how the game's own four mini-wizards keep them from counting and from playing their clips over the
+mini-wizard's (the Bond LE owner: "those 2 areas have videos that interrupt the new mini wizard mode videos").
+`value block_rule_gate_<n> 1` makes `site block_rule_<n>` such a check: the runtime hooks it as a veto
+(`hook_veto_n`; a `push {.., lr}; bl` entry through `hook_veto_bl`) refused with 0 while a mode of ours blocks,
+unless the mode keeps that rule counting - the same `keep_rules` / Keep counting ticks as every rule's.
+`game_mode_blocks.read_gate_rules` reads the three from a Bond program (LE and Pro 1.06; the 60th Anniversary's
+rules ask no such check) and `gate_rule_lines` writes the port lines; a drafted Bond port gets its own
+(`portgen.own_gate_rules`).
 
 **Coverage.** `pm_aside()` is as good as the port's stock route (above and below). On the 37
 shipped builds: the manager's own queries on the three Godzillas, the mode table on 21, and the
@@ -1146,7 +1234,10 @@ site balls_in_play         0x001fd194 0xe92d4010 0xe3084ab0
 
 While a multiball is being served it answers the balls the multiball asked for (the
 framework's ball manager, byte `+0xa`); otherwise the balls installed less those in the
-trough and the other ball devices. Two or more is `PM_STOCK_MULTIBALL`. It says nothing of
+trough and the other ball devices. Two or more, kept for 3 s, is `PM_STOCK_MULTIBALL`
+(PAD-687: a ball down an outlane is saved early on James Bond - the new ball is served while
+the drained one is still on its way to the trough, and the count reads 2 for about a second;
+taken for a multiball, it ended the mode, and in a mode's challenge game the ball). It says nothing of
 the title's other modes, so on these titles `stack no` waits for the game's multiballs only,
 and the Modes tab says so. A ball that is out of the trough and every ball device counts as in
 play, so a ball stuck on the playfield (or, in the rig, one of a six-ball multiball the script
@@ -1433,6 +1524,41 @@ own multiball; two players.
 
 `mode_project.BALL_SAVE_PROVEN` lists the proven builds, and the tab greys Ball save on any other build.
 
+## Drain to one ball (PAD-733)
+
+A multiball of the mode's own that ends with two or more balls still up (MINILLA's dad-and-baby multiball won with
+both balls in play) leaves the player a multiball the mode no longer runs. David: "just kill the flippers and show
+that the mode is ended, then instead of ending the ball, give a ball back in the plunger lane". `pm_drain_to_one()`
+does that, from the mode's end (before or after `pm_end`):
+
+1. The game's flippers go dead - the framework's all-flippers off (`site flippers_off`, Premium/LE 1.16 `0x3f1898`,
+   Pro 1.16 `0x479894`): each flipper record's enable bit (+6, bit 2; bit 4 marks it changed), which the node boards'
+   flipper rules follow. The game's own dead-flipper feature calls exactly this pair (LE `0xc19a4` / `0xc19cc`, Pro
+   `0xbffa8` / `0xbffd0`), there with its kickbacks, pops and slings off as well (`0x3f04cc`); the runtime kills the
+   flippers alone, so the pops and slings keep the balls moving. Every tick it asks again (the game's own flipper
+   update on a status change must not bring them back early), and the game's ball search is put off 45 s, as its own
+   feature does. The multiball's own ball save, if it still runs, ends there (`data multiball_record`, LE `0x7d3930`,
+   Pro `0x7d74e4`: the framework's multiball record, its save a countdown in ticks at +0 and a grace span at +4, both
+   zeroed): inside it every drain was served back and launched again into dead flippers (emulator, run dto_insave:
+   26 s of that before one ball was left).
+2. Once one ball is left (the framework's balls in play), that ball's ball save is armed (`pm_ball_save`, 20 s): when
+   it drains too the game serves it back to the shooter lane and the SAME ball goes on - no bonus, no next ball.
+3. The flippers come back (`site flippers_on`, LE `0x3f196c`, Pro `0x479968`) when the served ball lands in the
+   shooter lane (`value shooter_lane_switch`, 62 on both) or the last ball is seen home in the trough (a trough hit
+   more than 1.5 s after the one before it: that one still rolling down is not the last), and at the latest after
+   30 s. At the ball's end, a tilt or the game's end it lets go without turning them on: the game's own next ball
+   brings them back from its status, as after any ball end.
+4. The game's modes a mode held off (`pm_block_game_modes`) stay held off until the flippers are back: its end's
+   `pm_block_game_modes(0)` waits for the drain (`block: MINILLA keeps the game's modes off until its extra balls
+   have drained`). Run mi_dadwin2 without it: the game's BUILDING ATTACK began 13 ms after MINILLA's end, over its
+   TOTAL, with the flippers dead.
+
+`drain to one: MINILLA - the flippers are dead with 2 balls in play ...`, `down to 1 ball(s) after N ms - its save
+armed ...` and `over after N ms (the served ball is in the shooter lane) - the flippers are back` say what happened.
+It answers 0 (and the balls play on) with fewer than two balls in play, no game in play, a tilted ball, or a port
+without the two sites or the multiball serve. Pro 1.15 has no game program here: its two sites are the same code
+(found by it, movw/movt and branches masked) once one is read.
+
 ## The magnet (PAD-381)
 
 David (2026-10-04): modes need access to the coils, "However, we need guardrails on this since these are
@@ -1624,6 +1750,114 @@ the coil (the record's latest request is not ours) refuses a hold and ends one. 
 uncontrolled coil off, the port also names its object (`site <name>_get` or `data <name>_obj`), where it keeps its
 controlling process (`value <name>_ctl`) and its "disabled" virtual (`value <name>_off_slot`).
 
+**The ball held at a post as the mode starts, its clock waiting (PAD-621).** luvthatapex (James Bond LE): "when mini
+wizard modes are started at the right ramp, the up post holds the ball so the player can see the beginning mode
+movie clip, then ball is released, timer starts". A mode file's `coil_hold <name> <ms> [mask] wait` (the Modes tab's
+Other mechanisms > Its clock waits until it lets go; the blocks' Hold "its clock waits until it lets go") stands the
+mode's clock still while that hold holds and starts it when the hold lets go (`mode.log`: `... holding, its clock
+waits until it lets go`, then `the <name> let go - its clock runs, <n> s`). Not as a challenge's ball starts (`challenge
+pick`; blocks: the When the player picks a challenge script): that ball is in the shooter lane, so there is no hold and
+the clock runs.
+
+James Bond LE/Pro 1.06's right return up post is a held coil for it: `coil_hold right_return_up 6000 wait` in a mode
+that starts at the Right ramp holds the ball the way the game's own mini-wizards do. The post is a Device-framework
+object (BottomLaneUpPost, device 9, node 8 coil 7) the game drives itself: its update OFFs it on most switch hits and
+its tick raises it for 1875 ticks on a pending raise when the game wants the ball held (the first Right ramp of a
+ball, for its own mode's start: about 12 s), unless a process controls it (`+0x10`). So a hold takes it - the
+framework's own take / give (`site right_return_up_take` / `_give`, `value right_return_up_ctl 16`) - sends the game's
+own command (255 for 64 ms, then AD_BOTTOM_LANE_UP_POST_POWER), and before giving it back clears the device's
+countdown and pending raise (`value <name>_left`, `value <name>_pending`), so the give's own update lowers it.
+`value <name>_max_ms` lets the one command's hold run past the runtime's 5 s, to the game's own longest there (the
+post: 14 s, its own command on it 20 s); `value <name>_no_hold_flag` refuses a hold while that game flag is set
+(FG_MODES_DO_NOT_HOLD_BALL, 166).
+
+**Emulator-proven** (2026-10-19, the stock LE and Pro cards, hidden, muted; C:/tmp/PAD-621 proof.sh, a mode file
+`trigger 0x4 1` on Right ramp exit, `seconds 20`, `coil_hold right_return_up <ms> wait`): control (no mode) - the
+game's own mini-wizard off the Right ramp raised the post 255/60 then 48 and held it 14.1 s, and a plain first Right
+ramp held it ~12 s; LE with the game's modes held off and stacked - HOLD 6000 ms, the process controlling it, ONE
+command (`[coildrive]` node 8 coil 7: 255 for 60 ms, hold 48 for 5930 ms), no OFF of the game's during it through
+slingshot hits every 2 s, let go at 6011 ms, the clock 20 s from then (END 26.0 s after the start); Pro with a 9 s
+hold - one command, 255 for 60 ms then 48 for 8930 ms, let go at 9011 ms, the clock 20 s from then. After a let-go
+the game may raise the post again at the next switch hit for its own first-ramp hold (the ball is past it by then).
+Desk: tests/test_stern_mode_post_hold.py (the clock standing still while held, a challenge ball not held).
+
+## Spare switches and outputs (PAD-826)
+
+For hardware a mod ADDS to the machine: a switch wired to a node board input the game has no switch on, or a coil,
+flasher or toy wired to a driver output the game never fires. RobF on Pinside: *"unmask unused switches and coils"*.
+docs/plans/mode_spare_io.md has the disassembly.
+
+**Naming them.** By the board's own numbers: the node (8, 9 ... the `node` column of the title's switch list) and
+an input bit 0..63 (its `bit` column) or a driver output 0..8 (the node-bus library refuses a coil above 8 itself).
+The runtime reads the game's own tables LIVE and takes only what nothing of the game's uses; anything else is refused,
+said in `mode.log`, and never touched:
+
+- an input is spare when the switch service's map has no switch of the game's on that node and bit. The service
+  reads the bit off the board every scan and skips it, so reading it changes nothing the game does;
+- an output is spare when some coil record of the game's is on that node (it is a driver board) and none is on that
+  output. No record means the game never sends that output anything.
+
+```c
+uint64_t pm_spare_shot(unsigned node, unsigned input, const char *name, int active_high);
+int pm_spare_switch(unsigned node, unsigned input);         /* 1 closed, 0 open, -1 not a spare input */
+int pm_spare_drive(unsigned node, unsigned output, unsigned pulse_power, unsigned pulse_ms,
+                   unsigned hold_power, unsigned hold_ms);
+int pm_spare_pulse(unsigned node, unsigned output, unsigned power, unsigned ms);
+void pm_spare_off(unsigned node, unsigned output);
+int pm_spare_output(unsigned node, unsigned output);        /* 1 = spare here */
+```
+
+**A spare input is a shot.** `pm_spare_shot` gives it a shot bit of its own, one no shot of the port's uses, named
+`name` (`pm_shot(name)` finds it, so a mode file or blocks script can name it like any shot). Every time the switch
+CLOSES, that mask comes to every mode's `.shot`, from the tick. A close is the input at its closed level two ticks
+running, so a bounce is not a hit. Closed reads 0, which is how Stern's switches work (the board pulls an open input
+up). Pass `active_high` 1 for one that reads 1 when made, an opto's way. At most 8 spare inputs per game. Ask again
+with the same node and input for the same mask.
+
+**A spare output gets ONE command at a time**, which the board ends by itself: `pulse_power` (1..255) for
+`pulse_ms`, then `hold_power` (0 = none) for `hold_ms`. It is 48 V into wiring PAD has never seen, so the limits
+are the runtime's and cannot be raised:
+
+| | |
+|---|---|
+| who | only the running mode, in a game (not attract, not tilted) |
+| one command | pulse 1..1000 ms; pulse and hold together at most 5000 ms |
+| over time | an output's commands in any 10 s add up to 5000 ms or less (half the time on), at most 50 of them |
+| a new command | replaces the one running on that output (a flasher's pattern) |
+| off | the board's own OFF, for every spare output a mode drove, when the mode ends, the ball ends, the game ends or tilts, and on `pm_spare_off` |
+
+**What the port carries** (spare_io.py writes it from each build's own binary; `--census` lists every port):
+
+```
+site coil_frame   <the node-bus library's fire-by-address>   fire(node, {coil, pulse power, pulse ms, hold power, -, hold ms, x})
+site coil_off     <its OFF>                                  off(node, coil): 8n 03 4d <coil>
+data sw_struct    <the switch service's struct>              +16 one 160-byte block per node: +20 its 64 input bits, +28 a switch id per bit
+data coil_count / coil_table                                 the coil records (also PAD-420's)
+```
+
+The ten builds of the OLDER framework (Aerosmith LE 1.15, Avengers LE 1.09, Batman 1.13, Guardians LE 1.14, Iron Maiden
+LE 1.16, Mando LE 1.44, Rush LE 1.18, Stranger Things LE 1.12, Sword of Rage LE 1.18, Turtles Pro 1.58) keep switches
+and coils another way, and carry instead:
+
+```
+data sw_listen    <the switch listener table>   +268 boards, +12 an entry each [board record, first listener]; a listener's switch at +20 (its bit at +18), the next at +24
+data sw_boards    <the board table>             board = [sw_boards + node * 4]: its bits at +576, XORed with its mask at +584
+site coil_used    <the game's "a coil there">   used(node, output): a spare output is one it says no to, on a board it says yes to for another
+```
+
+They have no OFF frame: a spare output is switched off there with a fire of nothing (every power and time 0).
+
+The switch struct is checked against the game's own switch entries before any bit is read: every switch id in the map
+must be the entry naming that node and bit, or the spare inputs are off for the run (`spare inputs: ... does not
+check out`). `PM_CAN_SPARE_SWITCHES` and `PM_CAN_SPARE_COILS` say what this port has.
+
+**In the emulator** a spare input reads 0 (closed) unless set: `/dump/spare_in` takes one line per input, `<node>
+<bit> <level>`, re-read every 200 ms (hwshim's `[sparein]` lines), and `pullup` on a line of its own makes every
+input no switch of the game's is on read 1, as a Stern board's open inputs do. Without it the first scan of a board
+(the emulator scans one only when it has news) takes its unused inputs from 1 to 0 and looks like a close. Write the
+file whole (a temporary name, then a rename). A spare output's commands show as `[coildrive]`
+lines under `PAD_COIL_PROBE=1`. `sdk/spare_test_mode.c` drives both; `C:/tmp/PAD-826/spare_job.sh` is the proof job.
+
 ## The scoop (PAD-381)
 
 A mode may hold a ball that lands in the scoop - while its screen or a callout plays - and nothing more:
@@ -1684,7 +1918,38 @@ mode ended, 1832 ms; no abort.
 
 Not measured: a battle's select screen holding the ball first (the game's own hold, which the wrapper runs
 before its own); a tilt during a hold on a machine.
-## The shield platform (Godzilla Premium/LE, PAD-379)
+
+**A mode's finish (PAD-707).** David, v21 in the emulator: "the scoop kick-out needs to time up with when they
+finish like after collecting the finish at the scoop". A mode that ends while it holds a ball keeps the ball
+through its FINISH - the full-screen clip of its own it plays as it ends (a blocks mode's starts half a second after
+it is asked for, so the runtime waits up to 1.2 s for one to start) - and a ball that settles while that finish plays
+is held too: the kick-out comes as the clip ends, at most 10 s from the ball settling. Without a clip the end lets
+go as before. Run20 (Heisei 1.99D v21, a KING CAESAR test mode cashing out with his 3.97 s cashout clip and ending at
+once): `scoop: let go after 4324 ms (the mode's finish is over)`, the clip 115 frames, none to the glass without it.
+
+**A picked mode's start (PAD-707).** David: "the intro videos to the modes should play completely while the ball is
+still in the scoop and only eject from the scoop once those videos are done (or skipped)". The battle selection
+screen runs inside the scoop's settled event (the game's own hold); a pick a mode takes there (`roster_take`) keeps
+the ball after the screen closes, through the port's `roster_start_after_ms` until the mode starts, then through its
+full-screen start clip (1.2 s for one to begin), at most 15 s - logged `scoop: a mode took the selection screen's pick
+- the ball waits for its start clip` and `let go after N ms (its start clip is over)`.
+
+**The pick's choreography is the game's (PAD-733).** David: "imitate them for our custom modes ... I seen it flashed
+to the hud before showing the video". Filmed at 0.25x on Premium/LE 1.16, Pro 1.16 and the Heisei 1.99D card: after
+a pick of the game's own battle the screen fades out (gone by 0.44 s), the map zooms into the frame and holds, and at
+2.0 s the battle is on the glass in its full-screen intro - no HUD before it. The close is one of the game's display
+effects (Premium/LE 1.16: 132, priority 196, from the pick to +1983 ms; the game pauses its video player as it ends,
+taking anything of ours on it along). So a picked mode now starts on the first tick that effect has given way
+(`pm_roster_closing()`; the port's `roster_start_after_ms 2500` is only the most it waits - it was the start itself,
+3000, and the city's HUD, then the mode's, showed for 1.5 s first), and a blocks mode's start clip plays in that same
+tick (a clip a shot asks for still waits half a second, "Clips race the game's own"; there is no shot at a pick). A
+full-screen clip draws over everything, so a start at the pick itself would hide the screen's close (rig run a0), and
+one before the close's end is gone with it (a1950). The game pauses its player a moment after the effect ends (within
+~45 ms, run g_kumonga), so a full-screen clip it stops in its first 300 ms, started within 300 ms of that close, is played
+again once at once (`clip: "..." was paused N ms in by the game's close of its selection screen - played again`); it
+stays on meanwhile, so neither the HUD nor the backdrop loop gets a frame. The city screen a lost battle brings (`STAY IN:` / `TRAVEL TO:` /
+`TO REMATCH %s`, numbered lines 3748-3750) names a new monster lost there instead of the place's battle
+(`value roster_rematch_line 3750`), and the city pick replays the monster only in the city it was lost in.
 
 Godzilla Premium and LE carry their three shield targets on a platform a motor turns. Most of the game
 it faces AWAY: the spinner side (the shield ramp spinner) faces the player and the shields cannot be hit
@@ -1795,8 +2060,21 @@ the adjustments (desk only: `pm_shield` says 0).
 ## The building (Godzilla Premium/LE, PAD-393)
 
 Godzilla Premium and LE have a building on a stepper motor. The game moves it by FLOOR: 0 is where it
-rests (beside its home switch, BUILDING UP), and 1, 2 and 3 are 2500, 5000 and 7500 steps further. A mode
-asks for a floor and nothing else:
+rests (beside its home switch, BUILDING UP), and 1, 2 and 3 are 2500, 5000 and 7500 steps further.
+
+**Its lock is closed while one of our modes runs (PAD-684).** The game parks the building on floor 1 while its
+lock is lit (0x7d24c asks RuleBuildingLocks' "lock lit" query, 0x12e7d8, and moves it there; floor 0 when it is
+not), and on floor 1 a ball goes into the building. A lock lit before one of our modes began stayed open through
+it: balls locked, and the third lock's Godzilla Multiball, which the mode keeps from starting, never came - the game
+went into ball search (David's Premium, 2026-10-22). So while one of ours runs and has not put the building on a
+floor of its own, the runtime sends a building parked above floor 0 to 0, within the limits below, and puts it back
+where it was when the mode ends, which reopens the lock (mode.log: `building: floor 1 -> 0 - its lock closed while
+<mode> runs`). Nothing to do in a mode for it. The game would send it back up while the lock stays lit, and the
+building went up and down over and over under the ball (PAD-733, David's Premium in MELTDOWN), so while the lock is
+kept closed the game's own moves above floor 0 are refused (a veto on `site building_move`; mode.log: `building:
+the game's move to floor 1 refused - its lock stays closed while <mode> runs`): it stays down until the mode ends.
+
+A mode asks for a floor and nothing else:
 
 ```c
 pm_building(3);                           /* the floor furthest from home, at the operator's speeds */
@@ -1841,6 +2119,17 @@ arrival), a second move 1.5 s later refused (busy), floor 2 (+2500), floor 9 ref
 the mode's end it was put back on floor 0 (+5000). When the ball drained mid-test, the game sent it to floor
 0 itself and the put-back stood aside. Not machine-tested.
 
+**In a mode file, and on the Modes tab (PAD-589).** `building <floor>` moves it 1.5 s after the mode starts (the
+ball that started it clear first); `building <floor> <mask>` moves it on every hit of those shots while the mode
+runs. The tab's Mode page has it as *The building > Move the building to* (a floor, then *when it starts* or *on every
+hit of* a shot), and blocks have *Move the building to* (floor 1-3, or back where the game keeps it). Both go
+through `pm_building` with all of its limits, and the runtime's put-back. The app offers it only while the game's
+modes cannot start and its own Building Locks rule sees no shots. Measured on the
+stock Premium/LE 1.16 card (emulator, rigs 1-2, muted): `building 3` went 0 -> 3 1.5 s in, stayed 18 s and was put
+back on 0 when the mode's clock ran out; `building 2 0x08000000` went 0 -> 2 on the Maser target's hit and back to
+0 at the end. A hit on the Building Hit Opto itself had the game send it home 2.3 s after a move, and the runtime
+stood aside, as it does for any move of the game's.
+
 ## The shaker (Godzilla Premium/LE, PAD-414; every latest title with one, PAD-474)
 
 A Godzilla Premium may have the optional shaker motor in its cabinet (an LE has it fitted), and so may the other
@@ -1875,19 +2164,30 @@ The limits are the runtime's and cannot be raised:
   strength**: on Godzilla 1000 ms at 0 and 1, 5000 ms at 2 and 3; most other titles shake at one strength only,
   0 (`text shake_max_ms`). At least 100 ms.
 - Only while your mode runs, in a game (not attract, not tilted); never while one of the game's own shakes
-  runs, or one of yours; at most 20 shakes and 15 s of shaking in any minute (a game shake of several steps
-  is one shake, all its steps counted).
-- **Stopped** (the game's own stop) when your mode ends, the ball ends, or the game ends or tilts, and on
-  `pm_shake_stop` - unless the game has since asked for a shake of its own, which it leaves to run. A shake
-  marked with `pm_shake_outlast` (the mode's ending one) runs out after the mode's end; a ball end, game end or
-  tilt still stops it.
+  runs; at most **30 s of the motor running in any minute**, counted as it runs (a shake cut short or taken over
+  counts only what ran) - PAD-670: **the game's own shakes count too** (the runtime reads the drive's time left
+  every tick), since the motor heats the same whoever asked. Where 30 s comes from is below ("PAD-670").
+- **One of yours at a time, the game's way** (PAD-658): a shake asked for while one of yours runs takes the motor
+  over when it is longer than what is left of the running one (a game shake of several steps is measured by its
+  span), and is skipped (0, and a line in mode.log) when it is not - the game's own call does the same. A take-over
+  whose first step would not outlast the running step stops yours first (the game's own stop) and starts 50 ms
+  later.
+- **Stopped** (the game's own stop) when the ball ends, or the game ends or tilts, and on `pm_shake_stop` -
+  unless the game has since asked for a shake of its own, which it leaves to run. PAD-658: your mode's end leaves
+  its shake to run out (each step is never longer than the game's own longest); `pm_shake_outlast` (the ending
+  one, which always ran out) is kept for modes that call it.
+
+PAD-414 set 20 shakes and 15 s a minute, counted whole and refusing any shake while one of yours ran. Neither was
+measured or the game's: the game's own call has no per-minute limit at all. PAD-658's modes ran into them (a
+finale's shake refused after twenty small ones, a stage-up shake refused while a hit's still ran, the 6.9 s
+multiball start costing half the minute), so the count went, the running time is counted as it runs against 30 s,
+and the longer shake wins as in the game.
 
 `pm_shake` / `pm_shake_game` return 1 when shaking, 0 when refused (the reason is in mode.log) or on a game
 whose port has no shaker lines (`pm_can(PM_CAN_SHAKER)`; a Pro's program has the call too, not yet ported).
 A mode file says the same with `shake start|shot|end <ms> <strength> [mask]` or `shake start|shot|end game
 <name> [mask]` (MODE_PARAMETERS.md); a blocks mode with *Shake the cabinet for N ms* and *Shake it the game's
-way*; the form with Mode > Shaker. `examples/final_wars.c` starts with the game's multiball start and ends its
-wizard jackpot with the game's jackpot shake; `examples/destoroyah.c` its super jackpot.
+way*; the form with Mode > Shaker.
 
 **How it works** (Premium/LE 1.16). `shake(ms, strength, force)` (`0x189a54`) is the one call every shake of
 the game's goes through (about 340 of them): it reads adjustment 335 (AD_SHAKER_MOTOR, 0..4; past 4 is error
@@ -1915,11 +2215,33 @@ and a blocks mode).** Every shake reached the board as `[coildrive] node 1 coil 
 500 ms at 0 as 51/255 for 500 ms; 3000 ms at 0 as 1000 ms (the hard ceiling); 200 ms at 2 as 31/255; the game's
 jackpot shake as 51/255 for 500 ms; the multiball start's first steps 334 and 100 ms at 31/255 on time, the rest
 dropped by `pm_shake_stop`; 5000 ms at 3 as 23/255, and `pm_end` one second in sent the game's OFF (cmd 4d,
-4001 ms of it left); a shake asked for while one ran was refused; the 15 s a minute cap refused the next. A mode
+4001 ms of it left); a shake asked for while one ran was refused; the 15 s a minute cap refused the next. (PAD-414's
+limits; PAD-658 changed them - above - and its run is under "PAD-658" below.) A mode
 file's `shake start 1500 2`, `shake shot game jackpot <left ramp>` and `shake end 1000 3` shook as it started,
 on each left ramp, and as it ended - that one ran its 1000 ms after the END with no OFF. The setting read 4 on
 the stock card; the game itself shook as a game started (334 ms at 0, then 2000-4000 ms at 3). Not yet
 machine-tested (David's Premium has a shaker fitted).
+
+**PAD-658 (emulator, stock Godzilla LE 1.16, `PAD_COIL_PROBE=1`, a blocks mode with 150 ms soft on every shot; run
+`shake_proof_r1`).** 33 soft shakes in about 25 s, every one on the board as 23/255 for 150 ms (PAD-414 refused the
+21st); the Building's 150 then its 800 ms medium in the same ms, the 800 the one sent (31/255 for 800: the longer
+takes over through the game's own call); the game's 3 s rumble taking over the Right ramp's 150, and a Left ramp
+inside it skipped (nothing on the board); the Big loop's multiball start taking over its 150 - the game's OFF, then
+its five steps 50 ms later than its own times (317 ms in: 330, 100, 500, 1000, 5000 ms at 31/255) - and running out
+after the mode's END in the same tick. segv 0, fatal 0.
+
+**PAD-670: where the 30 s comes from (emulator, stock Godzilla LE 1.16 at its default SHAKER MOTOR Maximal Use,
+real time, muted, `PAD_COIL_PROBE=1`; `tools/spike2_emu/coilduty.py` on the board's lines;
+docs/plans/pad670_shaker_ceiling.md).** The game's call has no limit a minute and no rating for the motor is
+published, so the game's own shaking is the measure: 6.7 min of hard unattended play (longplay.sh's shots, one ball
+kept alive, until the game ended) ran the motor 42 s in all, **13.5 s in its busiest minute**, at most 5.1 s
+unbroken, its long rumbles only at its softest power (23/255); Stern's own Cycling Coil Test gives it 1 s a pass.
+30 s is that busiest minute twice over and never more on than off, and it now counts **the whole motor** - the
+game's own shakes too, and what ran (the game's own stop cut three of six 5 s shakes of ours 3.5, 4.0 and 0.5 s
+short, which the runtime had counted whole). The run: `shake_test_mode.c` asking 5000 ms at 3 every 5.5 s for 80 s
+while the play went on. Main's runtime refused at "the modes have run the shaker for 30 s" while the board showed
+ours at 22 s; this one refused exactly when the board's minute (26.2 s, the game's 3.2 s in it) plus the 5 s asked
+for passed 30 s, shook at 24.8 s, and the motor's busiest minute stayed at 27.6 s. segv 0, fatal 0.
 ### Every other latest title with a shaker (PAD-474)
 
 Every Spike 2 title but the two Home Editions has a SHAKER MOTOR device (coil 0 of the cabinet board; on most
@@ -2000,7 +2322,7 @@ Pro 1.16's routine is the LE's instruction for instruction, so it has the LE's l
 | Venom Pro 1.07 | `0x00192dec` | ms force | 51 | 0/334/484/1536/2048 | 1536 | tap 80, short 200, medium 484, long 1024 |
 
 **Measured (emulator, PAD-474: every build above but D&D LE on its stock card, hidden, muted, `PAD_COIL_PROBE=1`,
-the pinned runtime, through `rigbatch.sh`; D&D LE starts no game on the rig, so its lines are unproven).** A mode file with `shake start <its longest at 0> 0`, `shake shot game <its short
+the pinned runtime, through `rigbatch.sh`; D&D LE by PAD-713 once the rig started its game: start and end 51/255 480 ms on node 1 coil 0, as on the Pro).** A mode file with `shake start <its longest at 0> 0`, `shake shot game <its short
 shake> <every shot>` and `shake end <600 ms or its longest> <its softest used strength>`: every runtime `shaker:` line
 was followed on the board within ~20 ms by `[coildrive] node 1 coil 0` at the game's power for the time asked, cut
 to the stock setting's longest (setting 2 on Elvira, 3 on most `drive` titles, 4 elsewhere; Metallica at its operator's
@@ -2105,6 +2427,35 @@ nothing, and the blocks' notes say so). Where the port names no shows (a Pro, ev
 the block are greyed with the reason (`mode_project._shows_cannot`); a name the title does not have is refused on the
 Lights page; Port to... the Pro leaves both out (kept with the Premium/LE's shots for the way back:
 `MODEL_FIELDS`), and a mode taken to another game drops a show that game does not name.
+
+**A show the game starts by a call, and a show on each hit (PAD-642).** A James Bond 007 LE owner: "Every time a lit
+insert is hit in a mode in James Bond LE there is a lightshow that quickly alternates inserts and GI in a 1.5-2 second
+show. Would like to see this lightshow as an option in custom modes so those could be consistent." That flash has no
+body of its own to play. Every mode of the game's answers its lit shot with its show 464 (LE 1.06; body 0x139448),
+which calls 0x19e534(colour); that starts two shows through the game's own show starter (`site show_start`, numbers
+into its table 0x7c46b8): 450, the GI (body 0x19d51c), and 448, the inserts (body 0x1bea60 - the Wide slow fade
+above, which a fresh process plays 25 times over: 11.7 s), each told the colour (+0xc0, an index into the game's
+palette 0x62f6d4) and 3 repeats (+0xc8). The game's own table of them (0x61f3a4) uses colours 1-10, 2 s each (1.5 s
+for purple). Pro 1.06 is the same code: 0x19cd44, shows 448 and 446. So a port may name a show by that call:
+
+```
+site show_stop_number     0x002fce04 ...   # the game's "stop every show with this number"
+site show_13              0x0019e534 ...   # the call (not a process body)
+value show_call_13        2                # ... made with this argument (here the colour: red)
+text show_numbers_13      450 448          # the game's shows it starts, stopped by show_stop_number
+text show_name_13         Lit shot flash red
+```
+
+`pm_game_show` makes the call instead of starting a process, with every limit above (only the running mode, in a
+game, one at a time, not while the ball ends); `pm_game_show_playing` is 1 for its `show_secs`; `pm_game_show_stop`
+(or a new show) stops the game's shows by those numbers. The shows it starts are the game's own processes, flagged as
+shows, so the game's exit frees their lights. Bond LE and Pro 1.06 name ten: Lit shot flash white, red, green, blue,
+cyan, magenta, purple, yellow, orange and dark orange (the game's colours 1-10). The 60th Anniversary LE's program (another
+framework) has no such call - nothing starts two shows with a colour and a repeat count - so it names none.
+
+A form mode plays one on each hit of a shot that scores too (`show_hit <name>`, Lights > The game's light shows > When
+a shot is hit), in place of the shot's white flash (PAD-415), as the game's own modes answer a lit shot; a blocks mode
+puts "Play the game's light show" in a "When a shot is hit" script.
 
 ## The game's own mini-wizards (PAD-436)
 
@@ -2272,9 +2623,130 @@ the same call); a machine. Bond LE 1.06's own boot crashed at times on the rig t
 0xaa470, then its dispatch watchdog) with no mode object at all, while other rigs loaded the disk: a boot that got to
 attract ran clean.
 
-**Not done.** Bond Pro 1.06 has no port yet; the 60th Anniversary edition (its own rules) was not looked at. The game's
-own lighting by parts was left as it is: stopping it ("instead of", PAD-428's first ask) would hold off `0x110cac`'s two
-calls in the collect, a separate choice.
+**James Bond Pro 1.06 (PAD-473).** The Pro's program carries the LE's mini-wizard code, 0xfcc lower: the same table
+(`0x621d38`, the same four entries, inserts and Ahoy's start `0x20530`), the start `0x10fdcc` (called from the Right
+ramp's handler `0x1ad998`), the lighting `0x10fce0` (from the collect, twice), the player's words `0x81dc34` and the
+refresh byte `0x869ab8`, each read off the same instructions as the LE's. Proven in the emulator (2026-10-09, rig 1,
+the stock Pro card, hidden, muted): `game_wizard light Goldfinger's Jackpot` lit it (selected 2, lit 0x4, the game's
+ready check 1), the Right ramp's switches started it (played 0x4, its running query 1, GOLDFINGER'S JACKPOT on the
+glass), and `game_wizard start Ahoy Mr. Bond` while it ran left Ahoy lit for the ramp (the game's own check: one is
+running). No abort.
+
+**Not done.** The game's own lighting by parts was left as it is: stopping it ("instead of", PAD-428's first ask)
+would hold off `0x110cac`'s two calls in the collect, a separate choice.
+
+**The game's own check, for a mode of yours lit at the Right ramp (PAD-503).** A Bond owner lit modes of their own at
+the Right ramp for the two films with none (a blocks mode's Light the mode at). The game's start of one of its own
+(`0x110d98`) first asks `0x110b90`: none of the four running, no henchman, villain or Q Branch mode (`0x15f410`,
+`0x1360d4`, `0x19ea7c`), nothing at `0x9f4e0` or `0xdbf70`, no Victory Laps; 1 = clear. The port's flags show none of
+the henchman and villain modes, so the owner's Right ramp in the middle of Mr Osato started their mode. The port names
+the check (`site wizard_way 0x00110b90 0xe92d4038 0xebfe3a51`; the Pro's `0x0010fbc4`, the same code 0xfcc lower) and
+`pm_game_wizard_way()` answers it: 1 clear, 0 in the way, -1 no game or no check. A blocks mode's lit shot waits on it
+whatever the mode says about the game's modes, and a Start the mode that gives way or holds the game's modes off waits
+on it as on the game's flagged modes. Measured in the emulator (stock card): 1 through plain play, 0 from the game's own
+start of Mr Osato (`0x123f84`) on, and with game flag 139 set. Its light waits on it too (PAD-556): while it is 0 only
+the insert held solid (the film's) shows, and the shot's lights and the villain chase come once it is 1, as the game's own
+wait to cycle their villains until the mode that won the film's last part is over.
+
+**A lit mode claims its shot (PAD-503, the owner on v1.169.3).** Waiting was not enough: the Right ramp is where Bond
+starts its henchman and villain modes (on the rig the first ramp of a fresh game started one, the check's `0x1360d4`
+part 1), and the game handles a switch before the modes hear of it - the switch hooks only count a hit, the tick hands
+it on - so every ramp started the game's next one and the owner's mode found it running. `pm_lit_claim(shots)`, renewed
+every tick while the mode would start there now (the player up's, nothing of its own or the game's in its way; a claim
+not renewed for 250 ms is gone): a hit on a claimed switch, seen by the switch hook as the drain hands it to the game,
+holds off the game's mode starts the port's `block_start` lines hook while the game handles that switch (400 ms at
+most; one of our modes beginning ends it). A refused mini-wizard of the game's stays lit (`wizard_refused`); a refused
+henchman or villain is simply not started and waits for a later shot. Shots from switches only. Proven in the emulator
+(stock card, a blocks mode lit at Right ramp exit opto): `[pad] lit: the game's mode 24 (Fiona Volpe) did not start -
+switch 48 is YOLT WIZARD's lit shot`, then `START (its lit shot)` 16 ms later, the game's check still clear.
+
+## The game's own mini-wizards on the other titles (PAD-473)
+
+Every latest build but James Bond's was greyed "The app has not found X's own mini-wizards". PAD-473 read each game's
+own modes and its rulesheet (`docs/plans/pad473_mini_wizards.md`): three games have none of their own - The Munsters
+(Munster Madness is its final wizard), the Star Wars Home Edition (Jedi Multiball) and James Bond 60th (007 Mode) - and
+the Modes tab leaves the section out on them (`mode_project.NO_GAME_WIZARDS`), as it does a machine part a machine
+lacks. Every other game has some.
+
+**The C++ titles: the mode route.** Bond keeps its mini-wizards in a table of its own; the C++ titles (`cmode` /
+`crule` classes: Godzilla, King Kong, Iron Maiden, Jaws, Star Wars, TMNT, ...) do not, but they all start one of their
+modes the same way: a rule of the game's calls the mode object's START virtual with only the object (TMNT 1.59:
+`getter(0x18)->v[39]()`, `value stock_slot_start`), and the mode's ACTIVE virtual (`value stock_slot_active`, the one
+`stack no` asks) says it runs. So the port names each mini-wizard's object, and the runtime starts it the game's way:
+
+```
+data  wizard_obj_1    0x007b5e78   # cmode_monster_zero (Godzilla Premium/LE 1.16)
+text  wizard_name_1   Monster Zero
+text  wizard_film_1   Godzilla Multiball's Super Jackpot      # what earns it, shown beside the name
+data  wizard_ready_1  0x...        # optional: the game's own mode that lights it for a start shot
+text  wizard_shot     Left ramp    # with a ready mode: the shot that starts a lit one
+```
+
+- `pm_game_wizard(n, PM_WIZARD_START)` calls the object's START once nothing of the game's is in its way: none of its
+  own modes running but its base play (the walk `stack no` uses; a mini-wizard's own ready mode is not in its way),
+  and no mode of yours holding the game's modes off. Until then it waits, tried every 250 ms while that ball lasts:
+  `[pad] game wizard 2 (Terror of Mechagodzilla): a multiball (cmode_planet_x_multiball) is in its way - started the
+  moment nothing is, this ball`. Several handed over start in order, never on top of each other. If the ball ends
+  first, it is lit (its ready mode) where the game has one, and dropped where it has none.
+- `PM_WIZARD_LIGHT` starts its ready mode (Star Wars' `clightsaber_duel_ready`, TMNT's `cteam_up_ready`): lit, and the
+  game's own start shot starts it. One the game lights for no start shot of its own is started instead (the Modes tab
+  offers only Start for it, and the file says `start`).
+- The game's own way to them is left as it is: its rules still light and start them too (no claim: Bond's lighting
+  veto has no counterpart here).
+- `value wizard_slot_enable <slot>`: where a mode's START returns at once unless the game's rules enabled it for the
+  player first (Foo Fighters 1.04: START asks v[46], which reads the player's byte at the object's +0x83; v[42] sets
+  it, v[43] clears it), the runtime calls that ENABLE virtual just before the START.
+- The objects are the game's static ones: their vtables are written by the game's own constructors, which have not
+  run when the runtime arms, so the arm checks the port's two slot values and that each object is in the game's
+  memory, and every hand-over checks the object's vtable and both slots' functions in the game's code before it calls
+  anything (`[pad] game wizard 1 (...): not handed over - its mode object (0x...) is not one of this build's`).
+
+The lines are written from each build's own mode objects (`stock_scan_cpp`, the scanner the block lines come from)
+and the names and what earns each from the game's rulesheet. Which builds are proven, and how: the plan, and
+`mode_project.WIZARDS_PROVEN`.
+
+**The plain-C titles: the function route.** Batman '66, Aerosmith, Guardians, Metallica, Stranger Things and the other
+plain-C titles have no mode objects: a rule of the game's starts a mini-wizard by calling its start function, which
+asks the game's own rules first and returns 0 when they say not now, and the mini-wizard keeps a game flag of its own
+while it runs (`FG_..._ACTIVE` in the game's flag names: the item-164 bitmap). So the port names the start and how it
+says it runs:
+
+```
+site  wizard_go_1        0x001368ec 0xe92d4f70 0xe24dd008   # its start (Batman '66 1.14's Batusi Multiball)
+value wizard_flag_1      84    # FG_MINOR_VILLAIN_WIZARD_MODE_1_ACTIVE (the port's game_flags lines name the bitmap)
+text  wizard_name_1      Batusi Multiball
+site  wizard_earned_1    0x...   # optional: the start's own "has the player earned it" check
+value wizard_arg_1       1       # optional: the r0 the game's own call passes (else 0)
+value wizard_proc_1      223     # instead of a flag: a process of its own (site proc_exists)
+data  wizard_running_1   0x...   # ... or a byte of its own, non-zero while it runs
+data  wizard_built_1     0x...   # optional: the construction guard of the object wizard_arg_1 is (bit 0 once built)
+```
+
+- START waits as the mode route does (nothing of the game's in its way: the stack's multiball and modes query; no
+  mode of yours holding the game's modes off) and then calls the start as the game's rules do. Its own check may still
+  say not now (0 back, and its flag not up): `[pad] game wizard 1 (...): the game's own start would not start it now -
+  started the moment it would, this ball`, tried again every 250 ms while that ball lasts. A start that says it
+  started is never called again, flag up or not. There is nothing to light: LIGHT starts it.
+- The in-the-way check is the runtime's, not only the game's: Batman's Gas Attack Multiball's own start starts it on
+  top of the Batusi Multiball (it asks only that it is not running itself), and Metallica's The End of the Line on top
+  of Blackened. Another of the port's own mini-wizards running is in the way as well, whether the stack sees it or not
+  (X-Men's Save Senator Kelly started on top of the Future: neither is a multiball, nor among its running bytes):
+  `[pad] game wizard 2 (...): The Future (another of its mini-wizards) is in its way`.
+- Starts that are methods take their object in r0 (`value wizard_arg_<n>`: X-Men 0.98's mode singletons, Jurassic Park
+  The Pin's rules): the game builds those itself, so `data wizard_built_<n>` names the object's construction guard and
+  the start is not called while it reads unbuilt ("the game has not built its object yet - started the moment it has").
+  X-Men's own enable-and-start is the call (`0x7970c`: the player's enabled byte, then the start, which returns at once
+  without it), the way Foo Fighters' START needs its enable on the mode route.
+- `site wizard_earned_<n>`: most of these starts ask first whether the player has earned it (Aerosmith 1.16's Medley
+  Multiball: every song played; Guardians' Cherry Bomb: four of its eight). A mode hands one over instead of the player
+  earning it, as on Bond, so that check is hooked as the port arms and answers 1 only while the runtime calls that
+  one's start; the rest of the start's own check (not while another of its modes runs, not twice a game) holds, and
+  the game's own calls of it are answered as they always were. It must open with two plain instructions, or `push
+  {.., lr}; bl` (the hook's two shapes); the arm turns the route off otherwise.
+- `value wizard_arg_<n>`: Stranger Things 1.13's Season One and Two Wizard Modes take one argument, 1 to start without
+  asking whether it is earned (its Send It Back challenge starts Season One that way), 0 to ask.
+- A start that returns nothing (Metallica's Blackened Multiball) leaves whatever was in r0: not 0 reads as started,
+  and a 0 is judged by its flag.
 
 ## Ports: why your mode runs on any game
 
@@ -2473,6 +2945,13 @@ button's RGB light (LOCKDOWN BUTTON-R/G/B in the light table), tied to the butto
 flip is a hit, so a flipper button as a scoring shot pays on every flip. The three Godzilla ports
 carry these lines (`portswitch.switch_source` read their drains).
 
+On Spike 3 (PAD-1322) the 64-bit drain has no per-switch call: `site switch_edge` is a point inside its loop
+that every edge passes (hooked so the logger reads the switch's record from a callee-saved register), with
+`value switch_record_reg`, `switch_id_at`, `switch_level_at`, `switch_desc_via`, `switch_flags_at` and
+`switch_polarity_at` in place of Spike 2's drain and table lines; `s3port.py` reads them off the program's own
+drain. The flipper buttons there carry flags 0 as on Godzilla (docs/plans/spike3_modes.md, "The switch edges on
+Spike 3").
+
 Emulator-proven 2026-09-27 on Godzilla Pro 1.15, Pro 1.16 and Premium/LE 1.16, one boot each in a
 rig slot (`value switch_edge_log` on): in play the game's mode mask is 0, so every press is ONE hit,
 on its press edge (level 0; the release is level 1 and no hit); a mode scored the left and right
@@ -2509,6 +2988,76 @@ sites do:
 
 The game draws that surface, so there is no draw loop. `surface_state` reads 2 while the clip
 plays. `surface_stop` stops it.
+
+The game puts its own clips on the same surface (James Bond's Ball Lock or Extra Ball in the
+middle of a mode). PAD-530: with three more port lines, a clip of the mode's comes back after
+the game's clip, where it would be by then, as the game keeps its own film reels in step:
+
+```
+site surface_seek       0x...    # (surface, ms): the player's gst_element_seek
+site surface_duration   0x...    # (surface) -> ms: query_duration
+site surface_position   0x...    # (surface) -> ms: query_position
+text backdrop_idle      MainPlayLoop   # the game's own main-play video: its clip is over
+```
+
+The runtime hooks `surface_set_video`. When the game asks for a clip while the mode's clip
+plays, it notes how far in the mode's clip was. Once the game asks for its main-play video, or
+the surface is idle, it plays the mode's clip again and seeks it on. It hooks `surface_play`
+too, whose second argument is the game's loop flag: a clip the game LOOPS is a background
+(Bond Women's `BondWomen_007_Loop` runs for as long as its multiplier does), so it plays one
+pass, its own length and at most 3 s, and then the mode's clip takes the surface back. But a
+loop that is the backdrop of one of the game's display effects (Bond's spinner satellite, effect
+75, a see-through picture over `Diamond_EarthSpin`) stays for as long as that effect has the
+screen, and the mode's clip comes back when it ends: with `data display_effects` (the effect
+manager pointer) the runtime reads the effect now, and one whose table record lacks the
+background flag 1 and whose priority is at least `value display_over_tv_min` (128) is over the
+TV (PAD-639; Bond's serve, effect 55 at 96, draws nothing there). The same wait holds for a clip
+the game plays once under such an effect: Bond's skill shot awards (effects 392-394 LE, 391-393
+Pro) play a hat toss and keep their picture over its last frame until the surface is idle, so the
+mode's clip (or a backdrop loop) going back at the toss's end kept that picture up for good. An
+effect owns the game's clip when the game put it on the surface (not its main-play video) at most
+1 s before the effect began, or while it ran. While it does, nothing of the mode's takes the
+surface: not the clip put back, not the backdrop loop (even the one due at once after the mode's
+start clip), and a new `pm_clip` waits for the effect's end and then plays from its start. A clip
+the game plays once (a lock, a start, an award) is waited out. It does not come back if
+the mode ended, another mode of ours began, or its time ran out under the game's clip. James
+Bond LE and Pro 1.06 named them first (LE at `surface_play` - 0x36c, - 0x6b4 and - 0x510, Pro the
+same distances). A port without them keeps the old way: the game's clip ends the mode's.
+
+PAD-725 put them in every clip v2 port (62). The newer player has them at Bond's distances; the
+older one (Aerosmith LE 1.15, Avengers 1.09, Batman 1.13, Guardians LE 1.14, Iron Maiden LE 1.16,
+Mandalorian LE 1.44, Rush LE 1.18, Stranger Things LE 1.12, Black Knight SoR LE 1.18) at
+`surface_play` + 0x1bc, - 0x1274 and - 0x360. Each was placed by Bond LE's recipe and checked by
+what it calls: on the newer player, the function that its call on the player (`[surface + 0x550]
++ 8`) reaches calls `gst_element_seek`, `gst_element_query_duration` or
+`gst_element_query_position` and no other; on the older one, its virtual call on the player
+(`[surface + 0x230]`, slots 0x20 / 0x28 / 0x24) reads a vtable entry that does. After a clip is
+put back, the runtime reads where it plays a second later (`clip: "<clip>" plays at N ms, 1 s
+after it was put back at M ms`), so a log shows the seek took.
+
+**The game's reel (PAD-725).** Aerosmith, Guardians, the Bonds, Led Zeppelin, Metallica, Rush and Stranger Things
+keep a clip of their own in step with a timeline of theirs (a song): while its window is open, the reel's tick reads
+the surface's position every frame and pauses, seeks and plays the surface to where its timeline is, whatever clip is
+on it. In the emulator it paused a clip of ours 50-100 ms in on Aerosmith 1.16 and Guardians 1.15 (the surface read
+state 1, so the clip counted as over and was not put back), and it played the first half second of the backdrop loop
+over and over (the game's play from the reel every 133 ms, the loop asked for again every 500 ms). With
+
+```
+site reel_tick          0x...    # push {r4-r10, lr}; mov r4, r0; ldr r0, [r0, #0x1c]; cmp r0, #0; popeq
+```
+
+the runtime hooks the tick, and while the last clip put on the bank's surface is ours (a clip, the backdrop, or one of
+ours that ended there), a reel whose surface (`[reel + 0x1c]`) is the bank's is handed a reel with no surface, so its
+tick returns at once (`clip: the game's reel 0x... would keep the bank's surface in step - it waits while ours has
+it`). Once the game puts a clip of its own there, the reel takes it up again and seeks it to where its timeline is.
+The tick was found on every clip v2 build by what it calls (`surface_position`, `surface_seek`, `surface_play`) and that
+prologue: 18 ports carry it, and no other clip v2 build has one.
+
+For a test, `pm_game_clip(name, loop)` puts a bank clip on the surface the way the game puts
+its own (not marked as the mode's), so a rig can stand in for a title's Ball Lock; and
+`/dump/cliplog.on` at start-up logs every clip of the game's on the bank's surface (`clip log:
+the game sets "<clip>" on the bank's surface (in a game)` and each play's loop flag), which is
+how a title's main-play video is found.
 
 The port lines:
 
@@ -2701,13 +3250,15 @@ The app's Modes tab makes modes as files (`mode_file.c` runs them), and it reads
 same port files: `mode_project.profile_from_port()` turns each one into the title's
 profile. The tab finds the project's card (the extract's record of it, or the project's
 stock image; a renamed card is read from its own `/spk/index/<game>-<version>.sidx`) and
-uses the port whose `game` and `version` match. A card with no port gets a message
+uses the port whose `game` and `version` match - on a Spike 3 card, the one in `ports/spike3`
+(its profile is keyed `<game>_<version>_spike3`, labelled "(Spike 3)", and none of the Spike 2
+build's emulator proofs carry over to it). A card with no port gets a message
 pointing here. What each part of the tab needs from the port:
 
 | Tab section | Needs in the port | Also needs |
 |---|---|---|
 | Starts on, Shots that score | `shot` lines (and `shot_mask_bits` when the game sends 32 bits), and `switch` lines with a `switch_hit` site | a port not in `SWITCH_SHOTS_PROVEN` says its switch shots are not proven |
-| Examples | `text example_start_shot` | Godzilla's ready-made modes appear wherever every shot they name exists |
+| Examples | `text example_start_shot` | TARGET RUSH, the one example on every title, starts on it |
 | Sound: count down | the `callout` and `callout_nth` sites, and `callout countdown` | `callout ten_seconds` adds the call at 10 s; without it the count is 5..1 only. `value countdown_first <n>` when the request's list opens with something else: the clip "one" is in (Iron Maiden 1.16's 351 opens with a sting, so 1); `pm_callout_nth` adds it to any clip asked of the countdown role. `value countdown_step <n>` when every number is a request of its own: `callout countdown` names the "one" request and the others follow it by that step (Star Wars ELG 168, Munsters, Jurassic Park Pin, Batman 66 1061 count down the ids; Led Zeppelin, Sword of Rage count up; Bond 60th 542 steps by 2, each number in two voices). `value countdown_stride <n>` when one request holds every number in several voices, number by number: the clip for the count is `n * stride + countdown_first` (Deadpool LE 962 / Pro 967: five voices each, "ten" first, so first 5, stride 5) |
 | Sound: the game's own call | `callout time_up` | without it nothing plays when time is up |
 | Sound: my sound | the `sound_lookup` site and `callout time_up` (the call it replaces) | a time-up request with variants (Guardians' 254: "Time's up." / "Your time is up!" ...) gets the sound in place of every variant, so whichever the game picks plays it |
@@ -2848,10 +3399,22 @@ The runtime records the endpoint at `agent_header` and REFUSES `agent_begin` (a 
 (the high-score table) or `/ingest/v1/game/game_events` (the event stream achievements are earned
 from). The sender then logs `Failed to begin construction of GAME_SESSION_END message`, the
 outgoing queue drops the entry (a failed send is dequeued, never retried) and the game plays on.
+
+**Achievements (PAD-698).** The game decides Insider achievements itself, on the machine: it asks
+the agent for the list of them (`GAME_ACHIEVEMENT_QUERY`), watches the game for them and shows
+NEW INSIDER ACHIEVEMENT! - a machine with modes showed one while every score report was held
+back. The gate refuses that query too, so the game has no list and awards nothing (its lookup
+says `Achievement descriptors not loaded.`). The query has no endpoint path, so the gate knows it
+by its message type (`agent_begin`'s r2), read out of the game's code at boot (`achq_find`): the
+one sender that loads `Failed to begin construction of GAME_ACHIEVEMENT_QUERY message` right after
+`bl agent_begin`, with `mov r2, #type` before the call. It is 28 on every build measured (the 57
+newest builds, Godzilla Pro 1.15 and every Heisei build), and exactly one sender uses it. A game
+where it is not found arms nothing, like a port without the two sites.
 The login, the heartbeat and the message of the day are the agent's own; audits, alerts, the
 home team, player properties, the free-game code and the descriptor queries go out as before.
-`mode.log` says `insider: score reports stay on this machine ...` at boot and names each endpoint
-the first time it is held back.
+`mode.log` says `insider: score reports stay on this machine ... the achievement query, message
+type 28, loaded at 0x..., is held back ...` at boot and names each endpoint (and the achievement
+query) the first time it is held back.
 
 **The gate is required.** A port without both sites arms nothing (`insider: the port has no
 agent_header/agent_begin ... NOTHING IS HOOKED, the game runs stock`), and the app refuses to
@@ -3052,6 +3615,7 @@ lines:
 | `[pad] lamps: 88 named inserts (24 tied to a shot)...` | the port's `lamp` lines were read; `the game counts 592 lights` once the game has counted them |
 | `[pad] lamps: our layer at priority 255; the game's layers now ... (* ours)` | the first hold made the mode's lamp layer |
 | `[pad] lamps: N insert(s) held (...)` / `handed back to the game` | a hold, a release |
+| `[pad] lamps: LEFT RAMP back to Y` / `handed back, N to the game and M to the mode under it` | a release gave an insert back to the mode it was taken from (PAD-601) |
 | nothing at all | no port found, or this process is not the game (normal for the game's helper processes) |
 
 ## When something goes wrong
@@ -3248,7 +3812,8 @@ code, not listed in data: the battle rule copies a table of exactly seven {slot,
 the screen and the rule check the slot number against 6 and 7 in more than a dozen places, and the
 screen's scene has exactly seven pictures, tiles and names (the evidence, with addresses, is in
 item 146's entry in `plans/TODO.md`, and `tests/test_spike2_mode_roster.py` reads it out of the
-program). Adding an eighth would mean moving that table and rewriting every one of those checks.
+program). Adding an eighth would mean moving that table and rewriting every one of those checks. The SCREEN
+can take new monsters of your own instead, each standing in one place (MORE KAIJU, PAD-707, below).
 
 **Claiming a slot.** In C:
 
@@ -3279,6 +3844,17 @@ In a mode file, one line: `roster_slot 0`. A mode with a roster slot needs `seco
 above 15 is logged and ignored (a slot the game does not have, 7-15, is logged as out of range).
 `trigger <shots> 0` still starts nothing, as it did before the key existed: only the pick does.
 
+**On the Modes tab (PAD-589).** *Starts on: the player picking* <battle> *on the battle selection screen* writes
+`roster_slot <n>` in the trigger's place, so only the pick starts the mode. Offered where the build is proven
+(`ROSTER_PROVEN`): Pro 1.15, Premium/LE 1.16 and Pro 1.16. Measured on the stock Pro 1.16 card (emulator, rig 1,
+muted): the claim silenced slot 0's callout (1888 -> 0); the ramps lit RAID BATTLE READY, a ball held in the
+scoop opened the selection screen, and the pick started the mode 3017 ms later (`claimed - the game's battle does
+not start`); at its clock's end `battle over for player 1` and the pick counted for the player's city (mask
+0 -> 2). Seven files the tab wrote, one per battle, all claimed at boot; the cursor rested on Megalon and its
+mode started 3000 ms after the pick, with the same end. The cursor's starting place varies from game to game, and
+a battle picked that no mode holds starts the game's own battle as before. The slot's picture and name are the
+Scenes tab's (Kaiju Battle Select), like any other screen.
+
 Slots on Godzilla (Pro 1.15 and Premium 1.16): 0 Ebirah, 1 Titanosaurus, 2 Gigan, 3 Megalon,
 4 King Ghidorah, 5 Megalon & Gigan, 6 King Ghidorah & Gigan. At the start of a game only some are
 open; the others show as locked and the cursor skips them.
@@ -3303,7 +3879,77 @@ battle's start writes it; a pick leaves it 0), a per-city byte at +92 that the s
 of the battle's flags is set (probably "won"; not measured), what the stop does after setting the bit
 (Pro 1.15 `0x122d14` on: a branch for the first time the bit is set, and a per-player byte at +135; not
 read), the battle's audits and its champion. A pick that is given back without the mode running (it
-could not start, or the ball ended first) is counted too.
+could not start, or the ball ended first) is counted too. (PAD-706 does all of it, below, where the port can.)
+
+**It counts as the battle it replaced (PAD-706).** Everything the game keeps for a battle lives in the
+battle's own object and is written by the battle's own START and STOP, which a pick never ran. Read at the
+desk on Premium/LE 1.16 (Ghidra and objdump; Pro 1.16 is the same code at its own addresses):
+
+- `CBattle::start` (`0x7fa78`) clears the battle's stopped byte (`+0x13+p`) and stop reason (`+0x17+p`),
+  writes the battle's mode id as the battle the player's city holds (the cities rule's `+0x38` vector; not
+  for a battle whose flags `+8` carry `0x10`), then the cmode start counts the start (`+0x3c+4p`), calls the
+  manager's "started" (`0xd47fc`: the battle's STARTED audit) and keeps the player's clock at `+0x54`.
+- `CBattle::stop` (`0x7f998`, (battle, reason)) counts a win (`+0x64+4p`), runs the cmode stop (stopped
+  byte, reason, the battle's END, the manager's "stopped": the COMPLETED audit when the reason is 1), then the
+  battle rule's bookkeeping: for a win, the city's "won" byte (the cities rule's `+0x50` vector) and, the
+  first time in that city, the city award (show 0x106 and 5M to 40M by how many cities are won, then events
+  0x4f-0x51); for a loss the battle stays qualified when adjustment 174 is 1; then the ramps and fix-2's city
+  bit. Every roster battle's own STOP (v[11]) calls it, except Megalon & Gigan's multiball, whose stop always
+  counts a win; v[11] adds only the battle's victory screen.
+- The selection screen's "Completed" is the battle's stop reason (`0x1201d8` on Pro 1.15: non-zero =
+  completed); a battle lost has reason 0 and stays open.
+
+So at a pick a mode takes, the runtime writes what the START writes (the battle itself does not start: no
+shots, screens, timer, lights or music of its) and zeroes the battle's points this time (its award's
+`+0xf0+8p`, which its END reads: with none, its ending clip does not play); and when the mode gives the
+pick back it calls `CBattle::stop` with the mode's outcome, `pm_roster_over(won)`. The game then counts the
+battle exactly as one of its own: won, the slot shows Completed, the COMPLETED audit and the battle's wins go
+up, the city is won (and its award plays), and what follows from that (the tier-2 slots, King of the Monsters'
+qualification) follows; lost, it is a lost battle. `pm_roster_done()` is `pm_roster_over(0)`. A slot whose
+battle stops itself (`value battle_own_stop_slots`, Godzilla's `0x20`: the multiball) runs its v[11] for a win
+and fix-2's path for a loss. Logged as `[pad] roster: slot 2's battle (mode id 14) counts as started for player
+1 in city 0` at the pick and `the pick ends as a WON battle for player 1 (slot 2, mode id 14): the battle's own
+stop ran - completed 1, wins 1, city 0's mask 0 -> 2` at the end. A port without the lines (`site battle_stop`,
+`site battle_started`, `site battle_clock`, the `value battle_*` offsets, `value roster_city_battle_vec_at`)
+gives the pick back as before (fix-2).
+
+**Played again until it is won (PAD-706).** The game does not forget a battle the player lost (its clock, or
+a drain: the manager stops it with reason 0 at the ball's end): it stays qualified, and the next lit scoop
+does not open the selection screen - the game's city pick (`0x198f24` on Premium/LE, `0x195284` on Pro 1.16)
+sets the player's city and, when that city holds a tier-1 battle (ids 12-15) it has not won, STARTs that
+battle again, its progress kept (run2: Gigan drained at 6 hits restarted at the next scoop, `SP START 14 lr
+0x199310`, and was won). A pick now makes the city hold the battle, so that START would be the GAME's battle in
+the mode's place. `site roster_resume` is that START's load (the same two words as `roster_start`'s; r0 = the
+battle): a battle whose slot a mode holds is taken as a pick of that slot again - `on_pick` runs, logged `slot 2
+restarted by the city pick (its battle was lost; the game plays it again)` - and the mode plays again, until it
+is won, as the game's battle would. A mode keeps its progress across those plays in variables that reset each
+game or each ball, not each time the mode starts.
+
+**After its finish (PAD-707).** The battle's own stop shows the game's battle-over display on the one video
+surface, so a pick's end that comes as its mode ends (`pm_roster_over`, after `pm_end`) waits for the mode's finish
+(the scoop's paragraph, above) and is given when the clip ends, at the ball's end, or as the game ends - logged `the
+battle KING CAESAR took ends once its finish and its total have played` and `KING CAESAR's battle ends now (its
+finish and its total are over)`. On v21 KING CAESAR's cashout was cut a second in by that display, and the scoop
+kicked with it. PAD-733: it also waits out the rest of the mode's ending hold (`pm_end_holding`: a block mode's TOTAL,
+3 s after its clip): on v29 the game's battle-over display came within 15 ms of the final blow's clip, so the TOTAL
+after it was never seen.
+
+**Beaten in its city (PAD-707).** A tier-1 battle's own shot handler, at the monster's last hit and before its
+victory show and its stop, calls `site battle_beaten` on `data battle_beaten_rule` (Premium/LE 1.16 `0x121c28` on
+`0x7b2e28`, Pro 1.16 and 1.15 `0x11f318`; only once `data battle_beaten_guard` says the rule is built) and sets the
+cities rule's "beaten here" byte for the player (`value roster_city_beaten_vec_at` 68, a byte a player, 4 a city).
+CBattle::stop alone left it 0 - the city stayed unfinished: the next city screen offered STAY IN TOKYO, the ramps
+qualified a battle there again, and the selection screen opened on the won battle and closed at once (David: "it
+starts the animation for mode select then it cancels itself out"; run16 frame by frame). A won pick of a slot in
+`value battle_beaten_slots` (0x0f, the four tier-1 places) does the same now: run17's bytes after the win match the
+stock win of PAD-706 run2 (`b44=1`, the ramps dark until the player travels), and after a travel the next selection
+stays up (run18).
+
+**Won or lost.** A mode in C says so: `pm_roster_over(1)` / `pm_roster_over(0)`. The mode-file interpreter:
+its `end_shot` ending it wins; with no `end_shot`, its clock running out wins (it has no other way to win, and
+a lost battle comes back at every lit scoop); anything else (the ball, a tilt, the game's own mode beginning)
+loses. A blocks mode (below): an End the mode block set to "the battle won" wins; a mode with no such block
+wins by its own end (its clock or an End the mode block); a drain, a tilt or the game moving on loses.
 
 `pm_roster_done()` is guarded, because the rule's "battle over" acts on whichever player is up (and,
 outside a game, on fields that belong to player 4). It acts only on a pick a mode took and has not
@@ -3327,9 +3973,40 @@ What the mode-file interpreter does with a pick of its slot:
   light the ramps while it still ran. Started by its trigger and never picked, it runs on as usual.
   (Tested at the desk against the host-compiled interpreter; not run in the emulator.)
 
-What the game does with a battle that a drain interrupts is different: it remembers it, and the next
-lit scoop RESUMES that battle without opening the screen. A mode in a slot is not resumed; a drain
-ends it (`.ball_end`), and the next lit scoop opens the screen again.
+A drain while a mode runs on a pick ends it (`.ball_end`) and the battle is lost; since PAD-706 the next lit
+scoop plays the mode again, as the game does with its own battles (above).
+
+**In blocks (PAD-706).** A script whose When is *When the player picks <battle> on the battle selection
+screen* (the hat is offered where the build is proven, `ROSTER_PROVEN`) claims that slot as the mode loads; a
+pick runs the script once the screen has closed (`roster_start_after_ms`), and the script's Start the mode
+starts it. *End the mode* gets a choice there: *, the battle won*. A pick while the mode runs restarts
+nothing and its end gives the battle back; a pick while another mode of ours runs waits for it; a pick the
+script starts nothing for, or one that lapses (the game ended, another player up), is given back as a battle
+lost. A mode running on a pick ends with its ball, as the game's battles do. Emulator-proven on the stock
+Premium/LE 1.16 card (PAD-706 run4, rig 1, muted): a blocks GIGAN STAGES in Gigan's slot (two Buildings win),
+picked through the scoop's screen: `counts as started for player 1 in city 0`, the STARTED audit 1 -> 2, the
+city holding battle 14, no stock START; a drain after one Building: `the pick ends as a LOST battle` (the
+battle's stopped byte set, reason 0, the city's mask 0 -> 2, still qualified); the next scoop: `slot 2
+restarted by the city pick`, the mode START again 3 s later, the STARTED audit 2 -> 3, and still no stock START
+of Gigan; its clock ran out (the mode has a won block, so a loss) and it came back at each later scoop.
+Run5 (the same card): drained after one Building (lost), restarted by the city pick, then two Buildings: `the pick
+ends as a WON battle ... completed 1, wins 1` - the battle's stop reason 1, the COMPLETED audit 0 -> 1, the city's
+won byte set, the ramps lit again - exactly what the game's own Gigan won in run2 showed; and the game went on as it
+does for a won battle: GODZILLA CONTROLS TOKYO 5,000,000 (+1 permanent bonus X, the first city's perk), Godzilla
+powerup level 2, then the city travel screen (TRAVEL TO: PARIS). Run6, David's Heisei 1.99D card (v20): the blocks
+Gigan won the same way, and a mode file with no `end_shot` in Destoroyah's slot won by its clock (`completed 1`, the
+second city's 10,000,000 award in its score); the city map then read RAID - TIER 2 UNLOCKED. Run7, stock Pro 1.16:
+the same pick, drain (lost), city-pick restart (`the resume at 0x00195398`) and win, the battle's bytes as on
+Premium/LE. Run8, the Heisei card again, a real three-stage GIGAN STAGES (both ramps x4, the Big loop x3, the
+Building; its stage kept for the game): four ramps and a loop (6,500,000), a drain (lost), the next scoop restarted
+it at stage 2, three loops and the Building (17,500,000): won, `completed 1, wins 1`. A matched pair on the stock Premium/LE card (glass_before on main's runtime, glass_after on this one): a
+mode file in Ebirah's slot won by its `end_shot` - main: `battle over`, +1,000,000 (the mode's), the city untouched
+(RAID BATTLE 0/0); now: `the pick ends as a WON battle`, +6,000,000 (the mode's and the city's 5,000,000), RAID
+GODZILLA CONTROLS TOKYO. No segv in any run. Not run: a battle slot of tier 2 (4-6; read at the desk: King Ghidorah
+and Battra stop through CBattle::stop, the multiball through its own v[11]), and Pro 1.15 (its lines are placed off its own program: every site strict, the clock checked as the start's call
+after the manager's "started", the stop and the city pick the same code as Pro 1.16 - desk-read, its card is
+archival and is not booted here). Premium 1.15 (the program of the Heisei V1.0 card) drafts every line strictly too;
+Premium/LE 1.13 does not (its battle stop, "battle over" and city step have another shape) and has no roster.
 
 **Its name and picture.** The screen draws each monster from its scene (`auto_loaded/cac32730...`):
 a colour tile (when selected), a grey tile (when not; all seven grey tiles are ONE picture), a large
@@ -3367,7 +4044,7 @@ value roster_vec_at         8
 value roster_record_size    12
 value roster_id_at          4
 value roster_qualified_at   83
-value roster_start_after_ms 3000   # the picked mode starts this long after the pick (mode_file.c)
+value roster_start_after_ms 2500   # the most a pick waits for the screen's close (PAD-733: pm_roster_closing)
 data roster_screen_table     0x006fc8a4   # the screen's slot table (.data): 32-byte records, the callout id at +28
 value roster_screen_record_size 32
 value roster_callout_at      28
@@ -3452,24 +4129,919 @@ EBIRAH DEFAULT CHAMP SCORE"), its audits ("GODZILLA VS EBIRAH STARTED" / "COMPLE
 neither), the champion ("GODZILLA VS. EBIRAH CHAMPION") and the battle's own award lines ("EBIRAH FINAL
 BLOW!"). They are program text, which `progtext.py` can rename within each string's length.
 
+**New monsters on the selection screen (MORE KAIJU, PAD-707).** David (2026-10-24): "add in a new monster to the
+existing menu but modify the menu to fit it elegantly". The seven places cannot grow in the GAME, but its SCREEN can:
+the card build adds tiles of your own to it, and the runtime walks the cursor over them. Each new monster stands in
+one place (`slot`, any place no mode claimed for itself): its battle is that place's battle.
+
+```c
+static int on_pick(unsigned slot)            /* the same on_pick as a claimed place's */
+{
+    if (!pm_begin()) return 0;               /* 0: the place's own battle runs */
+    start_my_mode();                         /* after pm_roster_start_after(): the game's screen closing */
+    return 1;
+}
+
+static void on_init(void)
+{
+    /* KUMONGA, a new monster in Ebirah's place (Biollante's on a Heisei card): its nodes the build adds, its callout */
+    pm_roster_more(0, "KUMONGA", "PadSel_kumonga", 0, on_pick);
+}
+```
+
+- **The screen (the card build, `battle_select.py`).** The build edits the card's OWN selection scene
+  (`auto_loaded/cac32730...`: a Heisei card's is DragonRR's, a stock card's Stern's - nothing of either is in the
+  app). The seven places are laid out again in GROUPS, each game place followed by the new monsters booked against
+  it (David: "pick A | B, C | D, E, F"; a gap between groups that hold new ones), the groups in their places' order
+  split into two columns where the taller is shortest (never inside a group), smaller when they must be (at most 5 new
+  ones; three make two columns of five at about 80% size), each place's lit tile,
+  state box (padlock, claw, city) and "0/4" moved with its tile; the grey sheet (all seven grey tiles in one picture)
+  is hidden and each grey tile cut out of it and placed on its own. Each new monster gets, in the scene: its grey tile
+  (the place's grey with the monster's picture in the card's own grey, its light fitted to the card's), and groups
+  the runtime shows and hides - `PadSel_<folder>_Lit` (the lit tile: the card's tile frame, the picture slanted into
+  it), `_Lock`, `_Done` (the card's padlock and claw), `_Portrait` (the card's portrait frame with the picture, and
+  the name lettered in the Heisei card's style - orange to red, a dark edge, the katakana below for the names it
+  knows - fitted to where the card letters its own) - and each place a new monster stands in gets
+  `PadSel_Cover<n>`, its grey tile, to draw over its lit one. A picture the runtime shows must be a GROUP (a Sprite):
+  the game's node lookup finds no other (emulator run7: bare pictures were never found and all stayed on the glass).
+  The picture is `monster.png` in the mode's folder (the blocks hat's Picture… puts it there), else its own screen's
+  picture, else its badge, else a tile lettered with its name.
+- **The cursor (the runtime).** The screen's switch handler (`site roster_screen_keys`, LE 1.16 `0x191048`, Pro
+  `0x18d3a8`: the flipper buttons 137 back / 139 on, `value roster_screen_left` / `_right`) is vetoed while the
+  screen has new monsters, and the runtime walks the screen's order itself (each game place 0-6, then the new
+  monsters booked against it, in their names' order), skipping a place the game would skip (its
+  state, `site roster_slot_state`, not 0) and a new monster whose place is skipped. Each move does what the game's
+  handler does: the screen's clock given 3 more (`site roster_screen_bump`), the sound 271 / 272, the game's cursor
+  word (+`roster_cursor_at`) and its landing (`roster_cursor`, the callout - a new monster's own `callout`, swapped
+  into the place's entry of the slot table while it lands). The game's own guards hold: nothing moves unless the
+  screen's clock runs and the busy one does not (`site roster_timer_on`, timers 83 and 23), and both flippers down
+  is the game's pick (`site roster_switch_held`). On a new monster the game's cursor is parked on its place, the
+  monster's `_Lit` and `_Portrait` and the place's `PadSel_Cover<n>` are shown and the place's own portrait group
+  (`<tile>FullBody_instance`, `text roster_tile_<n>`) hidden; the game draws everything else. The game changes its
+  portrait in two steps, the shown place's out and then the new place's in (`site roster_portrait_step`, LE 1.16
+  `0x190acc`, its state word `data roster_portrait_state`: 4 shown, 5 going out, 3 coming in, then the place
+  shown), so a new monster left for ANOTHER place stays drawn, its place's portrait hidden, until that out is over,
+  and goes in the step that starts the in (PAD-733: the out played on the place's own portrait - BIOLLANTE for 6
+  frames between KUMONGA and DESTROYAH); one arriving from another place is drawn in the step that starts its
+  place's in, after the place it came from has gone out (GIGAN's name going out showed round MINILLA's). A port
+  without the two changes at once. Opening (`site
+  roster_screen_open`, wrapped) runs the game's open - its cursor on the next open place after the one last played -
+  then puts the cursor on the screen's FIRST open entry in its order, the top-left tile (PAD-733, David: "it's in the
+  top-right most mode. it's jarring and confusing to figure out the direction to go from there"); a place no pick can
+  take is passed over, as the game's walk does; the lock of each new tile follows its
+  place's state, and the claw goes on the tile that WON alone (PAD-707, David's v21: "the footprint icons over the
+  beaten modes are off"): a place one of ours won shows that monster's `_Done`, none on the others booked against it,
+  and the place's own state box (`text roster_box_<n>` under `text roster_box_path`) is hidden - the game's claw for a
+  battle it never played; a place the game's own battle won keeps its box and puts no claw on a new tile.
+- **The pick.** The game picks as it always does (Action, both flippers, its 13 s): `site roster_screen_pick` notes
+  which tile it was, and the battle start it makes for the place (roster_start) is the new monster's when that was
+  under the cursor - `on_pick(slot)` exactly as a claimed place's, 1 = taken; the mode's `pm_roster_over(won)` gives
+  the place's battle back, won or lost (PAD-706: Completed, the audits, the city). A pick of the place's own tile is
+  its own battle; a monster that will not start (0) lets the place's battle run. `pm_roster_more_picked()` names the
+  monster inside `on_pick`; `pm_roster_start_after()` is the port's `roster_start_after_ms`.
+- **Its count on its tile** (PAD-733, David: "this count also needs to show on the monster select screen like the
+  other monsters"). The game letters each place's "0/4" into a text in the overlay (`T1_1Prog_Instance`...); the card
+  build gives each new monster a copy of place 0's, `<page>_Prog` (blank), placed on its tile as place 0's sits on
+  its own. `pm_roster_more_progress(done, of)` keeps the calling mode's count for the player up until the game ends,
+  and each opening of the screen writes "done/of" there (none before a report, none on a locked place, none on a
+  card built before PAD-733). On the Modes tab: the *Selection screen count* block (`roster_progress`, its `done`
+  and `of` values). A mode that keeps its hits for the game (a variable reset each game) and shows them so resumes a
+  lost battle where it was, as the game's own do. A battle LOST is held by the city it was lost in (the game's slot
+  state 3; its box stamps that city on the place's own tile - Tokyo, Paris, London, N.Y., labels 3-6 of the box, the
+  game's city order): the battle is the monster's, so its tile wears the stamp (`<page>_City<c>`, a group with a copy
+  of place 4's box's stamp, its words never rewritten: a stamp's font holds its letters alone - a space written into
+  one stopped the game, emulator run fb5) and its count instead of a padlock, and the place's own tile its
+  padlock (`PadSel_Lock<n>`, its box hidden and its words blank); the others booked against it keep theirs.
+- **Its shots blink while the cursor is on it** (PAD-733, David: "when I overlay the selected monster the respective
+  indicators need to be blinking on the play field"). The game blinks the shots of the battle under its cursor
+  (yellow; the emulator's lamp probe: slot 1's three powerlines), and on a new monster it blinked its place's battle's
+  or nothing. `pm_roster_more_shots(shots)` names the calling mode's: while the cursor is on its tile those inserts
+  blink `ffff00` (250 ms), every other shot's insert on the playfield is held dark (the cabinet's, as the Action
+  button, and the inserts of no shot stay the game's), and the game has them back as the cursor leaves it, at the pick
+  and at the ball's end. A block mode names the shots its Light a shot blocks light while it runs
+  (`block_modes.preview_shots`: none dark, none only lit while it is not running).
+- **Played again until it is won.** A new monster's battle lost is the one the game's city pick plays again at the
+  next lit scoop (`site roster_resume`, PAD-706); won, its tile shows the claw and its place is done: the place's other tiles
+  book the same battle, so they are not offered again that game.
+
+In a mode file: `roster_slot <n>` and `roster_more PadSel_<folder>` (`roster_callout` is the monster's callout). On the
+Modes tab: blocks, *When the player picks it on the battle selection screen, a new monster in <battle>'s place* (the
+battle hat's list offers every place twice: the battle itself, and a new monster in its place) with *Picture…*; a form
+mode, *Starts on: the player picking A new monster, in <battle>'s place*. The port lines (Premium/LE 1.16, Pro 1.16,
+Pro 1.15, the Heisei 1.99D program the same as Premium/LE 1.16's):
+
+```
+site roster_screen_keys   0x00191048 0xe92d4070 0xe1a05000
+site roster_screen_open   0x001911dc 0xe92d4038 0xe1a04000
+site roster_screen_pick   0x00190c60 0xe3a01000 0xe92d4010
+site roster_screen_bump   0x00190ecc 0xe92d4038 0xe1a05000
+site roster_slot_state    0x001244bc 0xe3510006 0xda000001
+site roster_timer_on      0x0020bb1c 0xe92d4008 0xe30c3154
+site roster_switch_held   0x0029643c 0xe59f1000 0xeaffffe2
+site roster_portrait_step 0x00190acc 0xe92d4030 0xe30b4480      (Pro 1.16 0x0018ce2c; not on Pro 1.15's port)
+data roster_portrait_state 0x007bb480                            (Pro 1.16 0x007aedc0)
+value roster_screen_left 137 / roster_screen_right 139 / roster_screen_timer 83 / roster_screen_busy 23 / roster_screen_bump_by 3
+text roster_screen_scene  cac32730af42b9d26d26c4bb6e667b07da53113e
+text roster_screen_path   SelectOverlay_Textbox.CharacterSelect_Instance.
+text roster_tile_0..6     Ebirah Titan Gigan Megalon Ghidorah MegalonGigan GhidorahGigan
+```
+
+**Measured (emulator, muted, hidden):**
+- **David's Heisei 1.99D base card, run8** (the set built by Try it's own code - Write's - from a project of three
+  blocks monsters: KUMONGA in Biollante's place, KAMACURAS in Destoroyah's, KIRYU in Gigan's, the official Godzilla.jp
+  stills as their pictures): the screen opened re-laid in two columns of five, the locks and "0/n" with their tiles;
+  the right flipper walked Biollante, Destoroyah, Gigan, SpaceGodzilla, KAMACURAS, KIRYU, KUMONGA (the locked tier-2
+  places skipped) and back to Biollante, each new monster with its lit tile, portrait and lettered name and the
+  place's own portrait and name gone, the place's tile grey; back on Biollante the game's own screen. Action on
+  KUMONGA: `the selection screen picks KUMONGA (in slot 0's place)`, `slot 0 picked (mode id 12): claimed - the
+  game's battle does not start`, its START, two Buildings: `the pick ends as a WON battle ... completed 1, wins 1,
+  city 0's mask 0 -> 2`. Run7 (the same, before the groups): the same walk and win, every new picture on the glass at
+  once - the lookup finds Sprites only.
+- **Stock Pro 1.16, run9 + run11** (the same three monsters as C, the stock card's scene built with them - the stock
+  scene is byte-identical on Premium/LE 1.16 and Pro, md5 fceccfeb): the screen re-laid with Stern's own art, the
+  cursor (which opens on the last place played there, Megalon) walked onto KAMACURAS, KIRYU and KUMONGA with their
+  tiles, portraits and names; a pick of Gigan's own tile: `slot 2 picked (mode id 14): claimed but not taken - the
+  game's battle runs`; run11: the screen's own 13 s timer picked KAMACURAS (`the selection screen picks KAMACURAS (in
+  slot 1's place)`), its START 3000 ms later, two Buildings: `completed 1, wins 1, city 0's mask 0 -> 2`.
+- **Stock Premium/LE 1.16, run10 + run13**: the same walk and look; run13: KUMONGA picked with Action (`the selection screen picks KUMONGA (in slot 0's
+  place)`), its START, two Buildings: `the pick ends as a WON battle ... completed 1, wins 1, city 0's mask 0 -> 2`.
+- No segv in any run. Runs from the D: card stalled at the game's start when two rigs read it at once (the known D:
+  stall); every run here booted a copy in the rigs' card cache. Not run: Pro 1.15 (archival card; its sites read off
+  its program, every one's words checked).
+
 **Known limits:**
 
-- A claimed slot keeps the replaced battle's progress text (0/4 for Ebirah) and never shows "Completed":
-  the game reads both from that battle, which never runs (seen on the glass).
-- The replaced battle never completes (read from the program, not measured), so whatever the game gates on completing it may be out of
-  reach: a slot's state comes from the battle's own mode (Completed when it has a stop reason) and
-  the cities rule at `0x79dae8` with adjustment 334 (Pro 1.15), which gate the tier-2 slots; the
-  wizard mode's qualification may depend on completions too. Once every other open slot is completed, the screen's
-  two-second single-slot timer picks the claimed slot every time.
-  Read further at the desk (Pro 1.15 `0x1201d8`, `0x136d30`): a slot's state reads only its own battle
-  (completed), adjustment 334, and the cities rule's per-player records (which battle each of its five
-  cities holds, and the player's city); it never reads another slot's completion. Since fix-2 the pick does
-  count toward the city (the mask bit, above; run7, run8); the city's battle stays 0 and its +92 byte
-  (probably "won") is never set. The city advance was read at the desk (`0x135bd0`, called only from `0x195288`,
-  which looks like a pick on a city screen); what opens that screen, and so the tier-2 slots, was not read.
+- A claimed slot keeps the replaced battle's progress text (0/4 for Ebirah): the game reads it from that
+  battle's own counters, which only its shots move. Since PAD-706 the slot does show "Completed" once the
+  mode has won it (the stop reason, above).
+- Where a port has a roster but no PAD-706 lines (none shipped; a derived port whose drafting could not place them),
+  the replaced battle never completes, so the tier-2 slots may stay out of reach; the blocks editor notes it there.
 - King of the Monsters starts the four tier-1 battles (Ebirah, Titanosaurus, Gigan, Megalon) itself,
-  not through the screen (item 144, seen live), so inside it the replaced battle runs as stock.
-- A mode is not resumed after a drain the way the game resumes its own battles (above).
+  not through the screen (item 144, seen live), so inside it the replaced battle runs as stock - a place a new
+  monster stands in too.
+- The battle's own points this time stay 0 (the runtime zeroes them at the pick, as the battle's START does), so
+  its END plays no ending clip of the old monster over the mode's ending, and whatever the game keeps from them
+  (read at the desk: the END posts them with event 0x1a; the battle's champion is probably fed from there, not
+  measured) does not get the mode's points.
+
+## A mode in the place of one of the game's own modes (PAD-710)
+
+PAD-706 made a mode picked in one of Godzilla's battles count as that battle. Every C++ Spike 2 title builds its modes
+on the same framework - Stern's mode class (`cmode`; on the later titles a `crule` underneath), with a START and a STOP
+that keep the game's books for the mode - so a mode of yours can take the place of any of the game's modes the port
+names a start of (PAD-363's `block_start_<id>`, `block_name_<id>`: the ids `block_modes` takes) and the game counts it
+as its own:
+
+- **When the game starts that mode** (one of its rules calls the mode's START, as it does when the player earns it),
+  the start does not run, and your mode starts instead.
+- **At that moment the runtime does the START's bookkeeping**, without running the game's mode (none of its shots,
+  lights, screens or music): the player's stopped and reason bytes cleared, the player's start count + 1, and on the
+  generations whose mode manager keeps per-mode audits, the manager's "started" notice (its STARTED audit).
+- **When your mode ends, the game's own STOP of its mode runs** - the mode object's own stop virtual, so the title's own
+  stop logic runs where its class has one - with the outcome: won = completed (non-zero reason), lost = not. The stop
+  writes what it writes for the game's own mode: stopped, the reason, the mode's END, its wins, the manager's
+  COMPLETED audit, and whatever the title does with a completed mode. A game's rules read those as "completed": its
+  wizards and unlocks are gated on them.
+
+In C:
+
+```c
+static int on_start(unsigned id)     /* the game's thread, at the moment its mode would have started */
+{
+    want_start = 1;                  /* start your mode on the next tick (pm_begin there) */
+    return 1;                        /* 1: the game's mode does not start; 0: let it */
+}
+
+static void my_end(int won)          /* however your mode ends */
+{
+    pm_end();
+    pm_place_over(won);              /* the game's own stop of its mode, with the outcome */
+}
+
+static void on_init(void) { pm_place_claim(21, on_start); }   /* Godzilla's 21 is Jet Fighter Attack */
+```
+
+`pm_place_counts(id)` says whether it counts as the game's mode there (the port names the framework), and
+`pm_game_mode_name(id)` the port's name for it. A start the mode takes while another mode of yours runs is the block's
+to decide, as before (PAD-363); a start while the claiming mode runs restarts nothing (on_start is still asked). The
+outcome waits for the player who started it to be up again; a game that ends first drops it; a mode that never says by
+the end of its ball counts as lost. `pm_game_mode_start(id)` calls the game's START of mode `id` as its rules do - a test's
+way to the claim (the C++ titles only).
+
+**In a mode file:** `in_place_of <id>` in place of the trigger (the file needs `seconds` but no trigger): the game
+starting that mode starts it, on the next tick. Its end says how it went, as a battle pick's does: its end shot ending it
+completes it; with no end shot its clock running out does; any other end (the ball, a tilt) does not. **On the Modes
+tab:** Mode > Starts on > *the game starting its* <mode>. **In blocks:** the When block *When the game starts its*
+<mode> (put Start the mode in it); End the mode gets *, completed*. With no End the mode, completed block, the mode's own
+end (its clock, an End the mode block) completes it. The Modes tab offers the game's modes on the builds it was proven on
+(`mode_project.PLACE_PROVEN`), leaving Godzilla's battles to the battle hat (PAD-706).
+
+**The port lines** (`mode_framework.py` reads them off each build's own program; `framework_lines.py <game ELF>` is the
+command line; the card build adds them from the card's own program to a port that lacks them, and a derived port gets
+them as it is derived):
+
+```
+site  mode_player            the framework's player byte getter (the index its per-player fields are kept by), or
+data  mode_player_at         ... the player byte itself, on an older build that reads it inline (PAD-714)
+value mode_slot_stop         the STOP's virtual slot
+value mode_stopped_at        the per-player stopped byte (mode + this + player)
+value mode_reason_at         the per-player reason byte            (Godzilla's, Jaws' and King Kong's generations)
+value mode_starts_at         the per-player start count (mode + this + 4 * player)
+value mode_wins_at           the per-player completions the STOP counts (the crule generation, Star Wars)
+value mode_slot_stopped_get  the mode's own "stopped?" virtual (mode, player), and
+value mode_slot_stopped_set  ... its own "mark stopped" (mode, value, player)   (Jurassic Park, PAD-716)
+site  mode_started           the manager's "started" notice (STARTED audit), with
+data  mode_manager           ... the manager it is called on, and
+value mode_id_at             ... where the mode keeps its id       (the generations whose manager keeps audits)
+```
+
+The finder keys on the STOP's one shape, the same on every generation read: `mov r4, r0; mov rR, r1; bl <player>; add
+r0, r4, r0; ldrb rX, [r0, #<stopped>]; cmp rX, #0; <return when set>`, then `strb <1>, [.., #<stopped>]` and the mode's END
+virtual called on the mode; the slot most mode classes hold such a function at is the stop's. The start count is the
+`ldr rX, [rB, #<starts>]; add rX, rX, #1; str` with rB = the mode + 4 * `sxth` of the player byte (a `sub #1; uxtb` index
+is another, 0-based count) in the START slot's functions and what they call; the wins the same in the STOP; the notice a
+`bl` with r0 = the manager constant and r1 = the mode's id (`ldr r1, [r4, #4]`), not a trace print.
+
+**Older builds** (PAD-714: Godzilla LE 1.13, Jaws LE 1.01, Rush LE 1.18, Star Wars LE 1.30, Venom LE 1.06, TMNT Pro 1.58,
+and the other older builds of Avengers, Deadpool, Foo Fighters, Iron Maiden, Jurassic Park, Led Zeppelin, Mando,
+Munsters and Sword of Rage) have no getter: the STOP reads the player up inline - `movw/movt rA, <the player byte>; ldrb
+rX, [rA]`, mostly `sub rX, rX, #1` (a 0-based index, so its offsets are one up: Rush 1.18's stopped byte `[r3, #0x38]` is
+the newest build's +0x37), `add rY, <mode>, rX` - and the port names the byte itself (`data mode_player_at`), which the
+runtime reads where it would call the getter. Each mode's START there counts words of its own beside the framework's,
+so the start count is the one the START most of the mode classes reach keeps (the base class's where it reads). On all
+22 older C++ builds on hand every offset is its newest build's; a slot that is only a jump to the STOP (Godzilla 1.13's
+v[11]) is followed, and Jurassic Park LE 1.15's stop asks the same own-stopped virtuals as 1.16's (v[32] / v[55],
+below). A port derived on a card writes the START slot the framework's start count is read through (`value
+stock_slot_start`) off its own program - the scanner's, else (Jurassic Park LE) the same title's shipped port's where
+this build's starts count as the START does - and takes `stock_slot_start` / `stock_slot_active` only from a reference
+of the same title: they are the title's own mode classes' vtable slots, and a derive from other titles of the
+generation copied theirs (Foo Fighters 1.03: 38 / 44, its own 41 / 49; Jurassic Park LE 1.15: 11, its own 21, so no
+start was counted).
+
+| generation | builds | stop | stopped | reason | starts | wins | STARTED audit |
+|---|---|---|---|---|---|---|---|
+| Godzilla's cmode | Godzilla Premium/LE, Pro 1.15 / 1.16 | v[11] | +0x13 | +0x17 | +0x3c | - | the manager's notice |
+| Avengers, Deadpool | Avengers LE/Pro 1.10, Deadpool LE/Pro 1.16 | v[14], v[18] | +0x13, +0x17 | - | +0x3c | - | the notice |
+| Iron Maiden | LE/Pro 1.18 | v[12] | +0x17 | - | +0x28 | - | the notice |
+| Jaws, King Kong | Jaws LE/Pro 1.02, King Kong LE/Pro 0.97 | v[15], v[14] | +0x1b | +0x23 | +0x5c | - | the notice |
+| Jurassic Park | LE/Pro 1.16 | v[24] | +0xc3 | - | +0xd8 | - | the notice |
+| Star Wars | LE/Pro 1.31 | v[12] | +0x17 | - | +0x48 | +0x64 | none |
+| crule | D&D, Foo Fighters, John Wick, Led Zeppelin, Mando, Munsters, Rush, Sword of Rage, TMNT, Venom | v[34]-v[53] | +0x37-+0x5f | - | stopped + 0x11 | starts + 0x1c (Venom + 0x2c) | none |
+
+John Wick's stop takes a third word (1 marks the mode stopped; the game always passes 1): the runtime calls every stop
+as `stop(mode, won, 1)`, which the two-word stops never read.
+
+**Modes with their own stop logic (PAD-716).** The stop called is the mode object's own, so a mode whose stop does
+more than the framework's does that too - it is the game's own outcome:
+
+- **Jurassic Park** asks the mode's own "stopped?" virtual (v[32]: mode, player) before anything and marks it stopped
+  through its own setter (v[55]: mode, value, player); the framework's are the plain byte at +0xc3. JP's (LE and Pro) Trex Chase,
+  Trex Encounter, Trex Rampage and the Ctrl Room's System Boot, Virus Attack and Restore Power override both and keep
+  their own byte (Trex Chase +0x137, Virus Attack +0x11f, Restore Power +0x117, Trex Rampage +0x123; on a co-op game
+  one shared). Their START clears it through the setter, so the take does the same (`value mode_slot_stopped_get 32` /
+  `mode_slot_stopped_set 55`, read off the STOP by the finder): before it, the take cleared +0xc3, the byte those
+  classes never read, and a second take of one in a game found it stopped already - the game's stop wrote nothing
+  (rig, two takes in one game, JP Pro's four and JP LE's six: the COMPLETED audit 0 -> 1 before, 0 -> 2 now).
+- **Iron Maiden's Soul Shard Hurry Up** runs the framework stop (stopped, the END, the manager's notice), then tells the
+  song that started it how it went (the song's v[42] with the hurry-up's id: Fear of the Dark records a won hurry-up for
+  the player) and sets its stopped byte back to 0, so it can come round again. The runtime's log reads that as
+  "stopped 0 -> 0 (its own stop set it back)".
+
+**The plain-C titles** (Aerosmith, Batman 66, The Beatles, James Bond, Elvira, Guardians, JP The Pin, Metallica,
+Stranger Things, Star Wars ELG, X-Men) have no mode class: their modes are start functions and game flags, and the
+game keeps each mode's books in the framework's audits and flags, named after the mode (James Bond LE 1.06's Ahoy Mr
+Bond Wizard Mode: `AUD_AHOY_MR_BOND_WIZARD_MODE_STARTED`, `FG_AHOY_MR_BOND_WIZARD_MODE_PLAYED`, `..._COMPLETED`). Both
+name tables are in the program (`FG_INVALID` at id 0: a flag's index is its id; an audit's id is its DESCRIPTOR's,
+`stock_scan_c.audit_ids` - PAD-714: X-Men 0.98 counts `AUD_FASTBALL_SPECIAL_STARTS` as 165, its name 209th, and until
+PAD-714 the ports named the name's place, so a mode in one's place counted another audit: Bond's Ahoy wizard bumped
+`AUD_SPECTRE_TARGET_1`, 180, where its own start counts 276), and every build counts an
+audit through the same framework function (`push {r4-r9, lr}; subs r5, r0, #0; sub sp, sp, #0x14`: id in r0, the amount
+in r1). `mode_framework.plain_books` takes each game mode's stem from the ACTIVE / PLAYED flag its start sets (else from
+the port's name, in the spellings the games use: a `MODE_` prefix or `_MODE` suffix, `HURRYUP`, Batman's `MODE_EP_47_48`
+for "episodes 47-48") and writes what it finds:
+
+```
+site  audit_add                     the framework's audit add
+value place_audit_started_<id>      the mode's STARTED (or STARTS, START) audit
+value place_audit_completed_<id>    its COMPLETED (or COMPLETIONS) audit
+value place_flag_played_<id>        its PLAYED flag
+value place_flag_completed_<id>     its COMPLETED flag
+site  place_start_<id>              PAD-715: its own start, where the port's block_start is a check before it
+```
+
+A mode in one's place then counts it the game's way: the STARTED audit counted and the PLAYED flag set at the take, the
+COMPLETED flag set and the COMPLETED audit counted when it completes (nothing on a loss). All 170 game modes the
+newest plain-C ports name have books (PAD-715 found the last three: JP The Pin counts Restore Power as
+`AUD_RESTORE_POWER_START`; Bond's Bird One Multiball is `ROCKET_MULTIBALL` in the program's names, so where neither the
+start's flags nor the name find books, the stem is the one the start's callers set). A plain-C start's own arguments
+are its own, so `pm_game_mode_start` calls one only while a claim holds it - the claim refuses it before any of it runs.
+
+**An older plain-C build (PAD-714).** The plain-C titles' game modes (`site block_start_<i>`) come from the start
+finder (sdk/cstarts, with each title's hand-checked knowledge), run over the programs on hand when a port ships; a port
+derived on a card from an older build had none. `mode_framework.plain_starts` takes the same title's port's modes (the
+reference's when it is the same title, else the title's shipped ports, its own model first, newest first) and finds
+each on the build by the finder's audit witness: the one function that counts the mode's STARTED audit (by name, at its
+id on this build), whose head is the reference start's - a push with lr and the same second instruction, the push's
+registers and a `mov`/`movw`'s number left out (Batman 66 1.13 saves r4-r11 and counts 0x31 where 1.14 saves r4-r10
+and counts 0x36), its true entry up to six words before the push (a `movw` scheduled first). A mode the witness cannot
+place is left out: never a wrong address. Checked against every shipped plain-C start whose program is on hand (175
+agree, 0 differ; the ones left out are counted from data - Beatles' songs, Bond's story chapters - or a check before
+the start, Bond's Jetpack). Elvira 3 1.11 gets its Houses, X-Men LE 0.97 12 of its 14 modes; James Bond 60th 1.10
+none (its one mode, the Villain Mode, keeps no audit).
+
+**A check before the start (PAD-715).** Bond's Jetpack and Bird One Multiballs' `block_start` is not their start but
+the lock-open check (PAD-578: refusing it closes the lock, which is what a block wants). The lamps ask that check all
+the time and the lock handler asks it at every lock, so a place taken there started the mode at the first lamp
+refresh. Where the start's own flags are not the mode's but one of its callers' calls sets them, `plain_books` names
+that function `site place_start_<id>` (Bond LE 1.06: Jetpack `0xe650c`, Bird One `0x165f50` - called by the lock
+handler at the last lock only). The runtime hooks it on its own (refused with 0) and takes the place there; the check
+takes nothing, and a port naming a start it cannot hook offers no place for that mode. After the take the game's lock
+count stays where its own start would leave it (all locks made).
+
+**Proven** (emulator, 2026-10-24, the stock cards, hidden, muted; `C:\tmp\PAD-710\rig`, `place_job2.sh` over
+rigbatch): a mode file `in_place_of <id>` with an 8 s clock, the game's START of that mode called as its rules call it,
+the mode started in its place, its clock ran out (completed), and the game's own STOP wrote the completion, the game
+playing on after it - every one of the 36 newest C++ builds (`mode_project.PLACE_PROVEN`; D&D LE 1.10 by PAD-713 once the rig started its game: Mimic Hurry Up, starts 0 -> 1, stopped 0 -> 1, wins 0 -> 1).
+Godzilla LE/Pro 1.16 Jet Fighter Attack and Jaws LE 1.02 Super Buoys: STARTED audit 0 -> 1 at the take, COMPLETED
+0 -> 1 at the end, stopped 1, reason 1; Avengers, Deadpool and King Kong: the STARTED audit 0 -> 1 (those modes keep no
+COMPLETED audit), stopped 1; the crule generation and Star Wars: stopped 1, wins 0 -> 1. Venom starts its Mini Mode 01
+by itself as a ball starts: the claim took it there too.
+
+The plain-C titles (run plain2, `place_job4.sh`): all 16 newest builds - the STARTED audit 0 -> 1 at the take on every
+one with an audit add, the COMPLETED audit 0 -> 1 at the end on Batman, Beatles, JP The Pin, Metallica and X-Men, the
+PLAYED and COMPLETED flags on Bond LE/Pro (Ahoy Mr Bond) and the PLAYED flag on Stranger Things; Star Wars ELG (no
+audit add) its COMPLETED flag 67 set and read back. The game played on after each.
+
+PAD-715 (`C:\tmp\PAD-715\rig`, `place715.sh` over rigbatch, Bond LE/Pro 1.06, both lock multiballs): a mode file in
+the multiball's place, 20 s of play with nothing taken, the lock lit two short and the game's lock handler called (a
+ball locked, nothing taken), then one short: the handler called the multiball's start, the mode took its place there
+(STARTED audit 0 -> 1, PLAYED flag set, balls 1: no multiball served), ran its clock out and the game played on. The
+v1.252.0 runtime took both places about 4 s into the ball, no lock made. JP The Pin Restore Power (`jp_job.sh`): its
+STARTED audit 0 -> 1 (v1.252.0: "counted only as ours"; that was id 189, the name's place - its own start counts
+184, PAD-714).
+
+**A challenge that is one of the game's modes.** A challenge (below) whose words lead one of the port's game modes'
+names (`mode_framework.challenge_places`: Bond's Ahoy Mr. Bond = Ahoy Mr Bond Wizard Mode, Godzilla's King of the
+Monsters, Jaws' 4th of July, Metallica's songs, Rush's 2112) has the line
+
+```
+value challenge_place_<n> <id>      challenge n is the game's mode id
+```
+
+and a mode of ours taking that challenge counts as the mode: its START's bookkeeping at the take, its stop (C++) or
+books (plain-C) with the outcome at the mode's end (`pm_place_over`, from mode_file.c and the blocks' end). Proven on
+Bond LE 1.06 (emulator, Default Game Mode = Ahoy Mr. Bond): STARTED audit 180 counted (the name's place: 276 since
+PAD-714) and PLAYED flag 86 set at the
+take, the mode's clock ran out (won) and COMPLETED flag 89 was set.
+
+## The game's modes completed (PAD-747)
+
+A tester on Uncanny X-Men asked for "a mini-wizard mode after finishing 4 of the stock modes, then my bigger wizard
+mode after the completion of the final 4". The runtime keeps, for each player and for the game in play (a new
+`game_start` forgets it), which of the game's own modes the player has completed - read the way the game itself
+records a completion, so a mode completed by the game's rules, or by a mode of yours in its place (PAD-710), counts:
+
+- **A C++ title** (the mode framework PAD-710 reads: `value mode_slot_stop`, `mode_stopped_at`, the player): each game
+  mode object's STOP is hooked once its vtable is set (the first ticks): the function itself where its first two words
+  can move, else the object's vtable slot is pointed at a thunk of the runtime's on its way to the STOP (a class's own
+  stop that opens `push {.., lr}; bl ...`). The STOP is entered with the mode in r0 and the reason in r1 - non-zero =
+  completed - and one that finds the mode already stopped for the player returns at once, so neither counts.
+- **A plain-C title**: the mode's COMPLETED audit (`value place_audit_completed_<id>`, PAD-710's books) counted through
+  the framework's audit add (`site audit_add`: the audit id in r0), or with no audit its COMPLETED game flag
+  (`value place_flag_completed_<id>`), seen rising for the player up. X-Men 0.98's missions are virtuals of their
+  own objects whose completion handler calls the audit add with the mission's COMPLETED audit (A Fiery Assault
+  `0x5c160`, audit 173).
+- **A plain-C title's other modes**: the ones the game keeps books of but the port names no start of (Stranger Things
+  1.13's story modes, Elvira's movies, Bond's Story Mode) are ids 128 and up - `text done_name_<n>` with `value
+  done_audit_<n>` (an `AUD_<stem>_COMPLETED` / `_COMPLETIONS` beside an `AUD_<stem>_STARTED`) or `value done_flag_<n>`
+  (an `FG_<stem>_COMPLETED`). `mode_framework.done_lines` writes them from the build's own audit and flag names, into
+  the shipped ports and at card build for any other.
+
+```c
+static const unsigned char MISSIONS[] = { 3, 4, 5, 6, 7, 8, 9, 10 };   /* X-Men 0.98: A Fiery Assault .. Juggernaut */
+
+static void on_tick(void)
+{
+    int n = pm_game_modes_done(MISSIONS, sizeof MISSIONS);   /* -1: none of them is seen completed here */
+    if (n >= 4 && !started_this_game) { ... pm_begin() ... }
+}
+```
+
+`pm_game_mode_done(id)` says whether the player up has completed one (1, 0, -1 not seen here), and
+`pm_can(PM_CAN_GAME_DONE)` whether the port names any completion the runtime can see.
+
+A mode file starts on it with `starts_on completed <N> [id ...]` (no ids: every mode the runtime sees completed): the
+mode starts at the completion that makes it N; when something is in its way then - another mode of yours, or one of
+the game's modes it gives way to or holds off (the mode just completed is often still finishing) - it waits and starts
+the moment nothing is, that game, for that player. `after`, `trigger_also` and `starts` hold as for a shot start.
+Blocks have **When the player has completed some of the game's modes** (a count and the modes ticked); the form has
+Starts on > the player completing N of the game's modes ticked.
+
+Proven in the emulator (PAD-747, the stock cards, hidden, muted): X-Men LE 0.98 - a mode file in A Fiery Assault's
+place ended by its clock, `done: player 1 completed the game's A Fiery Assault (mode 3, its COMPLETED audit) - 1 of the
+game's modes this game`, and a second file's `MINI WIZ START (1 of the game's modes completed)` 16 ms later; the rig
+sweep of every build with a card (`mode_project.DONE_PROVEN`, `C:\tmp\PAD-747\rig\job747.sh`): on a C++ title a mode
+in a game mode's place completed through the game's own STOP, on a plain-C one that or the instrument counting a
+mode's COMPLETED book through the game's own audit add or flag bitmap - 76 of the 80 builds; Elvira 1.11, Led
+Zeppelin LE/Pro 1.20 and Venom LE 1.06 never start a game on the rig, and stay unoffered. A blocks mode (BIG WIZ,
+When the player has completed 2 of the eight missions) on X-Men LE 0.98 did not start on A Fiery Assault twice and
+started on Mayhem in Midtown, the second mission (`C:\tmp\PAD-747\rig\run_bw.sh`). James Bond 60th keeps no books of its Villain
+Mode (nothing to count there).
+
+## A mode in the game's Challenge list (PAD-615)
+
+Stern's framework has a **Player Challenge** game on every Spike 2 title: the player picks it on the game's own
+menu as a game starts (`PLAYER GAME MODE`, "press both flipper buttons to select game mode"), or every game starts
+as one when the operator sets the service menu's `DEFAULT GAME MODE` (`AD_DEFAULT_GAME_MODE`: 0 standard,
+1 competition, then one value per challenge). It is a ONE-BALL game: the game ends at the first ball's end.
+
+Some builds name the challenges a player can pick, one game flag each, set at the game's start (from the pick, or
+from `AD_DEFAULT_GAME_MODE` by the game-start handler, Bond LE `0xaca0c`: `FG_PLAYER_CHALLENGE_MODE_ACTIVE` (18)
+and the pick's flag):
+
+| build | the challenges (menu order = slot) | their flags |
+|---|---|---|
+| James Bond LE / Pro 1.06 | 0 Chaos at Crab Key (Dr. No multiball), 1 Ahoy Mr. Bond, 2 Goldfinger's Jackpot, 3 Duel on the Disco Volante, 4 Her Majesty's Secret Service (the wizard mode multiball) | 185-189 |
+| Stranger Things 1.13, LE 1.12, LE 1.13 | 0 Demogorgon, 1 Send It Back, 2 Light the Fire, 3 Final Showdown | 144-147 (LE 1.12: 139-142) |
+
+Each challenge's module starts it from a handler on the ball's start event (bus 38, the last broadcast of the
+framework's ball start, after `ball_start` 37): `if (challenge game && its flag) start(...)` (Bond LE: Crab Key
+`0x92e44` -> `0x92bd8`, Ahoy `0x207f0` -> `0x20530(1)`, Goldfinger's Jackpot `0xbd6f8`, Disco Volante `0x7e2d8`,
+HMSS `0x1d9a24` -> `0x1d97e0(1, 0)`). `portchallenge.py` (command line: `challenge_lines.py <game ELF>`) finds
+those handlers by that shape and writes the port lines; a derived port gets them the same way:
+
+```
+value challenge_on_flag   18
+site  challenge_go_<n>    <the handler> <its first two words>
+value challenge_flag_<n>  <the pick's flag>
+text  challenge_name_<n>  <its name, from the flag's>
+```
+
+The runtime hooks every handler (`hook_veto_n`, refused with the handler's own 1). A mode CLAIMS a challenge
+(`pm_challenge_claim(slot, on_pick)`, or `pm_challenge_named("Ahoy Mr. Bond")` for its slot): in a challenge game
+with that pick, the hook calls `on_pick(slot)` on the game's thread at the moment the game would have started its
+own, and the game's own does not start (on_pick returning 0 lets it). Not a challenge game, another pick, or nothing
+claimed: the handler runs as it always did. The menu cannot grow; a mode takes a challenge's place under that
+challenge's name. **The game still ends the challenge game at the first ball's end** - proven with nothing of the
+challenge's own running: Bond LE, `DEFAULT GAME MODE` Ahoy and the handler never letting Ahoy start, the first drain
+past the ball save ended the ball and `GAME OVER` followed. A one-ball game whose challenge never ran also has no
+challenge ball save (Ahoy's is its own 60 s, `AD_AHOY_MR_BOND_WIZARD_MODE_CHALLENGE_BALL_SAVE_TIMER`, set by its
+start): give the mode a ball save of its own if it wants one.
+
+**A challenge game of 2-4 players** (PAD-696): every player plays the pick in turn, one ball each. The runtime keeps the
+game's pick for the whole game, and each later player's first ball is handed to the mode as player 1's was (`challenge:
+player 2's turn - the game's pick (...) again, for this player's ball`): `on_pick` is called again and the mode starts
+for that player. Their mode's end ends their ball; GAME OVER follows the last player's. Before this only player 1 got
+the mode and the others played the game's ordinary play. Emulator-proven, the stock cards with a mode file's own
+challenge: Godzilla LE 1.16's MODE CHALLENGE with 4 players, Bond LE 1.06's start menu with 2.
+
+**In a mode file:** `challenge <n>` (0-7) in place of the trigger: the file needs `seconds` but no trigger, and only
+the pick starts it (on the tick after the pick; a pick while it runs is taken and restarts nothing, a pick while
+another of our modes runs starts it when that one ends, the ball ending first lets the pick lapse). A word, `-1` or
+a number above 7 logs and claims nothing; a port with no challenge list logs `NOT claimed`. **On the Modes tab:**
+Mode > Starts on > *a challenge game of* <challenge>. **In blocks:** the When block *When the player picks the
+challenge* <challenge> (its script runs on the tick after the pick: put Start the mode in it; the mode claims the
+challenge as it loads).
+
+**Proven** (emulator, 2026-10-19, the stock cards, hidden, muted; the game made a challenge game by its own
+`DEFAULT GAME MODE`, set live by the rig instrument `ch615.c`: the adjustment's live value and its check byte
+~(sum of its 4 bytes); a control run with the same setting and no mode started the game's own challenge every time):
+Bond LE 1.06 (a mode file on challenge 1: `START (challenge pick)` 8 ms after the pick, Ahoy's flag 85 never set,
+the drain ended it and the game; a blocks mode lit by its film and holding Ahoy the same), Bond Pro 1.06, Stranger
+Things 1.13, LE 1.12 and LE 1.13 (challenge 0, Demogorgon). `mode_project.CHALLENGE_PROVEN` lists them.
+
+**Our names, and challenges of our own: the game's start menu (round 2, Bond LE/Pro 1.06).** Holding both flipper
+buttons in attract opens `CHOOSE YOUR MODE OF PLAY`: one entry at a time (STANDARD / NORMAL PLAY, COMPETITION, then
+CHALLENGE over each challenge's name), the flippers to change, Start to select. One function of the game's (LE
+`0xaccb0`; the Pro its own) builds the list on its own stack - 12-byte entries `{u32 kind, u16 caption message, char
+*name}` from `sp+388`, the count at `sp+92` - and then runs the menu; the next local is at `sp+496`, so the list holds
+**9 entries**. Bond's own take 7 (Standard, Competition, the five challenges; Tournament and DJ Mixer when switched on
+would take two more), which leaves room for **2** of ours. Kinds: 0 Standard, 1 Tournament, 2 Competition, 3-7 the
+challenges (names: messages 2882-2886, caption 1921 CHALLENGE), 8 DJ Mixer. Picking jumps on `kind - 1` (`ldrls pc`
+on `cmp #7`): 3-7 set flag 18 and the challenge's flag; anything else is a standard game.
+
+`portchallenge.py` finds both points by their words and writes, with the offsets read off the code:
+
+```
+site  challenge_menu      0x000ace80 0xe2400001 0xe3500005    # once the list is built (sub r0,r0,#1; cmp r0,#5)
+site  challenge_menu_pick 0x000adf74 0xe2433001 0xe3530007    # the jump on the chosen kind (sub r3,r3,#1; cmp r3,#7)
+value challenge_menu_list_at   388
+value challenge_menu_count_at  92
+value challenge_menu_cap       9
+value challenge_menu_kind      3
+value challenge_menu_caption   1921
+```
+
+Both are plain hooks (the logger sees the menu function's stack above the six words the trampoline pushes, and may
+change the saved r3). At `challenge_menu` a challenge a mode holds gets the name `pm_challenge_title(slot, words)`
+gave it (the menu's lettering: capitals), and each challenge `pm_challenge_add(words, on_pick)` added is appended
+(kind `0x100 + k`, the game's own caption) while there is room; the rest are logged once (`no room for ...`). At
+`challenge_menu_pick` (the game runs it on every frame of the menu) one of ours is remembered and its kind made 3, so
+the game makes a real one-ball challenge game - to the game, Chaos at Crab Key's; at the ball's start Crab Key's own
+handler hands it to the mode's `on_pick` instead (`challenge_veto`), so Crab Key never starts. A mode file says
+`challenge new` (its `name`, or `challenge_name <words>`, on the menu); a mode file taking a challenge (`challenge
+<n>`) shows its name in that challenge's place. The Modes tab: Starts on > a challenge game of > *A new challenge of
+its own*; blocks: the same choice in *When the player picks the challenge*.
+
+Proven (emulator, 2026-10-19, the stock cards, hidden, muted; both flipper buttons held 3 s in attract): Bond LE 1.06
+- YOLT WIZARD (`challenge new`) the 8th entry, DAF WIZARD (`challenge 1`) in Ahoy's place under its own name; YOLT
+picked: `START (challenge pick)` at the ball's start, the game's Ahoy not started, `GAME OVER` after the ball; three
+of our own: 9 entries and `no room for EXTRA WIZARD`, the last entry picked and started; the control with no modes:
+7 entries, Ahoy picked and the game's own Ahoy played. Bond Pro 1.06 (flipper buttons 62/63): the same.
+`mode_project.CHALLENGE_MENU_PROVEN`. Stranger Things' menu is other code: there a mode takes a challenge's place under
+the challenge's own name, and cannot add one.
+
+**Every build of Bond's generation (PAD-619).** The same start menu is on Aerosmith, Avengers, Batman 66, The Beatles,
+Deadpool, Guardians, Iron Maiden, JP The Pin, Led Zeppelin, The Munsters, Rush, Star Wars ELG, Stranger Things and
+Sword of Rage, every version: one function builds the list on its stack (12-byte entries, or 16 on The Beatles, Led
+Zeppelin, Rush and Sword of Rage: the same three fields and a word more), reads the buttons every frame and, as the
+selection is shown, jumps on its kind to set the game's mode flags. `portchallenge.menu_generic` finds it by those
+two points and reads off the code, per build:
+
+```
+site  challenge_menu      <the every-frame point: mov rX, r0 ; tst rX, #0x80 - the buttons just read>
+site  challenge_menu_pick <the kind jump: sub r3, r3, #1 ; cmp r3, #N>
+value challenge_menu_list_at   <the list: the last stack address taken before the index maths, less the load's offset>
+value challenge_menu_count_at  <the count: what the cursor's wrap past the last entry reads>
+value challenge_menu_cap       <room: up to the first local object above the list the function hands a call>
+value challenge_menu_entry     12 | 16
+value challenge_menu_kind      <the kind ours become>
+value challenge_menu_slot      0 (challenge 0's kind: ours stop it) | -1 (the plain challenge game)
+value challenge_menu_caption   <CHALLENGE: the first after CHOOSE YOUR MODE OF PLAY - 1921, 1911 or 1901 by era>
+site  challenge_balls     <the framework's balls-per-game getter>
+data  game_flags / value game_flags_at / data game_flag_count   <the flag bitmap, from the flag functions>
+```
+
+What each kind does is read the same way: the calls of the game's flag-set function in its case. A kind setting only
+the challenge game's flag is the **plain** challenge game - on most of these builds the entry the menu adds only once
+Stern Insider Connected has sent a challenge (its name is the download's), so the menu never shows it on a machine
+without one. A kind setting it and one flag more is a **named** challenge: Rush (Cygnus Book 1 / 2, 2112: flags 29-31;
+LE 1.18: 24-26 with 16 for the challenge game) and Sword of Rage (Retro, Ransom: 67/68) have no handler of the shape
+above, so `challenge_lines.py` names them by their flags alone:
+
+```
+value challenge_flag_<n>  <its flag>            # no site challenge_go_<n>
+text  challenge_name_<n>  <its name, from its flag's: Cygnus Book 1, 2112, Retro>
+```
+
+The runtime takes those **as the ball starts**: on the game's dispatch of the port's `event ball_start` (its thread,
+before any handler of the game's runs), a challenge game with a held challenge's flag set has the flag cleared - the
+game's own challenge then sees no pick and never starts - and the holder's on_pick called. A challenge of the modes'
+own becomes `challenge_menu_kind`: the plain one where the menu has it (nothing of the game's to stop: the ball's
+start hands it to the mode), else challenge 0's (Rush, Sword of Rage: its flag cleared as the ball starts; Stranger
+Things: its handler hands it over, as on Bond). The every-frame site appends ours only while the list does not
+already hold them, and copies a 16-byte entry's fourth word from the entry ours stand in for.
+
+**One ball.** The plain challenge game does not end after one ball by itself: its length is the Insider challenge's
+(Deadpool Pro 1.16, flag 18 alone: ball 2 followed). `site challenge_balls` - `push {r4, r5, lr} ; mov r5, r0 ; sub sp,
+sp, #12 ; mov r0, #<AD_BALLS_PER_GAME> ; bl ...`, the same on every Spike 2 build - is hooked to answer 1 from the
+moment a mode takes a challenge game until the next game starts, so every challenge game a mode plays is one ball,
+as Bond's own are. PAD-1330: a Spike 3 program builds that getter into each of its callers - the whole-function ones
+are `site challenge_balls` / `challenge_balls_2` as before, and each copy inside a function is `site
+challenge_balls_at_<k>` (k 0-3: the compare of the ball number with it) with `value challenge_balls_at_<k>_reg` (the
+register holding it, hook_full's numbering: x19 = 19), which the runtime sets to 1 there (Star Wars ELG 1.10's Spike 3
+port: four of them).
+
+Proven (emulator, 2026-10-19, the stock cards, hidden, muted): Deadpool Pro 1.16 - two of our own on the menu
+(CHALLENGE over MERC WIZARD and TACO RUN), MERC WIZARD picked: START (challenge pick) as the ball started, GAME OVER
+after the one ball. Rush Pro 1.19 - Default Game Mode 2 (Cygnus Book 1) with a mode on challenge 0: START as the ball
+started, flag 29 cleared, the game's Cygnus intro (flag 37) never set, GAME OVER after the ball; the control started
+the game's own (flags 29, 37). The start menu on every build of the generation: the rigbatch job
+(`C:\tmp\PAD-619\job619.sh`) opens the menu, steps to the mode's own entry, starts it, plays one ball and drains -
+`mode_project.CHALLENGE_MENU_PROVEN` lists each build that passed, with the entries its own menu took.
+
+**The other titles (PAD-619).** Each other kind of challenge and menu has a route of its own in
+`portchallenge.find` (docs/plans/pad619_challenges.md has every build's numbers):
+
+* **A challenge by the game-play mode's index** - Godzilla, Jaws, John Wick, Metallica (the framework's
+  `GamePlayModes`: the current mode is the singleton's word +8; the table's 28-byte entries read off its constructor)
+  and Venom (the adapter keeps the current mode in a global, +4, and each mode's flag and name in u16 arrays). A
+  challenge there sets the challenge game's flag alone; which one is the index:
+
+  ```
+  data  game_play_modes     <the singleton / global>
+  value game_play_mode_at   8 | 4
+  value challenge_mode_plain  1 | 0          # Standard: what a mode's challenge game plays instead
+  value challenge_mode_<n>  <the challenge's index>
+  text  challenge_name_<n>  <its name, from its own message: 4th of July, Red Circle Reckoning, Challenge Mode Low>
+  value challenge_name_msg_<n>  <that message: the start menu shows the mode's name there>
+  ```
+
+  The ball's start takes a held one by setting the index to Standard's. Godzilla's two (King of the Monsters and
+  its Time Attack) have flags of their own (40 / 41) and are taken by them, as Rush's. Jaws' Default Game Mode cannot
+  pick its challenges (they unlock with shark teeth): the rig makes one as the start menu's pick does, by setting
+  the index in attract.
+* **Start menus of other shapes** - Elvira's count lives in r5 for the whole loop (`value challenge_menu_count_reg`:
+  the frame is hooked with every register saved); Star Wars LE/Pro picks with a compare chain and has no challenge
+  kind at all; Foo Fighters, Mando 1.45 and Jurassic Park LE/Pro apply the shown entry live and Start only leaves
+  the menu (20-byte entries on Mando and JP; Mando LE 1.44 keeps its buttons and cursor in registers, reads the
+  buttons at the loop's foot and its pick as a byte); TMNT's entries are 24 bytes with the kind at +4, and its
+  challenges are locked until a player unlocks them (Start on a locked one plays Standard), so ours play as
+  Standard there too. Where the menu has
+  no challenge kind, ours play as Standard (`value challenge_menu_kind 0`, `value challenge_menu_sets_on 1`): the
+  pick is hooked where r3 points into the entry (`value challenge_menu_pick_back`), ours is made Standard's kind in
+  the entry itself and known after by the name it points to, and the ball's start hands the game to the mode -
+  one ball, as every mode's challenge game. Other layouts name their fields: `value challenge_menu_kind_at`,
+  `challenge_menu_caption_at`, `challenge_menu_caption2_at`, `challenge_menu_name_at`.
+* **One entry for every mode (PAD-686)** - Godzilla Premium/LE 1.16's start menu lists game-mode table indices
+  (u32s on its stack, room for nine), not entries of its own, so thirteen modes would not fit. The runtime appends
+  ONE more entry, King of the Monsters' own index a second time, at a point inside the menu's loop:
+
+  ```
+  site  challenge_menu_frame             <inside the loop, past where it jumps back: the buttons in a register>
+  value challenge_menu_frame_buttons_reg 5      # left flipper bit 4, right bit 2
+  value challenge_menu_frame_cursor_reg  6
+  value challenge_menu_frame_list_at     300    # count at 64, cap 9
+  value challenge_menu_frame_entry       4      # the index the entry repeats
+  value challenge_menu_slot              0
+  data  game_play_modes                  0x007b2814
+  value challenge_mode_plain             1
+  value challenge_menu_sets_on           1
+  ```
+
+  With the cursor on it the name message (`challenge_name_msg_0`) letters the mode shown, and a flipper press steps
+  to the next or previous mode instead of moving the cursor; past the last (or before the first) it moves on as the
+  game's own would. The menu applies the entry under the cursor live and the game applies the picked index's flags
+  again as the game starts, so a pick left on King of the Monsters starts its battle with the game and the mode is
+  refused ("a battle is running"): on our entry the pick is Standard's and flag 40 cleared, and the menu's pick alone
+  makes it the mode's one-ball challenge game. Back onto the game's own entry, index 4 and flag 40 again.
+  Proven (emulator, 2026-10-22, David's Heisei card with 13 modes, hidden, muted): the entry stepped through all 13
+  names and on to STANDARD; JET JAGUAR, KING KONG and OXYGEN DESTROYER picked, each START as the ball started, one
+  ball; MODE CHALLENGE then left back onto KING OF THE MONSTERS played the game's own challenge (its battle, no mode).
+  PAD-1369: the Spike 3 index menus (Fallout LE, Pokemon LE, Star Wars 2025 LE / Pro, Transformers LE) take the same
+  entry at Prolonged Competition's frame point, hooked after the frame's press moved the cursor
+  (`value challenge_menu_frame_moved 1`: the press is read off the cursor's change, and while a mode is left to step to
+  the cursor is put back); their list and count may be in registers (`challenge_menu_frame_list_reg`, `_count_reg`) and
+  Pokemon keeps a copy of the last index (`_last_at`). Three of the five have no challenge of their own to repeat, so
+  the entry is Standard's index again on all five: `challenge_menu_slot -1`, `challenge_menu_sets_on 1`, and the
+  runtime letters Standard's caption (`value challenge_menu_frame_caption_msg`) with the game's own CHALLENGE (`value
+  challenge_menu_caption`) and its name (`value challenge_menu_frame_name_msg`) with the mode's. Proven on all five
+  (emulator, 2026-11-17): the game's menu showing CHALLENGE / the mode's name, picked, one ball, GAME OVER.
+* **No challenge at all** - King Kong 0.97, X-Men 0.98 and D&D have none among their game modes; Bond 60th's only
+  one is Challenge Mode, the whole game against the clock: their profiles say so.
+
+The older builds (Batman 66 1.13, Iron Maiden LE 1.16, ...) dispatch the ball's start before the game's: a pick taken
+in the last 2 s survives the game's start, and also has `site challenge_balls_2` (a per-player sum of the setting)
+answer 1. A port without a `game_over` event is proven by a `ball_end` and then in_game last going to 0 with no second
+ball - the end-of-ball call flickers in_game to 0 without ending anything, so in_game alone is not proof.
+
+The ball's end asks the extra-ball test (`site challenge_extra_ball`, one shape on every build: the count byte, non-zero
+takes one and the ball is played again) before the balls-per-game getter. An extra ball earned in a mode's challenge
+game is not played: the runtime has the test say none while one runs (Star Wars ELG 1.10 played one as a second ball).
+
+On Star Wars LE/Pro 1.31 a ball that reaches the mission select just as a mode's challenge ends the ball stops on
+"USE THE ACTION BUTTON TO SELECT YOUR MISSION" until the player picks: the countdown does not run while the ball ends.
+Picked, the game finishes the ball and the game as usual.
+
+**The challenge's end ends the ball (PAD-630).** The game's own challenge, once it is over, ends the ball: Ahoy Mr.
+Bond's ending (LE `0x1cda4`), in a challenge game, clears its running flag and calls the framework's "end this ball
+now" (LE `0x3f79bc(1, 1)`: the status bits `0x202`, the flippers and devices off by bus 177, as the game's wizard
+endings do), so the ball drains dead and `GAME OVER` follows. A mode that took the pick left the ball live, and the
+game's own modes could start before the drain. So when THE MODE THAT TOOK THIS CHALLENGE GAME'S PICK ends (its clock,
+its own end, a stop) outside a ball end, the runtime calls the same function, and nothing of ours begins again in
+that game (`not started: this challenge game's challenge is over`); a mode ended by the drain needs no call. The
+site, found by its words (`movw/movt r2` the status, a push, `ldrh r3,[r2]`, `orr #0x200`, `orr #2`, `strh`; one
+per build):
+
+```
+site  challenge_end_ball  0x003f79bc 0xe305211e 0xe3402082    # Bond LE 1.06 (Pro 0x2665b0, ST 1.13 0x2bd8d4, ...)
+```
+
+A port without it logs `this port has no challenge_end_ball, so the ball plays on`.
+
+Proven (emulator, 2026-10-19, Bond LE 1.06 stock card, two challenge games in a row from the start menu): a mode
+file on its clock, and a blocks mode (`challenge new`) ended by its last shot (its Super Jackpot award, clip and
+sound still played). Before: the ball stayed in play after the end, slings scored, and the game's Goldfinger's
+Jackpot and a 2-ball multiball could start. After: the game left play at once (status `0x0202`), nothing scored,
+both refused (`no game`), and the next challenge game started its mode.
+
+**The challenge ball's launch, and its start as every other ball's (PAD-643, luvthatapex, Bond LE).** A challenge
+game's ball waits in the shooter lane as the mode starts. The game's own challenges play their start and launch it;
+a mode's left it for the player, under the mode's start clip. And Bond's skill shot - with it the left flipper button
+held at the launch opening the top control gate to the loop - is set up at the ball's serve only OUTSIDE a challenge
+game (its bus 34 handler, LE `0x18dd50`: `bl <challenge game?> ; cmp r0, #0 ; bne <out>`, then flags 156-159 and the
+super skill shot's process, which keeps `0x81eb90 + 10` at 3904 while the button is held; at the launch the gate's
+decision `0x1aff18` opens the gate, device 9 coil 6, for 20 s). So two things, per build (`portchallenge.launch_lines`
+/ `plain_lines`):
+
+```
+site  ball_launch         0x003f382c 0xe92d4010 0xe30b44d4    # the framework's launch-button handler (bus 197)
+value ball_launch_flag       12                                # FG_MBDEV_AUTO_PLUNGER_BALL_IN_DEVICE
+value ball_launch_wait_flag  13                                # FG_MBDEV_AUTO_PLUNGER_PLAYER_CONTROL
+site  challenge_plain_0   0x0018dd50 0xe92d4038 0xe1a05000    # Bond's skill shot set-up (LE; Pro 0x18c560)
+```
+
+The launch handler fires the auto plunger when a ball waits in it and does nothing otherwise; it has one shape on
+every Spike 2 build with challenges (61 of them, one hit each). When the mode that took the pick begins, the runtime
+calls it for the player, from the tick, every 500 ms while one of the two flags says a ball waits (for 10 s at most: the player-control flag can come before the ball reaches the plunger):
+by default once the mode's start clip is over (from 1.5 s after it began, while no clip of ours plays; 30 s at
+most; at once with no start clip), else a set time after the mode began, or never. `pm_challenge_launch(slot, ms)`
+says which for a challenge the calling mode holds or added: `PM_LAUNCH_CLIP` (0), `PM_LAUNCH_PLAYER` (-1), or ms. A
+mode file: `challenge_launch clip | player | <seconds>` (1-60). The Modes tab: under Starts on > a challenge game of,
+*its ball launched* when its start clip is over / a set time after it starts / by the player. Blocks: the When the
+player picks the challenge hat's second choice. Logged: `challenge ball: launched for the player (its start clip
+over, 2021 ms after its mode began)`, or why not. Where no ball waits in the auto plunger at all (Led Zeppelin LE / Pro 1.22: the challenge game's first ball goes to the shooter lane for the player's plunge, the auto plunger only takes the later ones, which the game launches itself) it logs `no ball waited in the auto plunger` and leaves the ball to the player.
+
+Each `challenge_plain_<k>` (0-3) is wrapped (`hook_wrap`): in a challenge game a mode of ours took - or is about to
+take (its pick made on the menu, or a held challenge's flag set) - the runtime clears the challenge game's flag for
+the call and sets it again after, so the handler runs as at a standard ball's start; anything else passes straight
+through. Only Bond LE / Pro 1.06 have one: no other build's skill shot asks the challenge flag that way (PAD-643
+sweep of the 69 programs).
+
+Proven (emulator, 2026-10-20, Bond LE 1.06 stock card, the owner's BON APPETIT blocks as `challenge new`, picked on
+the start menu, the left flipper button held from the mode's start; C:/tmp/PAD-643 run_a1.sh / run_b1.sh, rig/ch643.c):
+after - the skill shot's flag 156 and the left-flipper word 3904 at the serve, the trough eject 0.9 s later, the auto
+plunger (node 8 coil 4) 2.0 s after the mode began, `launched for the player`, and the top control gate (node 9 coil
+6) pulsed and held for 20 s 100 ms after the launch; the mode's screen stayed on the glass. Before (main): none of
+it - no skill shot flags, the gate never moved, and the ball was still in the shooter lane 70 s later.
+The same blocks with a 4 s start clip (`clip full` in When the mode starts): the clip at +0.52 s, the launch at
++4544 ms, as it ended. `launch 6`: launched at +6013 ms. `launch player`: `the player launches it (its mode says so)`
+and the ball still in the lane 40 s on. Bond Pro 1.06 (left flipper button 63 held): `0x0018c560 runs as at a
+standard ball's start`, flag 156, the launch at +2010 ms and the top control gate (node 9 coil 6) 100 ms later.
+
+
+**Its own high score (PAD-640).** The game keeps a champion per challenge (`CHAOS CHALLENGE`, `AHOY CHALLENGE`,
+...; the service menu's `CACK CHALLENGE CHAMPION` and the rest), and a challenge game's score that beats it goes in
+there, the initials entered under the challenge's name. A challenge of a mode's own plays, to the game, as Chaos at
+Crab Key's, so its score went in as the `CHAOS CHALLENGE` champion; a mode in a challenge's place filed its scores
+under that challenge. Now a challenge game a mode took keeps the MODE'S high score: the initials entry, when the
+game's score beats it, is under the mode's name (the menu's, in capitals), and the game's own champion is not
+touched. The game keeps its champions in one framework (Bond LE/Pro 1.06 and Stranger Things alike): categories
+`1..` (`HIGHEST SCORES`, `COMBO CHAMPION`, ..., one `<x> CHALLENGE CHAMPION` per challenge, in the menu's order), 36
+bytes each in one table (`{per-player bytes, score getter, reset, compare, qualify, fn, char **titles, u16 *entries,
+flags}`, Bond LE `0x7c3980`, the count at `0x5f7f08`), each a list of score entries (`{u32 record, char *initials,
+char *name, fn, fn, char *title, char **titles, u16 kind, u16 default-score adjustment, ...}`); a record is 96 bytes:
+the initials at +32, the score u64 at +72, `~(the byte sum of the first 88)` u16 at +88. At the game's end one
+function (LE `0x4e87dc`, between the game's other game-over calls at `0x1e29cc`) compares each category's score with
+its records - in a challenge game the game lets only the pick's challenge through - and runs the initials entry under
+the entry's title for each one beaten. `portchallenge.py` writes:
+
+```
+site  challenge_scores       0x004e87dc 0xe92d4ff0 0xe24dd0bc    # the end-of-game high scores (wrapped, hook_wrap)
+site  challenge_score_entry  0x004e7d10 0xe1a03000 0xe3050750    # (category, n) -> the score entry (called)
+value challenge_scores_cat_0  10                                 # DR. NO CHALLENGE CHAMPION ... _4 14 (Stranger Things 9..12)
+```
+
+While that function runs for a challenge game whose pick a mode took, the runtime points the challenge's entry at a
+record of the mode's own and its title at the mode's name, and puts all three back when it returns. The modes'
+records live in `/dump/pad_challenge_scores` (one line each: the record's 96 bytes in hex, a space, the name), a
+mode's first one the entry's default initials and a score of 0 (so the mode's first scoring game is its champion).
+Two modes under one name share one; the attract mode shows each mode's champion (below, PAD-660). A
+port without the lines files the score under the game's challenge, as before, and logs nothing new.
+
+Proven (emulator, 2026-10-20, Bond LE 1.06 stock card, hidden, muted; a blocks mode `challenge new` picked on the
+start menu, two challenge games in a row): the first, 14,708,650 points, came to `PLAYER 1 - Enter Initials` under
+`BON APPETIT` (the mode's record was its first: 0, MXV) and kept `14708650, AAA` in `/dump/pad_challenge_scores`; the
+second read it back and the same score left it standing. The game's own `CHAOS CHALLENGE` record (`0x812ed8`: 25,000,000,
+MXV) read the same before, between and after both games. The control on the released runtime: the game's own
+`CHAOS CHALLENGE` initials entry, as reported.
+
+**In the attract mode (PAD-660).** The attract mode shows the game's champions one page each (`CHAOS AT CRAB KEY
+CHALLENGE` / `CHAMPION` / the initials / the score, ... `HMSS CHALLENGE`); a mode's champion was kept but never shown.
+The attract mode runs a list of pages, each a process of the game's own (Bond LE's list `0x7a6864`: `{shown?, page}`
+pairs); a champion page reads its champion ONCE, before its first frame - the record (`(category, 0)`'s, with its
+check), the entry's score text, and its title, a message (`HMSS CHALLENGE` is message `0xf70`) - and then only draws
+frames, yielding between them, until its time is up. `portchallenge.page_lines` finds the LAST challenge's page
+(`push {r4-fp,lr}; mov r0,#<cat>; ...; bl <record>; ...; mov r0,#<cat>; bl <entry lookup>`), the message lookup its
+title calls (two or three calls with one id) and the yield its frame loop calls (`movw/movt r3 <proc list>; add
+r1,r3,#12`):
+
+```
+site  challenge_page        0x001d6358 0xe92d4ff0 0xe3a0000e    # HMSS's champion page (wrapped, hook_wrap)
+site  challenge_page_text   0x0038c6cc 0xe92d4008 0xe3083474    # the message text lookup (wrapped: the title)
+site  challenge_page_yield  0x002fd144 0xe3063df8 0xe3403082    # the frame yield (hooked: the record put back)
+value challenge_page_cat    14
+value challenge_page_title  3952                                # Stranger Things: FINAL SHOWDOWN CHALLENGE, cat 12
+```
+
+The wrapped page runs the game's own first, as it was; then, in the same process, the game's page again for each
+mode now on the challenge list (one that took a challenge's place, under its menu name, or one of the modes' own)
+whose record in `/dump/pad_challenge_scores` has a score: the category's entry points at a copy of the mode's record
+and the title message says `<NAME> CHALLENGE` (the name alone when that is longer than the game's longest title, 27
+letters, or already ends in CHALLENGE) - until the page's first yield, where the game's record is put back: the
+page's OWN yield (the game's current process, the yield's list head + 4, is the page's), since the game's other
+processes run on threads of their own and yield meanwhile (the first rig run, putting back at any yield, showed the
+mode's record under HMSS CHALLENGE). The page reads nothing of the record after its first frame,
+so the game's record is never read or written for a mode's page; a page cut short (a flipper button, a game start) is
+cut at a yield, when it is already back, and the end-of-game high scores put it back first too. The modes' pages
+follow the last challenge champion's in its slot of the list (the game's other pages and their order are unchanged),
+and only while the game shows its champions at all (its record must check; the champions adjustment). A port
+without the lines keeps the mode's champion and does not show it.
+
+Proven (emulator, 2026-10-21, hidden, muted): Bond LE 1.06 stock - a mode's own challenge (`BOND VS SUMO`) picked on
+the start menu, its game's 6,216,920 entered as `BOND VS SUMO`'s new high score, then the attract mode's champion pages:
+the game's five as before (`HMSS CHALLENGE` still 25,000,000 GG, the game's records unchanged all run), then `BOND VS
+SUMO CHALLENGE` / `CHAMPION` / `A` / `6,216,920`, then the attract mode went on. Stranger Things LE 1.13 stock - a mode
+in Final Showdown's place, its record seeded: `FINAL SHOWDOWN CHALLENGE` BRE 25,000,000, then `SUMO TEST CHALLENGE` /
+`DAV` / `12,345,670`. The first Bond run put the record back at ANY yield: the mode's record showed under
+`HMSS CHALLENGE` - hence the page's own. The control on the released runtime: no page of the mode's.
+
+**On every Spike 2 game (PAD-663).** Every Spike 2 build keeps its champions in the same framework - one category
+table (category 1 is HIGHEST SCORES on all of them), the entry lookup and one end-of-game function - but most keep no
+champion per challenge, so a mode's challenge game went in under the game's own: HIGHEST SCORES, a challenge of the
+game's (Avengers' `BATTLE ROYALE CHALLENGE SCORE #3`) or the one CHALLENGE CHAMPION (Mandalorian, Venom). Before
+the end-of-game function files a player under a category's entry it asks the bus, the same code on every build:
+
+```
+mov r0, #0x5b ; add r1, sp, #0x48 ; ... ; bl <dispatch> ; cmp r0, #0     ; {player, category +2, entry +4} at sp + 0x48
+```
+
+and the game's own handlers say no to what does not belong to the kind of game played. The port names that call:
+
+```
+site  challenge_scores_gate  0x00392080 0xebff5412 0xe3500000    # Avengers LE 1.10: the bl (hook_call)
+value challenge_scores_gate_id       91
+value challenge_scores_gate_cat_at   2
+value challenge_scores_gate_entry_at 4
+value challenge_scores_cat   1                                     # HIGHEST SCORES: every challenge game's place
+```
+
+In a mode's challenge game the category's first entry (`challenge_scores_cat_<n>` where the build has one per
+challenge, else `challenge_scores_cat`) points at the mode's record as above, its award (entry +0x20: what beating the
+GRAND CHAMPION wins) is off for the call, and the gate answers yes only for that entry and no for every other: the
+game's own champions and high scores are not touched by a mode's challenge game at all. The initials entry says the
+mode's name (`PAD CHALLENGE`). The score belongs to the game its mode began in: Avengers starts the ball, where a
+menu pick is taken, before it counts the game's start.
+
+The attract mode: Bond and Stranger Things show a page process per category (PAD-660's route above, also Aerosmith
+and Guardians on their last such category). Most builds show every champion through ONE page function instead,
+called once per category and returning when the page's time is up - `page(object, category, n, frames, ..)`
+(Avengers, Deadpool, Godzilla), `page(category, n)` (Batman 66), `page(category)` (Foo Fighters, John Wick). It
+reads the entry's record and its title (the entry's titles list, +0x18, or the entry's own title callback, +0x10):
+
+```
+site  challenge_pages_0     0x000214d8 0xe307c8c4 0xe340c075    # Avengers LE 1.10 (it opens with movw/movt ip)
+```
+
+The site is the function's first word, before the push where the function sets a register up first: Avengers'
+`movw ip ; movt ip`, Sword of Rage's `movw ip ; movt ip ; ldr ip, [ip]`, TMNT's two pairs and a load. Wrapped at the
+push, the page runs with that register unset (Sword of Rage crashed in the attract mode).
+
+A build may have more than one function of that shape (Deadpool, Batman 66, Jaws, The Beatles): all are named,
+`challenge_pages_0` .. `_3`, and the runtime follows the one the attract mode calls. Jurassic Park The Pin shows
+HIGHEST SCORES one row per page, each a small function of its own handing the entry to a page body that reads its
+titles: the GRAND CHAMPION's row page is named with them. Teenage Mutant Ninja Turtles and Venom show their other
+champions on bespoke pages (the title is in the scene), and HIGHEST SCORES on one list page of five rows, each row
+asked of the category's list:
+
+```
+site  challenge_list_page   0x000301e8 0xe30b3afc 0xe30d16f0    # TMNT LE 1.59: HIGHEST SCORES' list page
+```
+
+repeated with the category's list cut to its first entry, pointed at the mode's record, so it lists the mode's
+champion alone.
+
+The wrapped page runs the game's own call first, noting (the entry lookup, logged on the same thread) which category
+it showed. After the call for the lowest category the attract mode shows (its cycle's first page, the grand
+champion's where it has one) the page is called again with the same arguments, once per mode with a champion, the
+category's first entry pointed at a copy of the mode's record and titled `<NAME> CHAMPION`, and put back as each
+call returns. Nothing is repeated with a game in play; a page cut short gives the entry back on the next tick, and
+the end-of-game function's wrap puts it back before anything else.
+
+## Holding the end of a ball (PAD-622)
+
+James Bond's own mini-wizards end on a drain with their TOTAL: the mode's last clip, then its TOTAL under the bar,
+and only then the bonus. Measured on the stock LE 1.06 (emulator, Goldfinger's Jackpot started by
+`pm_game_wizard_named`, then drained): the award clip about 2.5 s, the TOTAL about 6 s, the BONUS screen 8 s after
+the ball ended. The game does it in the process that runs its end of ball: Goldfinger's ending `0xc0928` loops on its
+clip, drawing frames and yielding (`0x2fd144`) until it is done, so the bonus (bus `0x27`) and the next ball wait.
+
+A mode does the same with one call from its `.ball_end`:
+
+```c
+static void on_ball_end(void)
+{
+    if (!running) return;
+    show_my_total();                       /* on the tick's thread from here on, as at any end */
+    if (!pm_ball_end_hold(6000)) take_my_total_down();
+}
+/* and in the tick: once pm_ball_end_holding() is 0 again, take it down */
+```
+
+- Once every mode's `.ball_end` has run, the runtime - inside the game's end-of-ball dispatch, on the game's own
+  thread - sleeps a tick at a time (`site proc_sleep`, as the scoop's hold) for the longest time any mode asked
+  (10000 ms at most), then returns and the game's end of ball goes on exactly as before. The mode's tick runs
+  meanwhile on its own thread (Bond LE: dispatch thread 1, ticks another), so what it shows is drawn: the emulator
+  shows the TOTAL under the bar and the mode's clip still playing through the hold.
+- `pm_ball_end_release()` (from a tick) lets it go early; `pm_ball_end_holding()` is 1 from the ask until the end
+  of ball goes on.
+- Never on a tilted ball: the port's `tilt` event counted since the last ball ended refuses the ask, and a tilt
+  during a hold ends it.
+- The held coils (magnet, building, shield, shaker) still let go at the drain, before the hold; the display
+  priority's ending and the backdrop are given back after it.
+
+A blocks mode that the drain ends does it by itself (`drain_end` in its C): it ends as its clock would - an Award it
+ended on, then its TOTAL on its HUD or its own screen, its bar kept - and holds the end of ball for `DRAIN_TOTAL_MS`
+(6000, the game's own TOTAL) plus that Award, or for the rest of a total already showing. A mode started again
+before its drain's TOTAL went takes it down first.
+
+Proven (emulator, 2026-10-19, James Bond LE 1.06 stock card, hidden, muted; the owner's BON APPETIT blocks): main's
+code ended the mode at the drain and showed no TOTAL; the branch logged `its TOTAL at the drain: the end of ball
+waits 8000 ms` (its When the mode ends Award, then the TOTAL), `ball end: let go after 8015 ms (its time ran out)`,
+TOTAL 3,500,000 under the bar for 6 s, then the game's BONUS and ball 2 as ever (the next ball 12.6 s after the
+drain, main's 4.6 s). The same mode in Ahoy Mr. Bond's place in a Player Challenge game (`AD_DEFAULT_GAME_MODE` 3):
+`START` at the pick, the drain held 8015 ms with its TOTAL up, then the game's GAME OVER and MATCH. Not measured: a
+machine; a title other than Bond (every port with `site proc_sleep` offers it).
 
 ## Display priority: a mode layered on the game's display (item 154 display)
 
@@ -3481,7 +5053,8 @@ BLOW!"). They are program text, which `progtext.py` can rename within each strin
 > it to a waiter, never cuts a waiter short and never hides a display's words. It WATCHES instead:
 > `pm_display_covered()` is 1 while a display of the game's has the screen (an effect over the
 > layered display, or any layered foreground), and the examples' HUD keeps its middle words blank
-> until it is gone. What follows is how the game layers its display (still true, and what the
+> until it is gone. PAD-658: with no priority held (a mode not running) it looks at the game's display
+> there and then, so a qualification note waits for the game's words too, its time held. What follows is how the game layers its display (still true, and what the
 > watching reads) and the history of the hold.
 
 A mode's screen and clip share the glass with everything the game shows. Without a priority, the
@@ -3751,8 +5324,8 @@ both; a card written by the app with both (the mode files reached the guest the 
 
 ## The showcase: five code modes that light their shots and hold a display priority (item 157)
 
-`examples/` holds five intricate modes (KING GHIDORAH, OXYGEN DESTROYER, MASER BARRAGE, FINAL WARS,
-ANGUIRUS; their rules sheets are `examples/README.md`) with their own clip, panel, music and calls. Item
+Five intricate modes written for Godzilla (KING GHIDORAH, OXYGEN DESTROYER, MASER BARRAGE, FINAL WARS,
+ANGUIRUS; since PAD-691 not in the SDK or the app, kept as test material in `tests/mode_examples/c/`). Item
 157 lit them the way a rules designer lights a Stern mode and put them in the game's display order, with
 two helpers in `examples/intricate_kit.h`:
 
@@ -3836,6 +5409,13 @@ pm_backdrop_once("PadMode_meltdown_Jackpot");   /* once in its place, then the l
 pm_backdrop(0);                              /* the city again (pm_end and a ball end do it too) */
 ```
 
+PAD-658: the backdrop is the mode's that asked for it. A mode that is not running may ask while none of ours runs (a
+qualification note over its loop, as the game's own feedback screens letter their lines over a clip); while another
+of ours runs `pm_backdrop` answers 0 and changes nothing. An ending held with `pm_end_holding` (a TOTAL) keeps the
+loop behind it - on the live city the game's map labels (RAID, BRIDGE, TANKS, POWER) were under the TOTAL's words -
+and it goes when the hold does, at a ball's end, or as another mode begins. `pa_end` no longer asks for the city
+itself: `pm_end` does, at once for an end that holds nothing.
+
 How the game draws a frame (Godzilla Premium 1.16, measured with `display_probe.c`, docs/plans/hud-layers.md):
 the layered display draws its BACKGROUND element first (`BDLBackground::v[8]`): the video bank's player
 when the background object has a clip (its video field, +0x54), then the element's own scene; the HUD
@@ -3873,6 +5453,161 @@ award over it and the loop back after; LOOPS through; the score live throughout;
 stop; the renderer presenting every frame. Not measured: a machine; another title (no other port has the
 lines); a battle's background (the backdrop only takes the city's place, so ANGUIRUS, inside a battle,
 does not use it).
+
+### The backdrop on a clip v2 build: the loop on the bank's surface (PAD-521)
+
+A James Bond owner wanted their own mini-wizards to look like the game's: a video cycling all through the mode and
+back again after a shot's video. Bond LE plays a mode's clips on the video bank's own surface (clip v2, "Clips on the
+newer builds"), which the game draws in the TV frame above the score panel; it has no background element to take
+over, so `pm_backdrop` answered 0 and a loop played once. With
+
+```
+value backdrop_surface 1        # james_bond_le-1.06: the clip v2 lines are needed too
+```
+
+`pm_backdrop` / `pm_backdrop_once` work there: the runtime plays the loop on the surface again whenever it is idle
+while the mode wants it - its own end, a one-shot in its place (played at once), a full-screen clip of the mode's
+(`pm_clip`, the same surface: the loop after it), a clip of the game's on that surface. `pm_backdrop(0)`, `pm_end`
+and a ball end stop ours, and the game's own clips come back. The boot log says `backdrop: on - a mode's clip loops
+on the video bank's surface, behind the game's own videos`; each play is a `backdrop: "<clip>" looped / once / again
+on the video bank's surface` line.
+
+**Measured (emulator, stock Bond LE 1.06 card, 2026-10-11, rig 1, the game's own clips by name):** the loop
+(`GLDFNGR_Wizard_Mode_Background`) waited for the game's clip then on the surface and played in the TV frame,
+on through a Side ramp shot; `Disco_Intro` once in its place and the loop again by itself after it; a full-screen
+`MainPlayLoop_DrNo` over it; the game's own main-play loop back when the mode stopped it. No abort. Not measured: a
+machine; Bond Pro 1.06 (no line yet).
+
+Just asked for, or right after a full-screen clip of the mode's, the loop takes the surface at once, over whatever the
+game has there. The game's own main-play video (`MainPlayLoop_<film>`) can take the surface the moment a clip of ours
+ends (end-to-end run e3: the loop played after the intro and the game's dots were back 30 ms later, until they ran
+out); with `text backdrop_idle MainPlayLoop` the runtime watches the game's asks for the bank's surface (one hook on
+`surface_set_video`, shared with PAD-446's clip variants) and gives the loop the surface back on the next tick. Any
+other clip of the game's is waited out. Runs e4-e6 (the same sequence) kept the loop from the intro's end to the mode's;
+the game did not ask for its main-play video in them, so the take-back itself has not been seen yet.
+
+**PAD-725: every clip v2 title.** `value backdrop_surface 1` is in all 45 ports whose clips play on the game's own
+bank surface (not the 15 whose surface the app grafts into the HUD, which the game never puts a clip on, nor Jaws Pro
+1.02 and Godzilla Pro 1.16, which take the older `clip_play` route). Most titles have no name for their main-play
+video, and several LOOP a background of their own on the bank's surface in play (Dungeons & Dragons'
+`TownBackground_<town>` / `TravelBackground_<path>`, Foo Fighters' `BG_Loop_Van_34`, John Wick's `NY_Night`, Jurassic
+Park's `JawsMapProgressBGLooping`, from `/dump/cliplog.on`). Without a name the loop waited behind one of those for good.
+So a clip the game loops (`surface_play`'s loop flag, the hook the clip-back already has) is a background on every
+title: it gets one pass, its own length and at most 3 s, as it does under a mode's clip, and then the mode's loop takes
+the surface back (`backdrop: the game loops "<clip>" - one pass of it, then the loop takes the surface back`).
+`text backdrop_idle` still takes it back at once, and on a port without that line the last clip the game looped in a
+game is its main-play video, the one put back when a clip of the mode's ends and leaves the surface empty.
+
+### The game's status bar (PAD-521)
+
+James Bond LE shows each of its own modes in a coloured bar under the TV: the mode's name in the game's lettering, the
+bar in the mode's colour (Goldfinger's Jackpot gold), and its clock as a wipe draining along it. That bar is the port's
+scene `hud` (6fb39344/7de1c159: `StatusBar_Instance` with `bar_Color_Instance`, `Progress_Instance`, `Text_Instance`),
+and it belongs to the score display. A mode puts itself there the same way:
+
+```c
+pm_status_bar("YOLT WIZARD", PM_RGB(0, 192, 64), percent);   /* percent 0-100 of the wipe, -1 = no wipe */
+pm_status_bar(0, 0, 0);                                     /* given back as it was */
+```
+
+How the game does it (read off the game program): the score display is a singleton (`site status_bar`, its getter
+0x1862dc); its frame update shows the bar, its words, its colour and its wipe from four bytes at +0x11e, and moves the
+wipe to frame (+0x11c) + 1. The game's own modes set the words by a message id and the colour by a palette index, and
+both setters end in the nodes' own calls: the text node (+0x118) through `set_text`, the bar_Color node (+0x114)
+through its vfn +0x4c and +0x44, each (node, r, g, b, 1.0). The runtime makes those calls with the mode's words and any
+colour, sets the four bytes, keeps them while it holds the bar (a display of the game's that hides it is answered the
+next tick, words and colour sent again) and gives back the bytes it found - unless the game took the bar for a display
+of its own since - when the mode gives it back, or once the game has been over 30 s. Port lines (defaults shown):
+
+```
+site status_bar       0x001862dc 0xe92d4038 0xe30e48f8    # james_bond_le-1.06
+value status_flags_at 0x11e      value status_frame_at 0x11c
+value status_text_at  0x118      value status_colour_at 0x114
+value status_colour_vfn 0x4c     value status_tint_vfn 0x44
+```
+
+**Measured (emulator, stock Bond LE 1.06 card, 2026-10-11, rig 1):** a green bar named YOLT WIZARD with its wipe full
+and at 40, the Goldfinger background looping in the TV above it, through a Side ramp shot; a blue DIAMOND DEATH THREAT
+with no wipe; the empty bar back when given back. No abort. Not measured: a machine; Bond Pro 1.06 (no line yet).
+
+**End to end (emulator, 2026-10-11, the stock Bond LE 1.06 card, rig 1, runs e2-e6):** a blocks mode YOLT WIZARD built by
+Try it's own code (`mode_write.build_tryit_set`: its words-alone screen into the HUD scene, four clips into the bank,
+the mode compiled), started by its trigger: "YOLT WIZARD" in large white letters over its intro clip and the green bar
+under the TV with its clock full; its loop in the TV after the intro, the bar draining; a Side ramp shot put "JACKPOT"
+over the loop and its one-shot in the loop's place, the loop back after; ended, "TOTAL 2,000,000" over its total clip
+with the bar full, both given back 3 s later. No abort.
+
+### The Bond Women multiplier (PAD-889)
+
+James Bond LE and Pro 1.06 have a multiplier of their own: each Bond Woman the player collects adds one, and once
+collected it runs for a time at 2X (the first) up to 7X (the sixth). While it runs the game counts it into its playfield
+multiplier, the one score_add multiplies every award by, so a mode's `pm_score_add` points are multiplied by it already,
+as the game's own shots are. A mode can read what it is now (a blocks mode: the value "the Bond Women multiplier"):
+
+```c
+unsigned x = pm_bond_women_mult();   /* 2-7 while it runs, else 1 (and 1 on a title without it) */
+```
+
+How the game keeps it (read off the game program, LE 1.06): collecting sets the player's bit in a mask (0x52194), the
+multiplier is the bits counted plus one, held to 2-7 (0x5211c), and its start (0x8d4d0) stores that at +0x20 of its
+record (0x81a064) and runs process 0x1ab (Double Scoring's too) for a time from adjustment 225. Its getter is the port's
+`site bond_women_mult` (LE 0x8c9e4, Pro 0x8c89c): the byte while the process runs, 1 otherwise; a hook of the game's
+(0x9d334) adds it to `data score_mult`. The 60th Anniversary builds have no Bond Women (no line; the recipe refuses it).
+
+**Measured (emulator, the stock Bond LE 1.06 and Pro 1.06 cards, 2026-10-31, rig 1):** a blocks mode started at the
+ball start scored 1000 when the value read 1, and 1000 again when it read 4, after an instrument gave player 1 three Bond
+Women and called the game's own start: the game's playfield multiplier went 1 to 4 within the frame, the score 1000 to
+5000, and the mode's END said "2 scores, total 5000" on both. No abort.
+
+### A line under its name (PAD-547)
+
+The game's own modes show a running value under their name: James Bond's Duel on the Disco Volante has
+"SUPER JACKPOT = 53,200,000" under its status bar, growing as shots are made. A blocks mode ticks "a line under its
+name" (`"info": {"on": true, "text": "SUPER JACKPOT", "value": {"k": "var", "name": "superjackpot"}}`) and shows its
+words, " = " and the value with commas while it runs, written again only when the value changes, hidden under a display
+of the game's and gone at its end (a drain: at once).
+
+Nothing in it is a title's own. The build adds the line as one more screen of the mode's, `PadMode_<slug>_Info` with
+its words `PadMode_<slug>_Info.PadMode_<slug>_Info_Words`, so it goes on every title that takes screens, in white in
+the HUD scene's lettering. Where it goes is the port's: `text info_line_at <x> <y>`, the middle of the line in glass
+pixels. A port that names none gets it centred under where a mode's screen shows its words (680, 450).
+
+```
+text info_line_at 679 510      # james_bond_le-1.06: under the status bar, where the game's own mini-wizards put theirs
+```
+
+The port's place is where it starts. "Place on the screen…" beside the setting (or "Lay out on the screen…" on a mode's
+page) opens the Scenes editor on the title's HUD scene with the line in it beside the mode's screen (PAD-323), where the
+build will put it; dragging or sizing it there saves into the mode's `info_layout` (the same keys as `screen_layout`),
+and the build places it so. Emulator-proven: a line moved 40 px lower in the layout is drawn 40 px lower on the glass.
+
+A mode in C does the same with `pm_node("hud", "PadMode_<slug>_Info")`, `pm_text` and `pm_set_text`, its assets.json
+saying `"info_line": true`.
+
+**Measured (emulator, stock Bond LE 1.06 card, 2026-10-12, rig 1):** a blocks DAF WIZARD built by Try it's own code,
+its name in the blue bar and SUPER JACKPOT = 5,000,000 under it at the start, 6,250,000 and 7,500,000 after two Side
+ramps, gone with the TOTAL over its end clip. With main's code the same mode showed the bar alone. No abort.
+
+**Its TOTAL as the game's own (PAD-574).** A mode whose screen is words alone also gets two blank screens of its own,
+`PadMode_<slug>_TotalName` and `PadMode_<slug>_Total` (assets: `total_name_node` / `total_node`), 12 and 55 px under
+the port's `info_line_at`: a blocks mode writes "TOTAL" and its number into them at its end, hides its words screen
+and shows them for 3 s, under the bar as James Bond's own modes end. An Award block on a mode with no HUD shows on
+its own screen, and an End the mode right after an Award lets it show (and one Award of When the mode ends after it)
+before the TOTAL. A mode in C uses the two screens with `pm_node`, `pm_text` and `pm_set_text`. Emulator-proven on the
+stock Bond LE 1.06 card (rig 1, 2026-10-14) with the owner's own BON APPETIT blocks: SUPER JACKPOT for 2 s, then TOTAL
+14,000,000 under the bar for 3 s, then all gone. No abort.
+
+**A scored number under the bar (PAD-709).** A words-alone mode also gets `PadMode_<slug>_Points` (assets:
+`points_node` / `points_text`), a blank screen 110 px under the port's `info_line_at`, its number at 5x the HUD font (the
+game's own mini-wizards pop a scored shot up about 140 px high there). While the mode runs, a Words block with a value
+(or an Award block with one) writes the number into it instead of over the video, its words if any small over it on
+the TOTAL's word line, and hides the mode's info line meanwhile (3 s for Words, the Award's own seconds); it keeps out
+of the way of the game's screens. An Award's number holds the TOTAL back as PAD-574's did; a Words block's goes with
+the end. A card built before it has no such screen and the number goes over the video as before. The Scenes editor
+lays it out as a third part ("Place on the screen..." beside "as words over the video"), saved as assets.json
+`points_layout` (the keys of `screen_layout`). Emulator-proven on the stock Bond LE 1.06 card (rig 3, 2026-10-24) with a
+BOND VS SUMO like the reporter's: 1,000,000 large under the green bar (about 760 x 95 px), the SUPER JACKPOT line back
+3 s later, an Award's JACKPOT over its 2,500,000, the TV clear throughout; main's code drew both over the TV. No abort.
 
 ### A full-screen clip on a machine: drawn at the frame hand-over (PAD-301)
 
@@ -3949,8 +5684,17 @@ kerning, carried in from the Ebirah battle scene) and hidden until the mode show
 - `counters`: up to three across the top (x 17.6 / 573.6 / 1123.6): a label, a big value, a sub-label;
 - an award line and a line under it in the middle (for a moment: a jackpot, a head severed);
 - `timer`: the stock BATTLE badge's panel with the mode's own green LED label and a glowing disc with its
-  icon (`bolt`, `oxygen`, `maser`, `xilien`, `anguirus`, `radiation`), in the BATTLE badge's slot (y 267),
-  the seconds in its window;
+  icon (`xilien`, `radiation`, `bolt`, `ghidorah`, `oxygen`, `maser`, `anguirus`, `rage`, `crystal`, `snowflake`,
+  `rose`, `claw`), in the BATTLE badge's slot (y 267), the seconds in its window. A picture named `badge.png` in
+  the mode's folder is its icon instead (PAD-690: its alpha, or its brightness, fitted into the disc). No two modes
+  of a card wear the same drawn icon: the build gives a mode whose icon an earlier mode took, or that names none,
+  the next free one;
+- the progress panel (PAD-680, PAD-690): a column at the right edge, under the rage meter and over the player
+  score panels: up to 7 slots, the badges scaled to fill it; the modes' latest progress notes stand in it (each
+  mode's badge and the shots it still needs, newest on top, the oldest dropping off) until a mode starts or the
+  game ends. It steps down while one of ours runs and while any mode of the game's runs (`pm_aside`: PAD-733, a
+  timed mode's TIME LEFT sits there - SUPER TRAIN LOOPS - as a battle's RIGHT spins do). A mode with the timer off
+  still has a badge there (its label and icon);
 - `gauge`: pips on the right edge (`spike`, `segment` - filled from the bottom - or `diamond`), each a lit
   and a dark picture; or (`"kind": "bar"`, PAD-416) ONE meter in the stock POWERUP meter's manner at the
   glass's top-right corner - a metal frame with the mode's `icon` in a diamond, a glass tube in five cells and
@@ -4198,12 +5942,71 @@ desk-read from item 158's address pass), a card built by Write with `stock.cfg` 
 goes through the same `mode_install.py` path as the mode files; not booted), the Modes tab's
 dialog on the glass (its service is tested in-process).
 
+### Instead of: a stock rule's shot MOVES (PAD-699)
+
+David, 2026-10-23: "change the rules for the modes like gigan and biollante and space Godzilla ... Choose
+alternate shots and integrate into the modes." A `counts_as` row ADDS a shot; an `instead_of` row MOVES one:
+
+```
+instead_of 14 Big loop -> Left ramp      # battle vs Gigan: the Big loop is its Left ramp now
+```
+
+- **The new shot counts as the old one**, exactly as a counts-as row (while the old bit is lit in the rule's
+  per-player field). **The old shot alone no longer counts**: while its bit is lit, a dispatch of just that bit
+  is dropped and the game's handler is not run for it (as an item 161 handler's `PM_STOCK_DONE`). Rows are tried
+  remap first, then drop, so two rows that swap two shots of a rule work.
+- **The 0x1 "a switch was hit" bit rides along.** Godzilla's Big loop arrives as `0x1000000001`: the decision
+  looks at the shot's own bits, so the loop can stand in, and keeps the 0x1 when it becomes the target (the
+  handler saw it so in stock). A dispatch of 0x1 alone is never touched. This applies to counts-as rows too.
+- **The light moves with the shot.** Every tick, each insert of the new shot shows what the game is showing on
+  the old shot's first insert: the top layer of the game's (none of ours) holding each of its lights - its
+  colour, its blink, King Ghidorah's arrows going yellow, green, red. The old shot's inserts are held dark on the
+  runtime's layer. An old insert of one light (a powerline) gives its level in the row's colour (yellow unless a
+  `light` line says otherwise). `light` lines colour counts-as rows only.
+- **Every mode of the game's is named** (`rule` lines, game_mode_blocks.stock_rule_lines, written into the
+  Godzilla ports by `stock_rule_lines.py <program> <port>`; a derived port gets them from its own program when
+  its reference names rules, portgen REVISION 6). The runtime keeps 32 rules and 24 rows (`N_STOCK_RULES`,
+  `STOCK_ROWS`; stock_remap.MAX_ROWS).
+- **In the app:** the game mode's page, Shots: `<shot> instead of <shot>` (the default) or `counts as`. A row is
+  `{"rule", "from", "to", "instead": true}` in `modes/stock.json` (a row without `instead` is a counts-as row, as
+  every older project's).
+
+**What each Godzilla battle tests (the probe, stock Premium/LE 1.16 and the Heisei 1.99D card, which renames
+them):** every battle's handler gates a shot on its per-player field, so a moved shot works for all of these.
+
+| rule | stock name (Heisei 1.99D) | stock shots |
+|---|---|---|
+| 12 | Battle vs Ebirah (BIOLLANTE) | the three spinners' middle bits 15 / 40 / 15, then Pop bumper (or bit 42): final blow |
+| 13 | Battle vs Titanosaurus (DESTOROYAH) | Powerline left, center, right in turn (4M, 7M, 10M; shield targets 1M), Maser (15M), Godzilla target (final blow) |
+| 14 | Battle vs Gigan (GIGAN) | both ramps lit, 8 hits (alternating = a combo), the 8th wins |
+| 15 | Battle vs Megalon (SPACEGODZILLA) | one lit shot hopping (left spinner, Pop bumper, Building, ramps, center spinner), 7 hits, a shot timer multiplies |
+| 16 | Battle vs King Ghidorah | multiball: ramps, Building, Big loop, Top spinner all lit; each builds the jackpot; arrows change colour |
+| 6 | Megalon and Gigan Multiball (MEGAGUIRUS) | multiball: Building and the shield ramp spinner's first bit jackpots |
+| 17 | Ghidorah and Gigan (BATTRA) | its first phase pays ramps, loop and top spinner WITHOUT its field lit (field 0x1): a moved shot cannot land there |
+
+**Emulator-proven (2026-10-23, muted, rig 1; stock_probe.c beside the runtime):** on stock Premium/LE 1.16 and on
+David's "Heisei 1.99D + daveyvandy modes v20" card with the app-rendered stock.cfg: every old shot dropped
+(`no longer counts - it moved to`), every new one entering the handler as the old bit; Gigan won by 4 Big loops +
+4 Buildings (`STOP 14 reason 1 lr 0x909e0`), Destoroyah won through Left ramp / Big loop / Right ramp, Maser and
+the Godzilla target, Biollante's 25,000,000 final blow from the Godzilla target (`STOP 12 reason 1 lr 0x81f2c`)
+after two Pop bumpers did nothing, SpaceGodzilla's lit ramps taken by the shield targets, King Ghidorah's three
+shield targets paying exactly its ramps' and Building's jackpot builds, Megaguirus's Big loop its Building
+jackpot. LEDs (lamp_watch.py): Gigan's BIG LOOP and BUILDING in the ramps' own colours, LEFT/RIGHT RAMP 0,0,0;
+King Ghidorah's SHIELD inserts yellow, then green after a hit, then red, its ramps and BUILDING dark. No segv.
+
+**The shot slot is each build's own** (`game_mode_blocks.stock_shot_slot`: the first virtual call of the shot
+entry v[15], `ldr rX, [rY, #4 * slot]`): Premium/LE 1.16 and the Heisei cards 42, Pro 1.15 and Pro 1.16 41.
+Pro 1.16's port had been drafted with Premium/LE's 42 / 45: a wrap of its v[42] saw no shot at all (called once,
+at START, with other arguments); with 41 / 44 Gigan won through the Big loop and Building and Ebirah through the
+Godzilla target on the emulator. A derived port takes both numbers from its own program (portgen `_stock_slots`).
+Pro 1.15's lines are item 158's (its card is archival: not booted here).
+
 ## Rewriting a stock rule's shot logic (item 161)
 
 Designed at the desk on 2026-09-23 from item 158's reading of the game's own rules (above), built on
 item 160's per-rule wrap of the shot-handler vtable slot (the section above). The pieces in the repo:
 `pad_stock.h` (the header an author's C sees), its implementation in `pad_mode_runtime.c` ("STOCK
-RULES IN C"), `examples/ebirah_rewrite.c` (a worked example: battle vs Ebirah with three different
+RULES IN C"), `ebirah_rewrite.c` (a worked example: battle vs Ebirah with three different
 shots in order, then the Building), and the port lines the accessors read in both Godzilla ports. The
 readable pseudo-C of Ebirah's and tank attack's own code is reference material (Stern's logic) and is
 NOT in the repo. What is emulator-proven is at the end of this section.
@@ -4250,7 +6053,8 @@ WON, i.e. the battle's own ending plays. Replaying the game's handler with a cho
 rewrite keeps the game's ending without re-implementing it; item 158 proved (emulator) that those two
 paths do exactly this when the real switches drive them.
 
-**What the example does** (`examples/ebirah_rewrite.c`): after the battle's own START it puts the Left
+**What the example does** (`ebirah_rewrite.c`; since PAD-691 test material in `tests/mode_examples/c/`, not
+shipped, so the app offers no template for the rule): after the battle's own START it puts the Left
 ramp in the field and holds its insert (yellow blink, `pm_lamp_shot`); a Left ramp hit pays what a spin
 pays (200,000 x factor, `pm_stock_award`), takes the game's first stage award, and lights the Right ramp;
 then the Big loop; then the Building, whose hit is the game's final blow. Any other shot does nothing,
@@ -4334,3 +6138,968 @@ battle's on-screen words (the BG layer's text follows the SPINNER bits, so a rew
 game's default line, "SHOOT POP BUMPER FOR FINAL BLOW!" after the third stage); whether the stage
 screens, which name the spinner completed, read well over a ramp. A rewrite's own words would need
 the rule's display layer, which this item does not touch.
+
+## Co-op play (PAD-1017)
+
+2 to 4 players play one game as a team, on a game without co-op of its own. TMNT, Venom, The Mandalorian, D&D,
+Jaws, Jurassic Park, King Kong and Bond 60th have co-op in their own rules, and that code copies each feature's
+per-player state across players. No other title can reuse it. Here the game plays ONE player instead. Its progress,
+score, lights and flags are the team's, because there is only one of each. The runtime takes the teammates in turn,
+one ball each. There is nothing for a mode to call: a card gets it from `coop.cfg` beside the runtime (the Write
+tab's **Co-op play**):
+
+    coop on
+    button 59        the switch held at Start to add a teammate (the right flipper button; the build reads its id)
+    setting 0x...    (round 2) the live value of the game's own CO-OP PLAY row (0 Off, 1 Co-op, 2 Team 2v2, 3 Team
+                     2v1): co-op only while it is 1, a team game while it is 2 or 3 (PAD-1042); 4, 5 and 6 are 1, 2
+                     and 3 Classic, no character's ability (PAD-1065)
+    teams on         (PAD-1042) every game of two or more players is a Team 2v2 game, no menu row needed
+    teams 2v1        (PAD-1042) ... a Team 2v1 game
+    teams 3v1        (PAD-1224) ... a Team 3v1 game
+
+Round 2 (DoomWalrus666): the Modes tab's "Switch it on and off in the service menu" puts a CO-OP PLAY row in the game's
+own menu (menu_settings.COOP_PLAY, on a spare setting, Off to start with) and its live value in coop.cfg. Teammates join
+only while it says On. On a card of co-op and nothing else (no mode, no attract item), the Insider Connected gate is
+hooked as always but holds back the game session, high scores, game events and the achievement query only while it
+says On (`insider_holding`); Off, the card is the game's own on Insider Connected. A card with modes keeps the whole gate.
+
+On the machine, a Start pressed with the button held, in the first ball of a one-player game (then any Start in that
+co-op game), adds a teammate. The game's own add-a-player runs as always (credits, its hooks, the most players it
+allows) and counts the player, so the teammate has a score panel. Every panel shows the team's score: the tick and
+each ball's end copy player 1's score into every teammate's (`data scores`, or `scores32`). The game still PLAYS one
+player, because inside its player change its count of players is 1, so it never changes to player 2's flags and lamps. A plain Start adds a competing player as stock, and a game of competing players takes no
+teammates. At each ball's end with teammate t of n up: for t < n, the ball's byte goes one down before the game's
+player change, which puts it back up, so the next teammate plays the same ball. An extra ball taken leaves the byte
+down; it is put back up and the same teammate shoots again. For t = n the game's change runs as it is (the next ball,
+or the game's end). So the game ends after the last teammate's last ball.
+
+- **Each teammate's ball 1 is not a first ball (PAD-1046):** the framework's ball start tells a player's first ball
+  by its ball getter reading 1, and on one resets the player's lamps and flags and calls every rule's first-ball
+  hook: the rules' per-player setup (Godzilla: a battle back to not started, LIGHT BATTLE's ramps to make again).
+  Every teammate plays ball 1, so teammates 2..n set the team's ball-1 progress back to a new game's (DoomWalrus666:
+  Gigan's 7 shots on ball 1 gone, both ramps again to light battle; a battle started on ball 2 carried over). That
+  one call (`site coop_first_ball`, wrapped where it is made) reads 2 while teammate 2..n is up on ball 1, so the
+  setup runs once a game, at teammate 1's, as in a one-player game; the ball byte and its other reads stay the game's.
+
+- **Whose turn:** the game's own top line `BALL %d` (found in the message table by its English words) reads
+  `PLAYER 2  BALL %d` while teammate 2 is up. It goes back to the game's own words when the co-op game is over. The
+  bonus count keeps the game's head (PLAYER 1, the team): borrowing its `PLAYER %d` for the teammate blanked the
+  bonus screen's head and TOTAL SCORE line on Godzilla LE 1.16.
+- **Its own boards:** one champion per team size (`2-PLAYER CO-OP` ... `4-PLAYER CO-OP`), kept the way a mode's
+  challenge game keeps its own (PAD-640/663: the record in `/dump/pad_challenge_scores`, HIGHEST SCORES' first entry
+  pointed at it for the game's end, the game's own records shut for that game). The attract champion pages show
+  each board that has a champion.
+- **The lit score box (PAD-1043, DoomWalrus666):** the game lights and enlarges the player up's score box, so with
+  the game playing player 1 it lit player 1's box all game. The score panel's own calls of the framework's player-up
+  getter (`movw/movt ; ldrb r0, [<player>] ; bx lr`) are wrapped where they are made (`hook_call`) and answer the
+  teammate up during a co-op game; every other caller still hears player 1. The panel that lights one box of four
+  this way (Godzilla, Avengers, Jurassic Park The Pin, X-Men) is found by its frame update - the getter, then a
+  loop to 5 testing `box == up` (`rsb ; clz ; lsr #5`) and setting a Text colour (vtable +0x40) - and its "player
+  changed" checks (the getter, then `ldrb rA, [this, #count + 1] ; cmp rA, r0`; X-Men has two). No other title's
+  program has a panel of this shape, and those get no lines. A Team 2v2 game (below) is left the game's own: it
+  plays a game player per team, so its own player up already lights the team's box.
+- **"Player N, you're up" (PAD-1202, DoomWalrus666):** at a ball's start, with more than one player, the game starts a
+  process that waits a moment, asks the player-up getter who is up and plays that player's call (Godzilla 1.16:
+  `callout_nth(0x470 or 0x471, player - 1)`). With the game playing player 1 (a team game its player 1 or 2) it named
+  player one for every teammate. The process's getter call is wrapped where it is made (`hook_call`) and answers the
+  player really up: the teammate in a co-op game, the player (1-4) in a team game; mode.log says `co-op: "player N,
+  you're up" names player n (the game's player m)`. The process is found by its start: `bl <players getter> ; cmp
+  r0, #1 ; (cmphi r4, #1 ;) bls`, then its address into r1 - on Godzilla, Avengers, D&D, Foo Fighters, Iron Maiden,
+  Bond, Jaws, Jurassic Park, King Kong, Led Zeppelin, Mandalorian, Star Wars and Venom. Elvira's process of that
+  shape is handed the player COUNT ("n-player game") and reads no getter; the other titles have none.
+
+Port lines (portcoop.py; one framework shape on every Spike 2 build, the older ones' count at +0x50 of a struct):
+
+    site  coop_player_change  the player change at a ball's end (wrapped)
+    site  coop_add_player     add a player (wrapped)
+    data  coop_player         the player up's byte; the ball in play is the next one
+    data  coop_players        the count of players' byte
+    site  coop_first_ball     the ball start's call of the ball getter that tells a first ball (PAD-1046)
+    site  coop_panel_lit      (PAD-1043) the score panel's frame update's call of the player-up getter (hook_call)
+    site  coop_panel_up[_n]   (PAD-1043) its "player changed" checks' calls (hook_call; _2 .. _4 for more than one)
+    site  coop_up_call        (PAD-1202) the ball start's "player N, you're up" process's getter call (hook_call)
+    site  coop_start_game     (PAD-1316) the game start, handed the Insider lobby's size as its fifth word (hook_wrap)
+    site  coop_lobby_add      (PAD-1316) its loop's call adding lobby players 2..n after ball 1's start (hook_call):
+                              the runtime adds them while the intro and pick hold ball 1, so the panel shows them
+
+plus PAD-640/663's `challenge_scores*` lines for the boards. Emulator-proven on Godzilla LE 1.16 (2 and 4 teammates:
+every teammate played balls 1-3 in turn, the game ended after the last, and the team's score went on its own board).
+
+**CO-OP PLAY on the start menu** (PAD-1052, DoomWalrus666: "Can we please make Co-op mode work the same way?"): with CO-OP PLAY at 1 (or Classic 4, or a card of co-op with no such row) the start menu gets a CO-OP PLAY entry at the TEAM PLAY entry's sites (`team_menu_kind` 1). Picked, ball 1's start makes a co-op game of one (coop.n 1, as PAD-1054's held-button start does) and the top line says `CO-OP PLAY`, `START ADDS PLAYERS`, `UP TO 4 PLAYERS`; each Start in that ball then adds a teammate with no button held, and the first join ends the lines. A co-op game has 2-4 players, so one Start cannot add them all as TEAM PLAY's does (stock TMNT's own start counts its logged-in Insider players, not its co-op pick). The right flipper button + Start still adds a teammate. Emulator-proven: Godzilla LE 1.16, Iron Maiden LE 1.18 (teammates 2 and 3 by plain Starts).
+
+### Team 2v2 (PAD-1042)
+
+DoomWalrus666: "a team 2v2 mode. Player 1 and player 2 are on one team against Player 3 and Player 4 ... Scores are
+shared within a team, as well as game progression. Character Select should still be available ... the Service Menu
+setting for Co-Op mode should now also have a choice for Team 2v2". The CO-OP PLAY row has three values (stored 0 Off,
+1 Co-op, 2 Team 2v2, shown as those numbers - the game's own GAME ID kind - with the names in its help line; the row
+was Off/On with 0 and 1, so an operator's pick is kept). The game plays TWO players, a team each: its own player 1 is
+team 1, its player 2 team 2, so each team has a score panel, a score and a set of progress of its own and the game's
+own player change goes between them. The runtime takes each team's players in turn.
+
+PAD-1052 (DoomWalrus666: "you must press the start button 4 times. It would be more clear if you pressed the start
+button one time and it said 4 players added: Team 1: Player 1 and Player 3, Team 2: Player 2 and Player 4"): the
+players are numbered in the order they play, team 1 the odd ones (`coop_team_of`). Then "you still want to be able
+to play 1 player", and daveyvandy: "Make it work like stock Stern co-op 2v2 games work". Stock (TMNT 1.54's symbol
+build): TEAM PLAY 2 VS 2 is an entry of the start menu, and `start_button_start_game(credits, ..., players)` adds
+players 2..4 itself on the one Start; `team_play_get_player_score` makes players 1 and 3 one team, 2 and 4 the other.
+
+- **The pick:** with CO-OP PLAY at 2 (3, or coop.cfg `teams ...`) the start menu (both flipper buttons in attract)
+  gets TEAM PLAY 2 VS 2 (2 VS 1), at Prolonged Competition's sites and with its port lines (PAD-1041): on the entry
+  lists (`site challenge_menu` / `challenge_menu_pick`) a copy of Standard's entry with kind `TEAM_KIND` and our
+  name, played as Standard (kind 0) once picked; on the index menus (`site comp_menu_frame`) Standard's index again
+  (`value comp_menu_end_index`), lettered through Standard's name message (`comp_menu_end_msg`) while the cursor is on
+  it (`team_menu_*`). A plain Start is the game's own one-player game, and Start in its first ball adds a competing
+  player as stock does. A port that names neither menu: the second Start of a one-player game adds the teams.
+- **Joining:** a one-player game whose ball 1 starts within `TEAM_PICK_MS` (20 s) of the menu showing the entry is the team
+  game, and as its ball 1 starts (the event bus's dispatch of `ball_start`, `site hook_dispatch`: the game's thread,
+  before its handlers) the runtime calls the game's own add for each next player until the teams are full
+  (`on_team_dispatch`, `coop_team_fill`). Called from the tick instead, the game's add hung Iron Maiden LE 1.18. Player 2 is team 2 (the game's own player 2), player 3 joins team 1 (the
+  game's add runs - credits, its hooks - and its count is put back to 2), player 4 joins team 2 (back to 2). Short of
+  credits the game's add refuses and the fill stops there; each later Start in the first ball adds the next player. The top line then reads, `COOP_JOIN_MS` (2 s) each, `4 PLAYERS ADDED`, `TEAM 1: P1 AND P3`, `TEAM 2: P2 AND
+  P4` (`coop_join_words`), said three times over (`COOP_JOIN_ROUNDS`: Godzilla's game-start film hid about 10 s of them),
+  waiting while a display effect of the game's has the screen; player 1's character pick opens after them.
+- **Turns:** the teams alternate, a round of turns a ball: P1, P2, P3, P4, then ball 2. The last team's turn of a round
+  that is not the ball's last puts the ball's byte one down before the game's change, as co-op does, so the game goes
+  back to its player 1 on the same ball. An extra ball keeps the player who earned it. With three players team 2's
+  lone player plays both of its turns, so each team plays as many balls (`coop_team_player`, `coop_team_round`).
+- **Whose turn:** the top line reads `TEAM 1 P3  BALL %d` (Godzilla LE 1.16: `TEAM 2 PLAYER 3  BALL` ran into the
+  game's credits after 19 characters).
+- **Characters, awards, handicaps** go by the player up (1-4), as in co-op: each player picks a character at their
+  first ball, no two the same; a character's record holds (`coop_cache_*`) are the team's game player's.
+- **The game's end** is the game's own for its two players (one match draw each); the scores go on a `TEAM PLAY`
+  board of the runtime's own (PAD-640/663's one-entry filing: the higher team score is the one that can take it),
+  never on the game's own boards.
+- **Team 2v1** (daveyvandy: "There should be a designated option for 2V1"): CO-OP PLAY 3 (or `teams 2v1`) is the
+  same team game for three players at most - players 1 and 3 against player 2, who plays both of team 2's turns each
+  ball (P1, P2, P3, P2); TEAM PLAY 2 VS 1 and one Start adds three (`3 PLAYERS ADDED`, `TEAM 1: P1 AND P3`, `TEAM 2:
+  P2`), a later Start adding no one (`coop_teams_size`: 4 for 2, 3 for 3; the game keeps its own
+  `team_max`). Its scores go on a `TEAM 2V1` board of their own, so a 2v1 champion never sits on the 2v2 board.
+- **Team 3v1** (PAD-1224, DoomWalrus666: "Also please add a 3v1 mode"): TEAM PLAY 3 VS 1 (start-menu kind 5, or
+  `teams 3v1`) is the team game of four whose team 1 is players 1, 3 and 4 against player 2, who plays all three of
+  team 2's turns each ball (P1, P2, P3, P2, P4, P2); one Start adds four (`4 PLAYERS ADDED`, `TEAM 1: P1, P3, P4`,
+  `TEAM 2: P2`). `coop.team_kind` (4, 3, 5) says which team game it is; `coop_team_player_in` / `coop_team_of_in`
+  give 3v1's layout (player 2 must be the game's player 2: the joins fill the teams in Start order). Its scores go on a
+  `TEAM 3V1` board.
+- **Enhanced Standard** (PAD-1224, DoomWalrus666: "standard play but with the ability for players to choose a
+  character with special abilities ... their own scores and gameplay progress as normal, nothing shared"): CO-OP PLAY
+  at Enhanced adds ENHANCED STANDARD (start-menu kind 2) after CO-OP PLAY. It is the game's own game of competing
+  players (`coop.standard`): Starts in ball 1 are the game's own adds (`coop.n` follows its count), the player change
+  is the game's own (`coop_std_change`) and `coop.turn` is the game's player up, so each player's pick (at their
+  first ball) holds while they are up. The abilities' records are the game's player's already. Scores, the score
+  panel, the top line, the "you're up" call, Insider logins, first-ball setup, handicap records and the high score
+  boards stay the game's own; no co-op awards follow it. Classic has no such entry.
+- **Classic** (PAD-1065, DoomWalrus666: "play these modes without any special abilities. The players may select a
+  character but none of them will have any special abilities"): CO-OP PLAY 4, 5 and 6 are Co-op, Team 2v2 and Team
+  2v1 Classic, the same games as 1, 2 and 3 (now called Enhanced; `coop_menu_game`, `coop_teams_size`). The pick is
+  made as before, but `coop_char_up` answers no character, so no adjustment, record hold, count, gift, lit shot or
+  Action-button ability holds, and the pick's top line never says what one does. Each character with an ability gets
+  a `PadCoopClassic_<n>` patch in the HUD scene beside its pick screen (only when CO-OP PLAY is in the service menu):
+  its card as a character with no ability draws it (NO SPECIAL ABILITY, "Plays as the game always does."), cut to
+  where the two differ and placed over its card; the runtime shows it with the card while the row says 4-6.
+  Emulator-proven on Godzilla LE 1.16 (rig kit `C:/tmp/PAD-1065`: tryset.py builds a Write override set whose row
+  defaults to a value - the `default` option is one-based with `from_zero`, so 6 for 5; rig/job.sh sets the slot's
+  NVRAM aside so the default shows, and needs 6 coins a player on fresh settings): Team 2v2 Classic (5) - 11 of 11
+  patches found, both players picked, GODZILLA 1954's card said NO SPECIAL ABILITY and the game read no adjustment of
+  its; the control at 2 read ball save 15 (its own 12) and saved the ball in play at the pick; no faults.
+- **Off / Classic / Enhanced** (PAD-1073, DoomWalrus666: "I would like for the service menu options to simply be
+  Co-op/Team: Off, Classic, Enhanced"): CO-OP PLAY is now 0 Off, 1 Classic, 2 Enhanced (`coop_play.MENU_VALUES` 3),
+  and the game is the start menu's pick alone: at 1 or 2 the menu has CO-OP PLAY, TEAM PLAY 2 VS 2 and TEAM PLAY 2 VS
+  1, all three (`team_menu_kinds`). On the entry lists each is a copy of Standard's entry with kind `TEAM_KIND` plus
+  what it makes (0x301, 0x304, 0x303), so a pick that hands over only the kind still says which; on the index menus
+  Standard's index goes on once for each, and the cursor's place among them picks the name lettered and the game
+  (`tm.kind`). The team fill takes its size from that pick (`tm.size`, read by `coop_teams_switched_on`); coop.cfg's
+  `teams` still makes its one team game. A store an older card's 0-6 row left reads as near as it can
+  (`coop_row_mode`: 3 Enhanced, 4-6 Classic). The right flipper held at Start still makes a co-op game (a team of one
+  alone) at 1 or 2, and a later Start in it adds a co-op teammate.
+  Emulator-proven with Write-built override sets and their pinned runtime (rig kit `C:/tmp/PAD-1073`: tryset.py
+  `<code> <card> <out> <default> <project> [chars]`, rig/job.sh steps the start menu entry by entry to `TARGET`; a
+  fresh store so the row reads its default): Godzilla LE 1.16 (an index menu) at 1 Classic - entries 4-6 CO-OP PLAY,
+  TEAM PLAY 2 VS 2, TEAM PLAY 2 VS 1 lettered in turn under the cursor, TEAM PLAY 2 VS 1 picked and one Start added
+  three players (team 1: 2, team 2: 1), GODZILLA 1954's card said NO SPECIAL ABILITY and its pick read no adjustment;
+  Iron Maiden LE 1.18 (an entry list) at 2 Enhanced - entries 3-5 the same three, CO-OP PLAY picked and two more
+  Starts added teammates 2 and 3; main's runtime on the same Godzilla card offered CO-OP PLAY alone; no faults.
+
+Emulator-proven on Godzilla LE 1.16 (rig kit `C:/tmp/PAD-1042/rig`: job.sh, team.cfg; tryset.py builds a Write
+override set with the row defaulting to 2): 4 players through the game's own CO-OP PLAY row at 2 (read live at Start;
+the arm-time log reads the store before the game has loaded it) - turns P1 P3 P2 P4 for balls 1-3, two team panels
+with their own scores (11,717,290 / 12,465,960), each player's own character pick, team 2's score on TEAM PLAY with
+its initials and the attract mode's TEAM PLAY CHAMPION page, the game's own champions untouched; 3 players (`teams
+on`): player 3 played both of team 2's turns each ball; no faults.
+
+### Co-op and Insider Connected (PAD-1108)
+
+DoomWalrus666 (3-player co-op): "achievements earned by player 2 and 3 were shown as earned by Player 1. Player 1
+username displayed on End of Ball Bonus for all 3 players". The game plays one player for the team, and it asks its
+user manager for that player's login. The manager keeps two tables of the players' logins - player p's entry (a 16-byte
+user uuid and a flags word) at table + 20p + 4, the tables at the manager's +A and +B - and the per-player name, the
+achievement drivers and the logged-in test all read them. coop.cfg:
+
+    users <manager> <A> <B>     the user manager (a global) and its tables' fields (coop_play.insider_users: the
+                                lookup `ldr ip,[r0,#A]; cmp r3,#1; ldr r0,[r0,#B]; movne r0,ip; b <table lookup>`)
+    achievements <award>        the game's achievement award (coop_play.achievement_award: the one function counting
+                                AUD_CONNECTIVITY_ACHIEVEMENTS_GIVEN)
+
+While teammate t is up in a co-op game the game's player 1 holds teammate t's entry and t's place holds player 1's;
+before each of the game's own player changes they go back, so the game's end, its high scores and its session see the
+logins as the players made them (and the tick puts them back after a game ended any other way). A team game swaps
+too (PAD-1267): the player up holds their team's game player's place (player 3 the game's player 1, player 4 its
+player 2) - see below for the entries the game clears there. The award is refused while the gate holds back (the PAD-698 hold on the achievement list only works from boot: a card
+of co-op and nothing else holds only while CO-OP PLAY is not Off, and a machine switched to co-op after booting at Off
+already has the list). Every Spike 2 build measured has one manager (the tables at +0x160/+0x164, Beatles and Star
+Wars ELG +0x150/+0x154) and, but for Star Wars ELG, one award.
+
+Emulator, Godzilla LE 1.16 (marker logins planted in both tables from the host, read back at each turn): in a
+3-teammate co-op game the game's player 1 held teammate 2's entry through teammate 2's balls and teammate 3's through
+theirs, every entry back as planted after the game; in a team game players 1 and 2 kept theirs and the game itself
+cleared players 3 and 4's at player 3's first turn. A test mode calling the award on a scratch table was refused
+(the entry's earned byte stayed 0); without the `achievements` line the same call ran.
+
+**The score panel's names and a team game's players 3 and 4 (PAD-1267).** DoomWalrus666: "Co-op mode: Active player
+name always appeared on Player 1 scoreboard, while the active highlighted score was the correct score position. Teams
+mode, player 3 and 4 names don't appear on scoreboard after ball 1". The swap put the teammate up's login in place 1,
+and the score panel's box 1 read place 1. The panel's calls that name a BOX's player are port lines:
+
+    site  coop_panel_name[_n]   the panel's calls of the game's "Insider name of player N" - name(out, player,
+                                flags, r3, [sp], [sp + 4]), reaching the user manager's lookup - for a box's
+                                player (portcoop.panel_name_sites: near coop_panel_lit, the out string and the two
+                                stack arguments set up, r1 not the player-up getter's answer)
+
+wrapped where they are made (hook_call; the six-argument wrapper is entered with the caller's stack and passes the
+two stack arguments on) and asked for the place holding that box's player's login now (coop_name_player). The panel's
+call naming the player up, and the bonus's, still read the swapped place: the teammate up's. Godzilla LE / Pro 1.15
+and 1.16 have two (the box frame update, the "who leads" caption), X-Men LE / Pro 0.98 one; Avengers and Jurassic
+Park The Pin name no player in the panel.
+
+A team game counts two game players, and the game clears the first table's entries past its count a tick after each
+of its player changes. The runtime keeps a copy of every player's login (before each of the game's own player changes,
+the logins as made) and puts back a cleared entry past the count with the login that belongs in that place now (the
+swap's, `coop_team_users_back`: in the change, and on the tick); at the team game's end those entries get the game's
+own bytes back, so no login is left over for the next game.
+
+Emulator, Godzilla LE 1.16, marker logins: in a 3-teammate co-op game, with teammate 2 up, box 1 read place 2
+(player 1's marker) and box 2 place 1 (player 2's), and so for teammate 3. Before: in a Team 2v2 game players 3 and
+4's entries in the first table went to 0 as player 3's first turn began and stayed 0 all game; after: the game cleared
+them a tick after each of its six player changes and each time they were put back, then left as the game had them at
+the game's end. With the team swap, player 3's turns had player 3's login in place 1 and, once the game had cleared
+place 3, player 1's put back there (box 1 named player 1's, box 3 player 3's); player 4's turns the same on the game's
+player 2; every login back as made after the game.
+
+PAD-1315 (DoomWalrus666: "In co-op mode, Player 1's user icon moves to the scoreboard position of the active player
+next to their username"). The boxes' Insider icons are not drawn with the names but by the score frame's Insider
+overlay (NetScoreFrameOverlay, every Spike 2 build), whose loop over the four boxes calls its drawer once a box as
+draw(this, logins, player 1..4, r3, [sp]; the box's rectangle in s0-s3); the drawer reads that player's login state
+and login (the swapped entries) and draws that user's avatar in that user's colour. And re-pointing the name's player
+made a guest's box (no login: "PLAYER %d" of the number given) read the number of the place its entry was in.
+
+    site  coop_icon_draw        the overlay's one call of its per-box drawer (portcoop.score_icon_sites: the drawer
+                                gives its r2 as r1 to a call reaching the framework's login read and then to the
+                                login read, table + 20 * p + 4, itself) - answered with the place holding the box's
+                                own player's login; the four floats and the stack word are passed on as they came
+    site  coop_panel_name_user  the user-for-player call inside the name function coop_panel_name calls
+                                (portcoop.name_user_site) - with it the name is asked for the box's own number and
+                                only this lookup is re-pointed while the box's name is made
+
+Godzilla Pro 1.16: drawer 0x483c14 called from 0x484440, the name's user lookup 0x3bc944. All 53 latest builds have
+the drawer call; the four with box names (Godzilla LE / Pro, X-Men LE / Pro) the name's lookup. Emulator, Godzilla LE
+1.16, marker logins (no Insider user behind them, so the names fall back to "PLAYER n"): teammate 2 up, before box 1
+read PLAYER 2 and box 2 PLAYER 1, after PLAYER 1 and PLAYER 2. The emulator has no Insider session, so the overlay
+never draws there (its draw gates on the session's state and a feature check); the drawer call's hook arms and full
+co-op games run with it.
+
+### Co-op awards (PAD-1028)
+
+After a co-op game the machine shows who of the team did best at each award: most points, most ball saves, the
+longest ball, the jet fighters destroyed. The game plays one player for the team, so what a teammate did is what the
+team's counts did during that teammate's turns. The runtime reads each count at every turn's end (inside the player
+change, before the game's own) and gives the rise since the last read to the teammate who was up. `coop.cfg` names
+the awards, one line each, up to 16; the Modes tab's **Awards…** under **Co-op play** writes them, read off the
+card's own program:
+
+    award score - MOST POINTS              the team's points in the teammate's balls (the ball's bonus in)
+    award time - LONGEST BALL (SEC)        the teammate's longest ball, in seconds
+    award audit 116 MOST BALL SAVES        audits of the game's, added up (ids comma-separated, up to 48): counted
+    award audit 168,169 MOST RAMPS         as the game counts them, through its audit add (`site audit_add`, hooked)
+    award champion 4 JET FIGHTER CHAMPION  a champion category of the game's own: its value for player 1
+                                           (`data challenge_scores_table`, 36 bytes a category, +4 value(player))
+
+At the game's end each award goes to the teammate with the most: `PLAYER 2`, or every one tied (`PLAYERS 1+3`,
+`ALL PLAYERS`: short, as the page letter-spaces them); an award nobody has any of is not shown (`mode.log` says so).
+They show the way the game shows its own champions, so in each game's own
+look: one attract champion page an award, its words as the title, the winner in the initials' place, the count as
+the score. They come first among the pages the runtime adds (PAD-660/663), from the game's end until the next game
+starts, and only while the game shows its champions at all. `mode.log` has each teammate's count:
+
+    co-op award: MOST RAMPS - PLAYER 2 (1:0 2:12)
+
+What every game offers (coop_play.py): the points and the longest ball; the framework's audits by name
+(AUD_TOTAL_BALLS_SAVED, the game's mode STARTED and COMPLETED audits, AUD_TOTAL_EXTRA_BALLS, AUD_SHOT_*RAMP*,
+spinner spins, pop bumpers, slingshots, mystery awards, tilt warnings), where the build has its audit add (all the
+latest builds but Star Wars Home Edition); and the game's own champion categories but its score boards, challenge
+games, co-op boards and times. A category's value is what the game keeps for its one player: a count (Godzilla's JET
+FIGHTER CHAMPION, GODZILLA POWERUP CHAMPION) or a best score (GODZILLA MULTIBALL CHAMPION), so those are offered
+unticked, for the owner to pick per game.
+
+**On the winners' character cards (round 2).** DoomWalrus666: "the players selected Godzilla character portrait ...
+next to their awards at the end of the game". A card with co-op characters (below) also carries an award card per
+character in the HUD scene beside the pick's screens: `PadCoopAward_<n>` (1-based, the character's place), the pick
+card's look with the character's portrait and name, and a words line `PadCoopAward_<n>_Words` the runtime writes.
+coop.cfg says `award_cards on`. When the co-op game is over (inside the game's player change, on its thread, before
+its match and high scores) the game's end waits while each award is shown on each winner's card in turn, 3.5 s each,
+42 s in all, the game's process sleeping a tick at a time (`site proc_sleep`, as the end-of-ball hold):
+
+    MOST POINTS  PLAYER 2  9,982,980
+
+A winner with no character (no pick) is left out there; the attract pages still show every award.
+
+**Over the bonus's own loop (round 3).** DoomWalrus666: the cards "play over what seems to be active gameplay"; show
+them "over the end of ball bonus loop videos". By the player change the bonus screen is gone and the main play is back
+on the glass. The cards cannot go into the bonus screen itself: the game does not draw the HUD scene while its bonus
+is up (a hold at the bus's `bonus_end` kept TOTAL SCORE on the glass 10 s and no card showed), and the bonus's own
+scene is not one the app can write. So the cards stay at the game's end and the backdrop (the clip behind the HUD, in
+the city's place) plays the bonus's own loop under them: the game's own looped clip and crop as the bonus ends
+(`event bonus_end`; on Godzilla `EndOfBallBonus_BackgroundLoop`, `SquareCrop`), given back when the cards are done. A
+port without the event, or a bonus with no looped clip, keeps the main play under them.
+
+### Co-op characters (PAD-1031)
+
+Each teammate picks a character at the start of their first ball (teammate 1 when the team forms; each join opens
+it again, since the joiner's held right flipper walked it), and its ability holds while that teammate is up. The game
+plays one player for the team, so nothing per player is copied: an ability changes what the game READS. `coop.cfg`
+(the Modes tab's **Characters…** under **Co-op play**):
+
+    pick on                                   each teammate picks at their first ball
+    pick_time 30                              the seconds to pick (30 when not given; 0: no limit); a flipper
+                                              press starts them again
+    left 60                                   the left flipper button (the right is `button`)
+    action 34                                 the Action button (LOCKDOWN / ACTION BUTTON)
+    lane 62                                   the shooter lane (SHOOTER LANE): the save's presses wait for the ball
+    character adj:94x200:0:15,bs:94 GODZILLA 1954|LONGER BALL SAVE
+    character save:10 GODZILLA 2000|ACTION BUTTON BALL SAVE
+    character adj:195x50:4:30 GODZILLA GMK|EASIER HEAT RAY
+    char_clip 1 PadCoopClip1                  PAD-1079: character 1's own video (a clip the build added)
+    clip_crop Normal                          the bank crop the videos play at (the app writes Normal: 1:1 on the glass;
+                                              not given, the port's backdrop_crop - Godzilla's ScoreFrame is x1.065, -43,-98)
+
+PAD-1079: a character with `char_clip` has a see-through window in its pick card's portrait frame (the app cuts it
+only on a title whose port has the backdrop, `backdrop_draw`). While its card is on the glass (the pick on it, then
+PICKED) the runtime loops its clip as the backdrop, behind the HUD in the city's place, and gives the backdrop back
+when the card goes. The app makes the clip the bank's size with the owner's video where the window is on the glass, on
+black, so the backdrop stretched over the glass puts the video in the frame.
+
+PAD-1114: the co-op and team games' intro (the dialog's **Intro video...**), with or without characters:
+
+    intro PadCoopIntro 12000                  the intro's clip (a full-screen clip the build added) and its length
+                                              in ms; sounds.cfg `cintro <request> <carrier key> <its key> <ms>` is
+                                              its sound, on a carrier the game never plays (as PAD-945's shot sounds)
+                                              - at priority 255 while the intro plays, so the game's own sounds (a
+                                              Start's "player added") cannot take its bus; 3 again after (PAD-1220)
+
+A game that begins as co-op or team (the right flipper held at Start, the start menu's CO-OP PLAY / TEAM PLAY, a
+team game's filling Start, a teammate joining before ball 1 is out) plays it once: full-screen over the game's own
+start film (`pm_clip`; asked for again once if the game's film takes the surface in its first 1.5 s), its sound on
+the carrier with the game's own sounds faded under it (its music asked for again after). Both flipper buttons down
+together, each let go once since it began, skip it. From then until the pick the flippers and Action are the
+runtime's (the game's language keys and launch do not see them), so the ball waits in the shooter lane
+(`ball_launch_flag`, 20 s at most); then, where the game's PLAYER LANGUAGE SELECT is on (`value language_adjustment`, read
+as the intro begins; Godzilla's 14 puts its own bar over its start film, under the intro), a language window: the
+top line says `LANGUAGE: ENGLISH`, each flipper press flips every player's language word (`data language_player`, +
+4 x player; `text language_<n>` names them), and 6 s after the last press it goes on by itself (not on Action: Godzilla
+launches the ball at an Action press the runtime holds back, so an Action press, or any launch, ends it too); then the
+first pick, held back until here. Godzilla's own bar over its start film is under the intro, so this window is where the language is chosen.
+
+**Round 2: in the game's own intro screen; the ball after the pick.** DoomWalrus666: "add language selection during
+the intro video in a small dialogue", "Ball must NOT go to the shooter lane until video, language, and character
+selection are all completed". On a port that names its start films (`text start_film_clips`, Godzilla's
+intro1/3/4/6, played by its BDLGameIntro screen at a Start), a Start about to be co-op or team (the right flipper held
+within 1.5 s with characters to pick, the start menu's entry just picked, or a co-op game already waiting for its
+film) has the game's film ask answered with the intro's clip: the game plays it in its own intro screen, with its own
+PLAYER LANGUAGE SELECT bar over it, and the flippers flip the language as on a stock Start (the right flipper held
+through Start is not a flip). Its own words over the film (`text intro_hide_<k>`: the place, the date, the Japanese
+date art) are hidden; the screen's scene is demand-loaded, so its root is the one the game passes its node finders
+(`site find_node` / `find_text`) when it looks those words up. The screen is up while the game's state word reads
+`value intro_state_up` (`data intro_state` -> + `value intro_state_at`; Godzilla 0, then 4); a film the screen closes
+before its end goes on full screen as the runtime's clip. Both flipper buttons stop the film, and the game closes its
+screen. A co-op game that formed before the game asked for its film waits up to 2 s for it, then plays full screen as
+above. Then the first pick opens at once - no ball wait, no language window. BALL 1'S SERVE (`site serve_ball`: the
+ball start's call of the framework's serve, Godzilla LE 0x2a77ec) waits on the game's own process, a tick at a time
+(`site proc_sleep`), through the intro and the first pick until a character is taken (or the start menu's
+players-added lines and the pick after them); while it waits the pick has the flippers and Action (no ball to launch:
+its top line says ACTION PICKS). Not earlier in the ball start: held at its first-ball check the game never put its
+intro screen up. The handicap pick (PAD-1033) already waits for the character's.
+
+**PAD-1221: a Start press in the intro adds a player with no sound.** The game answers an add with its own sound about 0.5 s later (Godzilla LE 1.16: request 1161, bus 0x2), which the intro's 250 ms fade let be heard. A Start press while ball 1 waits sets `ci.join_at`, and `ci_quiet` stops outright (`ci_join_cut`) any non-music sound first seen within 3 s of it. (Every teammate's pick holding their serve is PAD-1215's, below.)
+
+**Round 3: players added during the intro; the pick at once.** The game takes Start on its own process, which waits
+in the serve, so a Start in the intro was lost: while ball 1's serve waits, a press of the Start button (coop.cfg
+`intro_start <id>`, the program's START BUTTON; not with the left flipper held, the game's reset; not the press that
+began the game) is the game's own add, called through the co-op wrap (a teammate, or the team game's next player).
+The start menu's players-added lines (about 18 s, more while the logo plays) are dropped when an intro played: the
+pick opens the moment the intro ends or is skipped.
+
+PAD-1123: a character's clip and sound once picked (the dialog's **When picked...**), and the character on its
+teammate's End of Ball Bonus (the dialog's **Show each teammate's character on their End of Ball Bonus**):
+
+    char_picked 1 PadCoopPicked1 4000         character 1's clip once picked (the owner's video, or a picture shown
+                                              3 s or as long as its sound, up to 10 s: full screen, fitted whole) and
+                                              its length in ms; sounds.cfg `cpick <n> <request> <carrier key> <its key>
+                                              <ms>` is its sound (its own file, else the video's), on the intro's carrier
+    bonus_loop EndOfBallBonus_BackgroundLoop  the clip the game's bonus loops (found in the bank by name; Godzilla 1.15
+                                              and 1.16, at SquareCrop: x1.29, moved -197,-126)
+    char_bonus 1 PadCoopBonus1                that loop made again with character 1's video (or picture) and name on
+                                              a 360x290 portrait bottom-right (glass 994,472), the
+                                              name across the picture's foot
+
+When the teammate up takes a character (its PICKED card on the glass) its sound plays at once; its clip waits until
+the card has had its 2.5 s and the card's own video behind it has been given back (the bank's one surface), then plays
+full screen over the game with `pm_clip` (asked for again once if a clip of the game's takes the surface in its first
+1.5 s). Both flipper buttons down together, each let go once since it began, cut it short, its sound too. A pick for a
+teammate who is not up plays neither. The bonus: the game asks for its loop by name through `clip_play` (hooked; a port
+on clip v2 or a clip layer has no bonus copies yet), and the runtime answers with the copy of the character of the
+teammate whose ball ended - the turn moves on only at the player change, after the bonus (emulator, Godzilla LE 1.16).
+A teammate with no character, or one with no picture or video, gets the game's own loop. The award cards' backdrop
+(PAD-1028 round 3) plays the game's own loop, never a teammate's copy. The build makes the copies from the project's
+own file of the loop (the stock one extracted, or the owner's replacement of it), else the card's.
+
+**The awards ceremony (PAD-1219).** DoomWalrus666 saw the cards over a battle's clip on his machine and asked for the
+HUD off and the final score along the bottom. A bonus end seen during the game is no longer needed: the build names
+what plays behind the cards in coop.cfg, `ceremony <clip> <crop>` - the owner's Awards video (made into
+`PadCoopCeremony`, a silent full-screen clip of the bank's size, crop `Normal`) or else the bank's End of Ball Bonus
+loop at its own crop - and the backdrop takes ANY background's place while the cards show (a battle's included, which
+bd_place_ok refused before). While they show, `on_scene_show` keeps every scene but the cards' own (the HUD scene the
+build put them in) and the video player out of the frame: the score panels, the top bar's words, the background's own
+words; the power-up meter goes with them. The build adds `PadCoopFinal` beside the cards, a band across the glass's
+foot (y 596, 1360x160) whose words the runtime writes at x1.4 (28 characters fill the glass; x2.1 cut the words' ends on the emulator):
+"FINAL SCORE  <player 1's>" in co-op, "TEAM 1  <p1>   TEAM 2  <p2>" in a team game ("T1 <p1>  T2 <p2>" when that is
+too long). Emulator, Godzilla LE 1.16: see the ticket's after shots. A port with no
+backdrop (`scene_show` unhooked) keeps the HUD and says so.
+
+**The awards ceremony's music (PAD-1317).** DoomWalrus666 asked for a custom audio track during the ceremony. The
+Characters dialog's Awards music... keeps a sound file (or a video, its sound taken) as `coop/ceremony_music.<ext>`; a
+Write makes it a sound of the card's own (at most 60 s, `coop_play.CEREMONY_SOUND_MAX_SECONDS`: the ceremony is 42 s at
+most) built under the pseudo mode `sound_modes.CEREMONY_MODE` (4017) on the co-op intro's carrier, and sounds.cfg names
+it: `ccer <request> <carrier key> <its key> <ms>`. As the ceremony begins (`coop_cer_begin`) the runtime fades the
+game's sounds playing then (each once, 250 ms), lifts the carrier to priority 255 and plays it, the record lookup
+swapped to the music's (as the intro's); the cards' loop fades any sound the game starts while they show, every 100 ms;
+at `coop_cer_end` the music fades out over 1.5 s and the carrier goes back to priority 3.
+
+Up to 16 characters, `<name>|<what it does>` 27 characters each. Abilities, comma-separated (`-` none):
+
+- `adj:<id>=<v>` / `adj:<id>x<pct>:<lo>:<hi>`: the game's adjustment `<id>` reads `v`, or its own value x pct / 100
+  held to lo..hi, while the teammate is up. The getter (`site adjustment`, on every co-op port) is wrapped; NVRAM is
+  never written. Only an adjustment the game reads LIVE changes play: Godzilla reads BALL SAVE TIME (94) when a save
+  starts and HEAT RAY SPINS PER LEVEL (195) at each spin; it copies LIGHT BATTLE DIFFICULTY (173) and BUILDING
+  DIFFICULTY (168) into the player's record at the game's start, so those need more than the getter.
+- `bs:<id>`: `<id>` is the ball save time, read when a ball is served: a pick made with the teammate's ball already
+  out gives that ball the save now (`pm_ball_save` of what the getter answers).
+- `save:<s>`: two presses of the Action button within 0.6 s give an `s` second ball save, once a ball (one press is
+  the game's: Godzilla's heat ray is a hold). With `lane`, the presses count only once the turn's ball is out of the
+  shooter lane: none while a ball waits there and none for 1.5 s after one leaves it, since Godzilla's Action button
+  is also its launch and a quick second press at a launch spent the ball's save there (PAD-1045, ball 2 on). A save
+  the game refuses is not spent.
+
+The pick says itself on the game's top line (PAD-1017's borrow of `BALL %d`): `PLAYER 2 PICK: <name>`, then what it
+does, every 1.5 s; the flippers walk (a character another teammate has is skipped; RANDOM after the last), Action
+takes it, and when `pick_time` runs out the one shown is taken. RANDOM takes one nobody has. PAD-1044: the seconds
+left count down on the top line (`PLAYER 2 PICK  17`) and on the pick's screen (its `_Words` line, in a box the card
+draws in its header); the one taken stays on the glass 2.5 s saying PICKED (the top line `PLAYER 2 PICKED`, or
+`PLAYER 2 IS <name>` on a title with no screens). While `pm_in_game()` is 0 with a player up (a menu over the game)
+the pick and its clock wait; it was dropped there once, leaving that teammate with no character for the turn.
+PAD-1066 (DoomWalrus666: "the timer should never be able to force a player to continue"): each flipper press under the
+pick starts `pick_time` again from the top, so a player walking the characters can read every one for as long as they
+like; the time only runs out on one who has left the flippers alone that long.
+PAD-1051 (DoomWalrus666): the game's own PLAYER LANGUAGE SELECT (Godzilla's adjustment 14, `USE FLIPPERS TO SELECT
+LANGUAGE:`) walked on the same flippers at the same ball start, and the Action press that took a character launched
+the ball. While the pick is open and its ball waits in the plunger - the game's own flags, the port's
+`ball_launch_flag` / `ball_launch_wait_flag` (PAD-643's) - the game does not see the pick's buttons (the left flipper,
+`button`, `action`): at a press the drain hook leaves the switch's level byte reading released (Godzilla polls it: its
+flippers and Action have no handler) and clears its descriptor's handler bits (0x400 / 0x800); the switch is given
+back at its first press, or release, after the pick, so the game gets whole presses only. Action takes the character,
+then the flippers are the language select's and Action launches; a launch (the flag clearing) takes the one shown. Hiding
+also stops at the first `lane` switch edge 1 s or more after the ball began to wait (a launch, whatever the flags
+say; either direction, as the lane's sense varies), so the flippers are never held from a ball in play.
+PAD-1078 (DoomWalrus666: "holding the right flipper and pressing start button also changes the language to
+Japanese", and in co-op "selecting a character is also changing the language"): Godzilla's PLAYER LANGUAGE SELECT
+(adjustment 14, armed in the game start, LE 1.16 0x2a78d4 -> 0x225330) is RuleCities' switch method (`site
+language_keys`, LE 1.16 0x13f7d0, Pro 1.15/1.16 0x13c3b8): it flips the player up between English and Japanese
+(RuleCities + 4 + 4 x player) at each RELEASE of a flipper BUTTON, which reaches it as the cabinet input 137 / 139
+(`value language_keys_left/right`), not as the playfield records 60 / 59 that PAD-1051 hides. So PAD-1051 never kept
+the pick's presses from it, and a right flipper held through Start and let go flipped it at once (emulator, main: the
+flag 0 -> 1 the moment the flipper was let go). The runtime vetoes the method (hook_veto) for a flipper's key while
+the pick has that flipper or still hides it (`coop_language_veto`): emulator, the flag stayed 0 through a short and a
+long hold and a pick walked with both flippers. Beside it, a pick button already held when the pick comes to want it
+is taken mid-press (`edge_take_held`: its level reads released, its handler bits held back through its release), and
+the pick also hides from a new game's start (`game_start`) until its first ball waits, at most 10 s
+(`COOP_FRESH_MS`): no ball is in play yet. A join in a ball in play is not a new game and stays as above. The top
+line's turn (name, what it does) ends with how to take one: `ACTION/LAUNCH PICKS` (`ACTION PICKS` on a port
+with no plunger flags; nothing with no `action`).
+Co-op, Team 2v2 and Team 2v1 share the pick. A port without the flags, or the ball out: as before.
+
+PAD-1215 (DoomWalrus666, Team 2v2: "using the action button to pick a character on Player 2, 3, or 4 launched the
+ball ... letting the character select timeout to 0 also launched the ball"): hiding was never enough - a hidden Action
+press still launches (PAD-1114), and the game's TIMED PLUNGER lets a waiting ball go on its own. Ball 1 of player 1
+escaped only behind an intro's serve hold. Now the ball start's serve (`site serve_ball`, hooked whenever there is a
+pick, intro or not) waits for any turn whose player has a pick to make (`coop_pick_hold`, the game's process asleep a
+tick at a time as in PAD-1114's `ci_ball_hold`): no ball is in the lane until the character is taken, and the top
+line says `ACTION PICKS`. A pick not open yet is waited for while the start menu's players-added lines run, else
+1.5 s; a Start meanwhile is still a join (`intro_start`, now written whenever there is a pick). Emulator, Godzilla LE
+1.16, Team 2v2, TIMED PLUNGER 10 s: on main player 2's Action pick and player 3's wait both launched the ball; fixed,
+player 1's ball waited 20 s for its pick, player 2's was served at the Action pick and waited for a second press, player 3's came at the time-out and was still in the lane 8 s later.
+
+    co-op: player 2's ball waits to be served until their character is picked
+    co-op: player 2's ball is served after 4513 ms (the character is taken)
+
+PAD-1045's guard (an Action press at a launch is not half of the save's double press) reads the same flags: Godzilla
+LE's shooter lane level byte reads the opposite sense to its flippers', so the lane said "out" while the ball waited and
+a press there counted toward x2 (emulator). Without the flags it reads `lane` as before.
+
+PAD-1054 (DoomWalrus666): a player alone picks too. A game whose start (`game_start`) comes with `button` held, or
+let go of at most 1.5 s before, is a co-op game of ONE when it plays one player, CO-OP PLAY is not Off (any of Co-op,
+Team 2v2, Team 2v1; always, with no `setting`) and there is a pick: player 1 picks at once and the ability holds as a
+teammate's. Its score goes on the game's own boards, no co-op awards follow it and the top line stays the game's own
+`BALL n`. A Start in its first ball still adds a teammate (any Start, button held or not, as in a co-op game), or with
+a team mode on begins the team game, player 1 keeping the character.
+
+    co-op: the right flipper was held at Start - one player with a character (the game's own boards; a Start in ball 1 still adds a teammate)
+    co-op: the right flipper was held at Start - no character pick (CO-OP PLAY is Off)
+
+`mode.log`:
+
+    co-op: teammate 1 picks a character (11, and RANDOM): the flippers walk, Action takes one (a launch the one shown), 30 s
+    switch 34: the game does not see it (its handler bits 0x0800 held back)
+    co-op: teammate 2's pick waits - the game is busy (24 s left)
+    co-op: teammate 2's pick goes on (24 s left)
+    co-op: teammate 1 is GODZILLA 1954 (LONGER BALL SAVE) - Action took it
+    co-op: GODZILLA 1954 - the game reads adjustment 94: 15 (its own 12)
+
+The app offers each ability where the card's program has what it needs (`coop_play.ABILITIES`, by adjustment name);
+`coop_presets/<title stem>.json` beside `coop_play.py` is a game's customization file (Godzilla's: eleven characters,
+one per ability the reporter asked for). Plan and the proof runs: `docs/plans/pad1031_coop_characters.md`.
+
+The rest of the kinds, each needing its port lines (the app offers an ability only where the build's port names
+what it needs):
+
+- `boost:<pct>`: the title's "add n of something" call (`site coop_boost`; Godzilla: its power-up add, `(this, n)`)
+  adds n x pct / 100 while the teammate is up.
+- `gift:<id>`: at the teammate's pick and at each of their later turns, the game's own one-shot feature adjustment
+  `<id>` (Godzilla: LIGHT ALLY 311, which lights the next of Mothra, Rodan and Anguirus): the game's
+  adjustment-changed handler (`site coop_adj_changed`, given `{u16 id}`) is called while the getter answers 1 for it,
+  once per turn. PAD-1075: a character takes up to four, given in the order named (Godzilla: LIGHT ALLY 311 and START
+  HEDORAH 319; LIGHT TRAIN 315; LIGHT LIGHT DESTRUCTION JACKPOT 309). Emulator, LE and Pro 1.16: START HEDORAH at the
+  pick put up HEDORAH SMOG MONSTER FRENZY, and START SAUCER ATTACK MB 320 started the multiball, its ball save read
+  through the getter as it began (SAUCER ATTACK MULTIBALL BALL SAVE TIMER 210: 60, its own 30) - so the multiballs'
+  own save timers (203-227, 200) are `adj:` parts too.
+- An `adj:` the game copies into a player's record at the game's start reads the same through the getter but plays
+  as the record says. `site coop_cache_<id>` is the method that copies it (hooked to learn the rule's object) and
+  `value coop_cache_<id>_at` where (this + player x 4 + at): held at what the getter would answer while the teammate
+  is up, given back as the harder of the team's own and what play made of it (Godzilla's LIGHT BATTLE DIFFICULTY 173
+  at +0x10 of the battle rule, BUILDING DIFFICULTY 168 at +0x4 of the building rule; each battle or building raises
+  its record a notch).
+- `count:<name>+<n>`: at the pick, a rule's count for the player raised by n. The rule is found by `site
+  coop_count_<name>` (its game-start method, hooked) or `data coop_count_<name>_rule` (where the game keeps its
+  pointer); `value coop_count_<name>_at` where (rule + player x 4 + at). Godzilla: `jets` (rule 0x15 of the rule
+  table, +0xa8: what JET FIGHTER CHAMPION and the bonus read), `tanks` (the tank rule, +(player - 1) x 4 + 0x48: the
+  city map's TANKS n/10).
+- `spot:<rules>`: two Action presses within 0.6 s while one of the game's rules in the mask runs (`pm_stock_active`):
+  its lowest lit shot (`pm_stock_lit`, not 0x1) goes through the game's own `site shot_dispatch`, once a ball
+  (Godzilla `value coop_battle_rules 0x7f000`: the seven battles, ids 12-18).
+- `addball:<n>`: two Action presses within 0.6 s in regular play (none of the game's modes runs) serve `n` more balls
+  through the game's own serve (`pm_multiball_add`), once a ball.
+- `yes:<name>`: a check of the game's (`site coop_yes_<name>`, `(this) -> 0/1`) answers 1 while the teammate is up
+  (Godzilla: the tank rule's "in the Maser phase", LE 0x108d20 / Pro 0x1064e8: the Maser lit for all of Tank Attack).
+- `keep:<name>=<v>`: a word of the game's (`value coop_keep_<name>_obj` + player x `_stride` + `_at`, `_width` 4 or 1)
+  is written v every tick while the teammate is up (Godzilla: MAGNA GRAB lit - the word its MAGNA GRAB LIT AT GAME
+  START adjustment sets at game start, 0x7b1d4c LE / 0x7a5714 Pro + 0x14 + 4 x player). `keep:<name>>=<v>` writes it
+  only while it is below v (Godzilla's Destruction Jackpot multiplier step, 0x7b1c78 / 0x7a5640 + 0xc + 4 x player,
+  0 = 1X: never below 2X for the power-ups character). A count may also be one byte
+  (`value coop_count_<name>_width 1`) or one word for every player (`_stride 0`). `keep:<name>|=<mask>` (round 6) keeps
+  the mask's bits set in it (Godzilla `perks`: the power-ups a player owns, the perks picked at the scoop, one bit each
+  in the word at 0x7b2dd0 LE / 0x7a6738 Pro + 0x44 + 4 x player; each rule tests its own bit, so a character starts
+  owning LOOP VALUE 2X (bit 8), RODAN TIMER +15 SECONDS (20), RAGE COMBO +3 SECONDS (11) and the rest; the app folds a
+  character's perks into one such part).
+- `eb:<n>` (round 6): as the character's teammate begins the game's ball n, the game's own award-extra-ball
+  (`site coop_eb_award`; Godzilla LE 0x2b300c / Pro 0x42e154, what the mystery's AWARD EXTRA BALL calls: the player's
+  extra ball count up, AUD_TOTAL_EXTRA_BALLS, SHOOT AGAIN) is called once a teammate a game; it answers 2 when the
+  game's extra balls are off or at their limit (it gives points instead), and the log says which.
+- Room on one character (round 6, the owner composes them in the app): COOP_CHAR_ADJ 24 `adj:` parts, COOP_GIFTS 6,
+  COOP_CH_N 4 each of count/keep/steps/lit/yes, COOP_CH_DBL 6 doubles, 767 characters of text; `coop_play.LIMITS`
+  mirrors them and the dialog refuses what the runtime would drop.
+- `steps:<name>`: a rule's steps come two a shot: `value coop_steps_<name>_obj` is the rule (one object), `_at` its
+  vector of `_n` step words, each a percent byte per player (100 = done; Godzilla's building keeps its six stability
+  steps so, at 0x7b1d10 + 0x2c on LE, 0x7a56d8 on Pro). Each step the game completes while the teammate is up, the
+  one after it is completed too. `_inline 1` when the steps are words in the rule itself, `_done` the value of a step
+  done and `_width 4` a word a player (Godzilla's three powerline targets at 0x7b0b90 + 0x38: each hit is two targets).
+- `count:<name>=<n>`: as `count:<name>+<n>`, but the word is made n at the pick (Godzilla: the heat ray rule's HEAT RAY
+  READY word at +4 + 4 x player, `value coop_count_heatray_obj` 0x7b2d68 LE / 0x7a66d0 Pro). A count's rule may be one
+  object (`value coop_count_<name>_obj`) instead of a hooked method or a pointer, and `value coop_count_<name>_stride`
+  (default 4) is the bytes between players' words (Godzilla's Mechagodzilla shield keeps its hits left in a u64 a
+  player: stride 8). `double:` also doubles a count that counts DOWN (the shield's hits left fall two a hit, to 0),
+  and a rise of several in one tick (a ripping spinner) is matched in full.
+- `adj:<id>+<n>:<lo>:<hi>` and `adj:<id>-<n>:<lo>:<hi>`: the adjustment reads its own value plus or minus n, held to
+  lo..hi (Godzilla: every BATTLE VS ... TIMER + 5; a timer read live through the getter when the mode starts needs no
+  record hold).
+- `lit:<name>=<mask>`: a shot held lit in one of the game's base-play rules while the teammate is up: `site
+  coop_lit_<name>` is the rule's shot handler (hooked to learn the object; Godzilla LE 0x1645ac / Pro 0x160bd8, the
+  rule that pays the MASER CANNON AWARD), and `<mask>` is OR-ed into its lit mask (the framework's u64 at this +
+  stock_field + 8 x player) every tick, and taken out at the turn's end. With `yes:maser` the Maser is lit the whole
+  time the teammate is up.
+- `double:<name>`: a rule's count (found as `count:` is) rises two at a time while the teammate is up: each rise of
+  one the game makes gets one more from the tick (Godzilla: its tanks and jets).
+- `unlock:<id>` / `unlock:<id>@<rules>`: adjustment `<id>` reads 1 while the teammate is up - always, or once one of
+  the rules has STARTED on their turn this game (Godzilla: UNLOCK ALL MONSTER BATTLES 334, which the selection
+  screen's slot state reads live: every battle open, tier 2 included; DoomWalrus666 asked for always).
+
+**The pick's own screens.** The top line is small (on Godzilla a long name ran into CREDITS), so a card with a pick
+gets a screen per character in the HUD scene, as a mode's own screen: `PadCoop_<n>` (1-based) and `PadCoop_Random`,
+each the owner's picture (the Characters dialog's Picture..., copied to `<project>/coop/`) or a generated panel with
+the name, and `<NAME> - <WHAT IT DOES>` under it. coop.cfg `screens <scene>` names the scene; the runtime finds them
+once the scene is up, keeps them hidden, shows the one the pick is on, and the top line then says only `PLAYER 2
+PICK`. With modes they go in the modes' own HUD pass (mode_assets.build); co-op alone, Write rewrites the HUD itself.
+
+**The game's start logo stays off the pick (PAD-1107).** A game whose start-of-game logo is a scene of its own, drawn
+over the HUD, would cover the card when the pick opens at the game's start (Godzilla: the GODZILLA logo reveal, at a
+CO-OP PLAY start with a teammate's Start, or a team start). The port names it:
+
+    text start_logo_scene     43b52a63772ce0a35b7f0e3d4f249566066b55f8
+    text start_logo_path      Logo_Instance
+
+and the runtime hides that node every tick a pick card is up, and shows it again once when the card goes, so the next
+game's start plays it as stock. A port without the lines leaves the logo alone. Godzilla LE 1.16 and Pro 1.16 carry
+them (the same auto-loaded scene, one node, on both cards).
+
+Emulator-proven on Godzilla LE 1.16: the pick (Action, the flipper walk past taken ones, RANDOM, the time), the
+screens (12 of 12 found and hidden, the shown one's picture and words, a set built by Write's own override path), the
+save time 15 instead of 12 and the heat ray's 10 spins instead of 20 while the right teammate is up, the Action save
+giving a drain back, one ramp lighting a battle (BATTLE READY) for the easy teammate and not for another, the ally
+record 0/0/0 -> 0/0/1, a power-up counted twice (the meter's two segments), TANKS 7/10 after 4 given and 3 shot down,
+the jets count 4. Pro 1.16 carries the same lines (its sites matched to LE's code, not run).
+
+## Handicaps (PAD-1033)
+
+Each player of a game picks a handicap, -3 (hardest) to +3 (easiest), and while they are up the game reads its own
+adjustments easier or harder: the adjustment getter (`site adjustment`) is wrapped and answers the player's level's
+values. NVRAM never changes, and a level never reaches another player. Nothing for a mode to call: the Modes tab's
+**Handicap per player** puts `handicap.cfg` beside the runtime (`plugins/stern/handicap.py` works the levels out of the
+card's own program):
+
+    handicap on
+    left 60                          the flipper buttons: the pick walks with them (left harder, right easier)
+    right 59
+    setting 0x007d1234               the service menu's HANDICAP row's live value (Off/On, Off to start with); absent:
+                                     always on (no spare setting was left for the row)
+    only                             the card has no modes: the runtime arms this before the score gate and nothing
+                                     else, so the scores stay on Insider Connected (it is the operator's settings)
+    record 173 0x0012406c 0xe92d40f8 0xe1a04000 0x10
+                                     adjustment 173 is kept in each player's own record by the method at 0x12406c
+                                     (its first two words, checked before it is hooked): this + player x 4 + 0x10
+    level -3 adj:94-15:0:15,adj:173+2:0:2,...
+    level +1 adj:94+2:0:15,adj:173-1:0:2
+
+A change is `adj:<id>=<v>`, `adj:<id>+<n>:<lo>:<hi>`, `adj:<id>-<n>:<lo>:<hi>` or `adj:<id>x<pct>:<lo>:<hi>` (the
+operator's value set, raised, lowered or scaled, held to the adjustment's own range); up to 24 a level.
+
+**The levels.** Godzilla's follow the reporter's list (+1 battles and a longer ball save, +2 the heat ray and
+Building Multiball too, +3 tanks, the bridge, the powerline, the jets and Mechagodzilla too; the harder ones the same
+way round, -3 with no ball save). Any other game's are worked out of its program: the ball save 2 s a level (none at
+-3), and every adjustment it names `..._DIFFICULTY` with at most 10 steps (each game's menu has the easiest lowest)
+in by thirds - level 1 the first third a step, level 2 two thirds two steps, level 3 all of them three steps.
+
+**The pick.** At each player's first ball (the ball byte is 1, the player's pick not yet shown this game) the game's
+top line ("BALL %d", co-op's borrow) reads `P2 HANDICAP 0`; the flippers walk it, starting at what that player had
+last game (0 at power-up, and 0 for everyone after a game reset with Start + the left flipper: it ends without the game's own game_over); the ball's first score takes it. The player's level holds from the game's first read of an
+adjustment in their first ball: the game reads the ball save time as it serves the ball, before the pick shows, so
+ball 1's save is the level the pick opened at and every later ball's the one taken. Before their first ball the
+getter answers the operator's own values: nothing the game reads for every player before then carries anyone's
+level. In a co-op game each teammate picks.
+
+**Records.** Godzilla reads its battle, building, tank, bridge, powerline, jet and Mechagodzilla difficulties once,
+at a player's first ball, and keeps each in the player's own record of its rule (`str adj, [this + player x 4 + at]`,
+player 1-based), which play then raises (a battle notch each battle). The getter's later answers never reach those,
+so `handicap.py` finds each such method in the card's program by its shape - `mov r0, #id`, `bl adjustment`, `mov rV,
+r0`, a call to the function that only answers the player byte (`data coop_player`), `add rD, <this>, r0, lsl #2`,
+`str rV, [rD, #off]` - and handicap.cfg names it; the runtime hooks it to learn the rule and at the pick writes the
+player's record with what the level makes of the operator's value (Godzilla LE 1.16: 0x12406c battles +0x10,
+0x12e168 building +0x4, 0x180e44 tanks, 0x1349c4 bridge, 0x1685a4 powerline, 0x158ba0 jets, 0x15c7a8 Mechagodzilla
+spins +0x14 and shield +0x4; the battle and building ones are PAD-1031's hand-found lines). Of the other 51 latest
+builds the finder sees such records on Avengers, Foo Fighters, Jaws and Rush; elsewhere the game reads its
+difficulties as it plays, and the getter's answer is what plays.
+
+**Proof** (Godzilla LE 1.16, rig kit `C:\tmp\PAD-1033\rig`, `/dump/handlog.on` logs the first read of each
+adjustment by each player on each ball): two players, player 1 -1 and player 2 +3 with the flippers; their records
+written at the pick (battles 2 / 0, the operator's 1), the heat ray read 8 (its own 20) in player 2's turns and 20 in
+player 1's, the ball save 11 / 15 (the operator's 12) from ball 2; a second game, both players' ball 1 save at their
+kept level.
+
+## Inactivity pauses the timers (PAD-1022)
+
+Every Spike 2 framework offers the operator **ALLOW INACTIVITY TO PAUSE TIMERS** (`AD_INACTIVE_TIMER`, 0..1, on by
+default), and the titles honour it in their own timer code: a mode's clock stops when nobody has scored for 372
+ticks (6 s) and runs on at the next score (TMNT 1.59 0xadf70, Godzilla 1.16 0x622e8: the adjustment, then a framework
+timer the title re-arms at every score). Guardians of the Galaxy 1.15 (Pro and LE) shows the adjustment and never
+reads it; nothing else of the 53 latest builds is like it (each other title that shows it reads it once, Munsters
+through a wrapper). There is nothing for a mode to call: the runtime arms it whenever the port names the clocks, and
+the Modes tab's **Inactivity pauses timers** puts `idle.cfg` beside the runtime so a card with no modes carries it:
+
+    idle on
+    only             the card has no modes: the runtime arms this and nothing else (scores stay on Insider Connected)
+
+Guardians' clocks are of two kinds:
+
+- **The song clocks.** A mission's clock (the shared timer process: Pod Chase, Escape Kyln, Knowhere, Quill's Quest,
+  Yaka Arrow, Sanctuary, Sibling Rivalry, Antiquities Shop) is its song: the end marker less where the song is, in
+  samples. Where the song is comes from a table, by player and song, that the game's song tracker writes each frame
+  from the voice. The tracker is wrapped and writes a held position instead: it moves with the song while the player
+  is active and stands while they are not, so the song plays on and the clock holds. A song that runs out under a
+  hold and comes round again keeps counting from the held position (on Yaka Arrow's 54 s song a 30 s hold first gave
+  the clock its full 54 s back). Any other break in the song's play (another song, another player, a jump) starts
+  again from the voice, since the game starts a song from where the table says it is. The ball's song is picked at
+  the plunge; a mission whose song is not the one playing counts its seconds by itself.
+- **The check.** Headphone Hurryup and the value hurry-ups wait while the game's shared "are the timers paused" check
+  says so (ball off the playfield, a show in process group 0x88..0xb8, pause process 0x83). It is wrapped to answer
+  paused while the player is inactive. Its second word is a `bl`, which the wrap's trampoline calls itself (a bl moved
+  into the trampoline would miss its target). Double Scoring calls the check and drops the answer; Super Scoring and
+  the Groot lock never ask: those run on, as Stern made them.
+
+Port lines (one set per build):
+
+    site  timers_paused   the shared check (wrapped): nonzero = paused
+    site  song_track      the song tracker (wrapped)
+    data  song_positions  the table: u32 [song * 4 + player - 1]
+    value song_now_at     the tracker's words, this far past the table (0x160): [0] the song (1..20), [2] where
+                          the voice is, [3] where it was (an offset: the code names them too seldom to place)
+    value inactive_adj    AD_INACTIVE_TIMER's id (175), read at each check: the operator may change it
+    value inactive_ms     (optional) the quiet time, 6000
+
+plus `adjustment`, `score_add` and `cur_player`. `idle_test_mode.c` is the rig instrument: it starts the mission
+whose song is playing and logs its clock each second.
+
+## Prolonged Competition (PAD-1041)
+
+Venom and Dungeons & Dragons offer **COMPETITION GAME PLAY UNTIL POWERED OFF** on their start menu (CHOOSE YOUR MODE OF
+PLAY, both flipper buttons held in attract): picked once, every game is a Competition game until the machine is
+switched off. Every other Spike 2 build has only the one-game **COMPETITION** entry, and on every latest build that
+entry sets `FG_PLAYER_COMPETITION_MODE_ACTIVE` (17) and nothing else. The runtime gives those games the prolonged one;
+there is nothing for a mode to call. The Modes tab's **Prolonged Competition** puts `comp.cfg` beside the runtime:
+
+    comp on
+    flag 17            FG_PLAYER_COMPETITION_MODE_ACTIVE, read off the card's own flag names
+    caption 1919       the menu's COMPETITION caption (the message after CHOOSE YOUR MODE OF PLAY's)
+    caption_end 1914   the menu's STANDARD caption
+    only               the card has no modes: armed with nothing else (scores stay on Insider Connected)
+
+- The entry is appended through the challenges' start-menu lines (`site challenge_menu`, `site challenge_menu_pick`,
+  `value challenge_menu_list_at` / `_count_at` or `_count_reg` / `_cap` / `_entry` and the layout values): COMPETITION
+  over `UNTIL POWERED OFF`, and once it is on, STANDARD over `ENDS PROLONGED COMPETITION`. Its kind is 0x200 until the
+  pick, which plays it as Standard (kind 0: r3 on the kind-jump menus, the entry itself where the port says
+  `challenge_menu_pick_back`).
+- PAD-1327, on a Spike 3 card (Star Wars ELG 1.10): the entry's name is a whole pointer (8 bytes at `_name_at`), the
+  count is in a callee-saved register (`value challenge_menu_count_reg 22`: the 64-bit hook_full hands x19..x28 by
+  their numbers, writable) and the kind at the pick is in the register `value challenge_menu_pick_reg` names (1 there;
+  3 when a port says nothing).
+- The next `game_start` on the event bus (`site hook_dispatch`) turns it on or off. While on, the flag is set at every
+  game's start, before the game's handlers, and again at a `ball_start` that finds it clear; turned off, it is cleared
+  at that game's start. It is the runtime's memory only: switching the machine off ends it.
+- The log says each game: `prolonged competition: game 2 plays as Competition (flag 17 was 0)` - the game itself
+  starts every game after the first with the flag clear - and `game 2 over (flag 17 is 1; prolonged on)`.
+- The menus of game-mode table INDICES (Godzilla, Jaws, John Wick, Metallica, King Kong, X-Men) take it through `site
+  comp_menu_frame` (hook_full; `value comp_menu_frame_list_at` / `_count_at` / `_count_last` / `_cap` / `_cursor_reg`
+  / `_buttons_reg`, `comp_menu_index` / `_index_msg` / `comp_menu_end_index` / `_end_msg`): Competition's index again
+  (Standard's once on), its name message lettered UNTIL POWERED OFF from the frame the cursor arrives on. Bond 60th's
+  menu object takes it through `site comp_menu_obj_built` / `comp_menu_obj_pick` / `comp_menu_obj_add_fn` and
+  `value comp_menu_obj_*`: the game's own add called once more with Competition's kind and flag and our name.
+  `prolonged_comp.frame_lines` writes the index-menu lines from a program.
+
+Proven (emulator, Deadpool Pro 1.16): picked, two Competition games, picked again, off; the sweep over the latest builds
+is in docs/plans/pad1041_prolonged_comp.md.
+
+## The score feed (PAD-1204)
+
+C0untDeM0net (Pinside): "a high score display external from the games running on a TV ... capture the end game scores
+and user info if logged in, then push them to an external server separate from IC". Nothing for a mode to call: the
+Play options tab's **Score feed** puts `scorefeed.cfg` beside the runtime (`plugins/stern/score_feed.py`), and at the end of
+each game the runtime posts one JSON object to the owner's server:
+
+    {"source":"PAD score feed","game":"Godzilla LE 1.16","port":"godzilla_le 1.16","game_number":1,
+     "time":1794510083,"players":2,"scores":[1657980,1657980],
+     "insider":["11111111-2222-3333-4444-555555555555","aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]}
+
+`game` is the `title` line (the app's name for the card), `port` the port's own game and version, `game_number` the
+games reported since boot, `time` the machine's clock in Unix seconds (null below 2017: never set), `scores` each
+player's final score (`pm_score`, 64- or 32-bit), and `insider` each player's Insider Connected user id, the 16 bytes
+at the user manager's table + 20p + 4 (co-op's `users` line, PAD-1108; first table, then the second), in memory
+order as 8-4-4-4-12 hex, null for a player not logged in. The players are the most `pm_player()` seen up while
+`pm_in_game()` in that game.
+
+PAD-1344 (C0untDeM0net: the mini games started from the game selection menu, like "The Shark Is Broken" on Jaws,
+were indistinguishable from standard games): after `game_number` come `"game_type"` - what the start menu (CHOOSE
+YOUR MODE OF PLAY) made the game: `"standard"`, or `"challenge"`, `"competition"`, `"tournament"`, `"head_to_head"`,
+`"team"`, `"cooperation"` (each game offers its own few; null when the runtime cannot read the game's flags) - and
+`"challenge"`, the challenge's name (the port's `text challenge_name_<n>`, or the name of a mode of ours that took the
+pick; null otherwise). Each type is the game flag its menu entry sets (Jaws LE 1.02: TOURNAMENT_MODE_ON_START 16,
+COMPETITION_MODE 17, CHALLENGE_MODE 18, COOP_MODE 19, TEAM_2P 22, TEAM_3P 23), named in scorefeed.cfg's `type` lines
+(`score_feed.type_lines`, off the card's flag names, the strongest first). The tick reads them four times a second
+while the game runs (`feed_type_sample`); a challenge game (its flag, the port's `value challenge_on_flag`, or a pick
+a mode of ours took) outranks every other, and which challenge is the Challenge list's own reading
+(`challenge_picked`: the challenge's flag, or the GamePlayModes index on Jaws, John Wick, Metallica...). A type seen
+once is kept for that game, or raised: the runtime clears a pick it hands to a mode, and a game may clear its flags
+before its end. mode.log says `score feed: this game is a challenge game: The Shark Is Broken` when it learns it.
+
+    feed http://192.168.1.50:8080/scores   where to post: http://, an IPv4 address, a port, a path (the app refuses
+                                           https, a name, 127.x and 0.0.0.0)
+    title Godzilla Premium/LE 1.16         the report's game
+    users 0x007bf878 0x160 0x164           the logins' tables (coop_play.insider_users), when the finder sees them
+    type 18 challenge                      PAD-1344: a start-menu game type's flag id and the report's name, one
+    type 17 competition                    line each (up to 8), the strongest first
+    only                                   the card has no modes: armed before the score gate with nothing else
+
+**When a game has ended.** The tick keeps the scores and logins when `pm_in_game()` falls with players known. A port
+that names `game_over` (58 of 70) sends at that event, re-reading the scores and keeping any login the game cleared
+since the fall; the fall alone is never a game's end there (James Bond's `in_game` also falls at each multiball's
+end). A port without it (Elvira 3, D&D, King Kong, TMNT Pro: 12 of 70) sends once play has stayed stopped
+`FEED_QUIET_MS` (30 s) with no new ball. On either, a ball start that finds a score below the one kept is the next
+game (the game zeroes them) and the kept report goes then; a ball start with every score kept or higher is the same
+game going on, and the kept report is dropped. A game reset with Start held mid-game is never reported.
+
+**How it is sent: never waiting.** Rules 1 and 2 hold for the runtime too (`build_mode.sh` refuses `pthread_*`,
+sleeping, `poll` and `select`), so the send is a state machine stepped once a tick on the game's tick: a
+`SOCK_NONBLOCK` socket whose `connect` is asked again each tick until `EISCONN` (or an error), the request sent with
+`MSG_NOSIGNAL | MSG_DONTWAIT` as the socket takes it, the answer's status line read as it comes; 5 s for each, then
+up to 3 tries 10 s apart, then the report is dropped. 8 reports wait at most. A name lookup would block, hence the IP
+address. `socket`, `connect`, `send` and `__errno_location` are weak: a game process without them logs `score feed:
+off - the game's process has no network calls`. The game's scoring is never touched, so it arms before the score
+gate; on a card of only this, Insider Connected is left as it was.
+
+mode.log:
+
+    score feed: armed - each game's final scores and Insider logins are posted to http://127.0.0.1:18208/pinball/scores
+      (at the game's game_over; bus 0x4d game, 0x25 ball, game_over) (scorefeed.cfg: only)
+    score feed: game 1 over (the game's game_over) - 2 player(s): 1657980 1657980 0 0, logged in 1100
+    score feed: game 1 posted to http://127.0.0.1:18208/pinball/scores (HTTP 200): {...}
+    score feed: game 2 not taken on try 1 of 3 - the server refused the connection (nothing listens on that port)
+    score feed: game 2 DROPPED after 3 tries
+
+**Proof** (emulator, rig kit `C:\tmp\PAD-1204\rig`: `feed.sh` builds the runtime, installs it with `scorefeed.cfg`
+and the port, and runs `feedlisten.py`, a stand-in server on 127.0.0.1; the rig shares the distro's network).
+Godzilla LE 1.16, 1 ball a game, ball save off: game 1, two players with marker logins planted in both tables
+(`loginpoke.py`), posted at its game_over (HTTP 200): players 2, scores 1,657,980 and 1,657,980 as the game's own score
+panel showed them, both marker ids in player order; game 2 with the server down: refused, refused, refused 10 s
+apart, dropped, and the machine played on; game 3, server back: posted as game_number 3.
+Elvira 3 1.13 (its port names no game_over), one player, three balls: after the last drain nothing was pressed, and 30 s later `game 1 over (play stopped with no new ball)` posted 2,269,300, the score the game's own end-of-game screen showed; one report, none between balls. An earlier run whose job pressed Start inside the 30 s sent the finished game's 500,100 at the next game's first ball (`the next game started`).
+
+## Records of your own on the high scores (PAD-1280)
+
+The Modes tab's **High scores…** keeps the project's records (`plugins/stern/mode_records.py`, the project sidecar's
+`mode_records`): each a name (the title its champion shows under), a description (the app's note), the mode it counts
+during (the whole game, one of the game's own modes - multiballs too, every mode the stock scanner reads off a C++
+title's program - or a mode of the project's), what it counts (points, or the shots and goals ticked: the game's own
+audits and champion counts) and, in a mode, each player's best single play or the whole game's total. Write puts
+`records.cfg` beside the runtime (a whole install, as co-op play: the score gate holds Insider Connected's reports
+back):
+
+    rec <n> <points|count> <run|game> <-|g<id>:0x<object>|own> <-|a<id>,c<cat>,...> <NAME>
+    own <n> <the mode's name>
+
+- **Counting.** On the game's tick, the player up's score rise (points) or champion counts' rise (`c<cat>`: the
+  category's value getter, `data challenge_scores_table` + 36 x cat + 4) is the record's while its mode ran for that
+  player at the last tick; the game's audit add (`site audit_add`, hooked) adds the audits named (`a<id>`) the same
+  way. A game's mode runs while its object's ACTIVE virtual says so (`value mode_slot_active`, else
+  `stock_slot_active`, else read off `site stock_any_running`); a mode of the card's while it is the mode running.
+  A play ends when its mode is seen stopped while that player is up; a new game forgets every count.
+- **Filing.** At the game's end, after the game's own high scores, the end-of-game function (`site
+  challenge_scores`) runs once more for each record a player beat: `value challenge_scores_cat`'s first entry points
+  at the record (`/dump/pad_challenge_scores`, under `RECORD:<NAME>`), titled with its name, the category's value
+  getter answering the record's values, its list that one entry, the gate (`site challenge_scores_gate`) letting only
+  it through, and no credit awarded. The player enters their initials in the game's own look; the game's own records
+  are neither read nor written.
+- **Shown.** The attract mode shows each record with a champion after the game's own champion pages (with the
+  modes' challenge champions, PAD-660/663), unless the Attract tab's Champions tick is off.
+- mode.log: `records: <NAME> - player 1 <n>, ...` at each game's end, then `... beats ...: the game's initials entry`
+  or `... record stands`.
+
+## Expression light shows (PAD-1040)
+
+BEN (Led Zeppelin): "if songs are swapped out, the expression lighting is no longer in sync with the replaced audio
+track". The cabinet's **expression lights** are the blades down its sides (`EXPRESSIVE LIGHTING L 1`..`R 96`: Led
+Zeppelin, Rush, Foo Fighters LE, John Wick, King Kong, Metallica) and the backbox speaker lights (`SPEAKER 1`..`23`,
+nearly every title; Batman 66's `LEFT` / `RIGHT SPEAKER n`). They are lights of the game's own light table, so the
+mode's lamp layer holds them exactly as it holds an insert: on Led Zeppelin LE 1.22 the game's own cabinet show plays
+under them until they are handed back. Led Zeppelin's `ExpressionLights` picks its show by the sound it plays, which is
+why a replaced song plays under the old song's show.
+
+**The port** names them on `cablamp` lines (`lamp_map.py --port` writes them after the `lamp` lines; the `lamp` lines
+no longer list them, whatever picture a title draws them on):
+
+    cablamp <R,G,B light ids> <u> <name>  # lamp N, I/O group G index I, at X,Y, blade L
+
+`u` is the light's place along its strip, 0..999 (a blade from the bottom up, a speaker ring from the top round
+clockwise); `X,Y` its place on the CABINET drawing, the same 0-300 x 0-600 a light show runs over (the left blade down
+x 12, the right down x 288, from y 600 up to 140; the speaker ring centred at 150,70). The runtime keeps them after
+the inserts (from index 256, up to 160): `pm_lamp_count` and every insert call still see only the inserts.
+
+| To... | Call |
+|---|---|
+| list them | `pm_cab_count()`, `pm_cab_at(i)`, `pm_cab_xy(i, &x, &y)` |
+| hold one solid (a show paints them all every tick) | `pm_cab_paint(i, rgb)` |
+| hand them back | `pm_cab_release_all()`; `pm_lamp_release_all()` takes them with the inserts, `pm_lamp_release_inserts()` leaves them |
+| run one of the card's shows by name, and stop it | `pm_cab_show(name)`, `pm_cab_show_stop()`; a mode file's `cab_show <name>` runs it while the mode runs |
+
+**The card's shows** (`cabshow.cfg`, beside the runtime or in `/dump`; the app's Expression lights tab writes it):
+
+    only                                       the card carries no modes: armed before the score gate, so a card
+                                               of light shows alone stays on Insider Connected
+    show <sound ids a,b,c> <loop 0|1> <name>   a show, started whenever the game's sound worker takes a request
+                                               whose sound list names one of the ids (0: by name only)
+    blades <fx> <ms> <a> <b> <rate> <blend>    a step of the blades' lane (colours 0xRRGGBB)
+    speakers <fx> <ms> <a> <b> <rate> <blend>  a step of the speaker lights' lane
+    songs <table> <rows> <pixels>              PAD-1063: the game's own song shows (below)
+    songspk <p,p,p,p> <p,p,p,p> ...            speaker n's colour: the average of those blade pixels
+    blades game <ms> <request> <set> <from> <blend>   a step that plays the game's own show of that song request
+                                               (set 0 ORIGINAL, 1 REMIX) from <from> ms into it
+
+Up to 32 shows, 128 steps a lane, 8 sound ids a show. A lane with no steps leaves its lights to the game, one whose
+steps ran out holds them dark.
+
+**In step with the song, not a clock.** A show's time is where its song IS: the played-sample count of the voice of
+the channel playing its request (voice `+12`, `value sound_voice_played`, 44,100 a second; the channel and voice layout
+is the framework's, the same on all 68 ports; measured on Led Zeppelin LE 1.22 and Rush LE 1.19). A re-used voice shows
+its last sound's count for a tick or two, so the show takes the count once it has moved off its first reading and
+advances with the game's clock; until then (and on a port without the channel lines) it runs on its own clock from the
+request. So the lights hold while the song is held, start over when the game starts it over or loops it, and follow the
+mixer's own cursor whatever the game does with the song; a song the game starts part-way would be followed from where
+its voice starts (not yet seen on a machine of ours). No channel playing the request for 250 ms ends the show and the
+lights are the game's again. The speaker lights are two rings, left and right (a title that numbers 1-23 with no side:
+the first half round the left speaker), each counted from its top, and `alternate` swaps them. The patterns (the runtime's `CAB FX` slice, mirrored by the app's `cabfx.js` and held equal by
+`tests/test_pad1040_cab_shows.py`): solid, fade_in, fade_out, crossfade, pulse, strobe, sweep_up, sweep_down,
+fill_up, fill_down, chase_up, chase_down, bounce, center_out, center_in, alternate, rainbow, sparkle, fire, meter,
+and `game` (PAD-1063: the game's own show, not the slice's arithmetic: SONG SHOWS' `cab_colour` paints it).
+`rate` is a pattern's pace in ms; sparkle, fire and meter are a hash of the time and the light, so a show plays the
+same every time.
+
+**The game's own shows (PAD-1063).** Led Zeppelin (LE and Pro 1.22) and Rush (LE and Pro 1.19) keep a show for
+each song IN the game program: `ExpressionLights` looks up the request a channel is playing in a table of rows
+`{u16 request, u16 0, u32 period ms, u32 frames, u32 ORIGINAL frames, u32 REMIX frames}` (LZ LE 1.22: 20 rows at
+0x56952c, two requests a song, 25 ms a frame; Rush: 25 rows) and paints frame `song position / period`, a frame being
+an R,G,B byte triple for each blade pixel: `EXPRESSIVE LIGHTING n` shows pixel n - 1 (L 1-48, R 49-96). The speaker
+lights have no frames of their own: speaker n is the average of four (speaker 12: eight) blade pixels. The two
+pointers are zero in the file and a static initialiser fills them. The app's `cab_stock.py` finds the table by its
+shape, runs that initialiser under unicorn, takes the frame size from the gaps between the arrays and the speaker
+groups from the show's own code, and writes `songs` / `songspk`; the runtime (`cab_game_colour`) then reads the frames
+out of the game's memory, every read checked against the process's maps, and a cabinet light finds its pixel by its
+port name. The game dims its own show with its brightness settings (90% as shipped) before it lights the lamps; a
+card's step plays the frames at their own values, as the other patterns. No other title of the 53 keeps such a table.
+
+Emulator-proven (Led Zeppelin LE 1.22, C:/tmp/PAD-1063/verify_game.py): three snapshots of the game's own show
+during a game are its frames exactly at 90%, blades and speakers; a card's show on song request 70 stepping request
+66 REMIX from 60 s (`blades game 300000 66 1 60000 0`, both lanes) painted that show's frame byte for byte at the
+song's place in 202 of 330 snapshots, through the song held, stopped and played again (the rest: the probe's own log
+stale after its last line, the song stopped and the lights the game's again, the jump's instant).
+
+**Emulator-proven** (Led Zeppelin LE 1.22, padled node 2 / node 7, C:/tmp/PAD-1040/emu): a mode's `cab_show PROOF`
+took all 96 blade pixels magenta and all 23 speaker lights cyan over the game's own show, then a green sweep up the
+blades over dim blue with a red chase round the speakers, then a yellow fill rising from the bottom; after 10,000 ms
+every light was the game's again and its own show came back.
+
+In step with the song (C:/tmp/PAD-1040/probe/sync_probe.c, a show whose speakers change colour every second of its
+song): the colour matched the song's second in every frame away from a second's edge while it played (73 of 79), while
+the probe held the song's count for 3 s (25 of 25: the lights held), after it let go (16 of 16: the mixer's own cursor,
+13 s, and the lights jumped to it), and from the replay on; the probe's stop handed the lights back 251 ms later.

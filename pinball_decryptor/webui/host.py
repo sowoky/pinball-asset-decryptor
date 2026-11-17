@@ -8,7 +8,10 @@ server, and a native window (pywebview) showing the page.
 The native window is Edge WebView2 on Windows, WKWebView on macOS and Qt
 WebEngine on Linux (all shipped with the app).  If it cannot start, the app
 opens the page in the system browser instead and says why in the log, so a
-missing web view never leaves the app unusable.
+missing web view never leaves the app unusable.  That includes a window that
+opens but stays blank (PAD-748): pywebview on a Windows PC without WebView2
+falls back to Internet Explorer's engine, and a WebView2 that fails to start
+only logs to a console the installed app does not have.
 """
 
 import argparse
@@ -49,18 +52,85 @@ class Host:
         self.window = None
         self._quit = threading.Event()
         self._maximized = False
+        # a title the app set before the window was showing: pywebview's
+        # set_title waits for the window to show, and the app sets titles on
+        # its UI loop, so it is kept here and put up when the window shows
+        self._shown = False
+        self._pending_title = None
+        # the screens, read while the App is built (preload_window)
+        self.screens = None
+        # PAD-1191: a video played full screen takes the window full screen;
+        # whether it was maximized before is what the app keeps meanwhile
+        self._fullscreen = False
+        self._fs_was_max = False
+        self._fs_lock = threading.Lock()
 
     # -- called by the app ------------------------------------------------
     def set_title(self, text):
         win = self.window
-        if win is not None:
+        if win is None or not self._shown:
+            self._pending_title = text or APP_TITLE
+            return
+        try:
+            win.set_title(text or APP_TITLE)
+        except Exception:                               # noqa: BLE001
+            pass
+
+    def _on_shown(self):
+        self._shown = True
+        text, self._pending_title = self._pending_title, None
+        win = self.window
+        if text and win is not None:
             try:
-                win.set_title(text or APP_TITLE)
+                win.set_title(text)
             except Exception:                           # noqa: BLE001
                 pass
 
     def is_maximized(self):
-        return self._maximized
+        # full screen is not a size to keep: the window as it was before it
+        return self._fs_was_max if self._fullscreen else self._maximized
+
+    @property
+    def fullscreen(self):
+        return self._fullscreen
+
+    def set_fullscreen(self, on):
+        """Take the window full screen, or back to how it was (PAD-1191: a
+        video played full screen, as on YouTube).  The page fills the window
+        with the player itself: pywebview ignores a page asking for full
+        screen (WebView2 fills only its own control with it, Qt WebEngine
+        refuses it), so the window is what goes full screen.
+
+        Returns True when the app's window did it, False when there is no
+        window to do it (the app in a browser: the page asks the browser)."""
+        win = self.window
+        if win is None or self.mode != "native":
+            return False
+        on = bool(on)
+        with self._fs_lock:
+            if on == self._fullscreen:
+                return True
+            if on:
+                self._fs_was_max = self._maximized
+                self._fullscreen = True
+            try:
+                win.toggle_fullscreen()
+            except Exception:                           # noqa: BLE001
+                log.warning("could not toggle full screen", exc_info=True)
+                if on:
+                    self._fullscreen = False
+                return False
+            if not on:
+                self._fullscreen = False
+                self._maximized = self._fs_was_max
+                # leaving full screen puts the window back at its old size,
+                # but not maximized (WinForms, Qt): maximize it again
+                if self._fs_was_max:
+                    try:
+                        win.maximize()
+                    except Exception:                   # noqa: BLE001
+                        pass
+            return True
 
     def maximize(self):
         win = self.window
@@ -78,6 +148,35 @@ class Host:
                 win.destroy()
             except Exception:                           # noqa: BLE001
                 pass
+
+    def preload_window(self):
+        """Load the window toolkit and read the screens (the first ask of
+        pywebview's screens loads its Windows backend: 0.4 s) on the main
+        thread while the UI loop builds the App, not after it (PAD-610)."""
+        import webview
+        self.screens = _screens(webview)
+
+    #: how long an update's quit may take before the process is ended outright
+    UPDATE_EXIT_S = 20
+
+    def quit_for_update(self):
+        """End the process for an update, which waits for it to be gone
+        (PAD-1032): close the window, and if anything still holds the
+        process up past UPDATE_EXIT_S - a thread that will not finish, a
+        window that will not close - end it outright.  The app has already
+        written its state and closed down (App._close_for_update).
+
+        Off the caller's thread: the caller is the UI loop, and the window's
+        close calls back into that loop (_close_app)."""
+        def _backstop():
+            time.sleep(self.UPDATE_EXIT_S)
+            log.warning("the app had not exited %d s after closing for the "
+                        "update; ending it", self.UPDATE_EXIT_S)
+            os._exit(0)
+        threading.Thread(target=_backstop, name="update-exit",
+                         daemon=True).start()
+        threading.Thread(target=self.quit, name="update-quit",
+                         daemon=True).start()
 
     @property
     def quitting(self):
@@ -103,12 +202,14 @@ class Host:
         types = _filetypes_for_pywebview(spec.get("filetypes"))
         if types and mode != "folder":
             kwargs["file_types"] = types
+        def _show(**kw):
+            return _on_gui_thread(win, lambda: win.create_file_dialog(kind, **kw))
         try:
-            result = win.create_file_dialog(kind, **kwargs)
+            result = _show(**kwargs)
         except Exception:                               # noqa: BLE001
             # a malformed filter on one platform: try once without it
             kwargs.pop("file_types", None)
-            result = win.create_file_dialog(kind, **kwargs)
+            result = _show(**kwargs)
         if result is None:
             return ""
         if isinstance(result, str):
@@ -119,8 +220,47 @@ class Host:
         return result[0] if result else ""
 
 
-def build(ctx=None):
-    """Context + server + app, ready for a host.  Returns (ctx, server)."""
+def _on_gui_thread(win, fn):
+    """``fn()`` on the window's own GUI thread, its answer back here.
+
+    PAD-1227: pywebview's Windows backend shows a file picker on whichever
+    thread asks, and the app asks from a new worker thread per pick
+    (Dialogs._run_native): a COM multi-threaded one, where Windows' file
+    dialog is meant for a single-threaded one, owned by a window on another
+    thread.  Shown that way the picker could take seconds to come up, stop
+    taking clicks and refuse to close.  On the form's own (single-threaded)
+    thread it is an ordinary modal dialog of the window.  Elsewhere (macOS,
+    Linux, a window without a WinForms form) *fn* runs as it is."""
+    form = None
+    if sys.platform == "win32":
+        try:
+            form = win.native
+            if not form.InvokeRequired:
+                form = None
+        except Exception:                               # noqa: BLE001
+            form = None
+    if form is None:
+        return fn()
+    from System import Action   # pywebview's WinForms backend loaded it
+    box = {}
+
+    def _go():
+        try:
+            box["r"] = fn()
+        except BaseException as e:                      # noqa: BLE001
+            box["e"] = e
+    form.Invoke(Action(_go))
+    if "e" in box:
+        raise box["e"]
+    return box.get("r")
+
+
+def build(ctx=None, meanwhile=None):
+    """Context + server + app, ready for a host.  Returns (ctx, server).
+
+    ``meanwhile()``, when given, runs on the calling thread while the UI loop
+    builds the App (the native host loads its window toolkit then), and its
+    errors are logged, never raised."""
     ctx = ctx or Context()
     compat.install(ctx)
     ctx.loop.start()
@@ -128,7 +268,36 @@ def build(ctx=None):
     server.start()
 
     from ..app import App
-    app = ctx.loop.call(lambda: App(ctx))
+
+    def _make_app():
+        app = App(ctx)
+        # what the native window opens with, read before the jobs the App
+        # queued at start-up run: asked for afterwards, the window waited
+        # behind all of them (PAD-610)
+        ctx.start_geometry = app.saved_geometry()
+        return app
+    if meanwhile is None:
+        app = ctx.loop.call(_make_app)
+    else:
+        made = {}
+        done = threading.Event()
+
+        def _job():
+            try:
+                made["app"] = _make_app()
+            except BaseException as e:               # noqa: BLE001 - re-raised
+                made["error"] = e
+            finally:
+                done.set()
+        ctx.loop.post(_job)
+        try:
+            meanwhile()
+        except Exception:                               # noqa: BLE001
+            log.warning("start-up work beside the App failed", exc_info=True)
+        done.wait()
+        if "error" in made:
+            raise made["error"]
+        app = made["app"]
     reg = ctx.registry
     reg.register("shell.accept_disclaimer", app.accept_disclaimer)
     reg.register("fs.list", list_dir, on_loop=False)
@@ -136,6 +305,17 @@ def build(ctx=None):
     reg.register("shell.zoom", app._on_ui_zoom_change)
     reg.register("shell.quit", lambda: ctx.host.quit() if ctx.host else None,
                  on_loop=False)
+    # PAD-1191: a video played full screen takes the window with it
+    reg.register("shell.fullscreen",
+                 lambda on: ctx.host.set_fullscreen(on) if ctx.host else False,
+                 on_loop=False)
+    # an AI agent driving the app (PAD-844): its calls always, the link
+    # file only while Settings > Let AI agents control PAD is ticked
+    from . import agent_link
+    ctx.server = server
+    agent_link.register(ctx)
+    if (getattr(app, "_settings", None) or {}).get("agent_access"):
+        agent_link.set_enabled(ctx, True, _app_version())
     # hot reload while developing (never in a frozen build): see devreload
     from . import devreload
     if devreload.enabled() and ctx.host is not None:
@@ -151,27 +331,110 @@ def url_for(ctx, server, query=""):
     return base + ("&" + query if query else "")
 
 
+def _app_version():
+    try:
+        from .. import __version__
+        return __version__
+    except Exception:                                   # noqa: BLE001
+        return ""
+
+
 def _close_app(ctx):
+    try:
+        from . import agent_link
+        agent_link.remove_link(ctx)
+    except Exception:                                   # noqa: BLE001
+        pass
     try:
         ctx.loop.call(ctx.app._on_close, timeout=60)
     except Exception:                                   # noqa: BLE001
         log.exception("closing the app")
 
 
-def run_native(ctx, server, host):
-    import webview
-    geo = None
+#: how long the window's page may take to reach the app before the app gives
+#: up on the window and shows itself in the browser instead (PAD-748).  A
+#: healthy window connects in a second or two, a cold first start of the web
+#: engine on a slow PC in well under this
+PAGE_WAIT = 45
+
+#: what the log says when the window cannot be used, and how to get it back
+WEBVIEW2_HELP = ("The app needs the Microsoft Edge WebView2 Runtime for its "
+                 "window; installing it (free, from Microsoft) or repairing "
+                 "it in Windows Settings > Apps brings the window back.")
+
+
+class WindowUnusable(Exception):
+    """The native window cannot show the app; the message says why."""
+
+
+def engine_problem(webview):
+    """Why the native window would come up blank, before it is opened, or
+    None.  Windows only: without the Edge WebView2 runtime (or with a .NET
+    older than 4.6.2) pywebview quietly falls back to Internet Explorer's
+    engine, which cannot run the page, and the window stays empty (PAD-748).
+    A web engine picked on purpose (PAD_UI_GUI) is left alone."""
+    if sys.platform != "win32" or os.environ.get("PAD_UI_GUI"):
+        return None
     try:
-        geo = ctx.loop.call(ctx.app.saved_geometry)
+        renderer = getattr(webview, "renderer", None)
+        if renderer is None:
+            webview.screens                             # loads the backend
+            renderer = getattr(webview, "renderer", None)
     except Exception:                                   # noqa: BLE001
-        geo = None
+        return None
+    if renderer and renderer != "edgechromium":
+        return ("this PC has no Microsoft Edge WebView2 Runtime, so the "
+                "window would stay blank")
+    return None
+
+
+class _EngineErrors(logging.Handler):
+    """pywebview's own errors (the web engine failing to start) go to its
+    logger, which an installed app shows nowhere: hand them to the app's
+    log, and say when one means the window will stay blank."""
+
+    def __init__(self, ctx, on_fatal):
+        super().__init__(logging.ERROR)
+        self.ctx = ctx
+        self.on_fatal = on_fatal
+
+    def emit(self, record):
+        try:
+            text = " ".join(str(record.getMessage()).split())
+        except Exception:                               # noqa: BLE001
+            return
+        # the .NET stack trace under the engine's own words says nothing
+        # more to the user or to us
+        text = text.split(" --- End of inner exception")[0]
+        try:
+            self.ctx.loop.post(self.ctx.window.append_log,
+                               "App window: %s" % text[:600], "warning")
+        except Exception:                               # noqa: BLE001
+            pass
+        if "initialization failed" in text.lower():
+            self.on_fatal("its web engine (Edge WebView2) did not start")
+
+
+def run_native(ctx, server, host):
+    """Show the app in its own window until it is closed.  Raises
+    WindowUnusable when the window cannot show the page (the caller then
+    shows it in the browser), without closing the app."""
+    import webview
+    problem = engine_problem(webview)
+    if problem:
+        raise WindowUnusable(problem)
+    geo = getattr(ctx, "start_geometry", None)
     width, height, x, y, maximized = geo or (1280, 860, None, None, False)
     width = max(MIN_SIZE[0], width)
     height = max(MIN_SIZE[1], height)
+    screens = host.screens if host.screens is not None else _screens(webview)
+    width, height, x, y = fit_to_screens(width, height, x, y, screens)
     # the App composed its title (version, the dev branch badge) before this
-    # window existed, so its set_title found no window: open with it
+    # window existed, so its set_title found no window: open with it (a
+    # title set from here on waits in host._pending_title for the window to
+    # show).  Read here, not on the UI loop: that runs the start-up jobs.
     try:
-        title = ctx.loop.call(ctx.app.root.title) or APP_TITLE
+        title = ctx.app.root.title() or APP_TITLE
     except Exception:                                   # noqa: BLE001
         title = APP_TITLE
     win = webview.create_window(
@@ -188,11 +451,15 @@ def run_native(ctx, server, host):
             closing_done.set()
         return True
 
+    # full screen maximizes the window and leaving it restores it: neither
+    # is the user's maximize (Host.set_fullscreen keeps that)
     def _on_maximized():
-        host._maximized = True
+        if not host.fullscreen:
+            host._maximized = True
 
     def _on_restored():
-        host._maximized = False
+        if not host.fullscreen:
+            host._maximized = False
 
     def _on_resized(w, h):
         try:
@@ -212,18 +479,59 @@ def run_native(ctx, server, host):
             except Exception:                           # noqa: BLE001
                 log.warning("could not show the window", exc_info=True)
         # A Python-side drop handler makes pywebview give every dropped File
-        # a pywebviewFullPath, which the page's drop zones read (a browser
-        # never exposes a dropped file's path).  preventDefault stops the
-        # web view from navigating to a file dropped outside a drop zone.
+        # a pywebviewFullPath (a browser never exposes a dropped file's
+        # path).  It goes in the context's drop box, where the tab the page
+        # called for the drop takes it by name (drops.py, PAD-838).
+        # preventDefault stops the web view from navigating to a file
+        # dropped outside a drop target.
         try:
             from webview.dom import DOMEventHandler
             win.dom.document.events.drop += DOMEventHandler(
-                lambda _e: None, True, False)
+                ctx.drops.put_event, True, False)
         except Exception:                               # noqa: BLE001
             log.warning("drag and drop of files is not available",
                         exc_info=True)
 
+    # A window whose page never reaches the app is a blank window: give up
+    # on it and show the app in the browser instead (PAD-748).  The engine
+    # saying it failed does that at once; otherwise PAGE_WAIT does.
+    page_seen = ctx.page_seen          # set when the page asks for its state
+    gave_up = {}
+    watch_done = threading.Event()
+
+    def _give_up(why):
+        if page_seen.is_set() or gave_up:
+            return
+        gave_up["why"] = why
+        closing_done.set()              # the app stays open, in the browser
+        watch_done.set()
+
+        # off the caller's thread: the engine reports its failure on the
+        # window's own UI thread, and destroy() waits for that thread to
+        # show the window first
+        def _close():
+            try:
+                win.destroy()
+            except Exception:                           # noqa: BLE001
+                log.warning("could not close the blank window", exc_info=True)
+        threading.Thread(target=_close, name="window-close",
+                         daemon=True).start()
+
+    def _watch():
+        deadline = time.monotonic() + PAGE_WAIT
+        while not watch_done.wait(0.25):
+            if page_seen.is_set() or host.quitting:
+                return
+            if time.monotonic() >= deadline:
+                _give_up("its page did not load in %d seconds" % PAGE_WAIT)
+                return
+    engine_log = logging.getLogger("pywebview")
+    engine_errors = _EngineErrors(ctx, _give_up)
+    engine_log.addHandler(engine_errors)
+    threading.Thread(target=_watch, name="window-watch", daemon=True).start()
+
     win.events.loaded += _on_loaded
+    win.events.shown += host._on_shown
     win.events.closing += _on_closing
     win.events.maximized += _on_maximized
     win.events.restored += _on_restored
@@ -245,18 +553,76 @@ def run_native(ctx, server, host):
     icon = os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))),
         "icon.ico" if sys.platform == "win32" else "icon.png")
-    webview.start(gui=gui, debug=debug, private_mode=False,
-                  storage_path=storage,
-                  icon=icon if os.path.isfile(icon) else None)
+    try:
+        webview.start(gui=gui, debug=debug, private_mode=False,
+                      storage_path=storage,
+                      icon=icon if os.path.isfile(icon) else None)
+    finally:
+        watch_done.set()                # the watch has nothing left to do
+        engine_log.removeHandler(engine_errors)
+    if gave_up:
+        host.window = None
+        ctx.dialogs.native_file_dialog = None
+        raise WindowUnusable(gave_up["why"])
     if not closing_done.is_set():
         _close_app(ctx)
     host._quit.set()
 
 
+#: how much of the window's top edge (its title bar) has to be on a screen
+#: for the saved place to count as one the user can see and drag from
+TITLE_BAR = (120, 40)
+
+
+def _screens(webview):
+    """The screens as (x, y, width, height), in the units the window's saved
+    x/y are in; [] when they cannot be had.  Windows only: there pywebview
+    reads them before it makes the process DPI aware, so they are logical
+    pixels like the saved place.  Elsewhere the window manager keeps a new
+    window on a screen itself."""
+    if sys.platform != "win32":
+        return []
+    try:
+        return [(s.x, s.y, s.width, s.height) for s in webview.screens]
+    except Exception:                                   # noqa: BLE001
+        log.warning("could not list the screens", exc_info=True)
+        return []
+
+
+def fit_to_screens(width, height, x, y, screens):
+    """(width, height, x, y) for the window to open with, so it opens where
+    the user can see it.  The saved place is kept while its title bar is on
+    one of the screens; a place on no screen any more (the display was made
+    smaller, or a monitor is gone: PAD-549) opens the window centred on the
+    main screen instead.  A window bigger than its screen is cut to fit."""
+    if not screens:
+        return width, height, x, y
+
+    def clamp(w, h, screen):
+        return min(w, max(MIN_SIZE[0], screen[2])), \
+            min(h, max(MIN_SIZE[1], screen[3]))
+
+    if x is not None and y is not None:
+        for screen in screens:
+            sx, sy, sw, sh = screen
+            seen = min(x + width, sx + sw) - max(x, sx)
+            if (seen >= min(TITLE_BAR[0], width)
+                    and sy <= y <= sy + sh - TITLE_BAR[1]):
+                w, h = clamp(width, height, screen)
+                return w, h, x, y
+    main = next((s for s in screens if s[0] <= 0 < s[0] + s[2]
+                 and s[1] <= 0 < s[1] + s[3]), screens[0])
+    w, h = clamp(width, height, main)
+    if x is None or y is None:
+        return w, h, x, y
+    return (w, h, main[0] + max(0, (main[2] - w) // 2),
+            main[1] + max(0, (main[3] - h) // 2))
+
+
 def _remember_geometry(ctx, host, w, h):
     app = ctx.app
     win = host.window
-    if app is None or win is None or host._maximized:
+    if app is None or win is None or host._maximized or host.fullscreen:
         return
     try:
         x, y = win.x, win.y
@@ -297,22 +663,80 @@ def run_browser(ctx, server, host, open_browser=True):
     _close_app(ctx)
 
 
+def _venv_candidates(root):
+    """Where a checkout's interpreter may live, best first (PAD-1132).
+
+    A tree's own .venv; then, for a tree that has none, the .venv of the
+    checkout it was cut from.  Ticket trees (pad-triage/work/tickets/PAD-n)
+    and item worktrees never get a .venv of their own, so without this a
+    pad-triage "Launch app" or a dev-chooser pick ran on the system Python,
+    which has no pywebview: the app opened in the browser and its Emulate
+    tab said PAD's own Python was missing pywebview.  The tree stays the
+    cwd, so `-m` still imports the TREE's code; only the interpreter is
+    borrowed.  $PAD_DEV_VENV names one outright."""
+    import json
+    import subprocess
+    out = [os.path.join(root, ".venv")]
+    if os.environ.get("PAD_DEV_VENV"):
+        out.append(os.environ["PAD_DEV_VENV"])
+    # a worktree of a checkout: the checkout that holds the shared .git
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute",
+             "--git-common-dir"], cwd=root, capture_output=True, text=True,
+            timeout=10,
+            creationflags=0x08000000 if os.name == "nt" else 0).stdout.strip()
+        if common:
+            out.append(os.path.join(os.path.dirname(common), ".venv"))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # a pad-triage ticket tree: <triage>/work/tickets/PAD-n, and pad-triage
+    # names David's dev checkout in its config.json (repo.dev_checkout)
+    parts = os.path.normpath(root).split(os.sep)
+    if len(parts) >= 4 and [p.lower() for p in parts[-3:-1]] == \
+            ["work", "tickets"]:
+        triage = os.sep.join(parts[:-3])
+        try:
+            with open(os.path.join(triage, "config.json"),
+                      encoding="utf-8") as fh:
+                dev = (json.load(fh).get("repo") or {}).get("dev_checkout")
+            if dev:
+                out.append(os.path.join(dev, ".venv"))
+        except (OSError, ValueError, AttributeError):
+            pass
+        out.append(os.path.join(os.path.dirname(triage),
+                                "pinball-asset-decryptor", ".venv"))
+    return out
+
+
+def _checkout_venv(root):
+    """(venv dir, its windowless python) for the first candidate that has
+    one, or None."""
+    for venv in _venv_candidates(root):
+        exe = (os.path.join(venv, "Scripts", "pythonw.exe")
+               if sys.platform == "win32"
+               else os.path.join(venv, "bin", "python"))
+        if os.path.isfile(exe):
+            return os.path.normpath(venv), exe
+    return None
+
+
 def _relaunch_with_checkout_venv(argv):
     """Development only: a checkout started by an interpreter without
     pywebview (the tree selector relaunches with the SAME interpreter it was
-    started with) re-runs itself with the checkout's own .venv, which has
-    the pinned requirements.  Never in an installed copy (no .venv there,
-    and frozen builds are skipped).  Returns True when it relaunched."""
+    started with) re-runs itself with a .venv that has the pinned
+    requirements: its own, or the dev checkout's (_venv_candidates).  Never
+    in an installed copy (no .venv and no git checkout there, and frozen
+    builds are skipped).  Returns True when it relaunched."""
     import subprocess
     if getattr(sys, "frozen", False) or os.environ.get("PAD_UI_VENV_RELAUNCHED"):
         return False
     root = os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))))
-    venv = os.path.join(root, ".venv")
-    exe = (os.path.join(venv, "Scripts", "pythonw.exe")
-           if sys.platform == "win32" else os.path.join(venv, "bin", "python"))
-    if not os.path.isfile(exe):
+    found = _checkout_venv(root)
+    if not found:
         return False
+    venv, exe = found
     if os.path.normcase(os.path.abspath(sys.prefix)) == os.path.normcase(venv):
         return False
     env = dict(os.environ)
@@ -348,7 +772,8 @@ def main(argv=None):
     ctx = Context()
     host = Host(ctx, mode)
     ctx.host = host
-    ctx, server = build(ctx)
+    meanwhile = host.preload_window if mode == "native" else None
+    ctx, server = build(ctx, meanwhile=meanwhile)
     try:
         if mode == "native":
             try:
@@ -363,13 +788,17 @@ def main(argv=None):
             try:
                 run_native(ctx, server, host)
             except Exception as e:                      # noqa: BLE001
-                log.exception("native window failed")
                 if host.quitting:
                     return 0
-                ctx.loop.post(ctx.window.append_log,
-                              "The app window could not start (%s); showing "
-                              "the app in your browser instead." % e,
-                              "warning")
+                text = ("The app window could not start (%s); showing the "
+                        "app in your browser instead." % e)
+                if isinstance(e, WindowUnusable):
+                    log.warning("native window unusable: %s", e)
+                    if sys.platform == "win32":
+                        text += " " + WEBVIEW2_HELP
+                else:
+                    log.exception("native window failed")
+                ctx.loop.post(ctx.window.append_log, text, "warning")
                 run_browser(ctx, server, host)
         else:
             run_browser(ctx, server, host, open_browser=(mode == "browser"))

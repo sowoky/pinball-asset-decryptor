@@ -87,8 +87,20 @@ def switch_names(name):
     if n.endswith(" MAGNET"):
         return [n + " FIRED VIRTUAL", n + " FIRED"]
     if _FOLLOWS.search(n):
-        return [n, n + " OPTO"]
+        out = [n, n + " OPTO"]
+        # PAD-1183: a title's coil and switch tables abbreviate apart -
+        # pokemon_le's coil BOTTOM POP BUMPER fires on switch BOT POP BUMPER
+        for long_, short_ in _ABBREV:
+            for a, b in ((long_, short_), (short_, long_)):
+                if n.startswith(a + " "):
+                    alt = b + n[len(a):]
+                    out += [alt, alt + " OPTO"]
+        return out
     return []
+
+
+#: word pairs a coil's name and its switch's name spell either way
+_ABBREV = (("BOTTOM", "BOT"), ("UPPER", "UP"), ("LOWER", "LWR"))
 
 
 def _title_switches():
@@ -194,6 +206,13 @@ def fire(name):
     if kind == "ball":
         return subprocess.call([sys.executable,
                                 os.path.join(HERE, "plunge.py"), "serve"])
+    if kind == "lane":
+        # PAD-1181: on a Spike 3 slot the shooter lane is the bridge's ball
+        # model's to open (s3ballask.py), not a switch this writes
+        import s3ballask
+        d = s3ballask.spike3_dir()
+        if d:
+            return s3ballask.spike3_ask(d, "plunge")
     m = plunge._open()
     if m is None:
         return 1

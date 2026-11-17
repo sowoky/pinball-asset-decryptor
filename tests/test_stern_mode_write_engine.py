@@ -21,6 +21,7 @@ pytest.importorskip("numpy")
 from pinball_decryptor.core import ext4_grow                                  # noqa: E402
 from pinball_decryptor.plugins.stern import engine, sidx, sidx_append, valpatch  # noqa: E402
 from pinball_decryptor.plugins.stern import mode_project as MP               # noqa: E402
+from tests.mode_examples import form as MX  # noqa: E402
 from pinball_decryptor.plugins.stern import mode_write as MW                 # noqa: E402
 from pinball_decryptor.plugins.stern.explorer import S_IFREG                 # noqa: E402
 from tests.test_stern_audio_grow import (                                     # noqa: E402
@@ -120,7 +121,7 @@ def _mode_card(monkeypatch, tmp_path, with_sound=True, audio_edit=False, sound_i
     monkeypatch.setattr(MW, "host_refusal", lambda platform=None: "")
 
     project = tmp_path / "project"
-    for name, spec in MP.example_specs()[:2]:
+    for name, spec in MX.example_specs()[:2]:
         slug, _s = MP.new_mode(str(project), spec=spec)
         if with_sound and name == "KAIJU RUSH":
             _wav(os.path.join(MP.mode_folder(str(project), slug), "end.wav"), 3.0)
@@ -331,12 +332,16 @@ def test_the_music_carrier_is_found_on_a_bank_grown_past_its_fragments():
     assert MW.request_sids(elf, _bank_head(2599, 2603), 125) == stock
 
 
-def test_a_bank_with_no_room_left_still_takes_every_new_sound(monkeypatch, tmp_path):
-    """PAD-445, no limit: a bank whose header has as many sounds as fragments still takes the
-    mode's own sound - nothing in a Write counts the records it appends."""
+@pytest.mark.parametrize("fragments,sounds", [
+    (4, 4),     # room 0
+    (2, 4),     # already past its fragments, as a tester's own card can be (PAD-594: Heisei V1.99D, 2643 over 2599)
+])
+def test_a_bank_with_no_room_left_still_takes_every_new_sound(monkeypatch, tmp_path, fragments, sounds):
+    """PAD-445, no limit: a bank whose header has no room left - or is past it already - still
+    takes the mode's own sound: nothing in a Write counts the records it appends."""
     card, staged, project, encoded, _h = _mode_card(monkeypatch, tmp_path)
     img = bytearray(card.data["img"])
-    img[:0xB0] = _bank_head(4, 4)                  # the card's 4 sounds, 4 fragments: room 0
+    img[:0xB0] = _bank_head(fragments, sounds)
     card.data["img"] = card.img_node["_data"] = bytes(img)
     msgs, log = _capture()
     _writes, _counts, plan, _m, _v = _compute(project, log)
@@ -794,7 +799,7 @@ def test_the_direct_sd_dialog_says_the_modes_were_left_out(monkeypatch, tmp_path
         return done
     # no modes: the dialog it always was
     assert run() == [(True, "Wrote 1 sound(s) directly to the SD card.")]
-    for _name, spec in MP.example_specs()[:2]:
+    for _name, spec in MX.example_specs()[:2]:
         MP.new_mode(str(project), spec=spec)
     [(ok, summary)] = run()
     assert ok and summary.startswith("Wrote 1 sound(s) directly to the SD card.\n\nModes: ")
@@ -808,7 +813,7 @@ def test_the_image_write_dialog_says_a_mac_left_the_modes_out(monkeypatch, tmp_p
     from pinball_decryptor.plugins.stern import pipeline as PL
     project = tmp_path / "project"
     project.mkdir()
-    for _name, spec in MP.example_specs()[:2]:
+    for _name, spec in MX.example_specs()[:2]:
         MP.new_mode(str(project), spec=spec)
     monkeypatch.delenv(MW.GATE_ENV, raising=False)
     monkeypatch.setattr(PL, "detect_game", lambda p: "godzilla_pro")

@@ -29,6 +29,7 @@ import shutil
 import sys
 
 from .pipeline_base import BasePipeline, PipelineError
+from . import name_memory
 
 
 WHISPER_IMPORT_HINT = (
@@ -40,7 +41,16 @@ WHISPER_IMPORT_HINT = (
     "Subsequent runs reuse the cached model offline."
 )
 
+WHISPER_LOAD_HINT = (
+    "Auto-name call-outs could not start its speech engine: %s\n\n"
+    "faster-whisper is installed but a library it needs did not load. "
+    "Reinstalling Pinball Asset Decryptor puts back the runtime files it "
+    "ships with."
+)
+
 CALLOUTS_CSV = "callouts.csv"
+#: PAD-1069: the column of callouts.csv holding the user's own note on a sound
+COMMENT = "comment"
 
 # Rough one-time download size per model (the GUI's quality choices), for
 # the "Downloading..." log line.  Approximate on purpose.
@@ -238,6 +248,12 @@ class TranscribePipeline(BasePipeline):
             from faster_whisper import WhisperModel  # noqa: F401 (probe only)
         except ImportError:
             raise PipelineError("Transcribe", WHISPER_IMPORT_HINT)
+        except OSError as e:
+            # Installed but its engine's DLL will not load - on Windows a
+            # missing Visual C++ runtime (PAD-821), which surfaced as an
+            # "Unexpected error" traceback after an all-green prerequisite
+            # list.
+            raise PipelineError("Transcribe", WHISPER_LOAD_HINT % e)
 
         if not os.path.isdir(self.assets_dir):
             raise PipelineError("Transcribe",
@@ -315,7 +331,7 @@ class TranscribePipeline(BasePipeline):
                 if not label:
                     new_rows.append((rel, kind, text))
                     continue
-                new_rel = _renamed_rel_path(rel, label)
+                new_rel = _renamed_rel_path(rel, label, self.assets_dir)
                 if new_rel == rel:
                     new_rows.append((rel, kind, text))
                     skipped_renames += 1
@@ -359,6 +375,9 @@ class TranscribePipeline(BasePipeline):
         # files that already carry a name, so keep what the last run wrote
         # about them; this run's rows win for the files it did transcribe.
         rows = _keep_earlier_rows(self.assets_dir, rows)
+        # PAD-1069: the comments the user gave sounds in the Audio tab stay
+        # with their sounds (a file this run renamed finds its by idx)
+        comment_of = earlier_comments(self.assets_dir)
         # folder + file split into their own columns and a numeric seconds
         # column (both plain sort keys in Excel — a tester: the combined
         # path drowned the filename, and the play length was only findable
@@ -366,14 +385,15 @@ class TranscribePipeline(BasePipeline):
         with open(out_path, "w", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
             w.writerow(["folder", "file", "seconds", "classification",
-                        "text"])
+                        "text"] + ([COMMENT] if comment_of else []))
             for rel, kind, text in rows:
                 folder, _, fname = rel.rpartition("/")
                 secs = _wav_seconds(
                     os.path.join(self.assets_dir, *rel.split("/")))
                 w.writerow([folder, fname,
                             "" if secs is None else "%.3f" % secs,
-                            kind, text])
+                            kind, text]
+                           + ([comment_of(rel)] if comment_of else []))
 
         rename_summary = (
             f"\nRenamed {renamed_count} file(s) using transcripts."
@@ -766,39 +786,42 @@ def _looks_like_out_of_memory(exc):
 _OOM_RETRY_WAITS = (1.5, 4.0)
 
 
-def _load_audio(abs_path):
-    """Decode a PCM WAV to the 16 kHz mono float32 array Whisper takes.
+class _AvWithoutMetadataErrors:
+    """Stand-in for the ``av`` module inside ``faster_whisper.audio`` whose
+    ``open`` drops ``metadata_errors`` when this PyAV no longer takes it.
 
-    faster-whisper's own loader goes through PyAV, and PyAV 15 dropped the
-    ``metadata_errors`` argument faster-whisper 1.2.1 still passes, so on a
-    fresh install every clip failed with ``open() got an unexpected keyword
-    argument 'metadata_errors'``.  Every clip this module sees is an
-    extracted PCM WAV, so read it directly; anything ``wave`` cannot open
-    (float or compressed WAV) falls back to the path and PyAV.
-    """
-    import wave
+    faster-whisper 1.2.1 (the newest) opens every clip with
+    ``av.open(..., metadata_errors="ignore")``; PyAV 19 removed that argument,
+    so on a fresh install (pip picks the newest av) every clip failed with
+    "open() got an unexpected keyword argument 'metadata_errors'" and nothing
+    was named (PAD-936).  Everything else is the real module."""
+
+    def __init__(self, av):
+        self._av = av
+
+    def __getattr__(self, name):
+        return getattr(self._av, name)
+
+    def open(self, *args, **kwargs):
+        try:
+            return self._av.open(*args, **kwargs)
+        except TypeError as e:
+            if "metadata_errors" not in kwargs or "metadata_errors" not in str(e):
+                raise
+            kwargs.pop("metadata_errors")
+            return self._av.open(*args, **kwargs)
+
+
+def _patch_faster_whisper_av():
+    """Point faster-whisper's audio decoder at :class:`_AvWithoutMetadataErrors`
+    (once per process; the serial loop and every pool worker call this)."""
     try:
-        import numpy as np
-        with wave.open(abs_path, "rb") as w:
-            rate, chans, width = (w.getframerate(), w.getnchannels(),
-                                  w.getsampwidth())
-            raw = w.readframes(w.getnframes())
+        import faster_whisper.audio as fw_audio
     except Exception:
-        return abs_path
-    if width == 2:
-        a = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-    elif width == 1:
-        a = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
-    elif width == 4:
-        a = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
-    else:
-        return abs_path
-    if chans > 1:
-        a = a[: len(a) - len(a) % chans].reshape(-1, chans).mean(axis=1)
-    if rate != 16000 and len(a) > 1:
-        n = max(1, int(round(len(a) * 16000 / rate)))
-        a = np.interp(np.linspace(0, len(a) - 1, n), np.arange(len(a)), a)
-    return a.astype(np.float32)
+        return
+    av = getattr(fw_audio, "av", None)
+    if av is not None and not isinstance(av, _AvWithoutMetadataErrors):
+        fw_audio.av = _AvWithoutMetadataErrors(av)
 
 
 def _transcribe_one(model, rel, abs_path, music_min_seconds, oom_retries=2):
@@ -816,11 +839,12 @@ def _transcribe_one(model, rel, abs_path, music_min_seconds, oom_retries=2):
     """
     import random
     import time
+    _patch_faster_whisper_av()
     last = None
     for attempt in range(oom_retries + 1):
         try:
             segments, info = model.transcribe(
-                _load_audio(abs_path),
+                abs_path,
                 language="en",
                 vad_filter=True,
                 vad_parameters={"min_silence_duration_ms": 250},
@@ -1023,6 +1047,120 @@ def _keep_earlier_rows(assets_dir, rows):
     return sorted(list(rows) + kept, key=lambda r: r[0].lower())
 
 
+def decode_key(rel):
+    """``(folder, idx)`` naming the decoded sound *rel* (a ``folder/file``
+    path) whatever its name now, both lower case, or None when its file name
+    has no idx number: how a row finds its sound again after a rename."""
+    from .name_memory import split_decode_name
+    folder, _, fname = rel.rpartition("/")
+    parts = split_decode_name(fname)
+    if not parts:
+        return None
+    return folder.lower(), parts[0].rpartition(" - ")[2].lower()
+
+
+def earlier_comments(assets_dir):
+    """PAD-1069: a function giving the comment the ``callouts.csv`` in
+    *assets_dir* holds for a sound (``folder/file``; by its idx number in the
+    same folder when that file is not named there), or None when the CSV
+    has no comment column.  A comment is never lost to a re-run."""
+    path = os.path.join(assets_dir, CALLOUTS_CSV)
+    if not os.path.isfile(path):
+        return None
+    try:
+        cf = CalloutsFile(path)
+    except (OSError, ValueError, csv.Error):
+        return None
+    if cf.key(COMMENT) is None:
+        return None
+    by_rel, by_idx = {}, {}
+    for r in cf.rows:
+        note, fname = cf.get(r, COMMENT), cf.get(r, "file")
+        if not note or not fname:
+            continue
+        folder = cf.get(r, "folder").replace("\\", "/").strip("/")
+        rel = f"{folder}/{fname}" if folder else fname
+        by_rel.setdefault(rel, note)
+        key = decode_key(rel)
+        if key:
+            by_idx.setdefault(key, note)
+
+    def comment_of(rel):
+        if rel in by_rel:
+            return by_rel[rel]
+        return by_idx.get(decode_key(rel), "")
+    return comment_of
+
+
+class CalloutsFile:
+    """A ``callouts.csv`` as the user left it, for Rename from callouts.csv
+    (PAD-894).  Spreadsheets save it back their own way (a French Excel
+    writes ``;`` and Windows-1252, others add a BOM), so the delimiter and
+    encoding are read from the file and :meth:`save` writes them back the
+    same.  ``rows`` are dicts keyed by the header as written; ``key(name)``
+    finds a column whatever its case or padding."""
+
+    def __init__(self, path):
+        self.path = path
+        with open(path, "rb") as f:
+            raw = f.read()
+        if raw.startswith(b"\xef\xbb\xbf"):
+            self.encoding = "utf-8-sig"
+        else:
+            try:
+                raw.decode("utf-8")
+                self.encoding = "utf-8"
+            except UnicodeDecodeError:
+                self.encoding = "cp1252"
+        text = raw.decode(self.encoding, errors="replace")
+        head = text.split("\n", 1)[0]
+        self.delimiter = max(",;\t", key=head.count)
+        reader = csv.DictReader(text.splitlines(keepends=True),
+                                delimiter=self.delimiter)
+        self.fields = list(reader.fieldnames or [])
+        self.rows = list(reader)
+        for want in ("file", "text"):
+            if self.key(want) is None:
+                raise ValueError(
+                    "%s has no \"%s\" column (its first line names the "
+                    "columns: folder, file, seconds, classification, text)."
+                    % (CALLOUTS_CSV, want))
+
+    @classmethod
+    def empty(cls, path):
+        """A new callouts.csv at *path* with no rows yet, in the columns and
+        encoding Auto-name writes (PAD-1048: a project named by hand)."""
+        self = cls.__new__(cls)
+        self.path = path
+        self.encoding, self.delimiter = "utf-8", ","
+        self.fields = ["folder", "file", "seconds", "classification", "text"]
+        self.rows = []
+        return self
+
+    #: PAD-1246: other headers a column goes by in a CSV brought back from a
+    #: spreadsheet or an LLM ("Comments", "Notes"), tried after the name itself
+    ALIASES = {COMMENT: ("comments", "note", "notes")}
+
+    def key(self, name):
+        heads = {(f or "").strip().lower(): f for f in reversed(self.fields)}
+        for want in (name,) + self.ALIASES.get(name, ()):
+            if want in heads:
+                return heads[want]
+        return None
+
+    def get(self, row, name):
+        k = self.key(name)
+        return ((row.get(k) if k else "") or "").strip()
+
+    def save(self):
+        with open(self.path, "w", encoding=self.encoding, errors="replace",
+                  newline="") as f:
+            w = csv.DictWriter(f, self.fields, delimiter=self.delimiter,
+                               extrasaction="ignore")
+            w.writeheader()
+            w.writerows(self.rows)
+
+
 def _wav_seconds(path):
     """Play length of *path* in seconds (float), or None if unreadable."""
     import wave
@@ -1072,13 +1210,13 @@ def _has_named_wavs(root):
 # Characters not allowed in Windows filenames + the path separators that
 # would let a malicious transcript escape the dir.  Replaced with '_'.
 _FORBIDDEN_FILENAME_CHARS = r'<>:"|?*/\\'
-# Cap the renamed filename's stem at this many chars.  Windows MAX_PATH
-# is 260; we leave headroom for the parent dir, extension, and the
-# original stem prefix.
-_MAX_TEXT_LEN = 80
+# Cap the transcript part of a renamed filename at this many chars: the
+# same cap a rename in Replace Audio has (PAD-1158: was 80, which cut long
+# callouts short).  The path-length side is name_memory.fit_label's job.
+_MAX_TEXT_LEN = name_memory.MAX_LABEL
 
 
-def _renamed_rel_path(rel_path, text):
+def _renamed_rel_path(rel_path, text, assets_dir=None):
     """Compute the renamed relative path for a transcribed file.
 
     ``original.wav`` + ``"Joust champion!"`` -> ``original - Joust champion!.wav``.
@@ -1107,6 +1245,10 @@ def _renamed_rel_path(rel_path, text):
     if len(cleaned) > _MAX_TEXT_LEN:
         cleaned = cleaned[:_MAX_TEXT_LEN].rstrip() + "..."
     cleaned = cleaned.rstrip(". ")
+    if cleaned and assets_dir:
+        # as much of it as this folder still holds (Windows' 260 limit)
+        cleaned = name_memory.fit_label(os.path.join(assets_dir, parent),
+                                        stem, cleaned, ext)
     if not cleaned:
         return rel_path
 

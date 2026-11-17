@@ -123,6 +123,33 @@ def test_sources_file_lists_every_source_and_the_compiler():
     assert "arm-linux-gnueabihf-gcc" in compiler
 
 
+def test_prebuilt_a64_object_is_an_aarch64_shared_object():
+    # PAD-1269: the Spike 3 machine is 64-bit ARM, so its pinned runtime is an aarch64 .so.
+    path = MR.prebuilt_object("a64")
+    with open(path, "rb") as f:
+        head = f.read(52)
+    assert head[:4] == b"ELF"
+    assert head[4] == 2, "ELFCLASS64"
+    assert head[5] == 1, "little endian"
+    e_type, e_machine = struct.unpack_from("<HH", head, 16)
+    assert e_type == 3, "ET_DYN (a shared object the game preloads)"
+    assert e_machine == 183, "EM_AARCH64"
+
+
+def test_prebuilt_a64_object_is_current():
+    reasons = MR.stale_reasons("a64")
+    assert not reasons, "the pinned Spike 3 mode runtime is STALE: " + "; ".join(reasons)
+    assert MR.prebuilt_is_current("a64")
+
+
+def test_a64_sources_file_lists_every_source_including_the_hook_layer():
+    sums, compiler = MR.recorded("a64")
+    for name in MR.SOURCES_A64 + ("mode64.so",):
+        assert re.fullmatch(r"[0-9a-f]{64}", sums.get(name, "")), name
+    assert "hook_a64.h" in MR.SOURCES_A64
+    assert "aarch64" in compiler
+
+
 def _copy_sdk(tmp_path):
     sdk = tmp_path / "sdk"
     (sdk / "prebuilt").mkdir(parents=True)
@@ -237,10 +264,15 @@ _READER = r"""
 #include <fcntl.h>
 #include <unistd.h>
 #include "pad_mode.h"
+typedef unsigned pm_addr;            /* PAD-1269: the 32-bit build's address and register types */
+typedef unsigned pm_reg;
+static unsigned long game_base;      /* PAD-1269: a PIE's load address, 0 on Spike 2 */
 static const char *PORT_FILES[2];
 static int events, lamps, rules;
 static void event_line(const char *s) { events++; }
 static void lamp_line(const char *s) { lamps++; }
+static int cabs;
+static void cab_line(const char *s) { cabs++; }   /* PAD-1040: `cablamp` lines, the cabinet's lights */
 static void rule_line(const char *s) { rules++; }      /* item 160: `rule` lines, the stock rules section */
 @HELPERS@
 @SECTION@
@@ -411,3 +443,16 @@ def test_a_port_can_ask_for_the_bus_ids_its_build_fires():
     assert 'if (!pm_port_value("event_census", 0) || pm_ms() < next) return;' in body
     assert "d = event_fired[id] - seen[id];" in body
     assert "event_census();                           /* PAD-420: `value event_census 1` */" in src
+
+
+def test_a64_build_fails_on_a_narrowed_log_format():
+    """PAD-1273: on Spike 3 a pm_addr / pm_reg is 64 bits, and a log line that printed one through %x
+    showed only its low 32 bits. The runtime's lines print them through PMA / PMU ("lx" / "lu" on
+    a64, the "x" / "u" they always had on Spike 2), and the a64 build makes -Wformat an error so a
+    new line that narrows an address fails to build instead of logging the wrong address."""
+    with open(os.path.join(SDK, "build_mode.sh"), encoding="utf-8") as f:
+        a64 = next(l for l in f if l.strip().startswith("a64)"))
+    assert 'ARCHWARN="-Werror=format"' in a64 and "Wno-error=format" not in a64
+    with open(os.path.join(SDK, "pad_mode_runtime.c"), encoding="utf-8") as f:
+        src = f.read()
+    assert re.search(r'#if PM_A64\s+#define PMA "lx"\s+#define PMU "lu"\s+#else\s+#define PMA "x"\s+#define PMU "u"', src)

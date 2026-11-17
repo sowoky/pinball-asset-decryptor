@@ -17,15 +17,24 @@
  *   raw <mask>          one dispatch of a mask as given
  *   event <name>        the game fires a named event (skill_shot, ball_start ...)
  *   battle <0|1>        the game's own kaiju battle is active or not
+ *   pick <slot>         PAD-706: the player picks battle <slot> on the battle selection screen (a mode that claimed it
+ *                       is called: "PICK <slot> -> 1" taken); a battle given back prints "ROSTER OVER WON|lost"
+ *   pickmore <name>     PAD-707: the player picks new monster <name> on the selection screen ("PICKMORE <name> -> 1")
  *   multiball <0|1>     the game's own multiball is active or not
  *   timed <0|1>         one of the game's other modes is active (Jet Fighter Attack: PAD-347)
  *   balls <n>           the balls in play
- *   ball_end            the ball drained
+ *   women <n>           PAD-889: James Bond's Bond Women multiplier runs at <n>X (1 = none runs): pm_bond_women_mult
+ *                       says it, and the game's scoring multiplies every pm_score_add by it, as Bond's does
+ *   ball_end            the ball drained (PAD-622: a hold a mode asks for runs as ticks, then "BALL END goes on")
+ *   tilt                the ball in play tilted: its ball_end holds nothing
  *   player <n>          the player up
  *   game_over           pm_in_game() falls
- *   new_game            a new game: player 1, every score 0, pm_in_game() 1
+ *   new_game            a new game: player 1, every score 0, pm_in_game() 1 (and no game mode completed)
+ *   done <id>           PAD-747: the player up completes the game's own mode <id> (pm_game_modes_done counts it);
+ *                       ids 100 and up are ones the runtime cannot see completed
  *   trigger <file>      /dump/<file> appears (a mode's test trigger), with optional text: trigger f=text
- *   covered <0|1>       a display of the game's that beats the held display priority has the screen
+ *   covered <0|1>       a display of the game's has the screen (a mode's words, or a note, wait for it)
+ *   words <0|1>         a screen of the game's own has its words up (PAD-662: pm_game_words, a mode's step aside)
  *   rescene             the game makes its HUD scene again (PAD-390): every node found so far is an old copy,
  *                       renamed "STALE:<name>", and the next lookups find fresh ones
  *   lamps               print every insert held now: "HELD <name> <rrggbb> <pattern> <ms> <mode>"
@@ -67,6 +76,9 @@ static const struct { const char *name; uint64_t mask; } SHOTS[] = {    /* godzi
     { "Left return lane", 0x4ull }, { "Right return lane", 0x10ull }, { "Pop bumper", 0x40ull },
     { "Mecha exit bottom", 0x10000000000ull }, { "Left spinner", 0x200ull },
     { "Top spinner", 0x2000ull }, { "Shield ramp spinner", 0x20000ull },
+    { "Right spinner", 0x20000ull },                    /* PAD-658: the same spinner, as a Pro's port names it */
+    { "Right scoop", 0x0100000000000000ull },           /* PAD-658: `switch` lines of the port, the scoop */
+    { "Mecha exit top", 0x0200000000000000ull },        /* and the top of the Mecha lane */
     { "Action button", 0x1000000000000000ull },         /* a `switch` line of the port (PAD-228) */
     { "Trough", 0x8000000000000000ull },                /* the trough's switches (PAD-416): a drain */
 };
@@ -81,6 +93,7 @@ static const struct { const char *name; int id; } EVENTS[] = {
 static unsigned long now_ms, ticks;
 static unsigned player = 1;
 static int in_game = 1, battle, multiball, timed;
+static int wizard_way = -1;               /* PAD-503: the game's own mini-wizard check (`way`); -1 = no such check */
 static uint64_t score[5];
 static const struct pm_mode *current, *running;
 static char trigger_file[64], trigger_text[128];
@@ -92,6 +105,8 @@ static int n_nodes;
 static void *fake(const char *path)
 {
     int i;
+    const char *gone = getenv("HARNESS_NO_NODE");     /* PAD-709: a card built without this node (a part of its name) */
+    if (gone && gone[0] && strstr(path, gone)) return 0;
     for (i = 0; i < n_nodes; i++)
         if (!strcmp(nodes[i].name, path)) return &nodes[i];
     if (n_nodes == 4096) return 0;
@@ -134,9 +149,12 @@ const char *pm_version(void) { return "1.16"; }
 int pm_in_game(void) { return in_game && player; }
 unsigned pm_player(void) { return player; }
 uint64_t pm_score(unsigned p) { return p >= 1 && p <= 4 ? score[p] : 0; }
+static unsigned women_mult = 1;            /* PAD-889: `women <n>` */
+unsigned pm_bond_women_mult(void) { return women_mult; }
 uint64_t pm_score_add(unsigned p, uint64_t v)
 {
     if (p < 1 || p > 4) return 0;
+    v *= women_mult;                       /* the game's playfield multiplier, which Bond counts the multiplier into */
     score[p] += v;
     printf("%6lu SCORE +%llu (player %u: %llu)\n", now_ms, (unsigned long long)v, p, (unsigned long long)score[p]);
     return v;
@@ -167,6 +185,9 @@ static unsigned disp_prio;
 static unsigned long disp_linger_until;   /* pm_end_holding: the hold kept for an ending, until then */
 static void disp_linger_release(const char *why);
 static unsigned begun;                     /* PAD-413: pm_begun */
+static void backdrop_other_began(void);    /* PAD-658: the backdrop, below */
+static void backdrop_mode_ended(void);
+static void backdrop_hold_over(void);
 static int clip_on;                        /* PAD-413: our full-screen clip plays (until it is stopped) */
 static const struct pm_mode *clip_owner;
 static const struct pm_mode *refused[16];   /* PAD-399: as the runtime, a refusal is said once until it changes */
@@ -196,6 +217,7 @@ int pm_begin(void)
         printf("%6lu CLIP STOPPED %s (another mode began)\n", now_ms, clip_owner ? clip_owner->name : "-");
         clip_on = 0;
     }
+    backdrop_other_began();
     return 1;
 }
 unsigned pm_begun(void) { return begun; }
@@ -203,9 +225,11 @@ static void mechs_let_go(const char *why);   /* PAD-395: the held mechanisms, be
 void pm_end(void)
 {
     if (running == current) running = 0, refused_forget();
+    if (!running) backdrop_mode_ended();
     if (!running) mechs_let_go("the mode ended");
 }
 int pm_running(void) { return running && running == current; }
+int pm_other_running(void) { return running && running != current; }   /* PAD-675 */
 unsigned pm_callout_id(const char *role)
 {
     return !strcmp(role, "countdown") ? 1287 : !strcmp(role, "ten_seconds") ? 1291 : !strcmp(role, "time_up") ? 1295 : 0;
@@ -236,18 +260,47 @@ void pm_clip_stop(void)
     if (clip_on) printf("%6lu CLIP STOPPED\n", now_ms);
     clip_on = 0;
 }
-/* hud-layers: the backdrop (a clip behind the HUD) */
+/* hud-layers: the backdrop (a clip behind the HUD). PAD-658, as the runtime: the mode that asked owns it (running, or
+ * showing a note); it stays behind an ending held with pm_end_holding until the hold is over */
 static char backdrop_now[96];
+static const struct pm_mode *backdrop_owner;
+static int backdrop_lingers;
+static void backdrop_off(const char *why)
+{
+    if (backdrop_now[0]) printf("%6lu BACKDROP OFF%s%s\n", now_ms, why ? " " : "", why ? why : "");
+    backdrop_now[0] = 0;
+    backdrop_owner = 0;
+    backdrop_lingers = 0;
+}
 int pm_backdrop(const char *name)
 {
+    if (running && running != current) return 0;
+    backdrop_lingers = 0;
     if (!name || !*name) {
-        if (backdrop_now[0]) printf("%6lu BACKDROP OFF\n", now_ms);
-        backdrop_now[0] = 0;
+        backdrop_off(0);
         return 1;
     }
+    backdrop_owner = current;
     if (strcmp(backdrop_now, name)) printf("%6lu BACKDROP %s\n", now_ms, name);
     snprintf(backdrop_now, sizeof backdrop_now, "%s", name);
     return 1;
+}
+static void backdrop_mode_ended(void)
+{
+    if (backdrop_now[0] && backdrop_owner == current && disp_linger_until && disp_owner == current) {
+        backdrop_lingers = 1;
+        printf("%6lu BACKDROP KEPT behind %s's ending\n", now_ms, current && current->name ? current->name : "?");
+        return;
+    }
+    backdrop_off("(the mode ended)");
+}
+static void backdrop_other_began(void)
+{
+    if (backdrop_now[0] && backdrop_owner != current) backdrop_off("(another mode began)");
+}
+static void backdrop_hold_over(void)
+{
+    if (backdrop_lingers && !running) backdrop_off("(its ending is over)");
 }
 int pm_backdrop_once(const char *name)
 {
@@ -275,6 +328,11 @@ int pm_ball_save(unsigned seconds)
 {
     printf("%6lu BALL SAVE %u s\n", now_ms, seconds);
     return 1;
+}
+int pm_drain_to_one(void)   /* PAD-733: the runtime's dead flippers until one ball is left */
+{
+    printf("%6lu DRAIN TO ONE (%d in play) %s\n", now_ms, balls_in_play, current && current->name ? current->name : "?");
+    return balls_in_play >= 2;
 }
 /* PAD-379: the shield platform, AWAY until a mode turns it; it takes SHIELD_TURN_MS to get there.
  * HARNESS_SHIELD=none is a Pro (fixed shields: no platform), =off an operator who switched the motor off. */
@@ -316,8 +374,25 @@ int pm_shield_keep(int where)
     if (where == PM_SHIELD_TOWARD || where == PM_SHIELD_AWAY) pm_shield(where);
     return 1;
 }
-/* PAD-414: the shaker - a SHAKE line for each one asked for (the runtime's limits are not modelled here, but one at a
- * time is: a shake asked for while one runs is refused); HARNESS_SHAKER=none: a game without one */
+/* PAD-589: the building (Godzilla Premium/LE) - a BUILDING line for each floor asked for, there at once (the stepper's
+ * travel and the runtime's limits are not modelled here); HARNESS_BUILDING=none is a Pro (no building) */
+static int building_at;
+static int building_none(void)
+{
+    const char *e = getenv("HARNESS_BUILDING");
+    return e && !strcmp(e, "none");
+}
+int pm_building(int floor)
+{
+    if (building_none() || floor < 0 || floor > 3) return 0;
+    printf("%6lu BUILDING floor %d\n", now_ms, floor);
+    building_at = floor;
+    return 1;
+}
+int pm_building_floor(void) { return building_none() ? -1 : building_at; }
+/* PAD-414: the shaker - a SHAKE line for each one asked for (the runtime's 30 s a minute is not modelled here, but
+ * PAD-658's one at a time is: a longer one takes over, a shorter one is skipped); HARNESS_SHAKER=none: a game without
+ * one */
 static unsigned long shake_until;
 static int shake_none(void)
 {
@@ -327,10 +402,11 @@ static int shake_none(void)
 static int shake_go(const char *what, unsigned ms)
 {
     if (shake_none()) return 0;
-    if (now_ms < shake_until) {
-        printf("%6lu SHAKE %s - refused, one is running\n", now_ms, what);
+    if (now_ms < shake_until && now_ms + ms <= shake_until) {
+        printf("%6lu SHAKE %s - skipped, the one running outlasts it\n", now_ms, what);
         return 0;
     }
+    if (now_ms < shake_until) printf("%6lu SHAKE taken over\n", now_ms);
     shake_until = now_ms + ms;
     printf("%6lu SHAKE %s\n", now_ms, what);
     return 1;
@@ -371,6 +447,7 @@ static void shield_tick(void)
  * game with neither. */
 static struct { const char *name; unsigned long started, until, ended; } coil_h[] = {
     { "magnet", 0, 0, 0 }, { "mg_magnet", 0, 0, 0 }, { "bridge", 0, 0, 0 },
+    { "right_return_up", 0, 0, 0 },     /* PAD-621: James Bond's post, held up to the game's own 14 s */
 };
 #define N_COILS (int)(sizeof coil_h / sizeof coil_h[0])
 static unsigned scoop_ms;
@@ -419,7 +496,7 @@ int pm_coil_hold(const char *name, unsigned ms)
         return 0;
     }
     if (ms < 100) ms = 100;
-    if (ms > 5000) ms = 5000;
+    if (ms > (strcmp(name, "right_return_up") ? 5000u : 14000u)) ms = strcmp(name, "right_return_up") ? 5000u : 14000u;
     coil_h[i].started = now_ms;
     coil_h[i].until = now_ms + ms;
     printf("%6lu HOLD %s %u ms %s\n", now_ms, name, ms, current && current->name ? current->name : "?");
@@ -444,6 +521,20 @@ int pm_scoop_hold(unsigned ms)
 }
 void pm_scoop_release(void) { if (pm_running() && scoop_until) scoop_kick("the mode let go"); }
 int pm_scoop_holding(void) { return scoop_until != 0; }
+/* PAD-622: the end of a ball held for a mode's total (the runtime's ball_end_hold_run) */
+static unsigned beh_ms;
+static int beh_asking, beh_release, beh_holding, tilted;
+int pm_ball_end_hold(unsigned ms)
+{
+    if (!beh_asking || !ms || tilted) return 0;
+    if (ms > 10000) ms = 10000;
+    if (ms > beh_ms) beh_ms = ms;
+    beh_holding = 1;
+    printf("%6lu BALL END HOLD %u %s\n", now_ms, ms, current && current->name ? current->name : "?");
+    return 1;
+}
+void pm_ball_end_release(void) { if (beh_holding) beh_release = 1; }
+int pm_ball_end_holding(void) { return beh_holding; }
 static void scoop_settle(void)
 {
     scoop_from = now_ms;
@@ -462,6 +553,88 @@ const char *pm_port_text(const char *name)
     return 0;
 }
 long pm_port_value(const char *name, long fallback) { (void)name; return fallback; }
+
+/* PAD-706: Godzilla's battle selection screen - seven slots a mode may claim; `pick <slot>` is the player picking one
+ * (or the game's city pick restarting a lost battle: the same call), pm_roster_over the battle given back */
+static int (*roster_fn[16])(unsigned);
+static const struct pm_mode *roster_by[16];
+int pm_roster_slots(void) { return 7; }
+int pm_roster_claim(unsigned slot, int (*on_pick)(unsigned slot))
+{
+    if (slot >= 7 || !on_pick) return 0;
+    roster_fn[slot] = on_pick;
+    roster_by[slot] = current;
+    printf("ROSTER CLAIM %u %s\n", slot, current ? current->name : "?");
+    return 1;
+}
+void pm_roster_release(unsigned slot) { if (slot < 16) roster_fn[slot] = 0; }
+void pm_roster_over(int won) { printf("%6lu ROSTER OVER %s\n", now_ms, won ? "WON" : "lost"); }
+void pm_roster_done(void) { pm_roster_over(0); }
+int pm_roster_callout(unsigned slot, unsigned id) { (void)id; return slot < 7 && roster_fn[slot]; }
+/* PAD-707: new monsters on the selection screen; `pickmore <name>` is the player picking that monster on
+ * the list's own screen (its on_pick called as the runtime's menu calls it) */
+static struct { int (*fn)(unsigned); const struct pm_mode *by; char name[40]; unsigned slot; } more_m[16];
+static int more_n;
+static const char *more_picked;
+int pm_roster_more(unsigned slot, const char *name, const char *page, unsigned callout, int (*on_pick)(unsigned slot))
+{
+    if (slot >= 7 || !on_pick || !name || more_n >= 16) return -1;
+    more_m[more_n].fn = on_pick;
+    more_m[more_n].by = current;
+    more_m[more_n].slot = slot;
+    snprintf(more_m[more_n].name, sizeof more_m[more_n].name, "%s", name);
+    printf("ROSTER MORE %u %s page %s callout %u\n", slot, name, page ? page : "-", callout);
+    return more_n++;
+}
+void pm_roster_more_leave(const char *name) { (void)name; }
+int pm_roster_more_count(void) { return more_n; }
+const char *pm_roster_more_picked(void) { return more_picked; }
+long pm_roster_start_after(void) { return pm_port_value("roster_start_after_ms", 0); }
+int pm_roster_closing(void) { return 0; }   /* PAD-733: the desk has no selection screen to close */
+int pm_roster_more_progress(long done, long of)   /* PAD-733: the count on its tile */
+{
+    printf("%6lu   ROSTER COUNT %ld/%ld\n", now_ms, done, of);
+    return more_n > 0;
+}
+int pm_roster_more_shots(uint64_t shots)   /* PAD-733: what its tile blinks on the playfield */
+{
+    printf("%6lu   ROSTER SHOTS %08x_%08x\n", now_ms, (unsigned)(shots >> 32), (unsigned)shots);
+    return more_n > 0;
+}
+
+/* PAD-710: the game's own modes 0-127 a mode may claim; `gamestart <id>` is the game starting one (a rule of its own,
+ * as the player earns it), pm_place_over the outcome the game's own stop is run with */
+static int (*place_fn[128])(unsigned);
+static const struct pm_mode *place_by[128];
+int pm_place_claim(unsigned id, int (*on_start)(unsigned id))
+{
+    if (id >= 128 || !on_start) return 0;
+    place_fn[id] = on_start;
+    place_by[id] = current;
+    printf("PLACE CLAIM %u %s\n", id, current ? current->name : "?");
+    return 1;
+}
+void pm_place_release(unsigned id) { if (id < 128) place_fn[id] = 0; }
+int pm_place_counts(unsigned id) { return id < 128; }
+const char *pm_game_mode_name(unsigned id) { return id < 128 ? "Desk Mode" : 0; }
+void pm_place_over(int won) { printf("%6lu PLACE OVER %s\n", now_ms, won ? "COMPLETED" : "not completed"); }
+int pm_game_mode_start(unsigned id) { (void)id; return 0; }
+
+/* PAD-747: the game's modes each player completed this game (the `done <id>` command); 100 and up are not seen */
+static unsigned char desk_done[5][128];
+int pm_game_mode_done_seen(unsigned id) { return id < 100; }
+int pm_game_mode_done(unsigned id) { return id < 100 ? desk_done[player <= 4 ? player : 0][id] : -1; }
+int pm_game_modes_done(const unsigned char *ids, unsigned n)
+{
+    unsigned k, seen = 0, done = 0;
+    for (k = 0; k < (n ? n : 100); k++) {
+        unsigned id = n ? ids[k] : k;
+        if (id >= 100) continue;
+        seen++;
+        done += in_game && desk_done[player <= 4 ? player : 0][id];
+    }
+    return seen ? (int)done : -1;
+}
 int pm_trigger_text(const char *name, char *out, unsigned cap)
 {
     if (!trigger_file[0] || strcmp(name, trigger_file)) return 0;
@@ -534,6 +707,12 @@ int pm_sound_fade(unsigned request, unsigned ms)
     snd_drop(request);
     return was;
 }
+int pm_sound_duck(unsigned request, unsigned steps, unsigned ms)
+{
+    if (snd_find(request) < 0) return 0;
+    printf("%6lu DUCK %u %u %u\n", now_ms, request, steps, ms);
+    return 1;
+}
 int pm_sound_sid(unsigned request, unsigned sid)
 {
     printf("%6lu SID %u %u\n", now_ms, request, sid);
@@ -573,6 +752,15 @@ int pm_sound_priority(unsigned request, int priority, int flags)
     }
     return old;
 }
+int pm_sound_priority_stock(unsigned request)
+{
+    int i, old;
+    for (i = 0; i < snd_prio_n && snd_prio[i].req != request; i++) ;
+    if (i == snd_prio_n) return -1;
+    old = snd_prio[i].pair;
+    snd_prio[i].pair = (request == MUSIC_CARRIER || request == GAME_MUSIC) ? (1 << 8 | 1) : (2 << 8 | 1);
+    return old;
+}
 int pm_stock_mode_running(unsigned kinds)
 {
     if ((kinds & PM_STOCK_BATTLE) && battle) return PM_STOCK_BATTLE;
@@ -580,9 +768,56 @@ int pm_stock_mode_running(unsigned kinds)
     if ((kinds & PM_STOCK_ANY) && (battle || multiball || timed)) return PM_STOCK_ANY;
     return 0;
 }
+/* PAD-768: a pick ends the game's timed mode (`timed 1`), as the runtime runs its own STOP; never a battle or multiball */
+int pm_game_modes_end(const char *why)
+{
+    if (!in_game || !timed) return 0;
+    timed = 0;
+    printf("%6lu GAME MODES END 1 (%s)\n", now_ms, why ? why : "");
+    return 1;
+}
 int pm_aside(void)
 {
     return in_game ? pm_stock_mode_running(PM_STOCK_BATTLE | PM_STOCK_MULTIBALL | PM_STOCK_ANY) : 0;
+}
+/* PAD-503: the game's own check before one of its mini-wizards (Bond: a henchman, villain or Q Branch mode in its way) */
+int pm_game_wizard_way(void)
+{
+    return in_game && player ? wizard_way : -1;
+}
+/* PAD-521: the game's own status bar - "STATUSBAR <percent> <rrggbb> <words> <mode>" each time it changes, "STATUSBAR OFF" */
+int pm_status_bar(const char *words, unsigned rgb, int percent)
+{
+    static char had[64];
+    static unsigned had_rgb;
+    static int had_pct = -2;
+    if (!words || !*words) {
+        if (had[0]) printf("%6lu STATUSBAR OFF %s\n", now_ms, current && current->name ? current->name : "?");
+        had[0] = 0;
+        had_pct = -2;
+        return 1;
+    }
+    if (strcmp(had, words) || had_rgb != rgb || had_pct != percent)
+        printf("%6lu STATUSBAR %d %06x %s %s\n", now_ms, percent, rgb & 0xffffffu, words,
+               current && current->name ? current->name : "?");
+    snprintf(had, sizeof had, "%s", words);
+    had_rgb = rgb;
+    had_pct = percent;
+    return 1;
+}
+/* PAD-503: a lit mode's claim on its shot - "LITCLAIM <shots> <mode>" each time a mode's claim changes */
+int pm_lit_claim(uint64_t shots)
+{
+    static const struct pm_mode *who[8];
+    static uint64_t had[8];
+    int k;
+    for (k = 0; k < 8 && who[k] && who[k] != current; k++) ;
+    if (k == 8) return 0;
+    who[k] = current;
+    if (had[k] != shots)
+        printf("%6lu LITCLAIM %llx %s\n", now_ms, (unsigned long long)shots, current && current->name ? current->name : "?");
+    had[k] = shots;
+    return shots != 0;
 }
 /* PAD-347: "BLOCK 1 <mode>" when a mode keeps the game's modes from starting, "BLOCK 0 <mode>" when it lets go */
 int pm_block_game_modes(int on)
@@ -645,14 +880,25 @@ static const struct { const char *name; uint64_t shot; int x, y; } LAMPS[] = {  
     { "SHIELD LEFT", 0x80000000ull, 189, 335 }, { "SHIELD CENTER", 0x100000000ull, 199, 346 },
     { "SHIELD RIGHT", 0x200000000ull, 215, 356 },
     { "SKILL SHOT", 0x400000000ull, 49, 284 }, { "BIG LOOP", 0x1000000000ull, 195, 251 },
-    { "TOP SPINNER", 0x1800ull, 165, 207 },
+    { "TOP SPINNER", 0x3800ull, 165, 207 },
     { "POP BUMPER", 0x40ull, 251, 413 }, { "TANK 2", 0, 76, 287 }, { "HEAT RAY", 0, 180, 144 },
     { "LOWER PLAYFIELD GI-WHT(X9)", 0, 0, 0 }, { "UPPER PLAYFIELD GI-WHT(X12)", 0, 0, 0 },
+    /* PAD-658: the right side's inserts the pack lights by name, and the flashers; PAD-669: the spinners'
+     * and the Mecha lane's shot ties as the port has them (ATTACK MECHA is the shield ramp spinner's) */
+    { "LEFT SPINNER", 0x800000200ull, 55, 373 }, { "SELECT CITY", 0x2000000000ull, 236, 380 },
+    { "MECHA LANE", 0x14000000000ull, 282, 393 }, { "ATTACK MECHA", 0x20000ull, 200, 381 }, { "TANK 6", 0, 227, 394 },
+    { "SCOOP BB-BATTLE", 0, 254, 346 }, { "SCOOP BB-GODZILLA PWR UP", 0, 254, 346 },
+    { "SCOOP BB-SUMMON ALLY", 0, 254, 346 }, { "SCOOP BB MECHA SPOT", 0, 259, 337 },
+    { "TAIL WHIP", 0, 176, 297 }, { "DESTRUCTION JACKPOT", 0, 170, 273 }, { "KAIJU", 0, 127, 392 },
+    { "GODZILLA SPOT", 0, 33, 205 }, { "GLOBE FLASH", 0, 287, 206 }, { "TOP SPINNER FLASH", 0x2000ull, 172, 100 },
+    { "RIGHT RETURN LANE", 0x10ull, 242, 472 }, { "MASER FLASH", 0x200ull, 30, 388 },
+    { "BUILDING SPOT", 0, 57, 382 },
 };
 #define N_LAMPS (int)(sizeof LAMPS / sizeof LAMPS[0])
 static const char *const PATTERN[] = { "solid", "blink", "pulse", "chase" };
 static struct { const struct pm_mode *owner; unsigned rgb, ms; int pattern; } held[N_LAMPS];
 static int covered;
+static int game_words;                 /* PAD-662: `words` */
 
 static const char *mode_name(const struct pm_mode *m) { return m && m->name ? m->name : "?"; }
 
@@ -817,6 +1063,7 @@ static void disp_linger_release(const char *why)
     disp_prio = 0;
     disp_owner = 0;
     disp_linger_until = 0;
+    backdrop_hold_over();
 }
 
 int pm_display_priority(unsigned p)
@@ -827,6 +1074,7 @@ int pm_display_priority(unsigned p)
             disp_prio = 0;
             disp_owner = 0;
             disp_linger_until = 0;
+            backdrop_hold_over();
         }
         return 1;
     }
@@ -836,7 +1084,8 @@ int pm_display_priority(unsigned p)
     printf("%6lu DISPLAY %u %s\n", now_ms, disp_prio, mode_name(current));
     return 1;
 }
-int pm_display_covered(void) { return disp_prio && covered; }
+int pm_display_covered(void) { return covered; }      /* PAD-658: held or not (a note looks too) */
+int pm_game_words(void) { return in_game && game_words; }   /* PAD-662 */
 int pm_end_holding(unsigned ms)
 {
     if (!running || running != current) return 0;
@@ -904,6 +1153,10 @@ int main(int argc, char **argv)
             dispatch(0x1);
             dispatch(mask);
             ticks_for_ms(50);
+        } else if (!strcmp(c, "switches")) {          /* PAD-675: n playfield switch hits (0x1 each), 20 ms apart */
+            long n = atol(argv[++k]);
+            printf("%6lu >> switches %ld\n", now_ms, n);
+            while (n-- > 0) { dispatch(0x1); ticks_for_ms(20); }
         } else if (!strcmp(c, "raw")) {
             dispatch(strtoull(argv[++k], 0, 0));
         } else if (!strcmp(c, "event")) {
@@ -911,26 +1164,92 @@ int main(int argc, char **argv)
             printf("%6lu >> event %s\n", now_ms, argv[k]);
             EACH_MODE(m) if (m->event && id >= 0) { current = m; m->event((unsigned)id); }
             current = 0;
+        } else if (!strcmp(c, "pick")) {                /* PAD-706: the player picks battle slot n */
+            unsigned slot = (unsigned)atoi(argv[++k]);
+            int took = -1;
+            printf("%6lu >> pick %u\n", now_ms, slot);
+            if (slot < 16 && roster_fn[slot]) { current = roster_by[slot]; took = roster_fn[slot](slot); current = 0; }
+            printf("%6lu PICK %u -> %d\n", now_ms, slot, took);
+            ticks_for_ms(50);
+        } else if (!strcmp(c, "pickmore")) {            /* PAD-707: the player picks a new monster on the screen (MORE KAIJU */
+            const char *who = argv[++k];
+            int took = -1, j;
+            printf("%6lu >> pickmore %s\n", now_ms, who);
+            for (j = 0; j < more_n; j++)
+                if (!strcmp(more_m[j].name, who)) {
+                    current = more_m[j].by; more_picked = more_m[j].name;
+                    took = more_m[j].fn(more_m[j].slot);
+                    more_picked = 0; current = 0;
+                    break;
+                }
+            printf("%6lu PICKMORE %s -> %d\n", now_ms, who, took);
+            ticks_for_ms(50);
+        } else if (!strcmp(c, "gamestart")) {           /* PAD-710: the game starts its own mode n */
+            unsigned id = (unsigned)atoi(argv[++k]);
+            int took = -1;
+            printf("%6lu >> gamestart %u\n", now_ms, id);
+            if (id < 128 && place_fn[id]) { current = place_by[id]; took = place_fn[id](id); current = 0; }
+            printf("%6lu GAMESTART %u -> %d\n", now_ms, id, took);
+            ticks_for_ms(50);
         } else if (!strcmp(c, "battle")) { battle = atoi(argv[++k]); printf("%6lu >> battle %d\n", now_ms, battle); }
         else if (!strcmp(c, "multiball")) { multiball = atoi(argv[++k]); printf("%6lu >> multiball %d\n", now_ms, multiball); }
         else if (!strcmp(c, "timed")) { timed = atoi(argv[++k]); printf("%6lu >> timed %d\n", now_ms, timed); }
+        else if (!strcmp(c, "way")) { wizard_way = atoi(argv[++k]); printf("%6lu >> way %d\n", now_ms, wizard_way); }
         else if (!strcmp(c, "shield")) {             /* the game turns the platform itself (its ball search) */
             shield_to = shield_at = !strcmp(argv[++k], "toward") ? PM_SHIELD_TOWARD : PM_SHIELD_AWAY;
             printf("%6lu >> shield %s\n", now_ms, argv[k]);
         } else if (!strcmp(c, "balls")) { balls_in_play = atoi(argv[++k]); printf("%6lu >> balls in play %d\n", now_ms, balls_in_play); }
+        else if (!strcmp(c, "women")) {              /* PAD-889 */
+            women_mult = (unsigned)atoi(argv[++k]);
+            if (!women_mult) women_mult = 1;
+            printf("%6lu >> Bond Women multiplier %uX\n", now_ms, women_mult);
+        }
         else if (!strcmp(c, "ball_end")) {
             printf("%6lu >> ball_end\n", now_ms);
-            mechs_let_go("the ball ended");
+            beh_ms = 0;
+            beh_release = 0;
+            beh_asking = 1;
             EACH_MODE(m) if (m->ball_end) { current = m; m->ball_end(); }
             current = 0;
+            beh_asking = 0;
+            mechs_let_go("the ball ended");
+            if (beh_ms) {                            /* the game's end of ball waits (the modes' ticks go on) */
+                unsigned long until = now_ms + beh_ms;
+                while (!beh_release && now_ms < until) tick();
+            }
+            beh_holding = 0;
+            tilted = 0;
+            printf("%6lu BALL END goes on\n", now_ms);
+        } else if (!strcmp(c, "tilt")) {           /* PAD-622: this ball tilted */
+            printf("%6lu >> tilt\n", now_ms);
+            tilted = 1;
         } else if (!strcmp(c, "scoop")) {          /* PAD-395: a ball settles in the scoop */
             printf("%6lu >> scoop\n", now_ms);
             scoop_settle();
+        } else if (!strcmp(c, "points")) {         /* PAD-503: the game scores for the player up */
+            unsigned long long v = strtoull(argv[++k], 0, 0);
+            if (player >= 1 && player <= 4) score[player] += v;
+            printf("%6lu >> points %llu\n", now_ms, v);
+        } else if (!strcmp(c, "hold")) {           /* PAD-503: the game holds play for a moment and carries on (James
+                                                    * Bond's end of a mode or multiball: pm_in_game() is 0 meanwhile) */
+            unsigned long ms = (unsigned long)(atof(argv[++k]) * 1000.0);
+            printf("%6lu >> hold %lu ms\n", now_ms, ms);
+            in_game = 0;
+            ticks_for_ms(ms);
+            in_game = 1;
+            printf("%6lu >> hold over\n", now_ms);
         } else if (!strcmp(c, "player")) player = (unsigned)atoi(argv[++k]);
+        else if (!strcmp(c, "done")) {               /* PAD-747: the player up completes one of the game's modes */
+            unsigned id = (unsigned)atoi(argv[++k]);
+            if (id < 128) desk_done[player <= 4 ? player : 0][id] = 1;
+            printf("%6lu >> done %u (player %u)\n", now_ms, id, player);
+            ticks_for_ms(50);
+        }
         else if (!strcmp(c, "game_over")) in_game = 0;
         else if (!strcmp(c, "new_game")) {
             int p;
             for (p = 0; p < 5; p++) score[p] = 0;
+            memset(desk_done, 0, sizeof desk_done);
             in_game = 1;
             player = 1;
             printf("%6lu >> new_game\n", now_ms);
@@ -951,6 +1270,9 @@ int main(int argc, char **argv)
         } else if (!strcmp(c, "covered")) {
             covered = atoi(argv[++k]);
             printf("%6lu >> covered %d\n", now_ms, covered);
+        } else if (!strcmp(c, "words")) {
+            game_words = atoi(argv[++k]);
+            printf("%6lu >> words %d\n", now_ms, game_words);
         } else if (!strcmp(c, "lamps")) {
             int n = 0;
             for (int i = 0; i < N_LAMPS; i++)

@@ -1,13 +1,15 @@
 // The frame around every tab: top bar, rail, status bar, log drawer,
 // the manufacturer picker, banners, toasts and the dialog host.
 
-import { html, useEffect, useLayoutEffect, useRef, useState, Icon, Button, Chip, openMenu, cx, fmtClock, tip, Empty, Spinner }
+import { html, useEffect, useLayoutEffect, useRef, useState, Icon, Button, Chip, Check, openMenu, cx, fmtClock, tip, Empty, Spinner, Progress, mediaUrl }
   from "./core/ui.js";
 import { Component } from "./vendor/preact-htm.js";
 import { useNs, useLog, useConnected, useEvent, state } from "./core/store.js";
 import { call, onCallError } from "./core/rpc.js";
 import { DialogHost, openDialog } from "./core/dialogs.js";
 import { tabLock } from "./core/locks.js";
+import { setLanguage } from "./core/i18n.js";
+import { Spike3KeyGuide } from "./core/spike3_guide.js";
 // The app-wide windows (Tips, Preview features, disk space, the Project
 // menu's windows) register themselves on import; ShellxOverlays draws the
 // progress windows the shellx service drives (docs/plans/web_ui_tabs/shellx.md).
@@ -40,13 +42,37 @@ export function applyZoom(z) {
   applyBreakpoints();
 }
 const ZOOMS = [0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+// The step asked for last: the wheel can ask again before Python's answer
+// has come back into state.shell, and a step from the stale zoom would
+// repeat the one just taken.
+let asked = null;
 export function stepZoom(dir) {
-  const cur = Number((state.shell && state.shell.zoom) || 1);
+  const fresh = asked && Date.now() - asked.at < 1500;
+  const cur = fresh ? asked.zoom : Number((state.shell && state.shell.zoom) || 1);
   let next = cur;
   if (dir === 0) next = 1;
   else if (dir > 0) next = ZOOMS.find((z) => z > cur + 0.001) || cur;
   else next = [...ZOOMS].reverse().find((z) => z < cur - 0.001) || cur;
-  call("shell.zoom", next);
+  asked = { zoom: next, at: Date.now() };
+  if (Math.abs(next - cur) > 0.001 || dir === 0) call("shell.zoom", next);
+}
+// Ctrl (or Cmd) + the mouse wheel steps the zoom like Ctrl +/- (PAD-766).
+// A wheel notch is one step; a touchpad's small pinch deltas add up to one.
+// A view with a zoom of its own (the Scenes picture) takes the wheel first
+// and calls preventDefault, so the page stays as it is there.
+let wheelSum = 0, wheelAt = 0;
+export function onZoomWheel(e) {
+  if (!(e.ctrlKey || e.metaKey) || e.defaultPrevented) return;
+  e.preventDefault();
+  const d = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * 100 : e.deltaY;
+  if (!d) return;
+  const now = Date.now();
+  if (now - wheelAt > 400 || Math.sign(d) !== Math.sign(wheelSum)) wheelSum = 0;
+  wheelAt = now;
+  wheelSum += d;
+  if (Math.abs(wheelSum) < 50) return;
+  stepZoom(wheelSum < 0 ? 1 : -1);
+  wheelSum = 0;
 }
 
 // ---------------------------------------------------------------- theme
@@ -193,7 +219,7 @@ function alignChecks(items) {
 
 // --------------------------------------------------------------- top bar
 // The Project menu (Tk _build_project_menu): every entry is off while a run
-// is in flight; Save / Save as / Properties / Change history / Relink need
+// is in flight; Save / Save as / Properties / Change history / Relink / Export / Import need
 // a project folder and a manufacturer.  "Recent projects" is a cascade of
 // the last 8 ("name    (path)", one disabled "(nothing yet)" when empty).
 // The gaps are no-break spaces, which HTML does not collapse.
@@ -201,6 +227,7 @@ const GAP2 = "\u00a0\u00a0", GAP4 = GAP2 + GAP2;
 export function projectMenuItems(shell) {
   const running = !!shell.running;
   const recents = (shell.recent_projects || []).filter((r) => r && r.folder);
+  const teamNews = (state.shellx || {}).team_news || 0;
   const proj = shell.project || {};
   const have = !!(proj.folder && shell.mfr);
   const base = (f) => (f || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || f;
@@ -220,6 +247,18 @@ export function projectMenuItems(shell) {
     { label: "Properties…", disabled: running || !have, onClick: () => call("ui.call_back", "on_project_properties") },
     { label: "Change history…", disabled: running || !have, onClick: () => call("shellx.change_history") },
     { label: "Relink moved files…", disabled: running || !have, onClick: () => call("ui.call_back", "on_relink_project") },
+    // PAD-1015: every replacement file in one folder, and back onto a fresh extract
+    { label: "Export replacement files…", disabled: running || !have, onClick: () => openDialog("project_export_files"),
+      title: { head: "Export replacement files", lines: [["Click", "copy every video, sound and picture this project uses into one folder (Video, Audio, Images), with a file that puts them back on a fresh extract"]] } },
+    { label: "Import replacements…", disabled: running || !have, onClick: () => call("shellx.import_replacements"),
+      title: { head: "Import replacements", lines: [["Click", "pick the replacements.json an export left: its files go on this project's slots, with the random clips, music modes and loudness"]] } },
+    // PAD-1236: several PCs on one project, each person's parts shared through one synced folder
+    { label: "Team…" + (teamNews ? GAP2 + "(" + teamNews + " new)" : ""), disabled: running || !have, onClick: () => openDialog("project_team"),
+      title: { head: "Team", lines: [["Click", "work on this project with other people on their own PCs: each person owns parts (videos, scenes, sounds...), shares them through one synced folder, and gets the others'"]] } },
+    // PAD-576: here rather than a top-bar button, where it pulled the eye from the rest of the app
+    { sep: true },
+    { label: "Reset…", disabled: running || !have || shell.view !== "mfr", onClick: () => openDialog("reset"),
+      title: { head: "Reset this project", lines: [["Click", "put images, videos, sounds, text, fonts, scenes, colors or modes back as extracted, or everything at once"]] } },
   ];
 }
 function projectMenu(anchor, shell) {
@@ -246,7 +285,7 @@ function eraMenu(anchor, shell) {
       disabled: locked, onClick: () => { if (m.key !== mfr.key) call("ui.pick_manufacturer", m.key); } });
   }
   items.push({ sep: true });
-  items.push({ label: "Browse manufacturers and their games…", icon: "home", disabled: locked,
+  items.push({ label: "My machines and manufacturers…", icon: "home", disabled: locked,
     onClick: () => call("ui.back_to_picker") });
   openShellMenu(anchor, items);
 }
@@ -288,7 +327,9 @@ export function settingsMenuItems(shell) {
          checked: it.checked, title: it.title,
          disabled: !!(it.disabled || (it.needs_idle && shell.running) || (it.needs_prereqs && !rows.length)),
          onClick: () => call("ui.settings_action", it.id, ...(it.args || [])) });
-  return [
+  // PAD-844: no ✓ at this level (shellx keeps every switch in a submenu);
+  // should one come back, its whole level still lines up
+  return alignChecks([
     ...lead.map(item),
     ...(lead.length ? [{ sep: true }] : []),
     { label: "Appearance", submenu: [
@@ -296,15 +337,44 @@ export function settingsMenuItems(shell) {
       { label: "Light", checked: theme === "light", onClick: () => call("ui.set_theme", "light") },
       { label: "Match the system", checked: theme === "system", onClick: () => call("ui.set_theme", "system") },
     ] },
+    { label: "Language", submenu: languageItems(shell) },
     { label: "Zoom (" + Math.round(zoom * 100) + "%)", submenu: [
-      { label: "Zoom in", kbd: MOD + " +", onClick: () => stepZoom(1) },
-      { label: "Zoom out", kbd: MOD + " −", onClick: () => stepZoom(-1) },
+      { label: "Zoom in", kbd: MOD + " + / " + MOD + " wheel up", onClick: () => stepZoom(1) },
+      { label: "Zoom out", kbd: MOD + " − / " + MOD + " wheel down", onClick: () => stepZoom(-1) },
       { label: "Actual size", kbd: MOD + " 0", onClick: () => stepZoom(0) },
     ] },
     { sep: true },
     ...all.slice(i).map(item),
-  ];
+  ]);
 }
+// PAD-458: each language by its own name, so it can be found from any of them
+export function languageItems(shell) {
+  return (shell.languages || [["en", "English (US)", "EN-US"]]).map(([code, name]) => (
+    { label: name, checked: (shell.lang || "en") === code, onClick: () => call("ui.set_language", code) }));
+}
+
+// The top bar's language button: a globe and the language's code, so it can
+// be found without reading a word.  A dot marks it until it is first opened,
+// since nothing else announces that the app speaks other languages.
+const LANG_SEEN = "pad.lang.seen";
+function LangBtn({ shell }) {
+  const lang = shell.lang || "en";
+  const code = ((shell.languages || []).find((l) => l[0] === lang) || [lang, "", lang.toUpperCase()])[2];
+  const [seen, setSeen] = useState(() => { try { return localStorage.getItem(LANG_SEEN) === "1"; } catch (e) { return true; } });
+  const open = (e) => {
+    if (!seen) { setSeen(true); try { localStorage.setItem(LANG_SEEN, "1"); } catch (err) { /* ignore */ } }
+    openShellMenu(e.currentTarget, languageItems(shell), { align: "right" });
+  };
+  // the tip in every language, so whoever needs it can read it
+  const names = "Language · Idioma · Sprache · Langue";
+  return html`<span class="sx-gear">
+    <button type="button" class="btn sm sx-lang notr" onClick=${open} ...${tip(names)} aria-label=${names}>
+      <${Icon} name="globe" /><span class="sx-lang-code">${code}</span>
+    </button>
+    ${seen ? null : html`<span class="sx-dot new" aria-hidden="true"></span>`}
+  </span>`;
+}
+
 function settingsMenu(anchor, shell) {
   openShellMenu(anchor, settingsMenuItems(shell), { align: "right" });
 }
@@ -323,6 +393,7 @@ function TopBar({ shell }) {
   const upd = shell.update;
   const sx = useNs("shellx");
   const working = shell.view === "mfr";
+  const gsOpen = !!(sx.getting_started && sx.getting_started.open);
   const dots = shell.gear_dots || {};
   const connectedNow = useConnected();
   const [connected, setShown] = useState(true);
@@ -337,23 +408,39 @@ function TopBar({ shell }) {
     ${mfr && working ? html`<button type="button" class="btn sm" style="gap:8px" onClick=${(e) => eraMenu(e.currentTarget, shell)}
         ...${tip("Switch manufacturer" + (eraLabel ? " or era" : ""))}
         aria-label=${"Manufacturer " + mfr.display + (eraLabel ? ", era " + eraLabel : "")}>
-        <span class="ellip">${mfr.display}</span>${eraLabel ? html`<span class="chip acc sm">${eraLabel}</span>` : null}<span class="muted">▾</span>
+        <span class="ellip notr">${mfr.display}</span>${eraLabel ? html`<span class="chip acc sm">${eraLabel}</span>` : null}<span class="muted">▾</span>
       </button>
       <span class="crumb" aria-hidden="true">›</span>` : null}
     <button type="button" class="btn sm" style="gap:10px;max-width:420px" disabled=${!!shell.running && false}
       onClick=${(e) => projectMenu(e.currentTarget, shell)} ...${tip(proj.folder || "Project")} aria-label="Project menu">
       <${Icon} name="folder" />
-      <span class="mono ellip" style="color:var(--accent)">${proj.name || "No project"}</span>
-      ${proj.caption ? html`<span class="dim ellip hide-narrow">${proj.caption}</span>` : null}
+      <span class=${cx("mono ellip", proj.name && "notr")} style="color:var(--accent)">${proj.name || "No project"}</span>
+      ${proj.caption ? html`<span class="dim ellip hide-narrow notr">${proj.caption}</span>` : null}
       <span class="muted">▾</span>
     </button>
     <span class="grow"></span>
+    ${working && sx.team_news ? html`<${Chip} kind="acc" dot onClick=${() => openDialog("project_team")}
+        title=${{ head: "Team", lines: [["Click", "open Project > Team: other people shared new parts of this project"]] }}>Team: ${sx.team_news} new<//>` : null}
     ${pyChanged.length ? html`<${Chip} kind="warn" dot onClick=${() => call("shell.dev_restart")}
         title=${"Python files changed since this app started:\n" + pyChanged.slice(0, 12).join("\n") + (pyChanged.length > 12 ? "\n…" : "") + "\n\nClick to restart the app with them (development checkout only)."}>Python changed · Restart<//>` : null}
+    ${shell.not_admin ? html`<${Chip} kind="warn" dot
+        title=${{ head: "Not running as administrator", lines: [["Why", "PAD was started without Administrator rights, so writing cards, USB passthrough and some build steps can fail or ask for permission one at a time"], ["Fix", "close PAD and start it from its own Start menu or desktop shortcut, or right-click it and choose Run as administrator"]] }}>Not administrator<//>` : null}
     ${!connected ? html`<${Chip} kind="err" dot>Reconnecting…<//>` : null}
     ${upd && upd.available ? html`<${Chip} kind="info" dot onClick=${() => call("ui.settings_action", "install_update")}
-        title=${"Pinball Asset Decryptor v" + upd.version + " is available — you're on v" + (shell.version || "") + "."}>${upd.label || ("v" + upd.version + " available")}<//>`
+        title=${upd.tip || "Pinball Asset Decryptor v" + upd.version + " is available — you're on v" + (shell.version || "") + "."}>${upd.label || ("v" + upd.version + " available")}<//>`
       : html`<span class="hide-narrow"><${Chip} kind="ok" dot title=${sx.update_state === "latest" ? "You're on the latest version." : "This version"}>v${shell.version || ""}${sx.update_state === "latest" ? ", latest" : ""}<//></span>`}
+    <button type="button" class=${cx("btn sm sx-gs-open", gsOpen && "on")}
+        onClick=${() => call(gsOpen ? "shellx.getting_started_close" : "shellx.getting_started_open")}
+        ...${tip("Short videos and steps for the common jobs: extract a card, swap a song, build and flash, multi-boot.")} aria-label="Getting started">
+        <${Icon} name="play" /><span class="hide-narrow">Getting started</span></button>
+    <button type="button" class="btn sm sx-discord-btn" onClick=${() => call("shellx.open_discord")}
+        ...${tip("Join the PAD Discord server: ask questions, share what you made and hear about new releases.")} aria-label="Join our Discord">
+        <${Icon} name="discord" /><span class="hide-narrow">Discord</span></button>
+    ${sx.donations ? html`<button type="button" class="btn sm sx-don-btn" onClick=${() => openDialog("donations")} ...${tip(sx.donations.tip)} aria-label="Donate to an animal shelter">
+        <${Icon} name="paw" /><span>Donate</span></button>` : null}
+    <button type="button" class="btn sm sx-rep-btn" onClick=${() => openDialog("report")} ...${tip("Something went wrong? Send the developer what happened, with the log and the card's details.")} aria-label="Report a problem">
+        <${Icon} name="flag" /><span class="hide-narrow">Report a problem</span></button>
+    <${LangBtn} shell=${shell} />
     ${working ? html`<${IconBtn} icon="help" label="Tips for this tab" cls="sx-help" onClick=${() => openDialog("tips")} />` : null}
     <span class="sx-gear">
       <${IconBtn} icon="gear" label="Settings" onClick=${(e) => settingsMenu(e.currentTarget, shell)} />
@@ -378,7 +465,7 @@ function Rail({ shell }) {
       ${items.map((t) => {
         // PAD-224: a tab with nothing to work on yet is greyed out but still
         // opens, under a banner that says why
-        const lock = tabLock(t, shell.project_state);
+        const lock = tabLock(t, shell.project_state, shell.spike3_key);
         return html`<button type="button" class=${cx("item", shell.tab === t.ns && "on", lock && "locked")}
           aria-current=${shell.tab === t.ns ? "page" : undefined}
           onClick=${() => call("ui.select_tab", t.ns)} ...${tip(lock ? t.label + ": " + lock.short : t.label)}>
@@ -391,11 +478,52 @@ function Rail({ shell }) {
 }
 
 // The open tab can't do anything yet (PAD-224): say why, and where to go.
+// PAD-1090: a Spike 3 tab without the user's OTP key - the Extract tab's own
+// walkthrough, with the same two ways in, and the key kept for every tab.
+function Spike3KeyGate({ shell, lock }) {
+  const busy = !!shell.spike3_key_busy;
+  const [key, setKey] = useState("");
+  const send = () => { if (key.trim()) { call("ui.spike3_paste_key", key.trim()); setKey(""); } };
+  return html`<div class="banner warn sx-lock sx-s3key" role="group">
+    <${Icon} name="lock" />
+    <div class="body-text stack">
+      <b>${lock.long}</b>
+      <span class="small">The 256-bit key is fused into the machine's Raspberry Pi, not stored on the card, and it is the same across machines.
+        If you already have it, paste it here (64 hex characters): PAD checks it against the selected card and keeps it.</span>
+      <div class="row wrap">
+        <div class=${cx("field mono sx-s3key-in", busy && "disabled")}>
+          <input type="password" autocomplete="off" spellcheck="false" aria-label="Your Spike 3 OTP key"
+            placeholder="Paste your OTP key (64 hex characters)" value=${key} disabled=${busy}
+            onInput=${(e) => setKey(e.target.value)} onKeyDown=${(e) => { if (e.key === "Enter") send(); }} />
+        </div>
+        <${Button} size="sm" kind="primary" icon="unlock" disabled=${busy || !key.trim()} onClick=${send}>Use this key<//>
+        ${busy ? html`<${Spinner} />` : null}
+      </div>
+      <div class="row wrap">
+        <${Button} size="sm" kind="ghost" disabled=${busy} onClick=${() => call("ui.spike3_load_key")}>Or choose a key file…<//>
+        <${Spike3KeyGuide} disabled=${busy} />
+      </div>
+      ${shell.spike3_key_status ? html`<span class="small">${shell.spike3_key_status}</span>` : null}
+    </div>
+  </div>`;
+}
+
+// A Spike 3 tab without the key is shown greyed and does not take clicks
+// (David: "greyed out unless the user has the OTP key"); the gate above it
+// is the way in.
+function KeyLockedPage({ shell, children }) {
+  const t = (shell.tabs || []).find((r) => r.ns === shell.tab);
+  const lock = t ? tabLock(t, shell.project_state, shell.spike3_key) : null;
+  if (!lock || lock.need !== "spike3key") return children;
+  return html`<div class="sx-keylocked" aria-disabled="true" inert>${children}</div>`;
+}
+
 function LockBanner({ shell }) {
   const x = useNs("extract");
   const t = (shell.tabs || []).find((r) => r.ns === shell.tab);
-  const lock = t ? tabLock(t, shell.project_state) : null;
+  const lock = t ? tabLock(t, shell.project_state, shell.spike3_key) : null;
   if (!lock) return null;
+  if (lock.need === "spike3key") return html`<${Spike3KeyGate} shell=${shell} lock=${lock} />`;
   const haveCard = !!(x.ssd ? x.drive : x.input);
   const pickFirst = lock.need === "extract" && !haveCard;
   return html`<div class="banner warn sx-lock" role="status">
@@ -428,16 +556,17 @@ function StatusBar({ shell }) {
     || (shell.run_mode === "write" && shell.tab === "write");
   // an emulator on its own tab owns the footer: its chip says its state
   const emuLive = !running && f.mode === "emulate" && idx >= 0;
-  const chip = shell.cancelling ? html`<${Chip} kind="warn" dot>Cancelling<//>`
+  const chip = shell.cancelling ? html`<${Chip} kind="warn" dot>Canceling<//>`
     : emuLive ? html`<${Chip} kind=${idx >= phases.length - 1 ? "ok" : "acc"} dot>${idx >= phases.length - 1 ? (f.status || "Running") : "Starting"}<//>`
     : running ? html`<${Chip} kind="acc" dot>${f.mode === "write" ? "Building" : f.mode === "extract" ? "Working" : "Running"}<//>`
+    : f.task ? html`<${Chip} kind="acc" dot>Working<//>`
     : html`<${Chip} kind="ok" dot>Ready<//>`;
   return html`<div class="statusbar" role="status">
     ${chip}
     ${phases.length ? html`<div class="phases">${phases.map((p, i) => html`<span class=${cx("phase", i < idx && "done", i === idx && "now", idx >= phases.length && "done")}>${p}</span>`)}</div>` : null}
     <span class="status" title=${f.status}>${f.status}</span>
     ${running && !ownCancel ? html`<${Button} kind="danger" size="sm" disabled=${shell.cancelling}
-      onClick=${() => call("ui.cancel")}>${shell.cancelling ? "Cancelling…" : "Cancel"}<//>` : null}
+      onClick=${() => call("ui.cancel")}>${shell.cancelling ? "Canceling…" : "Cancel"}<//>` : null}
   </div>`;
 }
 
@@ -479,7 +608,7 @@ function ProgressStrip({ shell }) {
     <div class=${cx("pbar", busy && "busy", running && !busy && "live")}>
       <i style=${busy ? "" : `width:${pct || 0}%`}></i>
     </div>
-    <span class="pct mono">${busy ? (running ? "working…" : "") : pct != null && (running || pct > 0) ? pct + "%" : ""}</span>
+    <span class="pct mono">${busy ? (running || f.task ? "working…" : "") : pct != null && (running || pct > 0) ? pct + "%" : ""}</span>
     ${eta != null ? html`<span class="eta mono" title="About this long left in this step, from its pace so far">ETA ${fmtClock(eta)}</span>` : null}
     ${f.started ? html`<span class="elapsed" title="Time since this run started"><${Elapsed} started=${f.started} /> elapsed</span>` : null}
   </div>`;
@@ -712,7 +841,7 @@ function LogDrawer({ open, height, setHeight }) {
     ]);
   };
   return html`<div class="logdrawer" style=${`height:${Math.min(height, logMaxH())}px`}>
-    <div class="lines" ref=${ref} tabindex="0" aria-label="Log" onScroll=${onScroll} onContextMenu=${menu}
+    <div class="lines notr" ref=${ref} tabindex="0" aria-label="Log" onScroll=${onScroll} onContextMenu=${menu}
       onWheel=${wheel} onKeyDown=${key} onTouchMove=${touched}
       onMouseDown=${() => { user.current.drag = true; touched(); }} onTouchStart=${() => { user.current.drag = true; }}>
       ${seed ? html`<div class="sx-seed">${seed.lines.map((t, i) => html`<div key=${"h" + i} class="line history">${t}</div>`)}</div>
@@ -756,6 +885,8 @@ function Prereqs({ shell }) {
 function Banners({ shell }) {
   return html`${(shell.banners || []).map((b) => html`<div class=${cx("banner", b.kind || "info", "sx-banner-" + b.id)} key=${b.id} role=${b.kind === "warn" ? "alert" : "status"}>
     ${b.icon === "bolt" ? html`<span class="sx-bolt" aria-hidden="true">⚡</span>` : html`<${Icon} name=${b.kind === "warn" ? "warn" : "info"} />`}<div class="body-text">${b.text}</div>
+    ${b.progress == null ? null : b.progress < 0 ? html`<${Spinner} />`
+      : html`<div class="sx-banner-prog" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${b.progress}><${Progress} pct=${b.progress} /><span class="mono">${b.progress}%</span></div>`}
     ${(b.actions || []).map((a) => html`<${Button} size="sm" kind=${a.primary ? "primary" : ""} onClick=${() => call("ui.banner_action", b.id, a.id)}>${a.label}<//>`)}
     ${b.dismiss !== false ? html`<${Button} size="sm" kind="ghost" icon="x" title="Dismiss" onClick=${() => call("ui.banner_action", b.id, "dismiss")} />` : null}
   </div>`)}`;
@@ -782,6 +913,80 @@ function Toasts({ shell }) {
   </div>`;
 }
 
+// ----------------------------------------------------------- My machines
+// The owner's machines on the picker's home (PAD-783; webui/shellx_machines.py):
+// each one's title, edition, build, card and project, what its card is
+// (stock, a PAD build's revision, modified), and "1.17 is out" with a link to
+// the maker's game-code page once the daily check sees newer code.  The
+// buttons go straight into the working view for that machine.  A machine's
+// "card" is the file it runs: a Stern SD card image, a JJP install ISO, a
+// BoF .fun update (PAD-787); r.noun names it and r.maker its maker.
+const MACH = {
+  intro: "Add the file each of your machines runs: a Stern SD card image, a Jersey Jack install ISO or a Barrels of Fun .fun update. Its title, build and project show here, and PAD tells you when the maker puts out newer game code for it.",
+  add: "Pick the file a machine runs: the .raw or .img of a Stern SD card, a Jersey Jack full-install .iso or a Barrels of Fun .fun update. PAD reads which game and build it is; nothing in the file changes.",
+  watch: { head: "Check for new game code", lines: ["Off until you tick it. Ticked, PAD reads the makers' public game-code pages once a day (Stern's, and the pages of your Jersey Jack and Barrels of Fun titles) and shows here when a machine's game has a newer build, with a link to that page.", "Nothing is ever downloaded: you click through to the maker yourself.", "Only the makers you have a machine of here."] },
+  newer: (r) => ({ head: r.maker + " has " + r.title + " " + r.build_next + " out", lines: ["This machine's " + r.noun + " is " + r.build + ". Click to open " + r.page_words.replace(/pages$/, "page") + "; nothing is downloaded.",
+    r.transfer ? "Once you have the new card image: Transfer Mods carries this project's changes onto it." : "Once you have the new " + r.noun + ": export this project's Mod Pack, extract the new one and import the pack into it."] }),
+  transfer: { head: "Transfer Mods", lines: ["Opens this machine's project and the Mod Pack tab's transfer, with this project as the one whose mods move.", "Pick the new code's card image there."] },
+  modpack: { head: "Mod Pack", lines: ["Opens this machine's project on the Mod Pack tab: export its changes as a pack, to import into a project of newer code."] },
+  noProject: (r) => "No project of this " + r.noun + " yet. Extract opens the Extract tab with it picked; the project you make from it joins this row.",
+};
+
+function MachineRow({ r }) {
+  const more = (e) => openShellMenu(e.currentTarget, [
+    { label: "Show the " + r.noun, icon: "folder", disabled: r.card_missing, onClick: () => call("shellx.machines_show_card", r.id) },
+    { label: r.noun === "card image" ? "Change card…" : "Change " + r.noun + "…", icon: "sd", onClick: () => call("shellx.machines_rebind", r.id) },
+    { label: "Rename…", icon: "edit", onClick: () => call("shellx.machines_rename", r.id) },
+    { sep: true },
+    { label: "Remove from My machines", icon: "trash", onClick: () => call("shellx.machines_remove", r.id) },
+  ]);
+  const proj = r.project && !r.project_missing;
+  return html`<div class="mach-row">
+    <span class="sx-logo mach-ic" aria-hidden="true"><${Icon} name="sd" /></span>
+    <div class="stack grow" style="gap:3px;min-width:0">
+      <div class="row wrap" style="gap:4px 10px;align-items:baseline">
+        <span class="t">${r.name}</span>
+        <span class="notr">${r.title}${r.edition ? html` <span class="muted">${r.edition}</span>` : null}</span>
+        ${r.build ? html`<${Chip} kind="info" sm>${r.build}<//>` : null}
+        <${Chip} sm kind=${r.lineage === "Stock" ? "" : "warn"}>${r.lineage}<//>
+        ${r.newer ? html`<button type="button" class="mach-newer" onClick=${() => call("shellx.machines_open_page", r.id)}
+            ...${tip(MACH.newer({ ...r, build_next: r.newer }))}><${Icon} name="star" />${r.newer} is out<${Icon} name="external" /></button>` : null}
+      </div>
+      <div class="muted small mach-sub">
+        <span class=${cx("mono", r.card_missing && "err-ink")} title=${r.card}>${r.card_missing ? r.noun.charAt(0).toUpperCase() + r.noun.slice(1) + " not found: " : ""}${r.card_name}</span>
+        ${r.size ? html` · ${r.size}` : null}
+        ${" · "}${proj ? html`project <b class="mach-proj" title=${r.project}>${r.project_name}</b>${r.more_projects.length ? " +" + r.more_projects.length + " more" : ""}`
+          : r.project_missing ? html`<span class="err-ink">project folder missing: ${r.project_name}</span>` : html`<span ...${tip(MACH.noProject(r))}>no project yet</span>`}
+      </div>
+    </div>
+    <div class="row mach-acts">
+      ${proj ? html`<${Button} size="sm" icon="folder" onClick=${() => call("shellx.machines_open_project", r.id)}>Open project<//>`
+        : html`<${Button} size="sm" icon="extract" disabled=${r.card_missing} title=${MACH.noProject(r)} onClick=${() => call("shellx.machines_extract", r.id)}>Extract<//>`}
+      <${Button} size="sm" kind=${r.newer && proj ? "primary" : ""} icon="modpack" disabled=${!proj} title=${r.transfer ? MACH.transfer : MACH.modpack} onClick=${() => call("shellx.machines_transfer", r.id)}>${r.transfer ? "Transfer Mods" : "Mod Pack"}<//>
+      <${Button} size="sm" icon="write" disabled=${!proj} onClick=${() => call("shellx.machines_write", r.id)}>Write<//>
+      <${Button} size="sm" kind="ghost" icon="more" title="More" onClick=${more} />
+    </div>
+  </div>`;
+}
+
+function MyMachines({ running }) {
+  const sx = useNs("shellx");
+  const m = sx.machines || { rows: [] };
+  useEffect(() => { call("shellx.machines_refresh"); }, []);
+  const rows = m.rows || [];
+  return html`<section class="mach">
+    <div class="row wrap" style="align-items:center;gap:8px 16px">
+      <h2 class="h1 grow" style="margin:0;font-size:24px">My machines</h2>
+      ${rows.length ? html`<${Check} checked=${m.watch === true} title=${MACH.watch} label="Check for new game code once a day"
+        onChange=${(v) => call("shellx.machines_set_watch", v)} />` : null}
+      <${Button} drop icon="plus" disabled=${running} title=${MACH.add} onClick=${() => call("shellx.machines_add")}>Add machine…<//>
+    </div>
+    ${rows.length ? html`<div class="mach-list">${rows.map((r) => html`<${MachineRow} key=${r.id} r=${r} />`)}</div>
+      ${m.watch_text ? html`<div class="muted small">${m.watch_text}</div>` : null}`
+      : html`<p class="dim" style="margin:0">${MACH.intro}</p>`}
+  </section>`;
+}
+
 // --------------------------------------------------------------- picker
 // The manufacturer picker (gui/picker.py): a letter logo in the maker's
 // colour, the name and its EXTRACT ONLY / BETA badge, the game count and
@@ -791,9 +996,11 @@ function Picker({ shell }) {
   const sx = useNs("shellx");
   const cards = sx.picker && sx.picker.length ? sx.picker : (shell.mfrs || []).map((m) => ({ ...m, stats: "", letter: "", peek: "" }));
   return html`<div class="picker"><div class="inner">
+    <${MyMachines} running=${shell.running} />
     <div class="row" style="align-items:flex-end;gap:16px">
       <div class="grow"><div class="eyebrow">Pinball Asset Decryptor</div><h1 class="h1" style="font-size:28px">Choose a manufacturer</h1>
-        <p class="dim" style="margin:6px 0 0">Pick the maker of the game you are working on. You can switch at any time from the manufacturer menu in the top bar.</p></div>
+        <p class="dim" style="margin:6px 0 0">Pick the maker of the game you are working on. You can switch at any time from the manufacturer menu in the top bar.</p>
+        <p style="margin:6px 0 0"><a href="#" class="sx-gs-link" onClick=${(e) => { e.preventDefault(); call("shellx.getting_started_open"); }}>New here? Short videos show the common jobs.</a></p></div>
       ${shell.mfr ? html`<${Button} onClick=${() => call("ui.pick_manufacturer", shell.mfr.key)}>Back to ${shell.mfr.display}<//>` : null}
     </div>
     <div class="grid">
@@ -802,14 +1009,68 @@ function Picker({ shell }) {
         <div class="row" style="align-items:flex-start">
           ${m.letter ? html`<span class=${cx("sx-logo", m.letter.length > 2 && "long")} style=${m.color ? "background:" + m.color : ""} aria-hidden="true">${m.letter}</span>` : null}
           <div class="stack grow" style="gap:2px">
-            <div class="row wrap" style="gap:4px 8px"><span class="t">${m.display}</span>
+            <div class="row wrap" style="gap:4px 8px"><span class="t notr">${m.display}</span>
               ${m.badge ? html`<span class=${cx("sx-badge", m.beta ? "beta" : "")}>${m.badge}</span>` : null}</div>
             ${m.stats ? html`<div class="muted small">${m.stats}</div>` : null}
           </div>
         </div>
-        <div class="games">${(m.games || []).slice(0, 14).map((g, i) => html`${i ? " · " : ""}<span class=${g.supported ? "" : "sx-unsup"} title=${g.supported ? undefined : (g.reason ? g.display + " — " + g.reason : g.display + " — not supported")}>${g.display}</span>`)}${(m.games || []).length > 14 ? html` · <span class="muted">+${m.games.length - 14} more</span>` : ""}</div>
+        <div class="games">${(m.games || []).slice(0, 14).map((g, i) => html`${i ? " · " : ""}<span class=${g.supported ? "notr" : "sx-unsup notr"} title=${g.supported ? undefined : (g.reason ? g.display + " — " + g.reason : g.display + " — not supported")}>${g.display}</span>`)}${(m.games || []).length > 14 ? html` · <span class="muted">+${m.games.length - 14} more</span>` : ""}</div>
       </button>`)}
     </div>
+  </div></div>`;
+}
+
+// The Getting started page (PAD-813, webui/shellx_getting_started.py): a short
+// video and a few steps for each job a new user comes for.  It takes the
+// place of the picker or the tab while it is open; the top bar stays, and its
+// Getting started button closes it again.
+function GettingStarted({ shell }) {
+  const sx = useNs("shellx");
+  const gs = sx.getting_started || { tasks: [], flow: [] };
+  const tasks = gs.tasks || [];
+  const [pick, setPick] = useState(() => (tasks[0] || {}).id);
+  const cur = tasks.find((t) => t.id === pick) || tasks[0] || { steps: [] };
+  const working = shell.view === "mfr";
+  const visible = new Set((shell.tabs || []).filter((t) => t.visible).map((t) => t.ns));
+  const canGo = working && visible.has(cur.tab);
+  const vid = useRef(null);
+  useEffect(() => { if (vid.current) vid.current.load(); }, [cur.id]);
+  const close = () => call("shellx.getting_started_close");
+  return html`<div class="picker sx-gs"><div class="inner">
+    <div class="row wrap" style="align-items:flex-end;gap:12px 24px">
+      <div class="grow"><div class="eyebrow">Pinball Asset Decryptor</div><h1 class="h1" style="font-size:28px">Getting started</h1>
+        <p class="dim" style="margin:6px 0 0">Pick what you want to do. Each one is a short video and a few steps.</p></div>
+      <${Check} checked=${!!gs.at_launch} label="Show this when the app opens"
+        onChange=${(v) => call("shellx.getting_started_at_launch", v)} />
+      <${Button} cls="sx-gs-close" onClick=${close}>${working && shell.mfr ? "Back to " + shell.mfr.display : "Choose a manufacturer"}<//>
+    </div>
+    <ol class="sx-gs-flow">${(gs.flow || []).map((f, i) => html`<li><span class="n">${i + 1}</span><b>${f.tab}</b><span class="dim">${f.what}</span></li>`)}</ol>
+    <div class="sx-gs-main">
+      <div class="sx-gs-video">
+        ${cur.video ? html`<video ref=${vid} controls preload="metadata" playsinline aria-label=${cur.title}
+            poster=${cur.poster ? mediaUrl(cur.poster) : undefined} src=${mediaUrl(cur.video)}></video>`
+          : html`<div class="sx-gs-novideo"><${Icon} name="film" cls="lg" /><span>The video for this one is not in this build.</span></div>`}
+      </div>
+      <aside class="sx-gs-steps">
+        <h2 class="h2">${cur.title}</h2>
+        <ol>${(cur.steps || []).map((s, i) => html`<li><span class="n">${i + 1}</span><span>${s}</span></li>`)}</ol>
+        ${cur.tab ? html`<${Button} kind="primary" onClick=${() => call("shellx.getting_started_go", cur.id)}>${canGo ? cur.go : "Choose a manufacturer"}<//>` : null}
+      </aside>
+    </div>
+    <div class="sx-gs-tasks">
+      ${tasks.map((t) => html`<button type="button" class=${cx("sx-gs-task", t.id === cur.id && "on")}
+          aria-pressed=${t.id === cur.id ? "true" : "false"} onClick=${() => setPick(t.id)}>
+        <span class="sx-gs-thumb">${t.poster ? html`<img src=${mediaUrl(t.poster)} alt="" />` : html`<${Icon} name="film" />`}</span>
+        <span class="t">${t.title}</span>
+      </button>`)}
+    </div>
+    ${gs.note ? html`<p class="muted small" style="margin:0">${gs.note}</p>` : null}
+    ${(gs.problems || []).length ? html`<section class="sx-gs-probs">
+      <h2 class="h2">If something goes wrong</h2>
+      <dl>${gs.problems.map((p) => html`<div><dt>${p.title}</dt><dd>${p.text}</dd></div>`)}</dl>
+      <p class="small" style="margin:0"><a href="#" class="sx-gs-guide" onClick=${(e) => { e.preventDefault(); call("shellx.getting_started_guide", "common_problems"); }}>More common problems and their fixes</a>
+        <span class="muted"> · </span><a href="#" class="sx-gs-guide" onClick=${(e) => { e.preventDefault(); call("shellx.getting_started_guide", "getting_started"); }}>Your first mod, written out step by step</a></p>
+    </section>` : null}
   </div></div>`;
 }
 
@@ -855,11 +1116,14 @@ function Disclaimer({ shell }) {
 // ---------------------------------------------------------------- shell
 export function Shell() {
   const shell = useNs("shell");
+  const sx = useNs("shellx");
+  const gsOpen = !!(sx.getting_started && sx.getting_started.open);
   const [logOpen, setLogOpen] = useState(() => { try { return localStorage.getItem("pad.log.open") !== "0"; } catch (e) { return true; } });
   const [logH, setLogH] = useState(() => { try { return Number(localStorage.getItem("pad.log.h")) || 150; } catch (e) { return 150; } });
   useEffect(() => { try { localStorage.setItem("pad.log.open", logOpen ? "1" : "0"); localStorage.setItem("pad.log.h", String(Math.round(logH))); } catch (e) {} }, [logOpen, logH]);
   useEffect(() => applyZoom(shell.zoom), [shell.zoom]);
   useEffect(() => applyTheme(shell.theme), [shell.theme]);
+  useEffect(() => { setLanguage(shell.lang || "en"); }, [shell.lang]);
   useEffect(() => { document.title = shell.title || "Pinball Asset Decryptor"; }, [shell.title]);
   useEvent("clipboard", (e) => { if (navigator.clipboard) navigator.clipboard.writeText(e.text).catch(() => {}); }, []);
   useEvent("open_url", (e) => window.open(e.url, "_blank"), []);
@@ -886,7 +1150,11 @@ export function Shell() {
       else if (e.key === "0") { e.preventDefault(); stepZoom(0); }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("wheel", onZoomWheel, { passive: false });
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("wheel", onZoomWheel);
+    };
   }, []);
   // the first-launch disclaimer is a gate: nothing else until it is answered
   // (Python's own questions can still show, above it)
@@ -901,13 +1169,13 @@ export function Shell() {
   return html`<div class="app">
     <${TopBar} shell=${shell} />
     <${Banners} shell=${shell} />
-    ${shell.view === "picker" ? html`<${Picker} shell=${shell} />` : html`
+    ${gsOpen ? html`<${GettingStarted} shell=${shell} />` : shell.view === "picker" ? html`<${Picker} shell=${shell} />` : html`
       <${Prereqs} shell=${shell} />
       <div class="body">
         <${Rail} shell=${shell} />
         <main class="main">
           <${LockBanner} shell=${shell} />
-          <${TabHost} ns=${shell.tab} />
+          <${KeyLockedPage} shell=${shell}><${TabHost} ns=${shell.tab} /><//>
           <${LogSplit} open=${logOpen} setOpen=${setLogOpen} height=${logH} setHeight=${setLogH} />
           <${StatusBar} shell=${shell} />
           <${LogHead} shell=${shell} open=${logOpen} setOpen=${setLogOpen} />

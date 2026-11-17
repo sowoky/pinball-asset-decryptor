@@ -42,10 +42,11 @@ def _port_section(src):
     """The port reader, lifted: its tables, port_line and port_load, then the lookups."""
     helpers = "\n".join(_lift(src, s) for s in (
         "static int str_eq(", "static void str_copy(", "static int hexval(", "static uint64_t number("))
-    reader = _between(src, "/* The port is read in PORT_CHUNK pieces", "static struct site *site(const char *name)")
+    reader = _between(src, "static unsigned long game_base;",    # PAD-1269: from the load address the reader adds
+                      "static struct site *site(const char *name)")
     lookups = "\n".join(_lift(src, s) for s in (
-        "static struct site *site(const char *name)", "static unsigned fn(const char *name)",
-        "static long named(", "static unsigned data(const char *name)", "long pm_port_value("))
+        "static struct site *site(const char *name)", "static pm_addr fn(const char *name)",
+        "static long named(", "static pm_addr data(const char *name)", "long pm_port_value("))
     return helpers + "\n" + reader + "\n" + lookups
 
 
@@ -61,6 +62,7 @@ _GATE = r"""
 static const char *PORT_FILES[1] = { "" };
 static void event_line(const char *s) { (void)s; }
 static void lamp_line(const char *s) { (void)s; }
+static void cab_line(const char *s) { (void)s; }       /* PAD-1040's cabinet lights: not this test's */
 static void rule_line(const char *s) { (void)s; }      /* item 160's stock rules: not this test's */
 static void say(const char *fmt, ...)
 {
@@ -137,7 +139,7 @@ int main(int argc, char **argv)
 
 def _gate_source():
     src = _src()
-    maps = _between(src, "#define N_MAPS", "/* ---- rule 2:")
+    maps = _between(src, "#define N_MAPS", "#if !PM_A64\n/* ---- rule 2:")   # PAD-1269: rule 2 is Spike 2's
     gate = "\n".join(_lift(src, s) for s in (
         "static int words_match(struct site *x)", "static void core_of_port(", "static int site_check(",
         "static int port_gate(void)"))
@@ -202,7 +204,7 @@ def test_the_core_takes_shots_from_the_switch_drain(tmp_path):
 
 def test_maps_lines_are_read_as_the_kernel_writes_them(tmp_path):
     src = _src()
-    maps = _between(src, "#define N_MAPS", "/* ---- rule 2:")
+    maps = _between(src, "#define N_MAPS", "#if !PM_A64\n/* ---- rule 2:")   # PAD-1269: rule 2 is Spike 2's
     code = r"""
 #include <stdio.h>
 #include <string.h>
@@ -259,8 +261,19 @@ static const struct pm_mode *const list[] = { &mode };
 #define EACH_MODE(m) for (const struct pm_mode *const *pp_ = list; pp_ < list + 1 && ((m) = *pp_, 1); pp_++)
 static void on_ball_end(unsigned *r) { printf("BALL_END\n"); }
 static volatile unsigned event_fired[N_BUS_IDS];
+static void lit_hold_check(unsigned id) {}           /* PAD-503's, not under test here */
+static int challenge_game_id = -1, challenge_ball_id = -1;   /* PAD-619's, not under test here */
+static volatile int challenge_ours;
+static unsigned long challenge_ours_ms;
+unsigned long pm_ms(void) { return 0; }
+static void challenge_ball_start(void) {}
+static volatile int chg_end_owed;                    /* PAD-663's, not under test here */
+static volatile long chg_game_tid;
+static void chg_end_ball_now(const char *from) {}
 @SWITCHES@
 @DISPATCH@
+static void coop_bonus_end(void) {}                  /* PAD-1028's, not under test here */
+static void on_team_dispatch(unsigned *r) {}         /* PAD-1052's, not under test here */
 int main(void)
 {
     unsigned r[6] = { 73, 0, 0, 0, 0, 0 };
@@ -379,7 +392,7 @@ def test_the_beatles_profile():
     # item 164: its screen was seen; with no time-up call known, a mode's own end sound rides a carrier
     # (heard at time-up in the emulator), so nothing is left out
     # item 167: a multiball of the mode's own is greyed until the build is emulator-proven
-    assert cannot == (set() if "beatles-1.29" in MP.MULTIBALL_PROVEN else {"multiball"}) |         (set() if "beatles-1.29" in MP.BALL_SAVE_PROVEN else {"ball_save"}) | {"scoop", "shield", "wizard"}     # PAD-225; PAD-381: no scoop in its port; PAD-392: no shield platform; PAD-474: its shaker shakes (emulator-proven); PAD-436: no mini-wizards; PAD-420: its top magnet held (magnet, coils) and twelve light shows
+    assert cannot == (set() if "beatles-1.29" in MP.MULTIBALL_PROVEN else {"multiball"}) |         (set() if "beatles-1.29" in MP.BALL_SAVE_PROVEN else {"ball_save"}) | {"scoop", "shield", "building", "roster"} | (set() if "beatles-1.29" in MP.PLACE_PROVEN else {"place"}) | (set() if "beatles-1.29" in MP.DONE_PROVEN else {"done"})     # PAD-710: a game mode's place counts through its books (emulator-proven); PAD-589: no building, no battle selection; PAD-619: a challenge of a mode's own on its start menu (emulator-proven); PAD-225; PAD-381: no scoop in its port; PAD-392: no shield platform; PAD-474: its shaker shakes (emulator-proven); PAD-473: its own Beatlemania Multiball handed over (emulator-proven); PAD-420: its top magnet held (magnet, coils) and twelve light shows
     assert p.light_route == "inserts"
     assert "multiballs" in p.stack_note          # item 164: the framework's balls in play, multiballs only
     for part in cannot:
@@ -443,7 +456,7 @@ def test_a_32_bit_award_never_wraps_the_score(tmp_path, what, want):
     check (0x15ee7c): pm_score_add cuts an award to the room left, over the port's score_mult, and never
     reads a score_mult outside the process's mappings."""
     src = _src()
-    maps = _between(src, "#define N_MAPS", "/* ---- rule 2:")
+    maps = _between(src, "#define N_MAPS", "#if !PM_A64\n/* ---- rule 2:")   # PAD-1269: rule 2 is Spike 2's
     head = _GATE[:_GATE.index("@GATE@")]
     helper = _between(_GATE, "static void line(const char *fmt, ...)", "static void site_at(")
     code = (head.replace("@PORT@", _port_section(src)).replace("@MAPS@", maps) + helper
@@ -478,7 +491,9 @@ def test_switch_shots_not_yet_proven_say_so(monkeypatch):
 
 
 def test_a_port_without_a_switch_hit_site_offers_no_switch_shots(tmp_path):
-    text = "".join(l for l in BEATLES.read_text(encoding="utf-8").splitlines(True) if not l.startswith("site switch_hit"))
+    # PAD-645: nor the switch drain, which The Beatles 1.29 maps for the flipper buttons' sounds in attract
+    text = "".join(l for l in BEATLES.read_text(encoding="utf-8").splitlines(True)
+                   if not l.startswith(("site switch_hit", "site switch_edge")))
     (tmp_path / "beatles-1.29.port").write_text(text, encoding="utf-8")
     p = MP.profile_from_port(str(tmp_path / "beatles-1.29.port"))
     assert len(p.shots) == 27 and p.switch_shots == () and p.switch_shots_note == ""

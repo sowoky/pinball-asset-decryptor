@@ -255,6 +255,23 @@ _OVERRIDE_EXPLAIN = (
     "stands, and a changed one is patched where it changed rather than "
     "built again, so a second run only costs what you have edited since.")
 
+#: PAD-863 (DragonRR: "WARN the user that this is the case and tell him that
+#: if he continues to use the same build, future changes will be faster IF
+#: this is actually true!").  It is: said in the log when a Start has no set
+#: it can patch (none yet, another card, the set's files moved), the one
+#: wait that is long however little was changed.
+FIRST_SET_NOTE = (
+    "[emulate] first time these edits are prepared on this card, so this is "
+    "the longest wait: the card files your edits live in are copied out "
+    "whole and every edit in the project is made ready (a replaced sound "
+    "re-encoded, a picture or clip converted). It is all kept: as long as "
+    "you Start this card with this project, later Starts are quicker, "
+    "because what an earlier Start made is reused and the set is patched "
+    "where your edits changed instead of built again.")
+
+#: The State line's words for that wait (the build's own step follows them).
+FIRST_SET_WORDS = "Preparing your edits (first time: the longest)"
+
 #: Item 127 / feature/emulate-prepare: the same badge while the Modes tab's
 #: Try it is preparing its set.  Its own paragraph because the slow part is a
 #: different one - not a re-encode of the user's sounds, but the staging of the
@@ -309,6 +326,59 @@ def card_copy_progress(line):
     return "Copying card: %s / %s MB (%s%%)" % (done, total, pct)
 
 
+#: PAD-769: macOS builds its container on the first Start, and padbox.sh
+#: narrates it - ``[box] building <image>``, docker's own ``#5 [2/6] RUN ...``
+#: step lines, and ``[box] still building the emulator container: 3 min so
+#: far`` once a minute.  Until this was read the state label said "Not
+#: running" for the whole build, and a Mac user waited twenty minutes on it
+#: with no way to tell a slow download from a stall.
+_BOX_STEP_RE = re.compile(r"^#\d+ \[(\d+)/(\d+)\] ")
+_BOX_MIN_RE = re.compile(
+    r"^\[box\] still building the emulator container: (\d+) min")
+_BOX_OVER = ("[box] starting", "[box] the emulator container did not build",
+             "[box] docker has printed nothing")
+
+_BOX_EXPLAIN = (
+    "First Start on this Mac: the emulator's Linux container is being built "
+    "(Docker downloads Ubuntu and the emulator's tools into it). It takes a "
+    "few minutes, more on a slow connection, and happens once: later Starts "
+    "use the built container. The log shows each step as Docker runs it.")
+
+
+def box_build_line(line, state):
+    """The state-label text for one line of a container build, or None.
+
+    *state* is the caller's dict, carried from line to line (empty before the
+    first).  Returns the new label while a build is under way, ``""`` on the
+    line that ends it (the run starting, or the build failing), and None for
+    anything that changes nothing.  Pure, like :func:`card_copy_progress`.
+    """
+    if line.startswith("[box] building "):
+        state.clear()
+        state.update(active=True, mins=0, step=None)
+    elif not state.get("active"):
+        return None
+    elif line.startswith(_BOX_OVER):
+        state["active"] = False
+        return ""
+    else:
+        m = _BOX_MIN_RE.match(line)
+        s = _BOX_STEP_RE.match(line)
+        if m:
+            state["mins"] = int(m.group(1))
+        elif s:
+            state["step"] = (int(s.group(1)), int(s.group(2)))
+        else:
+            return None
+    parts = []
+    if state.get("step"):
+        parts.append("step %d of %d" % state["step"])
+    if state.get("mins"):
+        parts.append("%d min" % state["mins"])
+    return "Building the emulator container" + (
+        " (%s)" % ", ".join(parts) if parts else "…")
+
+
 def parse_cache_list(text):
     """Parse ``cardmount.sh --cache-list`` into ``(entries, disk)`` (item 77).
 
@@ -317,11 +387,21 @@ def parse_cache_list(text):
     dialog opens in.  ``disk``: ``(avail_kb, size_kb)`` or None.  Lines are
     tab-separated with the source LAST because labels and source paths may
     carry spaces.  Pure, like :func:`playfield_launch`, so the format is
-    testable without a WSL or a 7 GB card.
-    """
-    entries, disk = [], None
+    testable without a WSL or a 7 GB card.  ``pinned`` is True for the
+    library's newest builds (a ``pinned`` line names them, PAD-727): the rig
+    never evicts those, and neither does the automatic clean-up.
+
+    PAD-739 adds, from a ``state`` line: ``source`` (``ok`` / ``changed`` /
+    ``gone`` / ``unreachable``, "" from an older rig), ``use`` (``mounted`` /
+    ``copying`` / "") and ``copied`` (the copy's own date, the last-used
+    stand-in for a card never booted).  A ``leftover`` line - a copy that
+    never finished, or the side files of a card that is gone - is an entry
+    with ``leftover`` True, ``src`` "" and its newest file's date in
+    ``copied``.  The cache's own limit (``limit`` line) is in
+    :func:`parse_cache_meta`."""
+    entries, disk, pinned, state = [], None, set(), {}
     for line in (text or "").splitlines():
-        parts = line.split("\t")
+        parts = line.rstrip("\r").split("\t")
         if parts[0] == "entry" and len(parts) >= 6:
             try:
                 entries.append({
@@ -333,13 +413,85 @@ def parse_cache_list(text):
                 })
             except ValueError:
                 continue
+        elif parts[0] == "pinned" and len(parts) >= 2:
+            pinned.add("\t".join(parts[1:]))
+        elif parts[0] == "state" and len(parts) >= 5:
+            try:
+                state[parts[1]] = (parts[2], parts[3], int(parts[4] or 0))
+            except ValueError:
+                continue
+        elif parts[0] == "leftover" and len(parts) >= 5:
+            try:
+                entries.append({
+                    "label": parts[1], "real_kb": int(parts[2]),
+                    "apparent_kb": int(parts[2]), "boot": 0, "src": "",
+                    "leftover": True, "copied": int(parts[3] or 0),
+                    "use": "copying" if parts[4] == "copying" else "",
+                })
+            except ValueError:
+                continue
         elif parts[0] == "disk" and len(parts) >= 3:
             try:
                 disk = (int(parts[1]), int(parts[2]))
             except ValueError:
                 pass
+    for e in entries:
+        e["pinned"] = e["label"] in pinned
+        if e.get("leftover"):
+            e["source"] = ""
+            continue
+        e["leftover"] = False
+        src, use, copied = state.get(e["label"], ("", "-", 0))
+        e["source"] = src if src in ("ok", "changed", "gone",
+                                     "unreachable") else ""
+        e["use"] = use if use in ("mounted", "copying") else ""
+        e["copied"] = copied
     entries.sort(key=lambda e: e["real_kb"], reverse=True)
     return entries, disk
+
+
+def parse_cache_meta(text):
+    """The ``limit`` line of ``--cache-list`` (PAD-739): ``{limit_gb,
+    used_kb, dir, store}``, or None from an older rig without one."""
+    for line in (text or "").splitlines():
+        parts = line.rstrip("\r").split("\t")
+        if parts[0] == "limit" and len(parts) >= 5:
+            try:
+                return {"limit_gb": int(parts[1]), "used_kb": int(parts[2]),
+                        "dir": "\t".join(parts[3:-1]),
+                        "store": parts[-1] == "store"}
+            except ValueError:
+                return None
+    return None
+
+
+#: Days without a boot after which the Cache window's "Select unused" offers a
+#: card - the automatic clean-up's own 30 (core/space_keeper.UNUSED_SECS).
+CACHE_UNUSED_DAYS = 30
+
+
+def cache_last_used(e):
+    """When the entry was last used: its last boot, or for one never booted
+    (copied ahead of time, or by an older rig) the copy's own date.  The
+    second is when it was COPIED, not used - the window says so."""
+    return int(e.get("boot") or 0) or int(e.get("copied") or 0)
+
+
+def cache_unused(e, now, days=CACHE_UNUSED_DAYS):
+    """Why the entry is safe to delete without being missed, or "".  Never one
+    in use, being copied, or the library's (PAD-727)."""
+    if e.get("use") or e.get("pinned"):
+        return ""
+    if e.get("leftover"):
+        return "a copy that never finished"
+    if e.get("source") == "changed":
+        return "its image was rebuilt or replaced: this copy is never used again"
+    if e.get("source") == "gone":
+        return "its image was deleted or renamed"
+    last = cache_last_used(e)
+    if last and now - last >= days * 86400:
+        return "not used for %d days" % days
+    return ""
 
 
 def human_size(kb):
@@ -394,9 +546,18 @@ def assets_fingerprint(assets_dir):
     recorded value has to be the one taken AFTER that write - and then a file
     restored from an older copy moves the fingerprint too, where a newest-wins
     test would call it unchanged.
+
+    What the app writes there for itself is left out of the walk
+    (``core.checksums.FINGERPRINT_SKIP_*``, at the top of the folder): none
+    of it is an edit, and its log changes between any two Starts (PAD-509:
+    no Start ever found its set current while the log was counted).
     """
+    from ..core.checksums import FINGERPRINT_SKIP_DIRS, FINGERPRINT_SKIP_FILES
     newest, count = 0, 0
-    for root, _dirs, files in os.walk(assets_dir):
+    for root, dirs, files in os.walk(assets_dir):
+        if root == assets_dir:
+            dirs[:] = [d for d in dirs if d not in FINGERPRINT_SKIP_DIRS]
+            files = [f for f in files if f not in FINGERPRINT_SKIP_FILES]
         for name in files:
             count += 1
             try:
@@ -417,7 +578,7 @@ def _is_card(rec, st, path):
 
 
 def overrides_reason(manifest, card_path, assets_dir, fingerprint,
-                     run_card=None, scene_edits=True):
+                     run_card=None, scene_edits=True, left_out=()):
     """Why the staged override set cannot be reused, or ``""`` if it can.
 
     A sentence rather than a bool: every one of these is worth saying out loud
@@ -454,10 +615,21 @@ def overrides_reason(manifest, card_path, assets_dir, fingerprint,
     if bool(manifest.get("scene_edits", True)) != bool(scene_edits):
         return ("the Scenes tab's edits were switched %s since it was built"
                 % ("on" if scene_edits else "off"))
+    # PAD-1197: the Emulate tab's "Leave out of this run" ticks
+    from ..plugins.stern import run_leave_out
+    if run_leave_out.clean(manifest.get("left_out") or ()) != run_leave_out.clean(left_out):
+        return "what this run leaves out was changed since it was built"
     from ..core import colour_profile
     if str(manifest.get("colour_profile") or "") != colour_profile.signature(
             assets_dir):
         return "the color profile was changed or switched since it was built"
+    # PAD-938: an image.bin an earlier version took sounds out of could send the game's
+    # songs to the wrong place (Led Zeppelin crashed at its first song)
+    from ..plugins.stern.image_compact import IMAGE_REV
+    if int(manifest.get("image_rev") or 0) < IMAGE_REV and any(
+            ntpath.basename(str(r.get("path") or "")) == "image.bin"
+            for r in manifest.get("files") or []):
+        return "its sound file was built by an earlier version of the app"
     return ""
 
 
@@ -643,6 +815,7 @@ DOCKER_DIRS = (
                                                        # /usr/local/bin
     "~/.rd/bin",                                       # Rancher Desktop
     "~/.orbstack/bin",                                 # OrbStack
+    "/opt/podman/bin",                                 # Podman Desktop / package
     "/Applications/Docker.app/Contents/Resources/bin",  # Desktop's own copy,
                                                         # there even when the
                                                         # symlink was declined
@@ -654,6 +827,7 @@ DOCKER_ENGINE_APPS = (
     ("Docker Desktop", "/Applications/Docker.app"),
     ("OrbStack", "/Applications/OrbStack.app"),
     ("Rancher Desktop", "/Applications/Rancher Desktop.app"),
+    ("Podman Desktop", "/Applications/Podman Desktop.app"),
 )
 
 
@@ -682,7 +856,7 @@ def which_tool(name, dirs=DOCKER_DIRS):
 
 
 def docker_cli():
-    """The `docker` command on this machine, or None.
+    """The `docker` or `podman` command on this machine, or None.
 
     ``PAD_DOCKER`` overrides, for the Mac that keeps it somewhere none of
     :data:`DOCKER_DIRS` names - and a wrong override answers None rather than
@@ -692,7 +866,62 @@ def docker_cli():
     override = (os.environ.get("PAD_DOCKER") or "").strip()
     if override:
         return override if os.path.isfile(override) else None
-    return which_tool("docker")
+    d = which_tool("docker")
+    p = which_tool("podman")
+    if d and p:
+        # Both installed; prefer whichever engine is currently responsive.
+        # Every docker call in the app asks this, so a pick that answered is
+        # kept for _BOTH_PICK_S; one that did not is asked again next time,
+        # so starting either engine is seen at once.
+        when, pick = _BOTH_PICK.get((d, p), (0.0, None))
+        if pick and time.monotonic() - when < _BOTH_PICK_S:
+            return pick
+        for exe in (d, p):
+            try:
+                r = subprocess.run([exe, "info"], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=2,
+                                   creationflags=_CREATE_FLAGS)
+                if r.returncode == 0:
+                    _BOTH_PICK[(d, p)] = (time.monotonic(), exe)
+                    return exe
+            except Exception:
+                pass
+        return d
+    return d or p
+
+
+#: docker_cli()'s last answered pick when docker and podman are both
+#: installed, {(docker, podman): (monotonic time, exe)} (PR #17 review).
+_BOTH_PICK = {}
+_BOTH_PICK_S = 30.0
+
+
+def docker_env(env=None, cli=None):
+    """An os.environ mapping whose PATH also reaches :data:`DOCKER_DIRS` and
+    the resolved CLI's folder, so the helpers `docker` runs by name - the
+    credential helper (``docker-credential-desktop``) BuildKit asks for before
+    pulling a base image, buildx and compose plugins - are found when the app
+    was launched from Finder with launchd's /usr/bin:/bin:/usr/sbin:/sbin
+    (PR #20).  The same PATH padbox.sh and spkbox.sh already build.
+
+    APPENDED, not prepended: like :func:`which_tool`, the PATH the app was
+    given wins, and these folders only answer what it could not (PR #20
+    review).  macOS only - DOCKER_DIRS are Mac locations, and everywhere else
+    the inherited PATH is passed through untouched.
+    """
+    base = os.environ.copy() if env is None else dict(env)
+    if sys.platform != "darwin":
+        return base
+    if cli is None:
+        cli = docker_cli()
+    cur = [d for d in (base.get("PATH") or "").split(os.pathsep) if d]
+    extra = [os.path.dirname(cli)] if cli and os.path.dirname(cli) else []
+    extra += [os.path.expanduser(d) for d in DOCKER_DIRS]
+    for d in extra:
+        if d not in cur:
+            cur.append(d)
+    base["PATH"] = os.pathsep.join(cur)
+    return base
 
 
 def docker_engine():
@@ -716,6 +945,9 @@ def docker_engine():
     colima = which_tool("colima")
     if colima:
         return ("Colima", "cli", colima)
+    podman = which_tool("podman")
+    if podman:
+        return ("Podman", "cli", podman)
     return None
 
 
@@ -825,7 +1057,8 @@ def engine_setup_plan(cli=None):
                else [tool, "install"] + packages)
     steps = ["Install %s with %s. Nothing already on this Mac is changed or "
              "removed." % (label, mgr),
-             "Start Colima, the Linux machine the docker command talks to. It "
+             "Start Colima, the Linux machine the docker command talks to, "
+             "sharing your home folder and your disks (/Volumes) with it. It "
              "runs in the background and takes a couple of minutes the first "
              "time, while it downloads its disk image."]
     if admin:
@@ -833,6 +1066,144 @@ def engine_setup_plan(cli=None):
                      "dialog, because %s installs system-wide." % mgr)
     return {"manager": mgr, "packages": packages, "label": label,
             "admin": admin, "install": install, "steps": steps}
+
+
+def colima_profile_dir(profile=""):
+    """The folder colima keeps *profile*'s ``colima.yaml`` in, found the
+    way colima's own config/files.go finds it: ``$COLIMA_HOME`` when that
+    exists, else ``~/.colima``, else ``$XDG_CONFIG_HOME/colima`` (or
+    ``~/.config/colima``) when ``~/.colima`` is not there.  The default
+    profile's folder is "default"; ``-p work``'s is "work"."""
+    name = profile or "default"
+    home = os.environ.get("COLIMA_HOME") or ""
+    if not os.path.isdir(home):
+        home = os.path.expanduser("~/.colima")
+        xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser(
+            "~/.config")
+        alt = os.path.join(xdg, "colima")
+        if not os.path.isdir(home) and (os.environ.get("XDG_CONFIG_HOME")
+                                        or os.path.isdir(alt)):
+            home = alt
+    return os.path.join(home, name)
+
+
+def colima_mounts(profile=""):
+    """``[(location, writable)]`` from *profile*'s ``colima.yaml``: the
+    folders it was told to share.  ``[]`` is colima's default (the home
+    folder alone), and also what an unreadable config gives.
+
+    Read by line rather than with a YAML library, which the app does not
+    ship: colima writes its own file, as ``mounts: []`` or as a list of
+    ``- location: X`` / ``writable: B`` items under ``mounts:``."""
+    try:
+        with open(os.path.join(colima_profile_dir(profile), "colima.yaml"),
+                  encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return []
+    out, inside = [], False
+    for line in lines:
+        bare = line.split(" #", 1)[0].rstrip()
+        if not inside:
+            inside = bare == "mounts:"
+            continue
+        if bare and not bare[0].isspace() and not bare.startswith("-"):
+            break                                   # the next top-level key
+        item = bare.strip()
+        if item.startswith("- "):
+            item = item[2:].strip()
+            out.append(["", False])
+        if not out:
+            continue
+        key, _sep, val = item.partition(":")
+        val = val.strip().strip("'\"")
+        if key == "location":
+            out[-1][0] = os.path.expanduser(val)
+        elif key == "writable":
+            out[-1][1] = val.lower() == "true"
+    return [(loc, w) for loc, w in out if loc]
+
+
+def mac_pacer_env():
+    """``PAD_PACER=<the app's binary>`` on a frozen Mac app, else nothing: the
+    program padbox.sh runs with ``--pace`` between docker exec and ffplay
+    (PAD-1109). The frozen binary, because a Mac has no other Python for
+    certain; an unfrozen app (a developer's) runs the rig's own padrelay.py
+    through ``sys.executable``, which padbox.sh takes as ``<python> <script>``."""
+    if sys.platform != "darwin":
+        return []
+    exe = sys.executable or ""
+    if not exe:
+        return []
+    if getattr(sys, "frozen", False):
+        return ["PAD_PACER=" + exe]
+    relay = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         os.pardir, "tools", "spike2_emu", "padrelay.py")
+    return ["PAD_PACER=" + exe, "PAD_PACER_SCRIPT=" + os.path.normpath(relay)]
+
+
+#: Colima's machine is 2 CPUs and 2 GiB unless told otherwise; the emulator's
+#: box runs a game under qemu and a software (llvmpipe) renderer beside it,
+#: and on a 2-CPU machine the renderer drew 14 fps and the sound reached the
+#: Mac in lumps (PAD-1109). Sized to the Mac, never more than half of it.
+COLIMA_CPUS_MAX = 4
+COLIMA_MEMORY_GIB_MAX = 4
+
+
+def colima_resource_args(host_cpus=None, host_mem_bytes=None):
+    """``--cpu N --memory G`` for ``colima start``, from the Mac's own size:
+    half its cores up to 4 (none below 4 cores), and 4 GiB from 16 GiB of
+    RAM, 3 from 8, nothing less (Colima's own defaults then)."""
+    args = []
+    cpus = os.cpu_count() if host_cpus is None else host_cpus
+    if cpus and cpus >= 4:
+        args += ["--cpu", str(min(COLIMA_CPUS_MAX, cpus // 2))]
+    mem = _host_memory_bytes() if host_mem_bytes is None else host_mem_bytes
+    gib = (mem or 0) // (1 << 30)
+    if gib >= 16:
+        args += ["--memory", str(COLIMA_MEMORY_GIB_MAX)]
+    elif gib >= 8:
+        args += ["--memory", "3"]
+    return args
+
+
+def _host_memory_bytes():
+    """The Mac's RAM in bytes (``sysctl hw.memsize``), or 0 when unknown."""
+    try:
+        out = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True,
+                             text=True, timeout=5).stdout.strip()
+        return int(out)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
+def colima_start_argv(colima, profile="", share=("/Volumes",), resources=()):
+    """``colima start`` sharing *share* with its Linux machine as well as
+    what it shares already (PAD-903).
+
+    Colima shares only the home folder, and a docker bind mount of a folder
+    it does not share is its VM's own folder of that name, empty (PAD-885):
+    the Multi-boot tab's ISOs on an external disk under /Volumes looked like
+    nothing at all.  ``--mount`` REPLACES the list rather than adding to it,
+    so every folder the profile already mounts is named again - home first,
+    which is in that list only implicitly while the list is empty, and
+    which the emulator's rig and the toolbox's cache live in.  Colima keeps
+    the list in its config, so a later plain ``colima start`` keeps it.
+    """
+    home = os.path.expanduser("~").replace("\\", "/").rstrip("/")
+    have = [(loc.replace("\\", "/").rstrip("/") or "/", w)
+            for loc, w in colima_mounts(profile)]
+    if not have:
+        have = [(home, True)]
+    for d in share:
+        d = d.replace("\\", "/").rstrip("/") or "/"
+        if not any(loc == "/" or d == loc or d.startswith(loc + "/")
+                   for loc, _w in have):
+            have.append((d, True))
+    argv = [colima, "start"] + (["-p", profile] if profile else [])
+    for loc, w in have:
+        argv += ["--mount", loc + (":w" if w else "")]
+    return argv + list(resources)
 
 
 def parse_status(text):
@@ -875,6 +1246,44 @@ def state_text(info):
             # that walks the game past the lock the user asked to see.
             return "Locked: US machine on 50 Hz", _MAINSLOCK_HINT
     return label, hint
+
+
+#: WHY THE GAME IS DRAWN IN SOFTWARE, for the Renderer row (PAD-497).
+#: David's report was a screen recording of a stuttering King Kong video; the
+#: reason - Windows had reinstalled the graphics driver under a WSL that kept
+#: running, and every renderer since had fallen back to software - was in the
+#: run log only, and this row said "200% CPU, 30 fps" as if nothing had
+#: changed.  Keyed on status.sh's ``gl_fallback`` (watch.sh's verdict word).
+_GL_RESTART = ("Stop the game, press Restart WSL… and start it again; if "
+               "the next run still says this, restart Windows.")
+_GL_COST = ("The game is drawn in software. That takes one to two CPU cores "
+            "instead of a few percent of one, and the game's videos stutter "
+            "when the PC cannot spare them.")
+_GL_FALLBACK_TIP = {
+    "gpulost": ("WSL has lost the graphics card: Windows updated or reset "
+                "the graphics driver while WSL was running, and WSL keeps "
+                "the old connection until it restarts. " + _GL_COST + " "
+                + _GL_RESTART),
+    "loader": ("The GPU renderer would not start: Windows replaced the "
+               "graphics libraries WSL had loaded. " + _GL_COST + " "
+               + _GL_RESTART),
+}
+_GL_FALLBACK_OTHER = ("The GPU renderer would not start (the run log says "
+                      "why). " + _GL_COST + " Restart WSL… often brings the "
+                      "GPU back.")
+
+
+def renderer_text(info):
+    """(text, tip) for the Renderer row: CPU and fps, plus - only when the run
+    fell back from the GPU - the word software and why.  ``tip`` is "" on a
+    GPU run and on software by request, which are not faults."""
+    text = "%s%% CPU, %s fps" % (info.get("host_cpu", "?"),
+                                 info.get("fps", "—"))
+    why = info.get("gl_fallback", "")
+    if not why:
+        return text, ""
+    return (text + " · no GPU",
+            _GL_FALLBACK_TIP.get(why, _GL_FALLBACK_OTHER))
 
 
 def _wsl_path(win_path):
@@ -920,7 +1329,53 @@ def _rig_env():
     # reach the same rig, and every window that rig opens is titled with it.
     # Empty on an ordinary install.
     return rigdata.rig_env("spike2", bool(d) and rigdata.exists()) \
-        + rigslot.rig_env()
+        + rigslot.rig_env() + _board_env() + _host_drive_env()
+
+
+_HOST_DRIVE = {}
+
+
+def _host_drive_env():
+    """PAD_HOST_DRIVE, on Windows: the drive the distro's ext4.vhdx is on, as
+    WSL opens it (``/mnt/c``).  Inside WSL ``df`` reports the VIRTUAL disk's
+    size (1 TB), so the card cache copy started a 14.7 GB copy onto a C:
+    with a few GB left; the vhdx could not grow, ext4 went read-only and the
+    whole distro with it until WSL restarted (PAD-816).  cardmount.sh checks
+    this drive's free space before it copies.  Looked up once per distro (a
+    registry read); empty when the disk cannot be found."""
+    if sys.platform != "win32":
+        return []
+    want = runtime.wsl_distro()
+    if want not in _HOST_DRIVE:
+        drive = ""
+        try:
+            from ..core import wsl_disk
+            _, vhdx = wsl_disk._default_distro_vhdx()
+            letter = ntpath.splitdrive(vhdx or "")[0]
+            if re.fullmatch(r"[A-Za-z]:", letter):
+                drive = _wsl_path(letter + "\\").rstrip("/")
+        except Exception:                                # noqa: BLE001
+            drive = ""                  # unknown: the copier checks as before
+        _HOST_DRIVE[want] = drive
+    d = _HOST_DRIVE[want]
+    return ["PAD_HOST_DRIVE=%s" % d] if d else []
+
+
+def _board_env():
+    """PAD_BOARD, on Windows, when the rig would guess another board than the
+    one the app and the Visual Pinball controller read (the profile's
+    .pad-rig).  padpath.sh's pad_board_dir guesses that one only for a rig
+    under a profile; an INSTALLED rig (Program Files) guesses the Linux home's
+    ~/.pad-rig, which nothing on Windows reads, so its runs were invisible to
+    them (PAD-803).  Empty where the guess is already right, so a checkout's
+    commands are unchanged."""
+    if sys.platform != "win32":
+        return []
+    board = _wsl_path(rigslot.board_dir()).rstrip("/")
+    m = re.match(r"(/mnt/[a-z]/Users/[^/]+)/.", _wsl_path(rig_dir()), re.I)
+    if m and (m.group(1) + "/.pad-rig").lower() == board.lower():
+        return []
+    return ["PAD_BOARD=%s" % board]
 
 
 def rig_cmd(script, *args, env=()):
@@ -1027,6 +1482,145 @@ def parse_multiboot(text):
     return "unknown", ""
 
 
+def spike3_cmd(path):
+    """The argv that asks the rig whether *path* is a Stern **Spike 3** card,
+    or None when this machine cannot be asked.
+
+    Same shape as :func:`multiboot_cmd`: ``parts.py --spike3`` is the one place
+    the question is answered (its docstring has the how), and the tab shells it
+    rather than re-reading the MBR itself, so the Emulate tab and the rig's own
+    cardmount.sh / watch.sh can never disagree about a card.  macOS answers None
+    for the same reason - the card's host path is not one the probe, inside a
+    container, could open - so there the rig's own refusal speaks for itself.
+    """
+    if sys.platform == "darwin":
+        return None
+    if sys.platform == "win32":
+        return _wsl_head() + ["python3",
+                "%s/parts.py" % _wsl_path(rig_dir()), "--spike3",
+                _wsl_path(path)]
+    return ["python3", os.path.join(rig_dir(), "parts.py"), "--spike3", path]
+
+
+def parse_spike3(text):
+    """``(True|False|None, why)`` out of ``parts.py --spike3``'s line.
+
+    Scanned line by line, like :func:`parse_multiboot`, so a warning wsl.exe
+    prepends cannot be mistaken for the verdict.  None is "could not tell"
+    (no line, no probe) - never treated as "not a Spike 3 card", because a card
+    the tab could not ask is one the run will ask again.
+    """
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("spike3:"):
+            continue
+        state, _sep, why = line[len("spike3:"):].strip().partition(" - ")
+        state = state.strip().lower()
+        if state == "yes":
+            return True, why.strip()
+        if state == "no":
+            return False, why.strip()
+    return None, ""
+
+
+#: The Spike 3 rig's launcher, beside the Spike 2 rig (PAD-1090).  It ships
+#: only in a source checkout today, so its absence is an answer, not an error.
+S3_LAUNCH = os.path.join("..", "spike3_emu", "s3launch.sh")
+
+
+def spike3_rig_present():
+    """Whether the Spike 3 launcher is on this PC at all."""
+    return os.path.isfile(os.path.join(rig_dir(), S3_LAUNCH))
+
+
+def _s3_argv(*args):
+    """``s3launch.sh ARGS`` as ROOT (the store's dm-crypt and s3run.sh's
+    overlay mounts need it) - Windows only, through ``wsl -u root``; None
+    where there is no password-free root (see rig_cmd_root)."""
+    if sys.platform == "win32":
+        return _wsl_head(root=True) + [
+            "bash", "%s/%s" % (_wsl_path(rig_dir()), S3_LAUNCH.replace(os.sep, "/"))] + \
+            [str(a) for a in args]
+    if sys.platform != "darwin" and linux_root_head() is not None:
+        return list(linux_root_head()) + [
+            "bash", os.path.join(rig_dir(), S3_LAUNCH)] + [str(a) for a in args]
+    return None
+
+
+def spike3_check_cmd():
+    """``s3launch.sh --check``: can this PC run a Spike 3 card?"""
+    return _s3_argv("--check")
+
+
+def spike3_setup_cmd():
+    """``s3launch.sh --setup``: install what --check found missing (apt
+    packages, the qemu-aarch64 binfmt) - the tab runs it on a Start that the
+    check refused for packages alone, then checks again."""
+    return _s3_argv("--setup")
+
+
+def spike3_keyfile(card, project=None):
+    """The padkeys.json holding the user's OWN OTP key for *card*, or None -
+    webui/spike3_key.py's search (only a file that names an OTP key: one
+    beside the cards may hold only the .spk package key). Only the path
+    travels to the rig; the store needs it once per card."""
+    from . import spike3_key
+    return spike3_key.find_keyfile(card, project=project)
+
+
+def spike3_launch_cmd(card, slot, minutes, audio=False, keyfile=None,
+                      audio_ctl=None, restore=None, mode_so=None,
+                      mode_files=None):
+    """The run: the card into the Spike 3 store if needed (decrypted with
+    *keyfile*, the user's padkeys.json), then the game in a window on rig
+    slot *slot* for *minutes* - started from save state *restore*
+    (``game/slot``, PAD-1147) instead of booted when one is given.
+    PAD-1272: *mode_so* / *mode_files* (host paths) - Try it's mode build,
+    preloaded into the game with its files in /dump."""
+    conv = _wsl_path if sys.platform == "win32" else (lambda p: p)
+    args = [conv(card), int(slot), int(minutes)] + (["--audio"] if audio else [])
+    if keyfile:
+        args += ["--keyfile", conv(keyfile)]
+    if audio_ctl:
+        # a native Windows path, as the Spike 2 run's PAD_AUDIO_CTL: the
+        # Windows sound player reads it, never WSL - so not converted
+        args += ["--audio-ctl", audio_ctl]
+    if restore:
+        args += ["--restore", restore]
+    if mode_so:
+        args += ["--mode-so", conv(mode_so)]
+        if mode_files:
+            args += ["--mode-files", conv(mode_files)]
+    return _s3_argv(*args)
+
+
+def spike3_load_cmd(slot, name):
+    """Load save state *name* (a bare slot name: the run's own title's) into
+    the Spike 3 run on rig slot *slot* (PAD-1147)."""
+    return _s3_argv("--load", int(slot), name)
+
+
+def spike3_slots_cmd(*args):
+    """slots.sh ARGS (list / label / delete) on the Spike 3 save states."""
+    return _s3_argv("--slots", *args)
+
+
+def spike3_stop_cmd(slot):
+    return _s3_argv("--stop", int(slot))
+
+
+def parse_s3check(text):
+    """``(True|False|None, what)`` out of ``s3launch.sh --check``: None when
+    no verdict line came back (the launcher could not be asked)."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line == "s3check: ok":
+            return True, ""
+        if line.startswith("s3check: missing - "):
+            return False, line[len("s3check: missing - "):].strip()
+    return None, ""
+
+
 def slot_up_cmd():
     """``slot.sh up N`` as root for the rig this app's run is on, or ``None``
     when there is nothing to mount: rig 0 (the ordinary rig, no layer), or a
@@ -1057,10 +1651,110 @@ def rig_cmd_root(script, *args):
     to them), and the two must not be one call that a wrong argument could
     flip.
     """
+    if sys.platform not in ("win32", "darwin") and \
+            linux_root_head() is not None:
+        # ...except where root needs no password after all (PAD-871)
+        return _linux_root_argv(script, args)
     if sys.platform != "win32":
         raise RuntimeError("rig_cmd_root is WSL-only")
     root_env = _rig_env()
-    return _wsl_head(root=True) + (["env"] + root_env if root_env else []) +         ["bash", "%s/%s" % (_wsl_path(rig_dir()), script)] +         [str(a) for a in args]
+    return _rig.reach_argv(
+        _wsl_head(root=True) + (["env"] + root_env if root_env else [])
+        + ["bash", "%s/%s" % (_wsl_path(rig_dir()), script)]
+        + [str(a) for a in args])
+
+
+#: linux_root_head()'s cache: [head, probed].
+_LINUX_ROOT = [None, False]
+
+#: How long ``sudo -n`` gets to answer.  It answers in milliseconds; the bound
+#: is for a sudo whose policy asks a directory server that is not there.
+_SUDO_PROBE_S = 10
+
+
+def linux_root_head():
+    """How a LINUX DESKTOP reaches root without a password (PAD-871): ``[]``
+    when the app already is root, ``["sudo", "-n", "-k"]`` when the user's
+    sudo needs no password, None when neither - and always None on Windows
+    and macOS, which have their own root (``wsl -u root``, the container).
+
+    Save states need it (criu can only freeze a root guest, watch.sh says
+    why), and a GUI has nowhere to type a password into, so a sudo that
+    would ask one is the same as no root at all - ``-n`` turns the prompt
+    into a refusal instead of a hang.  ``-k`` ignores a password typed into
+    a terminal a minute ago: that would pass this probe and then lapse under
+    the run, leaving a root game that the Stop button's sudo could no longer
+    reach.  Probed with the same ``env`` every root command here starts
+    with, so a sudoers rule narrower than that answers None rather than
+    clearing a launch it would refuse.
+
+    The Docker image (installer/docker) gives its user that rule, which is
+    how the container gets save states.  Probed once per app run.
+    """
+    if sys.platform in ("win32", "darwin"):
+        return None
+    if _LINUX_ROOT[1]:
+        return _LINUX_ROOT[0]
+    head = None
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        head = []
+    else:
+        try:
+            r = subprocess.run(["sudo", "-n", "-k", "env", "true"],
+                               stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL,
+                               timeout=_SUDO_PROBE_S)
+            if r.returncode == 0:
+                head = ["sudo", "-n", "-k"]
+        except Exception:                               # noqa: BLE001
+            head = None                     # no sudo, or it never answered
+    _LINUX_ROOT[:] = [head, True]
+    return head
+
+
+def savestates_possible():
+    """Whether this machine can run a checkpointable boot at all: Windows
+    (WSL) and macOS (the container) always, a Linux desktop when it has a
+    password-free root (:func:`linux_root_head`)."""
+    if sys.platform in ("win32", "darwin"):
+        return True
+    return linux_root_head() is not None
+
+
+#: What a root run on a Linux desktop must be handed back.  sudo's env_reset
+#: clears the session - the display, the audio server, the session bus - and
+#: watch.sh's dropped helpers (renderer, playfield, audio) need exactly
+#: those, the way WSLg's are simply there for ``wsl -u root``.  HOME is the
+#: desktop user's, for wsl_home()'s reason: root's own would be /root.
+_SESSION_VARS = ("HOME", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY",
+                 "XDG_RUNTIME_DIR", "XDG_SESSION_TYPE",
+                 "DBUS_SESSION_BUS_ADDRESS", "PULSE_SERVER", "LANG", "LC_ALL")
+
+
+def _linux_root_argv(script, args=(), env=()):
+    """A rig script as root on a Linux desktop, through
+    :func:`linux_root_head` - only called once that has answered.
+
+    Every ``PAD_*`` the app runs with rides along too (the Docker image's
+    PAD_FORCE_NATIVE, a rig slot), and PAD_STATE_SUDO=1 when root came from
+    sudo: the playfield runs dropped to the desktop user, and that is how its
+    Save and Load buttons know to ask ``sudo -n`` for the save-state scripts
+    (playfield._as_root), as the Mac's box does.
+    """
+    head = linux_root_head() or []
+    keep = ["%s=%s" % (k, os.environ[k]) for k in _SESSION_VARS
+            if os.environ.get(k)]
+    keep += ["%s=%s" % (k, v) for k, v in sorted(os.environ.items())
+             if k.startswith("PAD_")]
+    if head:
+        keep.append("PAD_STATE_SUDO=1")
+        # the rig is this user's: padpath.sh's own search, run as root, would
+        # look under /home/$SUDO_USER, which is not the Docker image's home
+        if os.environ.get("HOME") and not os.environ.get("PAD_HOME"):
+            keep.append("PAD_HOME=" + os.environ["HOME"])
+    return head + ["env"] + _rig.linux_host_env() + keep + list(env) \
+        + ["bash", os.path.join(rig_dir(), script)] + [str(a) for a in args]
 
 
 #: wsl_account()'s cache: [(user, home), probed].  One probe per app run is
@@ -1190,7 +1884,15 @@ def watch_cmd(minutes, env, savestates=True):
     broken probe degrades to what this tab always did - no save states,
     everything else identical - rather than to a root run pointed at
     /root/spike2root.
+
+    macOS (PAD-835) asks for the same boot with ``PAD_PIVOT=1`` alone:
+    ``docker/padbox.sh`` turns it into a root, privileged box, the image
+    carries criu and the static busybox, and a container engine whose Linux
+    cannot checkpoint withdraws the request in ``entrypoint.sh`` - so there,
+    too, the worst case is the ordinary run without save states.
     """
+    if savestates and sys.platform == "darwin":
+        return rig_cmd("watch.sh", minutes, env=list(env) + ["PAD_PIVOT=1"])
     if savestates and sys.platform == "win32":
         home = wsl_home()
         if home:
@@ -1198,11 +1900,18 @@ def watch_cmd(minutes, env, savestates=True):
             # checkpointable launch is built here rather than by rig_cmd, and
             # a run started without it is a run whose sound quietly takes the
             # WSLg path (PAD-95).
-            return (_wsl_head(root=True) + ["env",
-                     "HOME=" + home, "PAD_PIVOT=1"] + _rig_env()
-                    + list(rig_win_python_env()) + list(env)
-                    + ["bash", "%s/watch.sh" % _wsl_path(rig_dir()),
-                       str(minutes)])
+            # and a card on a network share mounted first (PAD-849)
+            return _rig.reach_argv(
+                _wsl_head(root=True) + ["env",
+                 "HOME=" + home, "PAD_PIVOT=1"] + _rig_env()
+                + list(rig_win_python_env()) + list(env)
+                + ["bash", "%s/watch.sh" % _wsl_path(rig_dir()),
+                   str(minutes)])
+    if savestates and sys.platform not in ("win32", "darwin")             and linux_root_head() is not None:
+        # A Linux desktop (PAD-871): the same boot, as root by the one route
+        # that needs no password, or not at all - the ordinary run below.
+        return _linux_root_argv("watch.sh", [minutes],
+                                ["PAD_PIVOT=1"] + list(env))
     return rig_cmd("watch.sh", minutes, env=env)
 
 
@@ -1221,7 +1930,49 @@ def kill_cmd():
         if home:
             return _wsl_head(root=True) + ["env", "HOME=" + home] + _rig_env() + [
                     "bash", "%s/killgame.sh" % _wsl_path(rig_dir())]
+    if linux_root_head() is not None:
+        return _linux_root_argv("killgame.sh")
     return rig_cmd("killgame.sh")
+
+
+def restart_cmd():
+    """restartgame.sh (PAD-738), as ROOT on Windows like kill_cmd: it writes
+    the request into the run's rootfs, which a root run owns, and padpath
+    must resolve the desktop user's rootfs."""
+    if sys.platform == "win32":
+        home = wsl_home()
+        if home:
+            return _wsl_head(root=True) + ["env", "HOME=" + home] + _rig_env() + [
+                    "bash", "%s/restartgame.sh" % _wsl_path(rig_dir())]
+    if linux_root_head() is not None:
+        return _linux_root_argv("restartgame.sh")
+    return rig_cmd("restartgame.sh")
+
+
+def status_cmd():
+    """status.sh, as ROOT on Windows, so each rig's poll sees ITS OWN run.
+
+    Which rig a process belongs to is read from its /proc/<pid>/environ
+    (padslot.sh), and only the process's owner and root can read that.  Every
+    run here is root's - this tab's checkpointable launch, a session's rig -
+    so the desktop user's poll could not tell them apart: rig 0 counted every
+    other rig's game as its own, and with a session's game up on rig 1 the
+    app on rig 0 offered only "Stop emulator", whose root kill rightly left
+    that game alone (PAD-496).  Root reads every environment.  The desktop
+    HOME rides along for kill_cmd's reason, and so does its fallback.
+    """
+    if sys.platform == "win32":
+        home = wsl_home()
+        if home:
+            return _wsl_head(root=True) + ["env", "HOME=" + home] + _rig_env() + [
+                    "bash", "%s/status.sh" % _wsl_path(rig_dir())]
+    if linux_root_head() is not None and rigslot.slot() >= 1:
+        # A Linux desktop's root run (PAD-871) is read fine by the user's
+        # poll on rig 0, where an unreadable run counts as rig 0's
+        # (padslot.sh) - and sudo on every poll would fill the system log.
+        # Off rig 0 only root can tell whose run it is.
+        return _linux_root_argv("status.sh")
+    return rig_cmd("status.sh")
 
 
 def load_cmd(slot):
@@ -1236,6 +1987,8 @@ def load_cmd(slot):
             return _wsl_head(root=True) + ["env", "HOME=" + home] + _rig_env() + [
                     "PAD_RESTORE_KILL=1", "bash",
                     "%s/loadgame.sh" % _wsl_path(rig_dir()), str(slot)]
+    if linux_root_head() is not None:
+        return _linux_root_argv("loadgame.sh", [slot], ["PAD_RESTORE_KILL=1"])
     return rig_cmd("loadgame.sh", slot, env=("PAD_RESTORE_KILL=1",))
 
 
@@ -1350,9 +2103,10 @@ _SETUP_OPTIONAL = (
      "Multi-boot cards"),
 )
 
-#: OF THOSE FEATURES, THE ONES ONLY A WSL RUN EVER WANTS.  ``watch_cmd`` asks
-#: for the checkpointable boot on Windows and nowhere else, so a Linux
-#: desktop's Start never wants a static busybox or a criu - and naming a
+#: OF THOSE FEATURES, THE ONES ONLY A ROOT RUN EVER WANTS.  ``watch_cmd`` asks
+#: for the checkpointable boot on Windows, and on a Linux desktop only where
+#: root needs no password (PAD-871, :func:`linux_root_head`), so any other
+#: Linux desktop's Start never wants a static busybox or a criu - and naming a
 #: package that machine's runs would never use is a wrong accusation.  Card
 #: building is not like that: the Multi-boot tab builds its menu program the
 #: same way on every desktop, so the feature added by PAD-126 is deliberately
@@ -1465,11 +2219,11 @@ def _setup_optional_rows(facts):
     """
     if not facts:
         return []
-    wsl = facts.get("iswsl") != "0"
+    root_run = facts.get("iswsl") != "0" or linux_root_head() is not None
     return [(feat, _apt_name(facts, key, pkg), why)
             for key, pkg, why, _how, feat in _SETUP_OPTIONAL
             if facts.get(key) == "0"
-            and (wsl or feat not in _WSL_ONLY_FEATURES)]
+            and (root_run or feat not in _WSL_ONLY_FEATURES)]
 
 
 def _and_list(names):
@@ -1801,7 +2555,12 @@ def setup_report(facts):
                                                                    binfmt))
     if facts.get("iswsl") == "1":
         lines.append("  survives a WSL restart: "
-                     + yes_no("wslconf", "yes", "NO — systemd is off"))
+                     + ("NO — this Linux has no systemd; Set up emulator… "
+                        "registers it again"
+                        if facts.get("wslconf") == "0"
+                        and facts.get("hassystemd") == "0"
+                        else yes_no("wslconf", "yes",
+                                    "NO — systemd is off")))
         lines.append("  logs in as: %s%s"
                      % (facts.get("user", "unknown"),
                         "  <- the picture will be black"
@@ -1895,11 +2654,24 @@ def setup_report_darwin(docker, cli=None, engine=None):
                                          + ", ".join(DOCKER_DIRS)))
     lines.append("  container engine: "
                  + ("%s (%s)" % (engine[0], engine[2]) if engine else
-                    "none installed — Docker Desktop, OrbStack, Rancher "
-                    "Desktop and Colima each provide one"))
+                    "none installed — Docker Desktop, Podman, OrbStack, "
+                    "Rancher Desktop and Colima each provide one"))
     lines.append("this Mac can run the emulator." if docker == "ok" else
                  "this Mac cannot run the emulator yet.")
     return lines
+
+
+def wsl_can_turn_systemd_on(facts):
+    """Would writing ``[boot] systemd=true`` make the ARM handler survive a
+    WSL restart?  Only on WSL, only when systemd is not already PID 1, and
+    only where systemd is installed at all (PAD-1132).  The app's own
+    PAD-Runtime has none, by design (tools/runtime/Dockerfile), and the
+    notice promised to "turn systemd on" there anyway; setupfix.sh then did
+    nothing.  An older rig sends no ``hassystemd``: absent accuses nobody,
+    so it is treated as installed, as before."""
+    facts = facts or {}
+    return (facts.get("iswsl") == "1" and facts.get("wslconf") == "0"
+            and facts.get("hassystemd") != "0")
 
 
 def setup_settled(facts):
@@ -1978,7 +2750,7 @@ def setup_fix_steps(facts):
         steps.append("Register the kernel's handler for 32-bit ARM programs.")
     elif binfmt == "disabled":
         steps.append("Switch the 32-bit ARM handler back on.")
-    if facts.get("iswsl") == "1" and facts.get("wslconf") == "0":
+    if wsl_can_turn_systemd_on(facts):
         steps.append("Add [boot] systemd=true to /etc/wsl.conf, so the "
                      "registration is still there after WSL restarts.")
     return steps
@@ -2157,7 +2929,7 @@ def setup_notice(facts, can_fix):
         # unsaid: `does[0]` ran off an empty list, so the tab answered such a
         # machine with an internal error where its notice should have been.
         # Seen on this PC while photographing PAD-126.
-        if facts.get("iswsl") == "1" and facts.get("wslconf") == "0":
+        if wsl_can_turn_systemd_on(facts):
             does.append("turns systemd on in /etc/wsl.conf, so the handler "
                         "is still registered after a WSL restart")
         parts.append(

@@ -45,17 +45,18 @@
 #define PADLED_H
 
 #define PADLED_MAGIC   0x44454c50u      /* 'PLED' */
-#define PADLED_VERSION 5
+#define PADLED_VERSION 8
 
 /* Node ids run to 14 and index to 95, so a flat [16][96] covers every board
  * with room to spare and needs no per-node base to get wrong. */
 #define PADLED_NODES 16
 #define PADLED_IDX   96
 #define PADLED_COILS 16
-/* VERSION 4's `seen` plane pushed the struct past one page. Two, now - it is
- * still a rounding error beside the 3 KB this has always published, and the
- * mapping is created by watch.sh from this constant. */
-#define PADLED_BYTES 8192
+/* VERSION 4's `seen` plane pushed the struct past one page, and VERSION 6's
+ * `hi` plane past two. Four, now - the mapping is created by watch.sh from
+ * this constant, and the shim takes its size from the file, so an older
+ * watch.sh simply gets the version its file has room for. */
+#define PADLED_BYTES 16384
 
 /* APPEND ONLY. A reader compiled against version 1 maps the same page and finds
  * every field it knows at the same offset, which is what lets the playfield
@@ -147,6 +148,64 @@ struct padled_shm {
     unsigned drive_fires;         /* 14-byte cmd 40 commands, ever          */
     unsigned drive_offs;          /* cmd 4d, ever                           */
     unsigned drive_rule_fires;    /* the short cmd 40 (fire by rule), ever  */
+    /* VERSION 6 (PAD-500): A STRIP BOARD'S CHANNELS PAST ITS FIRST 96. A board
+     * with more lamps than val[] has room for takes them in banks of 96 (the
+     * bank form, item 165), and until this plane every bank past the first was
+     * walked, counted and published nowhere - the back three quarters of a
+     * topper, and of the cabinet's expressive-lighting blades (288 channels on
+     * node 2), never lit in any reader. hi[node][(bank - 1) * 96 + index] is
+     * channel 96 * bank + index of that board, banks 1 to 4, so channels 96 to
+     * 479. Levels only, as the frame carried them: no `seen` twin, and the
+     * counters above are untouched, so nothing that judges a run (the light
+     * show announcer, `decoded`) reads these frames any differently than it
+     * did. Offset for a Python reader: hi 7356. */
+    unsigned char hi[PADLED_NODES][4 * PADLED_IDX];
+    /* AFTER VERSION 6 (PAD-658): THE COLOUR A MODE PAINTED ON A ONE-COLOUR INSERT.
+     * WRITTEN BY THE MODE RUNTIME, NOT THE SHIM (pad_mode_runtime.c,
+     * lamp_paint_note): a single-colour insert takes one level - the colour's
+     * brightest part - so the wire carries how bright and not what colour, and
+     * the view drew every one on its orange ramp: a blocks mode's red light show
+     * read yellow, where the Modes tab's preview paints the show's colours. One
+     * 8-byte entry per port lamp (the runtime's lamp index): I/O group, index
+     * (the port's "I/O group G index I"; the reader maps group to node as it
+     * does for the device table), r, g, b, on, 2 spare. An entry counts only
+     * while `on` and paint_magic is 'PINT' (0x544e4950). PAD-668: the view no
+     * longer DRAWS that hue - on the machine a one-colour insert glows in its
+     * lens's colour whatever a show asks - it names it in the insert's
+     * tooltip. The shim never touches it,
+     * so `version` stays what the shim's mapping holds. Offsets for a Python
+     * reader: paint_magic 13500, paint_gen 13504, paint 13508. */
+    unsigned paint_magic;
+    unsigned paint_gen;
+    unsigned char paint[256][8];
+    /* VERSION 7 (PAD-775): A COIL'S RULE. The game hands a board each coil's
+     * firing rule once (cmd 41: power, times, and in byte 26 the INPUT whose
+     * closing fires it, 0x40 | input) and from then on the BOARD fires the
+     * flippers, slingshots and pop bumpers from their own switches - the game
+     * sends nothing per flip (the short cmd 40 is a one-off "run it now",
+     * drive_rule_fires above). So a reader that plays the board for a
+     * playfield of its own - vpx/padcontroller.py, for a Visual Pinball
+     * table - needs the rule: `rule_pwr` non-zero says the coil is live (a
+     * cleared rule is `41 <coil> 00 ...`), `rule_in` says which input drives
+     * it. Written by coil_rule_note() on every cmd 41, so the game arming its
+     * flippers at ball start and disarming them at game over is visible.
+     * Offsets for a Python reader: rule_pwr 15556, rule_in 15812,
+     * rule_sets 16068 (coilmap.RULE_*). */
+    unsigned char rule_pwr[PADLED_NODES][PADLED_COILS];
+    unsigned char rule_in[PADLED_NODES][PADLED_COILS];
+    unsigned rule_sets;           /* cmd 41 frames published, ever         */
+    /* VERSION 8 (PAD-1228): A NODE BOARD'S STEPPER, WHERE IT WAS SENT. The
+     * board runs a stepper itself (cmd 34 homes it, cmd 35 moves it) and the
+     * game hears back only its end switches, so a reader playing the machine
+     * for a table of its own could not show the mechanism: Rush LE's drum
+     * clock hand (node 10 motor 0, 10 steps a game minute) turned on every
+     * pop and the Visual Pinball table's clock stood still. Written by the
+     * shim's stepper model at each home (0) and move (its destination):
+     * step_cfg[node] bit k says motor k has been homed or moved, step_pos is
+     * its place in steps from home, either sign. Offsets for a Python reader:
+     * step_cfg 16072, step_pos 16088 (coilmap.STEP_*). */
+    unsigned char step_cfg[PADLED_NODES];
+    int step_pos[PADLED_NODES][4];
 };
 
 #endif

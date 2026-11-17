@@ -255,6 +255,30 @@ def test_games_still_means_the_first_games_partition(parts):
     assert "games_guessed" not in found
 
 
+def test_an_os_partition_carrying_spk_is_not_the_games_partition(parts):
+    """PAD-659: a card whose p2 (the OS) also had /spk was read as p2 = games
+    and, with no other rootfs left, p2 = rootfs too: the emulator mounted the
+    OS, found no game ("mounted, but no directory in it holds a game ELF"),
+    and the boot-menu check read the same p2. The partition that HOLDS a game
+    is the games partition; the OS stays the rootfs."""
+    parts.fs[P2 * SECTOR] = {"/": [("lib", DIR), ("usr", DIR), ("etc", DIR),
+                                   ("bin", DIR), ("spk", DIR)]}
+    found = parts.mod.identify(parts.img)
+    assert found["games"] == P3 * SECTOR
+    assert found["rootfs"] == P2 * SECTOR
+    assert "games_guessed" not in found and "rootfs_guessed" not in found
+
+
+def test_a_games_tree_without_a_title_still_falls_back_to_spk(parts):
+    """No partition passes the strict rule: the old /spk rule still names
+    games, and an OS without /spk is still the rootfs."""
+    parts.fs[P3 * SECTOR] = {"/": [("lost+found", DIR), ("spk", DIR)]}
+    parts.fs[P7 * SECTOR] = {"/": [("lost+found", DIR)]}
+    found = parts.mod.identify(parts.img)
+    assert found["games"] == P3 * SECTOR
+    assert found["rootfs"] == P2 * SECTOR
+
+
 def _cli(parts, monkeypatch, capsys, *args):
     monkeypatch.setattr(sys, "argv", ["parts.py"] + list(args) + [parts.img])
     rc = parts.mod.main()
@@ -556,10 +580,11 @@ def test_cli_multiboot_is_one_line_and_an_exit_status(parts, monkeypatch, capsys
 #: The one change since: item 125 (the Mode SDK) put the mode object in the
 #: game's preload list, ``${PAD_MODE_SO:+$PAD_MODE_SO:}``, empty unless a run
 #: names one - the same entry the pivot path's export carries.
+#: PAD-1309 put padmenu.so (hold BACK: back to the boot menu) before it, ``${PAD_MENU_SO:+...}``.
 EXEC_PIVOT = "        exec /.padqemu/game ./game </dev/null >/dump/game.out 2>&1"
 EXEC_CHROOT = ('exec chroot "$R" /bin/sh -c \\\n'
                '  "cd /games/$GAME && LD_PRELOAD=${PAD_TRACE_SO:+$PAD_TRACE_SO:}'
-               '${PAD_MODE_SO:+$PAD_MODE_SO:}'
+               '${PAD_MENU_SO:+$PAD_MENU_SO:}${PAD_MODE_SO:+$PAD_MODE_SO:}'
                '/lib/hwshim.so PAD_AUDIO_OUT=/dump/audio.raw PAD_SEGV_REPORT=${PAD_SEGV_REPORT:-1} '
                'exec ./game"')
 
@@ -708,7 +733,7 @@ def test_the_cards_sound_and_volume_keys_reach_the_emulator_conf_but_media_does_
     outer = _select_outer()
     assert ("grep -E '^[[:space:]]*(sound_move|sound_confirm|volume|"
             "machine_volume|mixer_volume|heading|text_size|counter|countdown_word|"
-            "footer|theme|settings|color_[a-z_]+)[[:space:]]*='") in outer
+            "footer|theme|settings|back_hold|color_[a-z_]+)[[:space:]]*='") in outer
     assert "media=" not in outer.replace("image=", ""), "media= is the card's path; the rig passes --media"
 
 
@@ -721,8 +746,11 @@ def test_the_cards_color_profile_lines_ride_on_the_image_count_gate():
     gate = outer[outer.index("| grep -vE '^[[:space:]]*color_profile[[:space:]]*=' || true"):]
     gate = gate[:gate.index('> "$R/dump/codeselect.conf"')]
     assert """grep -cE '^[[:space:]]*image[[:space:]]*=')" = "$SEL_N" ]""" in gate
-    assert "grep -E '^[[:space:]]*color_profile[[:space:]]*='" in gate
+    # PAD-495: edition= (the game's EDITION picks an image by its index) on the same gate
+    assert "grep -E '^[[:space:]]*(color_profile|edition)[[:space:]]*='" in gate
     assert "DROPPED" in gate
+    verbatim = outer[:outer.index("| grep -vE '^[[:space:]]*color_profile[[:space:]]*=' || true")]
+    assert "|edition|" not in verbatim[verbatim.rindex("grep -E '^[[:space:]]*(sound_move"):]
 
 
 def test_the_rig_applies_the_color_correction_the_way_select_sh_does():
@@ -1067,13 +1095,15 @@ def test_autoattract_is_held_back_until_the_menu_has_chosen():
     plain = ('setsid_as_seer bash "$S/autoattract.sh" "$LOG" > '
              '"$PAD_LOGDIR/padauto.log" 2>&1 &')
     assert plain in code
-    block = code[code.index('if [ "${PAD_AUTO_ATTRACT:-1}" != 0 ]; then'):]
+    # the launch is launch_autoattract() since PAD-738 (Restart game runs it too)
+    block = code[code.index('launch_autoattract() {'):]
     block = block[:block.index("PAD_SW_EXERCISE")]
     assert SEL_GUARD in block
     held = block[:block.index("else")]
     assert 'while [ -f "$f" ]' in held and 'exec bash "$@"' in held
     assert '"$ROOT/dump/selecting" "$SEL_WAIT"' in held
-    assert "AUTOPG=$!" in held, "teardown kills what $! names"
+    assert "AUTOPG=$!" in block[:block.index("\n}\n")], \
+        "teardown kills what $! names"
 
 
 def test_select_lines_reach_the_event_pane():
@@ -1085,7 +1115,9 @@ def test_the_extra_mounts_are_owned_and_torn_down_by_the_run():
     text = _read("watch.sh")
     code = _code(text)
     assert "CARD_MNTS=()" in code
-    mount = code[code.index(SEL_GUARD + '\n        SEL_PARTS='):]
+    # PAD-1279: the guard also leaves a test card out (it has no games partitions to list)
+    guard = SEL_GUARD.replace("; then", ' && [ "$PAD_TESTCARD" != 1 ]; then')
+    mount = code[code.index(guard + '\n        SEL_PARTS='):]
     mount = mount[:mount.index("elif [ -n \"${PAD_GAME_DIR:-}\" ]")]
     assert 'cardmount.sh" "$PAD_CARD" --part "$_p"' in mount
     assert '*"already mounted"*) ;;' in mount, "only mounts THIS run created"
@@ -1232,10 +1264,13 @@ def test_cardmount_part_mounts_beside_the_default_and_leaves_it_alone():
     assert 'if [ "$MODE" = "--part" ]; then' in code
     assert 'parts.py" --part "$PART" "$SRC"' in code
     # The eviction guard sees a live .pN mount, or the cache is pulled from
-    # under it.
+    # under it. Since PAD-739 it asks cache_in_use, which asks label_mounted
+    # first and then the other rig slots' readers.
     assert "label_mounted()" in code
+    in_use = code[code.index("cache_in_use() {"):]
+    assert 'label_mounted "$1" && return 0' in in_use[:in_use.index("\n}")]
     room = code[code.index("cache_make_room() {"):code.index("cache_wait() {")]
-    assert 'label_mounted "$vlabel" && continue' in room
+    assert 'cache_in_use "$vlabel" && continue' in room
     assert 'mountpoint -q "$CARDS/$vlabel"' not in room
     assert '"$CARDS/$1".p*' in code
     # --umount and --precache still work in their old positions.
@@ -1256,7 +1291,7 @@ def _srcs(var):
 #: audio.c/h + audio_fifo.c + audio_alsa.c (the WAV mixer and its two sinks).
 EXPECTED_SRCS = ["codeselect.c", "conf.c", "conf.h",
                  # PAD-307: the colour correction and the SETTINGS tile's screens
-                 "colour.c", "colour.h", "settings.c", "settings.h",
+                 "colour.c", "colour.h", "settings.c", "settings.h", "testpics.c", "testpics.h", "video.c", "video.h",
                  "theme.c", "theme.h", "themes.json", "gen_themes.py",
                  "gfx.c", "gfx.h",
                  "egl_stern.c", "egl_stern.h", "input.c", "input.h",
@@ -1267,12 +1302,21 @@ EXPECTED_SRCS = ["codeselect.c", "conf.c", "conf.h",
                  # PAD-342: the Stern and JJP SRCS took the BOF build's FAST
                  # Neuron reader too, and the Makefile installs the BOF hooks
                  "input_fast.c",
+                 # PAD-853: every SRCS took the Big Lebowski build's dpprocsw
+                 # reader, and the Makefile's check runs the TBL launcher
+                 "input_pipe.c",
                  "egl_x11.c", "stubs_jjp.c", "audio_pulse.c",
-                 "jjp_glibc.h", "padselect.sh", "padselect_bof.sh", "pad_install_bof.sh",
+                 # PAD-980: the Makefile installs the Spooky launchers by name
+                 "jjp_glibc.h", "padselect.sh", "padselect_bof.sh", "padselect_dp.sh",
+                 "padselect_spk.sh", "padselect_s3.sh", "padselect_proc.sh", "pad_install_bof.sh",
                  "log.c", "log.h",
                  "art.c", "art.h", "audio.c", "audio.h", "audio_fifo.c", "audio_alsa.c",
                  "codec.c", "codec.h",
                  "nvm.c", "nvm.h",
+                 # PAD-1194: the boot hook's high-score hand-over
+                 "scores.c", "scores.h",
+                 # PAD-1309: hold BACK / EXIT in a game for the menu (padmenu.so, P-ROC hook)
+                 "padmenu.c", "padmenu_proc.py",
                  "Makefile", "select.sh", "materialize.py", "images.conf.example",
                  "third_party/stb_truetype.h", "third_party/stb_image.h"]
 
@@ -1599,7 +1643,11 @@ def test_cardmount_cache_budgets_what_a_sparse_card_really_takes():
     allocated (card_size.py grows it sparse). Budgeting the apparent size
     asked for more than the whole work disk and evicted every cached card."""
     code = _code(_read("cardmount.sh"))
+    # the budget is cache_need_kb's since PAD-964 (the compact size first, the allocation as the fallback), and the
+    # room rule asks it
+    need = code[code.index("cache_need_kb() {"):code.index("cache_make_room() {")]
+    assert "stat -c '%b * %B'" in need
+    assert 'echo $(( alloc / 1024 ))' in need
+    assert 'echo $(( size / 1024 ))' in need      # no allocation reported
     room = code[code.index("cache_make_room() {"):code.index("cache_wait() {")]
-    assert "stat -c '%b * %B'" in room
-    assert 'need=$(( alloc / 1024 ))' in room
-    assert 'need=$(( size / 1024 ))' in room      # no allocation reported
+    assert 'need=$(cache_need_kb "$1")' in room

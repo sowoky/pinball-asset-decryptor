@@ -25,6 +25,7 @@ def test_opening_colors_reads_the_profiles_again(tmp_path):
     with web_app(tmp_path, mfr="stern") as w:
         w.call("ui.set", "extract", "output", str(proj))
         w.call("ui.select_tab", "scenes")
+        w.call("color.set_mode", "display")     # PAD-864: Spike 2 opens on Files
         w.drain()
         # staged behind the view's back (another window, a Load on the tab)
         cp.store(str(proj), cp.Profile(name="Godzilla", gamma=(1.2, 1.1, 0.9)))
@@ -113,7 +114,8 @@ def test_the_bar_loads_on_the_scenes_page(tmp_path):
             encoding="utf-8")
     (tmp_path / "tabs" / "text_scenes.js").write_text(
         "export const ScenesPage = () => null;" + chr(10)
-        + "export const ScenesActions = () => null;" + chr(10), encoding="utf-8")
+        + "export const ScenesActions = () => null;" + chr(10)
+        + "export const GameColors = () => null;" + chr(10), encoding="utf-8")   # (PAD-514)
     (tmp_path / "package.json").write_text('{"type": "module"}', encoding="utf-8")
     (tmp_path / "load.js").write_text(_LOAD, encoding="utf-8")
     run = subprocess.run([shutil.which("node"), str(tmp_path / "load.js")],

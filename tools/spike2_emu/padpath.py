@@ -32,6 +32,7 @@ padled, padsw and the audio FIFO all live there. It is per machine, outside the
 checkout, and thrown away with the rootfs, which is exactly the lifetime derived
 data should have.
 """
+import ntpath
 import os
 import subprocess
 import sys
@@ -97,22 +98,23 @@ def is_windows_path(p):
                         or (len(p) > 1 and p[1] == ":"))
 
 
-def _wsl(args):
+def _wsl(args, distro=None):
     """Run a program inside WSL, from Windows, and return its stdout or None.
 
     `wsl.exe -e <prog>` runs the program DIRECTLY, with no shell, and that is
     the whole point rather than a detail: with a shell in the way the arguments
     are re-parsed, and `$VAR` and `$(...)` both expand to nothing in that second
     pass. `printenv` and `wslpath` are used below for the same reason - neither
-    needs a shell to do its job.
+    needs a shell to do its job. `distro`: the one to ask (default:
+    PAD_WSL_DISTRO, else the machine's default distro).
     """
     cmd = ["wsl.exe"]
-    distro = _env("PAD_WSL_DISTRO")
+    distro = distro or _env("PAD_WSL_DISTRO")
     if distro:
         cmd += ["-d", distro]
     cmd += ["-e"] + list(args)
     try:
-        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            timeout=20,
                            creationflags=_CREATE_NO_WINDOW if _WIN else 0)
     except (OSError, subprocess.SubprocessError):
@@ -138,21 +140,49 @@ def to_win(path):
     return _WIN_CACHE[path]
 
 
-def to_wsl(path):
+def to_wsl(path, distro=None):
     """A Windows path as WSL sees it, or `path` unchanged if it already is one.
 
     The mirror of to_win(), and needed for the same reason: the playfield window
     runs helper scripts INSIDE WSL through interop, and cannot hand them the
     Windows path it was itself loaded from. The literal this replaces assumed
     the checkout was under `/mnt/c/Users/david/...`.
+
+    `distro`: the one the path is for - ASK IT, not the machine's default
+    (PAD-882: a Visual Pinball launch into PAD-Runtime converted its paths in
+    a default distro that could not answer, and bash was handed
+    `C:\\Program Files\\...\\riglock.sh`). When no WSL answers, a drive-letter
+    path still comes back as WSL's standard /mnt/<drive>/... mount rather
+    than unchanged: a Windows path is never what a Linux caller can use.
     """
     if not path or not is_windows_path(path):
         return path
-    key = "u:" + path
+    key = "u:%s:%s" % (distro or "", path)
     if key in _WIN_CACHE:
         return _WIN_CACHE[key]
-    _WIN_CACHE[key] = _wsl(["wslpath", "-u", path]) or path
+    got = _wsl(["wslpath", "-u", path], distro)
+    if not got and len(path) > 2 and path[1] == ":" and path[0].isalpha():
+        got = "/mnt/%s%s" % (path[0].lower(), path[2:].replace("\\", "/"))
+    _WIN_CACHE[key] = got or path
     return _WIN_CACHE[key]
+
+
+def to_wsl_many(paths, distro=None):
+    """to_wsl for a list of paths, one wslpath per FOLDER rather than per
+    path (PAD-964: the Visual Pinball tab's check of 53 cards in one folder
+    spent 9 s in 53 wsl.exe calls against 3 s in the check itself; wslpath
+    takes one path). A file's WSL path is its folder's with the name joined
+    on - the mount is the folder's. Paths already known are not asked again."""
+    for p in dict.fromkeys(paths):
+        if not p or not is_windows_path(p) or "u:%s:%s" % (distro or "", p) in _WIN_CACHE:
+            continue
+        folder, name = ntpath.split(p)          # a Windows path, on whichever side asks
+        if not name or not folder or folder == p:
+            continue
+        got = to_wsl(folder, distro)
+        if got and not is_windows_path(got):
+            _WIN_CACHE["u:%s:%s" % (distro or "", p)] = got.rstrip("/") + "/" + name
+    return [to_wsl(p, distro) for p in paths]
 
 
 def wsl_home():
@@ -222,6 +252,19 @@ def dump():
     """The host/guest shared area: padled, padsw, the audio FIFO, the tables."""
     r = root()
     return os.path.join(r, "dump") if r else None
+
+
+def logdir():
+    """Where the run logs live (padpath.sh PAD_LOGDIR: the slot's directory,
+    or the home on slot 0), in the form this side can open."""
+    p = _env("PAD_LOGDIR")
+    if p:
+        return to_win(p) if _WIN and not is_windows_path(p) else p
+    home = wsl_home()
+    if not home:
+        return None
+    p = home.rstrip("/") + ("/padslots/%d" % slot() if slot() else "")
+    return to_win(p) if _WIN else p
 
 
 # ---- RIG SLOTS (padpath.sh, "RIG SLOTS"; padslot.sh) ---------------------

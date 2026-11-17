@@ -347,6 +347,33 @@ Also fixed on the way: batman-1.13 sends cmd 55 to its END-STOP motor (node 9
 motor 1); the encoder change briefly let that fall into the end-stop model as
 "go to end 1". An end-stop motor ignores 55 again, as under PAD-237.
 
+**PAD-955 plays that 55.** On an end-stop motor its byte 4 names an INPUT
+(`0x40|bit`), not a position count: batman 1.14 in attract sends
+`55 01 48 ..` (crane to input 8, its POS. #6 AWAY stop) and `55 02 43 ..`
+(turntable to input 3, TURNTABLE POS. #2, between its stops 2 and 4).
+Ignored, neither arrived, and the VPX tribute table, whose turntable follows
+the position switches, never turned (a player's report). The model now runs
+the motor there like a 53/54: where it was opens at once, the named input
+closes `PAD_MOTOR_MS` later, and a 55 naming a stop is that end. Rig, batman
+1.14 from Start: `+78m +82m`, both arrived, no re-sends.
+
+**PAD-971: those were TEST moves, and the game waits for them to finish.**
+The crane parked at POS. #6 AWAY for good, and the VPX tribute's crane with
+it ("crane isn't returning to home position"). The game polls cmd 52 for
+each motor (`52 01`, `52 02`, ~14 a second) and the end-stop model answered
+the node's raw switch byte, which never says a move is done. Swept with
+`PAD_NB_CREPLY=52:0000<v>00` / `52:000000<v>`, one bit at a time, batman
+1.14, 16 builds: on most values the game follows the test move with
+`55 01 4d ..` (crane to input 13, POS. #1 HOME) and `55 02 42 ..`
+(turntable to input 2, POS. #1 HOME), byte 9 `06` where the test move had
+`02`; **0x20 alone in byte 2 gives exactly that one sequence**, no retries;
+0x01 holds the game waiting (moving), and zero or 0x08 never got past the
+test move. So a motor sent a cmd 55 now reports its own status: 0x01 while
+it travels, 0x20 once there. Rig, batman 1.14, boot + Start: AWAY / POS. #2,
+done, HOME / HOME, done, 4 moves in all, crane on 87, turntable on 77. A
+motor never sent a 55 (john_wick_le's car) keeps the switch byte PAD-237
+measured.
+
 ## Not done
 
 - **jaws_le's shark is not a board motor.** SharkMotor derives from
@@ -517,3 +544,28 @@ table names input 4 EXTRA BALL (FRONT LEFT) SWITCH and lists no coil on node
   out. Whether a real board reports "rule done" in some reply, and where, is
   open. Cost: anything that waits for the shark hears about it 10 s late.
 - The fin's SHARK POSITION 1..7 between its end stops (above).
+
+# A motor on two LED-class outputs: beatles' spinning record (PAD-965)
+
+The record (SpinningDiscMotor) has no coil and no stop switches. Its device
+records are two LEDs on node 8, MOTOR A0 DRIVER (output 4) and MOTOR A1
+DRIVER (output 5), and the game never writes them in a lamp frame. It sends
+
+    88 05 50 04 05 ff <ck> 00     run: the pair, then the speed
+    88 05 50 04 05 00 <ck> 00     stop
+
+Measured on beatles 1.29 (PAD_NB_TRACE=1, rig 3, 2026-11-03): one run at boot
+(the record's test spin, 14.5 s to 17.7 s), then one 15 ms ahead of EVERY
+burst of MAGNET-RECORD, stopped 5.2 s later - six catches, six spins. Only 00
+and ff were ever sent, so which way round the speed turns it is not known.
+
+Nothing read cmd 50, so both outputs sat at 0 in the LED plane and the Visual
+Pinball table's record (lamp calls 1804/1805 -> PadRecordMotor) never turned:
+every ball the magnet caught dropped off it down the middle (PAD-950 read that
+as "the game never runs the motor"). hwshim.c's led_motor_publish() now puts
+the speed on output A and holds B at 0 until the next cmd 50, and the lamp
+frames cannot overwrite a driven output (led_motor_out). The patched table
+also spins the record up in 0.6 s (SpinUp 100) where core.vbs's default takes
+6 s, longer than the game runs it. Proven: tests/test_spike2_led_motor.py, and
+a rig game through the bridge with lamp 1804 on 10-20 ms before each of six
+MAGNET-RECORD bursts and off 5.2 s later.

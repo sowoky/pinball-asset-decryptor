@@ -411,6 +411,21 @@ def test_stop_kills_our_guest_and_our_responder_only():
     assert "killours nodebus" in stop
 
 
+def test_stop_never_creates_a_missing_binfmt_entry():
+    """PAD-839: a distro with no stock qemu-arm handler got 'stop.sh: line 65:
+    .../binfmt_misc/qemu-arm: Permission denied' on the user's log - writing
+    the path tried to create the entry, and a trailing 2>/dev/null comes after
+    the failed open.  Each write must be guarded and wrapped in braces."""
+    import re
+    stop = _rig_code("stop.sh")
+    writes = [ln for ln in stop.splitlines() if re.search(r'>\s*"\$BF/', ln)]
+    assert writes
+    for ln in writes:
+        assert re.search(r'\{ echo -?1 > "\$BF/[\w-]+"; \} 2>/dev/null', ln), ln
+    assert '[ -e "$BF/qemu-arm" ]' in stop
+    assert "stock qemu-arm binfmt restored." in stop
+
+
 def test_restore_replaces_only_our_guests():
     restore = _rig_code("s1restorestate.sh")
     assert "s1own.sh" in restore
@@ -435,6 +450,14 @@ def test_helper_runs_and_answers_nothing_when_no_guest_is_ours(tmp_path):
     assert out.returncode == 0
     assert out.stdout.decode().strip() == ""
 
+
+def test_a_zombie_guest_is_nobodys_game():
+    """PAD-558: a zombie's mountinfo is unreadable while /proc/<pid> exists,
+    so the "alive but unreadable" branch claimed a Spike 2 run's defunct
+    guest and the Spike 1 windows opened at app start."""
+    own = _rig_code("s1own.sh")
+    assert "/proc/$pid/stat" in own
+    assert "Z*" in own
 
 # ------------------------------------------------- the speaker's PCM rate --
 # The DMD generation is 44100x2; the 2012 home models run their DAC at 24000

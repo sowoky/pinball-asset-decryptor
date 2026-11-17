@@ -252,7 +252,8 @@ def test_quit_stops_only_a_run_this_app_started(rig, monkeypatch, tmp_path):
     import subprocess
     ran = []
     from pinball_decryptor.webui import emulate_dp_core as core
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: ran.append(a))
+    # only the stop counts: the tab's own status.sh poll may run meanwhile on a busy machine
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: ran.append(a) if "stop.sh" in " ".join(a[0]) else None)
     monkeypatch.setattr(core, "rig_cmd_root",
                         lambda *a, **k: ["bash"] + list(a))
     monkeypatch.setattr(
@@ -285,7 +286,7 @@ def test_while_starting_the_button_is_cancel(rig, monkeypatch, tmp_path):
         s = w.state(NS)
         assert s["go_label"] == "Cancel" and s["go_enabled"] and s["starting"]
         assert w.call(NS + ".toggle")
-        assert w.state(NS)["go_label"] == "Cancelling…"
+        assert w.state(NS)["go_label"] == "Canceling…"
         # the tab's own status poll may run too: look for the cancel
         end = time.time() + 5
         while not any(c[-1] == "cancel.sh" for c in ran) and time.time() < end:

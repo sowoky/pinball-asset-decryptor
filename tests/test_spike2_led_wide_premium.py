@@ -111,7 +111,14 @@ static void led_map(void) {}
 static void led_val(unsigned node, unsigned idx, unsigned char v) { shm.val[node][idx] = v; }
 static signed char led_node_verdict[16];
 static void led_show_note(unsigned node, unsigned cmd, unsigned weight) { (void)node; (void)cmd; (void)weight; }
+/* a banked frame's levels (PAD-500's version-6 plane): not what this test reads */
+static void led_hi(unsigned node, int bank, const unsigned char *idx, const unsigned char *val, unsigned cnt)
+{ (void)node; (void)bank; (void)idx; (void)val; (void)cnt; }
 static unsigned short led_node_votes[16], led_node_yes[16];
+/* PAD-1189: a level change's fade into padled's ring: not what this test reads */
+static void led_wide_fades(unsigned node, const unsigned char *idx, const unsigned char *val,
+                           const unsigned char *fade, unsigned cnt)
+{ (void)node; (void)idx; (void)val; (void)fade; (void)cnt; }
 @FUNCS@
 static int frame(unsigned node, const char *h)
 {
@@ -130,7 +137,7 @@ int main(int argc, char **argv)
             const char *h = argv[k + 2];
             k += 2;
             while (h[0] && h[1]) { char t[3] = { h[0], h[1], 0 }; body[blen++] = (unsigned char)strtoul(t, 0, 16); h += 2; }
-            if (!led_wide_walk(body, blen, cmd, idx, val, &cnt)) { printf("REFUSED\n"); continue; }
+            if (!led_wide_walk(body, blen, cmd, idx, val, 0, &cnt)) { printf("REFUSED\n"); continue; }
             for (i = 0; i < (int)cnt; i++) printf("%u:%u ", idx[i], val[i]);
             printf("\n");
         } else if (!strcmp(argv[k], "title")) {         /* title yes|no|undecided */

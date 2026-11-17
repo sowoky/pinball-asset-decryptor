@@ -92,6 +92,10 @@ _VARIANT_KEY = "video_variants"
 # of a card built with one names its file: ``<the slot's name>__PadVar<k>``
 # (plugins/stern/clip_variants.NAME_FORMAT; k = 2 for the first extra clip).
 _VARIANT_NAME_RE = re.compile(r"^(?P<base>.+)__PadVar(?P<k>\d+)$")
+# PAD-494: a Stern project's music modes, ``staged_changes.sound_modes_of``: a
+# sound's files for the other modes pair with the sound exactly as its
+# replacement does (by the stock sound's content), their loudness with them.
+_SOUND_MODES_KEY = staged_changes.SOUND_MODES_KEY
 # Per-audio-slot flag maps that must follow a remapped audio key (the loudness
 # offset is a number rather than a flag, but it is per-slot state that belongs
 # to the replacement, so it travels with it).
@@ -99,7 +103,16 @@ _AUDIO_FLAG_KEYS = ("audio_loop", "audio_keep", "audio_levels")
 # Toggle values copied verbatim (not per-slot).
 _TOGGLE_KEYS = ("audio_trim", "video_trim", "video_no_conversion",
                 "video_best_quality",
-                "menu_expose_through")
+                "menu_expose_through",
+                # PAD-755: a Home Edition's coin door; a target that has one
+                # already, or can't be read, is left alone at build time
+                "coin_door",
+                # PAD-786: a final wizard that does not end the game; a target
+                # whose final wizard the app doesn't know is left alone
+                "final_wizard",
+                # PAD-1010: topper-only features unlocked without the topper; a
+                # target with no such feature the app can unlock is left alone
+                "topper")
 # Staged Defaults-tab edits.  These need no reconciliation at all: they are
 # keyed by the firmware's own ``AD_`` names and high-score slot labels, which
 # are the same words on a new version and on the other model of the same title
@@ -107,7 +120,9 @@ _TOGGLE_KEYS = ("audio_trim", "video_trim", "video_no_conversion",
 # apply already skips a name the target image doesn't carry and pulls every
 # value into that image's own range.  Merged per key so an edit already made
 # on the target wins.
-_MERGE_KEYS = ("settings", "high_scores")
+# ``setting_ranges`` (PAD-750) is keyed the same way and pulled into the
+# target the same way: a name it doesn't carry is skipped at build time.
+_MERGE_KEYS = ("settings", "high_scores", "setting_ranges")
 
 _HEAD = 256 * 1024
 _TAIL = 64 * 1024
@@ -682,6 +697,10 @@ def _baked_variants(modded_dir):
     return out
 
 
+#: PAD-553: an extract's own random clips, for the extract's read-back (plugins.stern.media_share)
+baked_variants = _baked_variants
+
+
 def _variant_rels(variants, modded_dir):
     """The extract rels of every random clip in :func:`_baked_variants`' answer."""
     return {os.path.relpath(f, modded_dir).replace(os.sep, "/")
@@ -1044,30 +1063,14 @@ def plan_direct_diff(modded_dir, target_dir, log_cb=None):
     return plan
 
 
-def _plan_audio(source_dir, target_dir, saved_audio, log_cb=None):
-    """Reconcile audio assignments by stock-WAV content.
-
-    "Stock" means the bytes the Extract produced, which on a BUILT project is
-    the ``.orig/`` snapshot rather than the slot file — see :func:`_stock_path`.
-
-    Returns ``(matched, remapped, flagged, dropped)`` where each entry is a dict
-    the caller can render and :func:`apply_transfer` can consume:
-      matched  {src_rel, tgt_rel==src_rel, repl}
-      remapped {src_rel, tgt_rel, repl}          (sound moved to a new index)
-      flagged  {src_rel, repl, reason}           (index reused for another sound)
-      dropped  {src_rel, repl, reason}           (sound no longer present)
-    """
-    log = log_cb or (lambda *_a, **_k: None)
-    matched, remapped, flagged, dropped = [], [], [], []
-    if not saved_audio:
-        return matched, remapped, flagged, dropped
-
-    # Index the target's stock WAVs by content signature (audio/ only).  Via
-    # _stock_path, so a target the user has already staged edits on — which
-    # apply_transfer explicitly supports — still indexes by its stock sounds.
+def _audio_index(target_dir, log):
+    """``(sig_to_rels, size_to_rels)``: the target's stock WAVs by content
+    signature (audio/ only), and by byte size for the one-sample fallback.
+    Via _stock_path, so a target the user has already staged edits on - which
+    apply_transfer explicitly supports - still indexes by its stock sounds."""
     tgt_audio_dir = os.path.join(target_dir, "audio")
     sig_to_rels = {}
-    size_to_rels = {}          # byte size -> rels, for the one-sample fallback
+    size_to_rels = {}
     if os.path.isdir(tgt_audio_dir):
         names = [n for n in os.listdir(tgt_audio_dir)
                  if n.lower().endswith(".wav")]
@@ -1080,6 +1083,31 @@ def _plan_audio(source_dir, target_dir, saved_audio, log_cb=None):
             if sig is not None:
                 sig_to_rels.setdefault(sig, []).append(rel)
                 size_to_rels.setdefault(sig[0], []).append(rel)
+    return sig_to_rels, size_to_rels
+
+
+def _plan_audio(source_dir, target_dir, saved_audio, log_cb=None, index=None):
+    """Reconcile audio assignments by stock-WAV content.
+
+    "Stock" means the bytes the Extract produced, which on a BUILT project is
+    the ``.orig/`` snapshot rather than the slot file — see :func:`_stock_path`.
+
+    Returns ``(matched, remapped, flagged, dropped)`` where each entry is a dict
+    the caller can render and :func:`apply_transfer` can consume:
+      matched  {src_rel, tgt_rel==src_rel, repl}
+      remapped {src_rel, tgt_rel, repl}          (sound moved to a new index)
+      flagged  {src_rel, repl, reason}           (index reused for another sound)
+      dropped  {src_rel, repl, reason}           (sound no longer present)
+
+    *index* is :func:`_audio_index`'s answer for *target_dir* when the caller
+    already has it (a second set of slots, the music modes', reuses it).
+    """
+    log = log_cb or (lambda *_a, **_k: None)
+    matched, remapped, flagged, dropped = [], [], [], []
+    if not saved_audio:
+        return matched, remapped, flagged, dropped
+    sig_to_rels, size_to_rels = (index if index is not None
+                                 else _audio_index(target_dir, log))
 
     # Last-resort identity for a slot whose pristine bytes are gone entirely:
     # no ``.orig`` snapshot because it was edited before snapshots shipped, or
@@ -1462,8 +1490,16 @@ def plan_transfer(source_dir, target_dir, saved=None, src_text_rows=None,
         saved = staged_changes.load(source_dir)
     to_target = _model_remap(source_dir, target_dir, log_cb=log_cb)
 
+    # PAD-494: a sound's music mode files follow it as its replacement does
+    sm = staged_changes.sound_modes_of(saved)
+    index = None
+    if sm and saved.get("audio"):
+        index = _audio_index(target_dir, log_cb or (lambda *_a, **_k: None))
     a_matched, a_remapped, a_flagged, a_dropped = _plan_audio(
-        source_dir, target_dir, saved.get("audio"), log_cb=log_cb)
+        source_dir, target_dir, saved.get("audio"), log_cb=log_cb, index=index)
+    m_matched, m_remapped, m_flagged, m_dropped = _plan_audio(
+        source_dir, target_dir, (sm or {}).get("slots"), log_cb=log_cb,
+        index=index)
     v_matched, v_dropped = _plan_video(
         source_dir, target_dir, saved.get("video"), to_target)
     # PAD-446: a slot's random clips follow the slot as its replacement does
@@ -1484,6 +1520,15 @@ def plan_transfer(source_dir, target_dir, saved=None, src_text_rows=None,
         "image": {"matched": i_matched, "dropped": i_dropped},
         "text": {"matched": t_matched, "dropped": t_dropped},
         "group_tags": {"matched": g_matched, "dropped": g_dropped},
+        _SOUND_MODES_KEY: {"matched": m_matched, "remapped": m_remapped,
+                           "flagged": m_flagged, "dropped": m_dropped,
+                           "names": list((sm or {}).get("names") or []),
+                           "levels": dict((sm or {}).get("levels") or {}),
+                           "random": list((sm or {}).get("random") or []),
+                           "mode_random": dict((sm or {}).get("mode_random") or {}),
+                           # PAD-641: the flipper buttons' sounds in attract (no slot: as they are)
+                           "attract": list((sm or {}).get("attract") or []),
+                           "attract_gap": (sm or {}).get("attract_gap") or 0},
         "toggles": {k: saved[k] for k in _TOGGLE_KEYS if k in saved},
         "defaults": {k: dict(saved[k]) for k in _MERGE_KEYS
                      if isinstance(saved.get(k), dict) and saved[k]},
@@ -1491,10 +1536,12 @@ def plan_transfer(source_dir, target_dir, saved=None, src_text_rows=None,
     n_defaults = sum(len(v) for v in plan["defaults"].values())
     transfer = (len(a_matched) + len(a_remapped) + len(v_matched)
                 + len(vv_matched) + len(i_matched) + len(t_matched)
-                + len(g_matched) + n_defaults)
-    flagged = len(a_flagged)
+                + len(g_matched) + n_defaults
+                + len(m_matched) + len(m_remapped))
+    flagged = len(a_flagged) + len(m_flagged)
     dropped = (len(a_dropped) + len(v_dropped) + len(vv_dropped)
-               + len(i_dropped) + len(t_dropped) + len(g_dropped))
+               + len(i_dropped) + len(t_dropped) + len(g_dropped)
+               + len(m_dropped))
     plan["totals"] = {"transfer": transfer, "flagged": flagged,
                       "dropped": dropped}
     return plan
@@ -1620,7 +1667,7 @@ def write_unmatched_text_report(notes, out_dir, modded_dir="", stock_dir=""):
            "Stock extract of the same version: %s" % (stock_dir or "?"),
            "Written %s" % time.strftime("%Y-%m-%d %H:%M:%S"), "",
            "No edit to any of these can be carried across. If you don't "
-           "recognise a line it is",
+           "recognize a line it is",
            "the factory's own; if you do, it is yours and worth a second "
            "look.", ""]
     for (path, side), texts in groups.items():
@@ -1789,6 +1836,24 @@ def plan_detail_lines(plan, cap=_DETAIL_CAP):
         "Transfer: %d slot(s) with random clips can NOT be carried — the new "
         "version has no matching clip:",
         (plan.get(_VARIANT_KEY) or {}).get("dropped"), lambda e: e["rel"], cap)
+    m = plan.get(_SOUND_MODES_KEY) or {}
+    _detail_block(
+        out, "info",
+        "Transfer: %d sound(s) with music mode files moved to a new index in "
+        "the new version — their mode files follow:",
+        m.get("remapped"),
+        lambda e: "%s  ->  %s" % (e["src_rel"], e["tgt_rel"]), cap)
+    _detail_block(
+        out, "error",
+        "Transfer: %d sound(s)' music mode files can NOT be carried — no sound "
+        "in the new version has identical audio.  Give these their mode files "
+        "again on the Audio tab:",
+        m.get("dropped"), lambda e: e["src_rel"], cap)
+    _detail_block(
+        out, "error",
+        "Transfer: %d sound(s)' music mode files flagged — that index now "
+        "holds a DIFFERENT sound:",
+        m.get("flagged"), lambda e: e["src_rel"], cap)
     _detail_block(
         out, "error",
         "Transfer: %d image replacement(s) can NOT be carried — the new "
@@ -1830,9 +1895,10 @@ def apply_transfer(source_dir, target_dir, plan, include_flagged=False,
     targets the same slot/string.  ``include_flagged`` also applies the audio
     entries whose index was reused (off by default — those are the risky ones).
     ``src_saved`` overrides the source sidecar (pairs with ``plan_transfer``'s
-    ``saved``).  Returns ``{"audio", "video", "video_variants", "image",
-    "text", "group_tags", "defaults", "superseded"}`` counts actually written
-    (``video_variants``: slots given their random clips, PAD-446).
+    ``saved``).  Returns ``{"audio", "video", "video_variants", "sound_modes",
+    "image", "text", "group_tags", "defaults", "superseded"}`` counts actually
+    written (``video_variants``: slots given their random clips, PAD-446;
+    ``sound_modes``: sounds given their music mode files, PAD-494).
 
     *origin* is the folder the mods CAME FROM as the user named it — field 1
     of the Mod Pack tab, which for a baked-in-mods transfer is the modded
@@ -1863,7 +1929,7 @@ def apply_transfer(source_dir, target_dir, plan, include_flagged=False,
     # What THIS run writes, per category — the record that supersedes the
     # previous one.
     record = {"audio": {}, "video": {}, "image": {}, "text": {},
-              _VARIANT_KEY: {}}
+              _VARIANT_KEY: {}, _SOUND_MODES_KEY: {}}
 
     src_loop = src_saved.get("audio_loop") or {}
     src_keep = src_saved.get("audio_keep") or {}
@@ -1936,6 +2002,9 @@ def apply_transfer(source_dir, target_dir, plan, include_flagged=False,
         del tgt_variants[rel]
         n_superseded += 1
 
+    n_superseded += _apply_sound_modes(tgt, plan, record, prior,
+                                       include_flagged)
+
     for kind, current in (("audio", tgt_audio), ("video", tgt_video),
                           ("image", tgt_image), ("audio_loop", tgt_loop),
                           ("audio_keep", tgt_keep),
@@ -1960,6 +2029,14 @@ def apply_transfer(source_dir, target_dir, plan, include_flagged=False,
     # Toggles copy over only if the target doesn't already set them.
     for k, v in plan.get("toggles", {}).items():
         tgt.setdefault(k, v)
+
+    # PAD-782: the attract items (photos, clips and text cards between the game's attract screens) are the project's
+    # as a whole: carried when the target has none of its own. Their files stay where they were picked.
+    n_attract = 0
+    at = src_saved.get("attract_items")
+    if isinstance(at, dict) and at.get("items") and not (tgt.get("attract_items") or {}).get("items"):
+        tgt["attract_items"] = at
+        n_attract = len(at["items"])
 
     # Staged Defaults-tab edits, merged per setting / per high-score slot so
     # anything already set on the target extract stays as the user left it.
@@ -2011,6 +2088,59 @@ def apply_transfer(source_dir, target_dir, plan, include_flagged=False,
 
     return {"audio": n_audio, "video": len(plan["video"]["matched"]),
             _VARIANT_KEY: len(record[_VARIANT_KEY]),
+            _SOUND_MODES_KEY: len(record[_SOUND_MODES_KEY]),
             "image": len(plan["image"]["matched"]), "text": n_text,
             "group_tags": n_tags, "defaults": n_defaults,
+            "attract_items": n_attract,
             "superseded": n_superseded}
+
+
+def _apply_sound_modes(tgt, plan, record, prior, include_flagged):
+    """PAD-494: merge *plan*'s music mode files into *tgt* (a sidecar), each
+    sound's files under the sound they paired with, their loudness with them
+    (:func:`staged_changes.merge_sound_modes`), and record them in *record*.
+    A file the previous transfer of the same mods gave a sound, which this one
+    does not and which the sound still holds, is taken off.  Returns how many
+    were taken off."""
+    sm = plan.get(_SOUND_MODES_KEY) or {}
+    entries = list(sm.get("matched") or ()) + list(sm.get("remapped") or ())
+    if include_flagged:
+        entries += [dict(e, tgt_rel=e["src_rel"]) for e in sm.get("flagged") or ()]
+    levels = sm.get("levels") or {}
+    rec = {"names": list(sm.get("names") or []), "slots": {}, "levels": {},
+           "random": []}
+    if sm.get("attract"):
+        rec["attract"] = list(sm["attract"])
+        if sm.get("attract_gap"):
+            rec["attract_gap"] = sm["attract_gap"]
+    for e in entries:
+        rec["slots"][e["tgt_rel"]] = dict(e["repl"])
+        if e["src_rel"] in (sm.get("random") or ()):
+            rec["random"].append(e["tgt_rel"])        # PAD-638: its files at random
+        if (sm.get("mode_random") or {}).get(e["src_rel"]):
+            rec.setdefault("mode_random", {})[e["tgt_rel"]] = list(sm["mode_random"][e["src_rel"]])
+        if levels.get(e["src_rel"]):
+            rec["levels"][e["tgt_rel"]] = dict(levels[e["src_rel"]])
+        record[_SOUND_MODES_KEY][e["tgt_rel"]] = dict(e["repl"])
+    if rec["slots"] or any(rec["names"]) or rec.get("attract"):
+        staged_changes.merge_sound_modes(tgt, rec)
+    n = 0
+    stale = prior.get(_SOUND_MODES_KEY) or {}
+    if stale and isinstance(tgt.get(_SOUND_MODES_KEY), dict):
+        here = tgt[_SOUND_MODES_KEY]
+        for rel, files in stale.items():
+            for m, f in files.items():
+                if (record[_SOUND_MODES_KEY].get(rel) or {}).get(m) == f:
+                    continue
+                if ((here.get("slots") or {}).get(rel) or {}).get(m) != f:
+                    continue              # the user re-pointed it since
+                del here["slots"][rel][m]
+                ((here.get("levels") or {}).get(rel) or {}).pop(m, None)
+                n += 1
+        here["slots"] = {r: v for r, v in (here.get("slots") or {}).items() if v}
+        here["levels"] = {r: v for r, v in (here.get("levels") or {}).items()
+                          if v and r in here["slots"]}
+        if not here["slots"] and not any(here.get("names") or []) \
+                and not here.get("turns"):
+            tgt.pop(_SOUND_MODES_KEY, None)
+    return n

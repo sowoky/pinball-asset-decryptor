@@ -16,7 +16,7 @@ from .crypto import AES_KEYS, decrypt_aes_pkg, encrypt_aes_pkg
 from .formats import (GameFile, create_tar, create_tar_gz, create_zip,
                       detect_game, extract_tar_gz, extract_zip)
 from .games import (GAME_DB, GODOT_GAMES, GPG_PASSPHRASES, P3_GAMES,
-                    UNITY_GAMES, USB_NAMING)
+                    PINHECK_INSTALL, UNITY_GAMES, USB_NAMING)
 from .gpg import (decrypt_gpg_symmetric, encrypt_gpg_symmetric,
                   sign_beetlejuice, strip_gpg_signature)
 
@@ -102,7 +102,7 @@ class ExtractPipeline(_BasePipeline):
             return
 
         if self.cancelled:
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
 
         # Phase 1: Decrypt / strip signature
@@ -124,7 +124,7 @@ class ExtractPipeline(_BasePipeline):
             return
 
         if self.cancelled:
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
 
         # Engine-specific loose-asset extraction
@@ -180,7 +180,7 @@ class ExtractPipeline(_BasePipeline):
 
         if self.cancelled:
             os.remove(temp_zip)
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
 
         # We're already in phase 1 (Decrypt); the inline ZIP extract that
@@ -211,7 +211,7 @@ class ExtractPipeline(_BasePipeline):
 
         if self.cancelled:
             os.remove(temp_tar)
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
 
         self.log("Extracting tar.gz archive...")
@@ -226,7 +226,7 @@ class ExtractPipeline(_BasePipeline):
     def _extract_tar_gz(self):
         self.log("No encryption - extracting archive directly...")
         if self.cancelled:
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
         files = extract_tar_gz(
             self.input_path, self.output_dir,
@@ -248,7 +248,7 @@ class ExtractPipeline(_BasePipeline):
 
         if self.cancelled:
             os.remove(temp_tar)
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
 
         self.log("Extracting tar.gz archive...")
@@ -263,7 +263,7 @@ class ExtractPipeline(_BasePipeline):
     def _extract_plain_zip(self):
         self.log("No encryption - extracting ZIP directly...")
         if self.cancelled:
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
         files = extract_zip(
             self.input_path, self.output_dir,
@@ -312,7 +312,7 @@ class ExtractPipeline(_BasePipeline):
         self.log(f"{backend} prerequisites OK", "success")
 
         if self.cancelled:
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
 
         os.makedirs(self.output_dir, exist_ok=True)
@@ -332,7 +332,7 @@ class ExtractPipeline(_BasePipeline):
                 executor.stop_container()
 
         if self.cancelled:
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
 
         if game_display in UNITY_GAMES:
@@ -604,12 +604,12 @@ class WritePipeline(_BasePipeline):
             self.log(f"  ... and {total_changes - 30} more")
 
         if self.cancelled:
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
 
         self._process_audio(changed)
         if self.cancelled:
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
 
         # Phase 2: Repack
@@ -618,13 +618,23 @@ class WritePipeline(_BasePipeline):
             return
 
         if self.cancelled:
-            self.done(False, "Cancelled")
+            self.done(False, "Canceled")
             return
 
         # Phase 3: Cleanup / Done
         self.phase(3)
-        naming = USB_NAMING.get(ext, os.path.basename(self.output_path))
         self.log("--- Installation Instructions ---")
+        if game_name in P3_GAMES:
+            # onto the game's SD card, freshly formatted: see PINHECK_INSTALL
+            for line in PINHECK_INSTALL.splitlines()[1:]:
+                self.log(line)
+            self.done(True,
+                f"Successfully packaged modified {game_name} assets to:\n"
+                f"{self.output_path}\n\n"
+                f"Unzip it, then copy all of it onto a freshly formatted "
+                f"SD card.")
+            return
+        naming = USB_NAMING.get(ext, os.path.basename(self.output_path))
         self.log(f"1. Copy to USB drive root")
         self.log(f"2. Naming convention: {naming}")
         self.log("3. Insert USB into machine and follow update prompts")

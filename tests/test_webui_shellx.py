@@ -69,7 +69,7 @@ def _mfr_keys():
 
 @pytest.mark.parametrize("mfr", ["stern", "jjp", "spooky", "pb", "williams",
                                  "cgc", "dp", "ap", "bof", "data_east",
-                                 "sega"])
+                                 "sega", "capcom"])
 def test_my_exports_exist_for_every_manufacturer(tmp_path, mfr):
     if mfr not in _mfr_keys():
         pytest.skip("no %s plugin" % mfr)
@@ -92,7 +92,7 @@ def test_stern_eras_keep_the_menu(tmp_path):
     with web_app(tmp_path, mfr="stern") as w:
         for era in ("spike1", "whitestar", "spike2"):
             w.call("ui.set_era", era)
-            assert item(w, "preview_features") is not None
+            assert item(w, "check_updates") is not None
             hints = w.state("shellx")["prereq_hints"]
             names = [p.name for p in w.window.current_mfr.prerequisites]
             assert set(hints) == set(names)
@@ -117,34 +117,63 @@ def test_menu_choices():
 
 
 # ---------------------------------------------------------- gear menu
-def test_gear_menu_keeps_the_tk_cascades(tmp_path):
-    """_build_settings_menu's order and cascades: Check automatically ▸,
-    Logs ▸ and the prerequisites summary ▸; the plain entries stay
-    top-level.  The voice recognition quality moved to the Extract tab
-    (PAD-460), and clearing the downloaded models stays here."""
+def test_preview_features_is_offered_only_while_there_is_a_preview(tmp_path, monkeypatch):
+    """PAD-763 released the mode maker, the one preview: the gear menu no longer offers
+    Preview features... with nothing to unlock, and offers it again for a new preview
+    (PAD-802's Visual Pinball is one)."""
+    from pinball_decryptor.core import preview
+    assert "modes" in preview.RELEASED and "modes" not in preview.FEATURES
+    monkeypatch.setattr(preview, "FEATURES", {})
+    with web_app(tmp_path, mfr="stern") as w:
+        assert item(w, "preview_features") is None
+    monkeypatch.setattr(preview, "FEATURES", {"next": "Next thing"})
+    with web_app(tmp_path / "again", mfr="stern") as w:
+        assert item(w, "preview_features") is not None
+
+
+def test_gear_menu_groups_and_no_top_level_checks(tmp_path):
+    """PAD-844: the top level only opens things (a window or a submenu);
+    every choice and on/off switch sits in a submenu, where the check
+    column lines its rows up.  Groups: how it runs (Updates, Save
+    automatically, Logs, AI agents), upkeep (disk, prerequisites, voice
+    models), then help and the rest.  The color-profile switch moved to the
+    Color profile tab's Machine screen mode."""
     import sys
+    from pinball_decryptor.core import preview
     with web_app(tmp_path, mfr="stern") as w:
         top = w.state("shell")["settings_items"]
         shape = [("sep" if it.get("sep") else
                   (it.get("label") + " ▸") if it.get("submenu") is not None
                   else it.get("id")) for it in top]
-        want = ["check_updates", "Check automatically ▸"]
+        want = ["Updates ▸", "Save automatically ▸", "Logs ▸",
+                "AI agents ▸", "sep"]
         if sys.platform == "win32":
             want.append("disk_space")
-        want += ["Logs ▸", "toggle_scenes_own_colours", "sep",
-                 "clear_voice_models", "sep",
-                 "Prerequisites ▸", "sep", "preview_features",
-                 "view_disclaimer"]
+        want += ["Prerequisites ▸", "clear_voice_models", "sep"]
+        if preview.FEATURES:                    # PAD-802: Visual Pinball is a preview
+            want.append("preview_features")
+        want += ["getting_started", "discord", "donations", "report_problem", "view_disclaimer"]
         assert shape == want
-        assert not any(it.get("header") for it in items(w))
-        up = cascade(w, "Check automatically")["submenu"]
-        assert [it["label"] for it in up] == [
+        assert not any("checked" in it for it in top)
+        assert item(w, "toggle_scenes_own_colours") is None
+        up = cascade(w, "Updates")["submenu"]
+        assert up[0]["id"] == "check_updates"
+        assert up[1] == {"header": "Check automatically"}
+        assert [it["label"] for it in up[2:6]] == [
             "Only at startup", "Every hour", "Every 6 hours", "Once a day"]
         assert all(it["id"] == "update_interval" and it["radio"]
-                   for it in up)
+                   for it in up[2:6])
+        # PAD-1024: the background download's switch, on by default
+        assert up[6].get("sep")
+        assert up[7]["id"] == "toggle_update_auto_download"
+        assert up[7]["checked"]
         logs = cascade(w, "Logs")["submenu"]
-        assert [it["id"] for it in logs] == [
-            "log_history", "project_log", "toggle_log_history"]
+        assert [it.get("id", "sep") for it in logs] == [
+            "log_history", "project_log", "sep", "toggle_log_history"]
+        agents = cascade(w, "AI agents")["submenu"]
+        assert [it["id"] for it in agents] == ["toggle_agent_access",
+                                               "agent_setup"]
+        assert agents[1]["disabled"]            # nothing to connect while off
         assert cascade(w, "Voice recognition quality") is None
         assert item(w, "voice_quality") is None
         assert item(w, "clear_voice_models")["needs_idle"]
@@ -189,7 +218,7 @@ def test_update_check_busy_label(tmp_path):
         assert it["label"] == "Checking for updates…" and it["disabled"]
         w.run(w.window.set_update_check_running, False)
         it = item(w, "check_updates")
-        assert it["label"] == "Check for updates" and not it["disabled"]
+        assert it["label"] == "Check for updates now" and not it["disabled"]
 
 
 def test_log_history_toggle_and_seed(tmp_path):
@@ -349,6 +378,32 @@ def test_log_link_opens_the_url_or_says_it_cannot(tmp_path, monkeypatch):
         assert w.call("shellx.open_link", "") is False
 
 
+def test_discord_button_opens_the_pad_server(tmp_path, monkeypatch):
+    """PAD-815: the top bar's Discord button (and Settings > Join our
+    Discord) opens the PAD server's permanent invite in the browser; the
+    page names no URL of its own, so the link lives in one place."""
+    import pathlib
+    from pinball_decryptor.core import desktop
+    from pinball_decryptor.webui.tabs import shell_extras
+    assert shell_extras.DISCORD_URL == "https://discord.gg/343hTHykka"
+    opened = []
+    with web_app(tmp_path, mfr="stern") as w:
+        monkeypatch.setattr(desktop, "open_url",
+                            lambda url, env=None: (opened.append(url)
+                                                   or (True, "")))
+        assert w.call("shellx.open_discord") is True
+        assert until(w, lambda: opened == [shell_extras.DISCORD_URL])
+        assert item(w, "discord")["label"] == "Join our Discord"
+        w.call("ui.settings_action", "discord")
+        assert until(w, lambda: opened == [shell_extras.DISCORD_URL] * 2)
+    js = (pathlib.Path(shell_extras.__file__).parents[1] / "static" / "js"
+          / "shell.js").read_text(encoding="utf-8")
+    top = js[js.index("function TopBar("):js.index("// ---", js.index("function TopBar("))]
+    assert 'call("shellx.open_discord")' in top
+    assert 'aria-label="Join our Discord"' in top
+    assert "discord.gg" not in js
+
+
 def test_first_run_theme_follows_the_os(tmp_path, monkeypatch):
     """MainWindow: initial_theme or detect_system_theme(), persisted with
     the next save; a saved theme wins."""
@@ -391,7 +446,7 @@ def test_download_dialog_handle(tmp_path):
         assert w.state("shellx")["download"]["detail"] == "5 MB"
         w.call("shellx.download_cancel")
         assert cancelled == [1]
-        assert w.state("shellx")["download"]["detail"] == "Cancelling…"
+        assert w.state("shellx")["download"]["detail"] == "Canceling…"
         w.run(h.close)
         assert w.state("shellx")["download"] is None
 
@@ -459,10 +514,12 @@ def test_every_rail_tab_has_tips_under_its_own_key():
     """PAD-388: the ? window looks a tab's tips up by the tab's key, so a
     HELP_CONTENT entry spelt otherwise ("Color profile" for the tab keyed
     "Color Profile") left that tab's Tips window empty."""
-    from pinball_decryptor.webui.help_content import HELP_CONTENT, sections_for
+    from pinball_decryptor.webui.help_content import HELP_CONTENT, PREVIEW_HELP, sections_for
     from pinball_decryptor.webui.tabs import TABS
     keys = [key for _m, _ns, key, _label, _group, _icon in TABS if key]
-    missing = [k for k in keys if not HELP_CONTENT.get(k) and k != "Modes"]
+    # a preview tab's tips are in PREVIEW_HELP (Modes; Visual Pinball, PAD-802)
+    preview_tabs = {t for f in PREVIEW_HELP.values() for t in f}
+    missing = [k for k in keys if not HELP_CONTENT.get(k) and k not in preview_tabs]
     assert not missing, missing
     assert not [k for k in HELP_CONTENT if k not in keys], "a key no tab has"
     assert sections_for("Color Profile")
@@ -807,6 +864,55 @@ def test_disk_space_lists_the_emulators_files_in_wsl(tmp_path, monkeypatch):
         assert w.asked[-1]["title"] == "In use"
 
 
+def test_freed_cards_say_windows_gets_them_back_by_reclaim(tmp_path, monkeypatch):
+    """PAD-739: a user deleted 120 GB of cached cards here, read "Freed", and
+    saw nothing change on his drive - the WSL disk file only shrinks when it
+    is compacted.  The status says so, and the cards on the distro's own disk
+    count towards what Reclaim gives back; a cache on a disk of its own
+    (/mnt/wsl/...) does not."""
+    from pinball_decryptor.core import host_temp
+    from pinball_decryptor.webui import emu_cache
+    monkeypatch.setattr(host_temp, "usage", lambda: None)
+    monkeypatch.setattr(host_temp, "scan", lambda: [])
+    gb = 2 ** 30
+    monkeypatch.setattr(emu_cache, "drop_emu_cache",
+                        lambda labels, sizes: sum(sizes[l] for l in labels))
+    cards = [{"path": "gz_v1", "size": 11 * gb, "manufacturer": "Stern Spike 2",
+              "detail": "gz_v1   last booted 2026-10-17 15:59"},
+             {"path": "gz_v2", "size": 8 * gb, "manufacturer": "Stern Spike 2",
+              "detail": "gz_v2   last booted 2026-10-14 12:57"}]
+    for where, counts in (("/home/simon/cardcache", True),
+                          ("/mnt/wsl/cards/cardcache", False)):
+        with web_app(tmp_path, mfr="stern") as w:
+            svc = w.window.service("shellx")
+            w.call("shellx.disk_open")
+            assert until(w, lambda: not w.state("shellx")["disk"]["busy"])
+            svc._disk_scan_id += 1
+            svc._disk_apply_scan(svc._disk_scan_id, {
+                "wsl_ok": True, "wsl_entries": [], "rig_entries": [],
+                "host_entries": [], "emu_entries": cards,
+                "emu_usage": {"total": 1000 * gb, "used": 200 * gb,
+                              "free": 800 * gb, "pct": 20, "dir": where},
+                "vhdx": {"distro": "Ubuntu", "path": "C:/x/ext4.vhdx",
+                         "size": 226 * gb, "reclaimable": 2 * gb}})
+            w.answers.append("yes")
+            assert w.call("shellx.disk_clean", None, "all") is True
+            assert until(w, lambda: w.state("shellx")["disk"]["status"]
+                         .startswith("Freed"))
+            status = w.state("shellx")["disk"]["status"]
+            reclaimable = svc._disk["vhdx"]["reclaimable"]
+            if counts:
+                assert status == ("Freed 19.00 GiB inside WSL: Windows gets it "
+                                  "back with Reclaim space to Windows below.")
+                assert reclaimable == 21 * gb
+            else:
+                assert status == "Freed 19.00 GiB."
+                assert reclaimable == 2 * gb
+    assert emu_cache.on_distro_disk({"dir": "/home/pad/cardcache"})
+    assert not emu_cache.on_distro_disk({"dir": "/mnt/wsl/paddata/spike2/cardcache"})
+    assert not emu_cache.on_distro_disk({"dir": ""}) and not emu_cache.on_distro_disk(None)
+
+
 def test_every_form_field_belongs_to_its_project(tmp_path):
     """David, 2026-09-26: "all the form entries on any of the tabs should be
     saved per project".  Every PROJECT_FIELDS field, the Write file name and
@@ -852,3 +958,26 @@ def test_every_form_field_belongs_to_its_project(tmp_path):
         w.drain()
         assert fields() == defaults
         assert w.window.write_output_var.get() == os.path.join(b, "build")
+
+
+def test_top_bar_names_a_run_without_administrator_rights(tmp_path, monkeypatch):
+    """PAD-1336: a Windows start that skipped launcher.vbs ran plain, and nothing said so."""
+    from pinball_decryptor.core import admin
+    from pinball_decryptor.webui.tabs import shell_extras
+    monkeypatch.setattr(shell_extras.sys, "platform", "win32")
+    monkeypatch.setattr(admin, "is_admin", lambda: False)
+    assert shell_extras.not_elevated_on_windows() is True
+    monkeypatch.setattr(admin, "is_admin", lambda: True)
+    assert shell_extras.not_elevated_on_windows() is False
+    # Linux and a Mac never show it, whatever the euid
+    monkeypatch.setattr(admin, "is_admin", lambda: False)
+    for plat in ("linux", "darwin"):
+        monkeypatch.setattr(shell_extras.sys, "platform", plat)
+        assert shell_extras.not_elevated_on_windows() is False
+    monkeypatch.undo()
+    monkeypatch.setattr(shell_extras, "not_elevated_on_windows", lambda: True)
+    with web_app(tmp_path, mfr="stern") as w:
+        assert w.state("shell")["not_admin"] is True
+    js = open(os.path.join(os.path.dirname(shell_extras.__file__), "..", "static", "js", "shell.js"),
+              encoding="utf-8").read()
+    assert "shell.not_admin ?" in js and ">Not administrator<" in js

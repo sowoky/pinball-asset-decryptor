@@ -73,7 +73,7 @@ forget() {
     [ -f "$MARK" ] || return 0
     rm -f "$DUMP"/mode.cfg "$DUMP"/mode[1-7].cfg "$DUMP/game.port" \
           "$DUMP"/mode.start "$DUMP"/mode[1-7].start "$DUMP/mode.stop" "$DUMP/mode.clip" \
-          "$DUMP/mode.log" "$DUMP"/*.assets "$DUMP/stock.cfg" "$DUMP/clips.cfg" "$MARK" 2>/dev/null
+          "$DUMP/mode.log" "$DUMP"/*.assets "$DUMP/stock.cfg" "$DUMP/clips.cfg" "$DUMP/sounds.cfg" "$DUMP/picture.cfg" "$DUMP/settings.cfg" "$DUMP/attract.cfg" "$DUMP/coop.cfg" "$DUMP/idle.cfg" "$DUMP/handicap.cfg" "$DUMP/comp.cfg" "$DUMP/cabshow.cfg" "$DUMP/scorefeed.cfg" "$DUMP/records.cfg" "$MARK" 2>/dev/null
     return 0
 }
 
@@ -147,6 +147,86 @@ if [ "$CLIPS" != 0 ]; then
     if [ "$N" = 0 ]; then WHAT="$CLIPS clip(s) that play one of several at random"
     else WHAT="$WHAT and $CLIPS clip(s) that play one of several at random"; fi
 fi
+# PAD-494: sounds.cfg (the music modes) is a reason of its own too
+SOUNDS=0
+[ -f "$S/sounds.cfg" ] && SOUNDS=$(grep -c "^sound	" "$S/sounds.cfg" 2>/dev/null)
+case "$SOUNDS" in ''|*[!0-9]*) SOUNDS=0 ;; esac
+if [ "$SOUNDS" != 0 ]; then
+    if [ "$N" = 0 ] && [ "$CLIPS" = 0 ]; then WHAT="music modes ($SOUNDS sound id(s))"
+    else WHAT="$WHAT and music modes ($SOUNDS sound id(s))"; fi
+fi
+# PAD-537: picture.cfg (the picture settings) is a reason of its own too
+PICTURE=0
+[ -f "$S/picture.cfg" ] && PICTURE=$(grep -c "^setting	" "$S/picture.cfg" 2>/dev/null)
+case "$PICTURE" in ''|*[!0-9]*) PICTURE=0 ;; esac
+if [ "$PICTURE" != 0 ]; then
+    if [ "$N" = 0 ] && [ "$CLIPS" = 0 ] && [ "$SOUNDS" = 0 ]; then WHAT="picture settings ($PICTURE)"
+    else WHAT="$WHAT and picture settings ($PICTURE)"; fi
+fi
+# PAD-782: attract.cfg (the owner's attract items) is a reason of its own too
+ATTRACT=0
+[ -f "$S/attract.cfg" ] && ATTRACT=$(grep -c "^item \|^champions off" "$S/attract.cfg" 2>/dev/null)
+case "$ATTRACT" in ''|*[!0-9]*) ATTRACT=0 ;; esac
+if [ "$ATTRACT" != 0 ]; then
+    if [ "$N" = 0 ] && [ "$CLIPS" = 0 ] && [ "$SOUNDS" = 0 ] && [ "$PICTURE" = 0 ]; then WHAT="attract items ($ATTRACT)"
+    else WHAT="$WHAT and attract items ($ATTRACT)"; fi
+fi
+# PAD-1017: coop.cfg (co-op play) is a reason of its own too
+COOP=0
+[ -f "$S/coop.cfg" ] && COOP=$(grep -c "^coop on" "$S/coop.cfg" 2>/dev/null)
+case "$COOP" in ''|*[!0-9]*) COOP=0 ;; esac
+if [ "$COOP" != 0 ]; then
+    if [ "$N" = 0 ] && [ "$CLIPS" = 0 ] && [ "$SOUNDS" = 0 ] && [ "$PICTURE" = 0 ] && [ "$ATTRACT" = 0 ]; then WHAT="co-op play"
+    else WHAT="$WHAT and co-op play"; fi
+fi
+# PAD-1022: idle.cfg (inactivity pausing the game's timers) is a reason of its own too
+IDLE=0
+[ -f "$S/idle.cfg" ] && IDLE=$(grep -c "^idle on" "$S/idle.cfg" 2>/dev/null)
+case "$IDLE" in ''|*[!0-9]*) IDLE=0 ;; esac
+if [ "$IDLE" != 0 ]; then
+    if [ "$N" = 0 ] && [ "$CLIPS" = 0 ] && [ "$SOUNDS" = 0 ] && [ "$PICTURE" = 0 ] && [ "$ATTRACT" = 0 ] && [ "$COOP" = 0 ]; then WHAT="inactivity pausing the timers"
+    else WHAT="$WHAT and inactivity pausing the timers"; fi
+fi
+# PAD-1033: handicap.cfg (a handicap for each player) is a reason of its own too
+HAND=0
+[ -f "$S/handicap.cfg" ] && HAND=$(grep -c "^handicap on" "$S/handicap.cfg" 2>/dev/null)
+case "$HAND" in ''|*[!0-9]*) HAND=0 ;; esac
+if [ "$HAND" != 0 ]; then
+    if [ "$N" = 0 ] && [ "$CLIPS" = 0 ] && [ "$SOUNDS" = 0 ] && [ "$PICTURE" = 0 ] && [ "$ATTRACT" = 0 ] && [ "$COOP" = 0 ] && [ "$IDLE" = 0 ]; then WHAT="handicaps"
+    else WHAT="$WHAT and handicaps"; fi
+fi
+# PAD-1040: cabshow.cfg (the card's expression light shows) is a reason of its own too
+CABS=0
+[ -f "$S/cabshow.cfg" ] && CABS=$(grep -c "^show " "$S/cabshow.cfg" 2>/dev/null)
+case "$CABS" in ''|*[!0-9]*) CABS=0 ;; esac
+if [ "$CABS" != 0 ]; then
+    if [ "$N" = 0 ] && [ "$CLIPS" = 0 ] && [ "$SOUNDS" = 0 ] && [ "$PICTURE" = 0 ] && [ "$ATTRACT" = 0 ] && [ "$COOP" = 0 ] && [ "$IDLE" = 0 ] && [ "$HAND" = 0 ]; then WHAT="expression light shows"
+    else WHAT="$WHAT and expression light shows"; fi
+fi
+# PAD-1041: comp.cfg (Prolonged Competition on the start menu) is a reason of its own too
+COMP=0
+[ -f "$S/comp.cfg" ] && COMP=$(grep -c "^comp on" "$S/comp.cfg" 2>/dev/null)
+case "$COMP" in ''|*[!0-9]*) COMP=0 ;; esac
+if [ "$COMP" != 0 ]; then
+    if [ "$N" = 0 ] && [ "$CLIPS" = 0 ] && [ "$SOUNDS" = 0 ] && [ "$PICTURE" = 0 ] && [ "$ATTRACT" = 0 ] && [ "$COOP" = 0 ] && [ "$IDLE" = 0 ] && [ "$HAND" = 0 ]; then WHAT="prolonged competition"
+    else WHAT="$WHAT and prolonged competition"; fi
+fi
+# PAD-1204: scorefeed.cfg (each game's final scores posted to the owner's server) is a reason of its own too
+FEED=0
+[ -f "$S/scorefeed.cfg" ] && FEED=$(grep -c "^feed " "$S/scorefeed.cfg" 2>/dev/null)
+case "$FEED" in ''|*[!0-9]*) FEED=0 ;; esac
+if [ "$FEED" != 0 ]; then
+    if [ "$N" = 0 ] && [ "$CLIPS" = 0 ] && [ "$SOUNDS" = 0 ] && [ "$PICTURE" = 0 ] && [ "$ATTRACT" = 0 ] && [ "$COOP" = 0 ] && [ "$IDLE" = 0 ] && [ "$HAND" = 0 ] && [ "$CABS" = 0 ] && [ "$COMP" = 0 ]; then WHAT="the score feed"
+    else WHAT="$WHAT and the score feed"; fi
+fi
+# PAD-1280: records.cfg (the owner's records on the game's high scores) is a reason of its own too
+REC=0
+[ -f "$S/records.cfg" ] && REC=$(grep -c "^rec " "$S/records.cfg" 2>/dev/null)
+case "$REC" in ''|*[!0-9]*) REC=0 ;; esac
+if [ "$REC" != 0 ]; then
+    if [ "$N" = 0 ] && [ "$CLIPS" = 0 ] && [ "$SOUNDS" = 0 ] && [ "$PICTURE" = 0 ] && [ "$ATTRACT" = 0 ] && [ "$COOP" = 0 ] && [ "$IDLE" = 0 ] && [ "$HAND" = 0 ] && [ "$CABS" = 0 ] && [ "$COMP" = 0 ] && [ "$FEED" = 0 ]; then WHAT="records on the high scores"
+    else WHAT="$WHAT and records on the high scores"; fi
+fi
 
 if ! python3 "$RIG/parts.py" --rootfs-file /etc/init.d/game_monitor "$CARD" 2>/dev/null \
         | grep -qF "$HOOK"; then
@@ -160,7 +240,7 @@ if [ -n "${PAD_MODE_SO:-}" ]; then
         "(PAD_MODE_SO=$PAD_MODE_SO): that one runs, the card's own modes are left out"
     exit 0
 fi
-if [ ! -f "$S/game.port" ] || { [ "$N" = 0 ] && [ "$CLIPS" = 0 ]; }; then
+if [ ! -f "$S/game.port" ] || { [ "$N" = 0 ] && [ "$CLIPS" = 0 ] && [ "$SOUNDS" = 0 ] && [ "$PICTURE" = 0 ] && [ "$ATTRACT" = 0 ] && [ "$COOP" = 0 ] && [ "$IDLE" = 0 ] && [ "$HAND" = 0 ] && [ "$CABS" = 0 ] && [ "$COMP" = 0 ] && [ "$FEED" = 0 ] && [ "$REC" = 0 ]; }; then
     forget
     say "$WHO carries a mode object but no $([ -f "$S/game.port" ] && echo "mode file" || echo "port file") beside it:"
     say "  nothing the emulator can run. This run boots without it"
@@ -182,7 +262,7 @@ fi
 if [ "$(id -u)" = 0 ]; then
     _o=$(stat -c %U "$PAD_HOME" 2>/dev/null)
     [ -n "$_o" ] && [ "$_o" != root ] && chown "$_o" "$ROOT$OBJECT" "$DUMP/game.port" \
-        "$DUMP"/mode.cfg "$DUMP"/mode[1-7].cfg "$DUMP"/*.assets "$DUMP"/stock.cfg "$DUMP"/clips.cfg "$MARK" 2>/dev/null
+        "$DUMP"/mode.cfg "$DUMP"/mode[1-7].cfg "$DUMP"/*.assets "$DUMP"/stock.cfg "$DUMP"/clips.cfg "$DUMP"/sounds.cfg "$DUMP"/picture.cfg "$DUMP"/settings.cfg "$DUMP"/attract.cfg "$DUMP"/coop.cfg "$DUMP"/idle.cfg "$DUMP"/handicap.cfg "$DUMP"/comp.cfg "$DUMP"/cabshow.cfg "$DUMP"/scorefeed.cfg "$DUMP"/records.cfg "$MARK" 2>/dev/null
 fi
 say "$WHO carries $WHAT: their runtime runs in this game, as on the machine"
 echo "$OBJECT"

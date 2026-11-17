@@ -211,6 +211,18 @@ site surface_find     0x004f9a50 0xe92d4070 0xe24dd008
 site surface_set_video 0x004f12e4 0xe5d03238 0xe92d4ff0
 site surface_play     0x004eea84 0xe5d03238 0xe92d43f0
 site surface_stop     0x004ee588 0xe5d03238 0xe92d40f0
+# PAD-725: the surface's own seek, length and position (PAD-530's, from Bond 1.06): a mode's clip the game's own
+# clip took the surface from comes back where it would be by then. Placed by the James Bond LE 1.06 recipe at
+# its distances from surface_play (+0x1bc / -0x1274 / -0x360: the older player), each proven by its call: the
+# player's virtual seek (+0x20), duration (+0x28) and position (+0x24), whose entries call gst_element_seek /
+# query_duration / query_position.
+site surface_seek     0x004eec40 0xe92d43f0 0xe1a07003
+site surface_duration 0x004ed810 0xe5d03238 0xe92d40f0
+site surface_position 0x004ee724 0xe5d03238 0xe92d40f0
+# PAD-725: the backdrop on the bank's surface, as Bond's (PAD-521): a mode's loop plays there again whenever it
+# is idle, and a clip the game loops there gets one pass before the loop takes it back. Emulator-proven on the
+# newest build of every title with a clip v2 bank, 2026-10-25.
+value backdrop_surface 1
 value surface_playing       2
 value scene_player_scene    0x10
 
@@ -470,3 +482,53 @@ site block_rule_10         0x001a1f68 0xe92d41f0 0xe1a06002  # cskill_shot::v[31
 text block_rule_name_10    Skill Shot
 site block_rule_11         0x001b3a30 0xe92d43f0 0xe1a04000  # cthe_child_rule::v[31]
 text block_rule_name_11    The Child
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+data  game_flags          0x006ba5cc
+value game_flags_at       4
+data  game_flag_count     0x005607dc
+value challenge_on_flag   16
+site  challenge_balls     0x001e26f4 0xe92d4030 0xe1a05000
+site  challenge_balls_2   0x0020b154 0xe92d4038 0xe1a04000
+site  challenge_extra_ball 0x002d27f0 0xe30a3600 0xe340306b
+# the start menu (CHOOSE YOUR MODE OF PLAY), applied live as an entry is shown: challenges of the modes' own - no kind of the game's makes a challenge game, so ours play as Standard (0) and the runtime hands the ball to the mode
+site  challenge_menu      0x00103900 0xe1a08000 0xe0823103
+site  challenge_menu_pick 0x00103908 0xe55390c8 0xe3590000
+value challenge_menu_pick_back 200
+value challenge_menu_list_at   584
+value challenge_menu_count_at  56
+value challenge_menu_cap       10
+value challenge_menu_entry     20
+value challenge_menu_kind      0
+value challenge_menu_slot      -1
+value challenge_menu_sets_on   1
+value challenge_menu_caption   1901
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x00356e20 0xe308285a 0xe3402076
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x00352e0c 0xe92d4010 0xe30b4894
+value ball_launch_flag       11
+value ball_launch_wait_flag  12
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x0021bb2c 0xe92d4ff0 0xe24dd0c4
+
+# PAD-710: the game's own mode framework (mode_framework.py, from this build's program): what one of its
+# modes writes as it starts and stops, so a mode of ours in one's place counts as it
+data  mode_player_at         0x0065e080
+value mode_slot_stop         41
+value mode_stopped_at        0x57
+value mode_starts_at         0x68
+value mode_wins_at           0x84
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x005246f4 0xe5d13000 0xe3530008
+data sw_listen             0x006b47bc
+data sw_boards             0x00744040
+site coil_used             0x003a1710 0xe92d43f8 0xe3088be8

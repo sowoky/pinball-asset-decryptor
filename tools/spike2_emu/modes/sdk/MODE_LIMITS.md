@@ -8,7 +8,7 @@ Stern's own modes are compiled into the game program, and the app doesn't rewrit
 
 - **Your modes:** wide open. Your own start, shots, scoring, screen, clips, sounds, music and lights.
 - **The game's modes:** you can change their numbers (timers, awards), not how they work.
-- **Everything else:** progression, settings, high scores and Insider Connected are off limits, and so are the coils, apart from a few Godzilla mechanisms a mode may hold for a moment.
+- **Everything else:** progression, settings, high scores and Insider Connected are off limits, and so are the game's coils, apart from the mechanisms a mode may hold for a moment. Hardware you add on inputs and outputs the game never uses is yours (spare switches and outputs).
 
 ## Quick answers
 
@@ -20,7 +20,9 @@ Stern's own modes are compiled into the game program, and the app doesn't rewrit
 | Start it on shots, a timer or a game event (ball start, skill shot, multiball...) | Yes. Events vary by game. |
 | Start it on a flipper or Action button | Godzilla only |
 | Start it after another of my modes | Yes, with "Only after" |
+| Start it when the player picks one of the game's battles | Godzilla: yes, in that battle's place. [Example 1](#1-add-mothra-to-godzillas-battle-selection) |
 | Start it when the player beats one of the game's battles | No. No game reports a win. |
+| Start it as one of the game's challenges (a Player Challenge game, one ball, picked as the game starts or set by Default Game Mode) | James Bond 007 LE / Pro 1.06 (Chaos at Crab Key, Ahoy Mr. Bond, Goldfinger's Jackpot, Duel on the Disco Volante, Her Majesty's Secret Service) and Stranger Things 1.13 / LE 1.12 / LE 1.13 (Demogorgon, Send It Back, Light the Fire, Final Showdown): yes, in that challenge's place, at the first ball. Mode > Starts on > a challenge game of, or the block When the player picks the challenge. A quick way to play a mode that is hard to reach. On James Bond the start menu also shows the mode's name, and a mode can be a new challenge of its own after the game's five (room for 2). A challenge game a mode played keeps the mode's own high score, entered under its name. The attract mode shows that champion after the game's own challenge champions. Other games' challenges are not a list a mode can join |
 | Run two of mine at once | No. One at a time. |
 | Take points away | Form modes only (a minus number under Points per shot) |
 | Give it sounds of its own | Yes, up to 16. Each rides on a game sound that never plays; the card has a fixed number of those (21 on Godzilla), shared by every mode on it. |
@@ -48,13 +50,15 @@ Stern's own modes are compiled into the game program, and the app doesn't rewrit
 | Hold the Mechagodzilla magnet or the bridge | Godzilla Premium/LE 1.16: up to 5 s, as it starts or on a shot |
 | Turn the shield targets toward the player | Godzilla Premium/LE 1.16: while the mode runs, then back where they were. Only while the game's modes can't start. Tested in the emulator so far |
 | Play one of the game's own light shows as it starts or ends | Godzilla Premium/LE 1.16: ten shows by name (flashy, subdued, accent), a few seconds each; none as the ball drains. Every build marked *light shows* in "Which games" below: up to twelve of its own, found by playing every show process of the game's in the emulator and named from what it lit; a Pro offers its LE's by the same names where they are the same show (Godzilla Pro has eight of the Premium/LE's). Tested in the emulator so far |
-| Start the game's own mini-wizard from a film (or any start) | James Bond LE 1.06: Chaos at Crab Key, Ahoy Mr. Bond, Goldfinger's Jackpot, Duel on the Disco Volante - lit for the Right ramp (the only one lit until it starts), or started at once or the moment the game would start one; the game's own lighting no longer lights one a mode hands out. The game's own mode runs, nothing of yours |
-| Move the building | Not yet |
+| Start the game's own mini-wizard from a film (or any start) | James Bond 007 LE / Pro 1.06: Chaos at Crab Key, Ahoy Mr. Bond, Goldfinger's Jackpot, Duel on the Disco Volante - lit for the Right ramp (the only one lit until it starts), or started at once or the moment the game would start one; the game's own lighting no longer lights one a mode hands out. The other games marked *mini-wizards* below (their own, by name: Godzilla's Monster Zero, King Kong's Crash the Gate, ...): started at once, or the moment none of the game's own modes is in the way, that ball; lit for the start shot only where the game lights it through a mode of its own (Star Wars' Lightsaber Duel, TMNT's Team-Up); Rush's Cygnus X-1 Books, when the ball is not in the Time Machine, wait for it to drain before their intro plays; Aerosmith's Medley Tour and Guardians' Cherry Bomb Multiball start only while none of the game's own songs or modes runs (the game's rule), so they wait for one to end or the next ball's launch; the game's own rules still start them too. One handed over never starts while another of the game's own mini-wizards runs. The Munsters, Star Wars Home and Bond 60th have none of their own. The game's own mode runs, nothing of yours |
+| Move the building | Godzilla Premium/LE 1.16: to one of the game's own floors (floor 3 is the furthest it ever goes), as the mode starts or on a shot, and back where it was when the mode ends. Only while the game's modes can't start. A ball hitting the building has the game move it back itself. Tested in the emulator so far |
 | Shake the cabinet | Every build marked *shaker* in "Which games" below, with a shaker fitted (an optional kit on most models, fitted on many LEs): as the mode starts, on a shot or as it ends - a shake of its own, at a strength the game itself uses and never longer than its own longest (Godzilla: up to 1 s hard, 5 s soft; most others one strength, 1 to 2 s), or one of the game's (Godzilla's jackpot shake, its multiball start; another game's short, medium or long shake). Tested in the emulator so far |
-| Fire a flipper, slingshot, pop bumper, kickback, lock, the trough or any other coil | No |
-| Add a switch or a shot | No. A mode sees the shots the game reports. |
+| Fire a flipper, slingshot, pop bumper, kickback, lock, the trough or any other coil of the game's | No |
+| Use a switch you added (wired to a node board input the game has no switch on) | Yes, as a shot of its own: Blocks' When a spare switch closes, or pm_spare_shot. Only an input nothing of the game's uses; anything else is refused. On the builds tested in the emulator |
+| Fire a coil, flasher or toy you added (wired to a driver output the game never fires) | Yes, one command at a time: Blocks' Drive a spare output, or pm_spare_drive. 48 V into wiring PAD has never seen, so the limits cannot be raised: only while the mode runs in a game, a pulse of at most 1 s, 5 s a command, on at most half of any 10 s, off when the mode, the ball or the game ends. An output the game uses is refused. On the builds tested in the emulator |
+| Add a switch or a shot of the game's | No. A mode sees the shots the game reports, and the spare switches you add. |
 | Change settings, audits or high scores from a mode | No. Settings are on the Defaults tab. |
-| Send scores to Insider Connected | No. Players can log in, but a card with modes sends no scores. |
+| Send scores to Insider Connected | No. Players can log in, but a card with modes sends no scores, and the game awards no Insider achievements. |
 | Write modes from a Mac, or straight to an SD card | No. Write an image file on Windows or Linux. |
 | Make modes for Spike 1, Spike 3 or another maker | No. Spike 2 only. |
 
@@ -64,21 +68,22 @@ Stern's own modes are compiled into the game program, and the app doesn't rewrit
 
 **No.** The screen has seven slots: Ebirah, Titanosaurus, Gigan, Megalon, King Ghidorah, Megalon & Gigan, King Ghidorah & Gigan. Seven is baked into the game's code in more than a dozen places, and the artwork has exactly seven pictures.
 
-**You can take over a slot instead.** Take Ebirah's, and:
+**You can take over a slot instead.** On the Mode page, set *Starts on* to *the player picking* Ebirah on the battle selection screen, and:
 
 - picking Ebirah starts your mode, 3 seconds later so the screen has closed. Ebirah's battle never runs.
 - the ramps stay dark until your mode ends, as in a real battle.
 - it counts toward the player's city, as the battle would.
-- the slot can show your picture and name (no longer than EBIRAH). The old callout is silenced, or replaced with yours.
+- the old callout is silenced.
+- the slot can show your picture and name: change them on the Scenes tab (Kaiju Battle Select), like any other screen.
 
 The catches:
 
-- **Not in the Modes tab yet.** It takes `roster_slot 0` in a mode file or one call in C, and `roster_entry.py` for the picture and name.
+- One mode per slot, and a slot the game shows as locked can't be picked until the player opens it.
 - The slot still shows Ebirah's 0/4 and never says Completed. Anything unlocked by finishing Ebirah may stay locked.
 - King of the Monsters still runs the real Ebirah.
 - A drain ends your mode. The game would have resumed its battle.
 - The operator menu, audits and champion still say Ebirah. Rename them on the Text tab.
-- Godzilla only.
+- Godzilla only (Pro and Premium/LE). Tested in the emulator so far.
 
 ### 2. "A Mothra mode of my own"
 
@@ -88,10 +93,10 @@ The catches:
 
 | | What a mode of yours can do |
 |---|---|
-| Start | a shot made N times, several shots in one ball (any order or in order), after another mode, a game event, a block |
+| Start | a shot made N times, several shots in one ball (any order or in order), after another mode, a game event, a battle picked on Godzilla's selection screen, a challenge game (Bond, Stranger Things), a block |
 | Score | any shot, with variables, conditions and timers for hurry-ups, combos, boss health or phases |
 | End | its clock, chosen shots, a block, a drain if ticked; always at game over or the next player |
-| Show | its own screen (a panel or your picture), full-screen clips, a countdown. On Godzilla, a HUD and clips behind the score. |
+| Show | its own screen (a panel or your picture), full-screen clips, a countdown. On Godzilla, a HUD and clips behind the score; on James Bond LE, a clip that loops in the TV and comes back after the others, its name and clock in the game's own bar under the TV, and its words alone over the video. |
 | Sound | its own sounds and callouts, and its own music in place of the game's |
 | Light | its scoring shots' inserts (solid, blink, pulse, chase, a blink that speeds up) and light shows |
 | Multiball | 2 to 6 balls, with a ball save |
@@ -135,7 +140,7 @@ The catches:
 
 - **A multiball of the game's is never stopped once it starts.** Balls may be sitting in a lock or on a magnet. With "cannot start" none can be lit or locked while yours runs, so it doesn't happen. If one was already on its way (a lock lit before yours began, a ball save), theirs starts and yours ends.
 - **One screen, one voice.** A clip of yours and one of the game's on the same shot replace each other. Your full-screen clips start half a second late so the game's doesn't win.
-- Some games can't tell which of their modes are running. There the option is greyed out, or your mode just gives way.
+- Some games can't tell which of their modes are running. There the option is grayed out, or your mode just gives way.
 - On some games a held-off start uses up whatever lit it.
 
 ## Why your mode always gives way
@@ -153,7 +158,7 @@ The few mechanisms a mode may hold (Godzilla's magnet and scoop, and on a Premiu
 - The scoop's kick-out is always the game's own.
 - The shield platform turns at most once every 1.5 s and 12 times a minute, never while one of the game's own modes or multiballs runs. It stays toward the player only while the game's own Mechagodzilla Shield feature isn't counting, because that feature turns it back. It turns back where it was when the mode ends, the ball drains, the player tilts or the game ends.
 
-- The shaker shakes only the way the game itself shakes it, so the operator's Shaker Motor setting always applies (off means nothing). One shake at a time, never over one of the game's own, never longer than the game's own longest at that strength, at most 20 shakes and 15 s of shaking a minute. It stops when the mode ends (except a shake as it ends, which runs out), the ball drains, the player tilts or the game ends.
+- The shaker shakes only the way the game itself shakes it, so the operator's Shaker Motor setting always applies (off means nothing). One shake at a time - a longer one takes over, a shorter one is skipped, as in the game - never over one of the game's own, never longer than the game's own longest at that strength, at most 30 s of the motor running a minute, the game's own shakes counted too (counted as it runs). It runs out when the mode ends, and stops when the ball drains, the player tilts or the game ends.
 
 All of it was tested on a real Godzilla Premium, except the shield and the shaker, so far tested only in the emulator.
 
@@ -163,84 +168,96 @@ Every build below has played modes in the emulator, and Godzilla Premium/LE 1.16
 
 | Game | Screen, clip, sounds | Countdown | Ball save | Lights | Also |
 |---|---|---|---|---|---|
-| Aerosmith 1.16 | ✓ | no | ✓ | shots | scoop, shaker, light shows |
-| Aerosmith LE 1.15 | ✓ | no | ✓ | all |  |
-| Aerosmith LE 1.16 | ✓ | no | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Avengers: Infinity Quest LE 1.09 | ✓ | ✓ | ✓ | all |  |
-| Avengers: Infinity Quest LE 1.10 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Avengers: Infinity Quest Pro 1.10 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows |
-| Batman 66 1.13 | ✓ | ✓ | ✓ | all |  |
-| Batman 66 1.14 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Deadpool LE 1.14 | ✓ | ✓ | not yet | all |  |
-| Deadpool LE 1.16 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Deadpool Pro 1.16 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Dungeons & Dragons LE 1.00 | ✓ | ✓ | ✓ | all |  |
-| Dungeons & Dragons LE 1.10 | ✓ | ✓ | ✓ | shots | magnet, scoop, mechanisms, light shows |
-| Dungeons & Dragons Pro 1.10 | ✓ | ✓ | ✓ | shots | magnet, scoop, mechanisms, shaker, light shows |
-| Elvira 1.13 | ✓ | no | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Foo Fighters LE 1.04 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows |
-| Foo Fighters Pro 1.04 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows |
-| Godzilla Premium/LE 1.16 | ✓ | ✓ | ✓ | shots | HUD, buttons, magnet, scoop, mechanisms, shield, shaker, light shows |
-| Godzilla Pro 1.15 | ✓ | ✓ | ✓ | shots | HUD, buttons, magnet, scoop |
-| Godzilla Pro 1.16 | ✓ | ✓ | ✓ | shots | HUD, buttons, magnet, scoop, shaker, light shows |
-| Guardians of the Galaxy 1.15 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Guardians of the Galaxy LE 1.14 | ✓ | ✓ | ✓ | all |  |
-| Guardians of the Galaxy LE 1.15 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Iron Maiden LE 1.16 | ✓ | ✓ | not yet | all |  |
-| Iron Maiden LE 1.18 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Iron Maiden Pro 1.18 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows |
-| James Bond 007 LE 1.06 | ✓ | ✓ | ✓ | shots | magnet, scoop, mechanisms, shaker, light shows, mini-wizards |
-| James Bond 007 Pro 1.06 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| James Bond 60th LE 1.11 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, light shows |
-| Jaws LE 1.02 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows |
-| Jaws Pro 1.02 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows |
-| John Wick LE 1.01 | ✓ | no | ✓ | all |  |
-| John Wick LE 1.02 | ✓ | no | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| John Wick Pro 1.02 | ✓ | no | ✓ | shots | scoop, shaker, light shows |
-| Jurassic Park LE 1.16 | ✓ | ✓ | ✓ | shots | magnet, mechanisms, shaker, light shows |
-| Jurassic Park Pin 1.05 | ✓ | ✓ | ✓ | shots | mechanisms, light shows |
-| Jurassic Park Pro 1.16 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows |
-| King Kong LE 0.97 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| King Kong Pro 0.97 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Led Zeppelin LE 1.22 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Led Zeppelin Pro 1.22 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Metallica Remastered 1.03 | ✓ | ✓ | ✓ | all |  |
-| Metallica Remastered 1.04 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Rush LE 1.18 | ✓ | ✓ | ✓ | all |  |
-| Rush LE 1.19 | ✓ | ✓ | ✓ | shots | magnet, scoop, mechanisms, shaker, light shows |
-| Rush Pro 1.19 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Star Wars ELG 1.10 | ✓ | ✓ | ✓ | shots | mechanisms, light shows |
-| Star Wars LE 1.30 | ✓ | ✓ | ✓ | all |  |
-| Star Wars LE 1.31 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Star Wars Pro 1.31 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Stranger Things 1.13 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Stranger Things LE 1.12 | ✓ | ✓ | ✓ | all |  |
-| Stranger Things LE 1.13 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Sword of Rage LE 1.18 | ✓ | ✓ | ✓ | all |  |
-| Sword of Rage LE 1.19 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Sword of Rage Pro 1.19 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| TMNT LE 1.59 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows |
-| TMNT Pro 1.58 | no | no | ✓ | no | never waits, no events |
-| TMNT Pro 1.59 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows |
-| The Beatles 1.29 | ✓ | ✓ | ✓ | shots | magnet, mechanisms, shaker, light shows, waits for multiballs only |
-| The Mandalorian LE 1.44 | ✓ | ✓ | ✓ | all |  |
-| The Mandalorian LE 1.45 | ✓ | ✓ | ✓ | shots | magnet, scoop, mechanisms, shaker, light shows |
-| The Mandalorian Pro 1.45 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| The Munsters LE 1.28 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| The Munsters Pro 1.28 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Uncanny X-Men LE 0.98 | ✓ | ✓ | ✓ | shots | magnet, mechanisms, shaker, light shows |
-| Uncanny X-Men Pro 0.98 | ✓ | ✓ | ✓ | shots | magnet, mechanisms, shaker, light shows |
-| Venom LE 1.07 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
-| Venom Pro 1.07 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows |
+| Aerosmith 1.16 | ✓ | no | ✓ | shots | scoop, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Aerosmith LE 1.15 | ✓ | no | ✓ | all | challenges, game mode places, starts on game modes completed |
+| Aerosmith LE 1.16 | ✓ | no | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Avengers: Infinity Quest LE 1.09 | ✓ | ✓ | ✓ | all | challenges, game mode places, starts on game modes completed |
+| Avengers: Infinity Quest LE 1.10 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Avengers: Infinity Quest Pro 1.10 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Batman 66 1.13 | ✓ | ✓ | ✓ | all | challenges, game mode places, starts on game modes completed |
+| Batman 66 1.14 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Deadpool LE 1.14 | ✓ | ✓ | ✓ | all | challenges, game mode places, starts on game modes completed |
+| Deadpool LE 1.16 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Deadpool Pro 1.16 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Dungeons & Dragons LE 1.00 | ✓ | ✓ | ✓ | all | starts on game modes completed |
+| Dungeons & Dragons LE 1.10 | ✓ | ✓ | ✓ | shots | magnet, scoop, mechanisms, shaker, light shows, mini-wizards, game mode places, starts on game modes completed |
+| Dungeons & Dragons Pro 1.10 | ✓ | ✓ | ✓ | shots | magnet, scoop, mechanisms, shaker, light shows, mini-wizards, game mode places, starts on game modes completed |
+| Elvira 1.13 | ✓ | no | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Fallout LE 0.82 (Spike 3) | no | no | ✓ | no | challenges, never waits |
+| Foo Fighters LE 1.04 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Foo Fighters Pro 1.04 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Godzilla Premium/LE 1.16 | ✓ | ✓ | ✓ | shots | HUD, buttons, magnet, scoop, mechanisms, shield, building, shaker, light shows, mini-wizards, battle slot, challenges, game mode places, starts on game modes completed |
+| Godzilla Pro 1.15 | ✓ | ✓ | ✓ | shots | HUD, buttons, magnet, scoop, battle slot, challenges, game mode places, starts on game modes completed |
+| Godzilla Pro 1.16 | ✓ | ✓ | ✓ | shots | HUD, buttons, magnet, scoop, shaker, light shows, mini-wizards, battle slot, challenges, game mode places, starts on game modes completed |
+| Guardians of the Galaxy 1.15 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Guardians of the Galaxy LE 1.14 | ✓ | ✓ | ✓ | all | challenges, game mode places, starts on game modes completed |
+| Guardians of the Galaxy LE 1.15 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Iron Maiden LE 1.16 | ✓ | ✓ | ✓ | all | challenges, game mode places, starts on game modes completed |
+| Iron Maiden LE 1.18 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Iron Maiden Pro 1.18 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| James Bond 007 LE 1.06 | ✓ | ✓ | ✓ | shots | magnet, scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| James Bond 007 Pro 1.06 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| James Bond 60th LE 1.11 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, light shows, game mode places |
+| Jaws LE 1.02 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Jaws Pro 1.02 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| John Wick LE 1.01 | ✓ | no | ✓ | all | challenges, game mode places, starts on game modes completed |
+| John Wick LE 1.02 | ✓ | no | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| John Wick Pro 1.02 | ✓ | no | ✓ | shots | scoop, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Jurassic Park LE 1.16 | ✓ | ✓ | ✓ | shots | magnet, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Jurassic Park Pin 1.05 | ✓ | ✓ | ✓ | shots | mechanisms, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Jurassic Park Pro 1.16 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| King Kong LE 0.97 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, game mode places, starts on game modes completed |
+| King Kong Pro 0.97 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, game mode places, starts on game modes completed |
+| Led Zeppelin LE 1.22 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Led Zeppelin Pro 1.22 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Metallica Remastered 1.03 | ✓ | ✓ | ✓ | all | challenges, game mode places, starts on game modes completed |
+| Metallica Remastered 1.04 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Pokemon LE 0.82 (Spike 3) | no | no | ✓ | no | challenges, never waits |
+| Rush LE 1.18 | ✓ | ✓ | ✓ | all | challenges, game mode places, starts on game modes completed |
+| Rush LE 1.19 | ✓ | ✓ | ✓ | shots | magnet, scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Rush Pro 1.19 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Star Wars 2025 LE 0.96 (Spike 3) | no | no | ✓ | no | challenges, never waits |
+| Star Wars 2025 Pro 0.84 (Spike 3) | no | no | ✓ | no | challenges, waits for multiballs only |
+| Star Wars ELG 1.10 | ✓ | ✓ | ✓ | shots | mechanisms, light shows, challenges, game mode places, starts on game modes completed |
+| Star Wars ELG 1.10 (Spike 3) | ✓ | ✓ | ✓ | shots | mechanisms, light shows, challenges, game mode places, starts on game modes completed |
+| Star Wars LE 1.30 | ✓ | ✓ | ✓ | all | challenges, game mode places, starts on game modes completed |
+| Star Wars LE 1.31 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Star Wars Pro 1.31 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Stranger Things 1.13 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Stranger Things LE 1.12 | ✓ | ✓ | ✓ | all | challenges, game mode places, starts on game modes completed |
+| Stranger Things LE 1.13 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Sword of Rage LE 1.18 | ✓ | ✓ | ✓ | all | challenges, game mode places, starts on game modes completed |
+| Sword of Rage LE 1.19 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Sword of Rage Pro 1.19 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| TMNT LE 1.59 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| TMNT Pro 1.58 | no | no | ✓ | no | challenges, game mode places, starts on game modes completed, never waits |
+| TMNT Pro 1.59 | ✓ | ✓ | ✓ | shots | mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| The Beatles 1.29 | ✓ | ✓ | ✓ | shots | magnet, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed, waits for multiballs only |
+| The Mandalorian LE 1.44 | ✓ | ✓ | ✓ | all | challenges, game mode places, starts on game modes completed |
+| The Mandalorian LE 1.45 | ✓ | ✓ | ✓ | shots | magnet, scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| The Mandalorian Pro 1.45 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| The Munsters LE 1.28 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, challenges, game mode places, starts on game modes completed |
+| The Munsters Pro 1.28 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, challenges, game mode places, starts on game modes completed |
+| Transformers LE 0.96 (Spike 3) | no | no | ✓ | no | challenges, never waits |
+| Uncanny X-Men LE 0.98 | ✓ | ✓ | ✓ | shots | magnet, mechanisms, shaker, light shows, mini-wizards, game mode places, starts on game modes completed |
+| Uncanny X-Men Pro 0.98 | ✓ | ✓ | ✓ | shots | magnet, mechanisms, shaker, light shows, mini-wizards, game mode places, starts on game modes completed |
+| Venom LE 1.07 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Venom Pro 1.07 | ✓ | ✓ | ✓ | shots | scoop, mechanisms, shaker, light shows, mini-wizards, challenges, game mode places, starts on game modes completed |
+| Walking Dead Remastered LE 0.92 (Spike 3) | no | no | ✓ | no | challenges, never waits |
 
 - **Countdown no:** the game's voice never says a number on its own.
-- **Ball save not yet:** found in the game, not yet seen working.
+- **When time is up:** the voice of The Beatles, Deadpool, Elvira, John Wick, Jurassic Park Pin, Led Zeppelin, Star Wars (LE, Pro and ELG), TMNT and Uncanny X-Men has no line saying the time is up, so the game's own call cannot end a mode there; a sound of your own can. The Beatles and Deadpool play every piece of their music themselves, so a mode cannot have music of its own there.
+- **No magnet:** Aerosmith, Avengers, Batman 66, Foo Fighters LE, King Kong, Led Zeppelin LE, The Munsters and Rush Pro use their magnet themselves at the shot it sits at, so a mode's hold there would always give way to the game's; Guardians of the Galaxy and TMNT use theirs only inside a feature of their own, and Sword of Rage's is the player's magna-save. Metallica Remastered has no magnet that catches the ball.
 - **Lights:** *shots* lights just the scoring shots' inserts; *all* holds every insert in the mode's colour.
 - **HUD:** counters, a timer and a gauge at the screen's edges, like Godzilla's own battles.
 - **Buttons:** the flipper and Action buttons count as shots.
 - **Magnet, scoop, mechanisms:** what a mode may hold for a moment: the magnet, a ball in the scoop, the Mechagodzilla magnet and the bridge.
 - **Shield:** a mode may turn the shield targets toward the player while it runs.
+- **Building:** a mode may move the building to one of the game's own floors.
 - **Shaker:** a mode may shake the cabinet (when the machine has a shaker fitted).
+- **Battle slot:** a mode may take one of the game's battles' places on its selection screen.
+- **Game mode places:** a mode may run in the place of one of the game's own modes, and the game counts it as that mode: its starts, its completions and what the game gives for them. A challenge that is one of the game's modes counts the same way.
+- **Starts on game modes completed:** a mode may start once the player has completed a number of the game's own modes in one game (you tick which ones count), like a mini-wizard after four of them or a bigger wizard after all of them.
 - **Never waits:** a mode can't be set to wait for the game's modes.
 - **Not listed?** Pick the card anyway. The app works out its hooks; press Check this game (about two minutes) before trusting them.
 
@@ -251,7 +268,7 @@ Every build below has played modes in the emulator, and Godzilla Premium/LE 1.16
 | Form modes | 64 per project (blocks and C modes not counted) |
 | Running at once | 1 |
 | Clock | up to 600 seconds (0 = no clock) |
-| Blocks mode | 48 scripts, 400 blocks, nested at most 10 deep |
+| Blocks mode | 48 scripts, 600 blocks, nested at most 10 deep |
 | Variables | 24 per mode, names up to 24 characters |
 | Timers | 8 per mode, up to 600 seconds each |
 | Numbers | whole numbers |
@@ -260,7 +277,7 @@ Every build below has played modes in the emulator, and Godzilla Premium/LE 1.16
 | HUD (Godzilla) | title, line or award 40 characters; 3 counters with 16-character labels; badge 12; gauge up to 12 pips |
 | Light show | 10 steps |
 | Multiball | 2 to 6 balls, ball save up to 60 seconds |
-| Clips | form mode: one at the start, one at the end. Blocks or C: 12. Up to 30 seconds each, any common video format, silent. |
+| Clips | form mode: one at the start, one at the end. Blocks or C: 32. Up to 30 seconds each, any common video format, silent. |
 | Pictures | up to 1360 x 768 (bigger is scaled down) |
 | Sounds | form mode: start, scoring shot, end and music. Blocks or C: 16. WAV only. |
 | Form end sound | one per card, from the first mode that has one |
@@ -269,9 +286,9 @@ Every build below has played modes in the emulator, and Godzilla Premium/LE 1.16
 ## Before you flash a real machine
 
 - It's a preview. Treat a card with modes as a test card and keep your stock image.
-- A card with modes never sends scores to Insider Connected.
+- A card with modes never sends scores to Insider Connected, and the game awards no Insider achievements.
 - Modes are built for one game version. After a Stern update, Write the card again: until then the modes don't run and the game plays stock.
 
 ## Asking for more
 
-Hit a wall that isn't here, or think one shouldn't be? Post in the preview channel with the game and version, what you wanted, and what happened. Some of these noes are "not yet" (the battle slot in the tab, for one). The ones that come from Stern's compiled code are much harder to move.
+Hit a wall that isn't here, or think one shouldn't be? Post in the preview channel with the game and version, what you wanted, and what happened. Some of these noes can move as the app learns more of a game. The ones that come from Stern's compiled code are much harder to move.

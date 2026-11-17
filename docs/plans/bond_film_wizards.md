@@ -78,6 +78,190 @@ once that part is in all six films, and the runtime gave back what the game had 
 left open above, is now the rule for any mini-wizard a mode hands out: the modes claim theirs as they load and the
 game's lighting (`site wizard_light`, vetoed) leaves a claimed one unlit; it still lights the unclaimed ones.
 
+## PAD-503: a mini-wizard of one's own, lit at the Right ramp
+
+The same owner made blocks modes of their own for the two films with none (DIAMOND DEATH THREAT on Diamonds Are
+Forever, one on You Only Live Twice): clips, sounds, scoring, started on `film_daf` / `film_yolt`. They started the
+moment the film was done; the owner wanted them as the game's four are, lit at the Right ramp with the film's villain insert
+lit, and started by the ramp. The game's own table has four entries and no room for more, so the lighting is the
+mode's own: a blocks statement, Light the mode at (`light_mode`: a shot, one more insert of the port's, a colour and
+a pattern), and a condition, the mode is lit (`block_modes.py` "LIT AT A SHOT").
+
+- Per player, kept ball after ball (the game's own stay lit until played); a new game drops it.
+- While it is lit and the mode is not running, the shot's inserts and the insert picked are held in its colour
+  (`pm_lamp_shot` / `pm_lamp_set`), held again each ball and for each player up, given back while a light show of
+  the mode's own paints.
+- That shot made starts the mode exactly as Start the mode does (`start("its lit shot", 1)`): with the game's
+  modes set to give way or held off, or waits out a multiball, it does not start while one of the game's own modes
+  or a multiball runs (Ahoy, say, started off the same ramp) and stays lit for the next one. Starting, however it
+  starts, puts the light out.
+- The inserts are every `lamp` line of the port (`TitleProfile.inserts`, on the builds in `LAMPS_PROVEN`): on Bond LE
+  the Right ramp's six are DR. NO-RIGHT RAMP, ROSA KLEBB, GOLDFINGER-RIGHT RAMP, LARGO, BLOFELD and MR. HENDERSON.
+  Which is which film's villain is the game's own pairing: its per-film lamp groups at `0x7cc220` (halfwords, 8 a
+  group, in film order) are the films (31 30 29 28 27 37), the Bond girls (61 62 78 79 80 81), the henchmen (59 66 60
+  67 68 69) and the villains (34 35 36 43 44 45), and its villain names run DrNo, RosaKlebb, Goldfinger, Largo,
+  Blofeld, Henderson in the same order as its henchmen (ProfDent ... Osato, KiddWint). So You Only Live Twice's is
+  BLOFELD and Diamonds Are Forever's is MR. HENDERSON.
+- The block's shot starts out at the port's `wizard_shot` (Bond: Right ramp exit opto, the ramp made).
+
+Proven on the desk harness (`tests/test_stern_block_modes.py`, run through PAD-Runtime's gcc): lit by an event, the
+shot and the insert blinking, held again after a drain, dark for player 2 and back for player 1, the shot starting it
+(and paying nothing itself, as any start shot), dark while it ran and not lit again after; with a battle running the
+shot left it lit ("still ready") and the next one after the battle started it; a new game put it out. The ARM build
+(build_mode.sh) of a Bond mode using it with a light show and a HUD is clean.
+
+Proven in the emulator (2026-10-10, PAD-Runtime rig 1, the stock James Bond LE 1.06 card, hidden, muted; C:/tmp/PAD-503
+proof.sh): DIAMOND DEATH THREAT as blocks (film_daf -> Light the mode at Right ramp exit opto + MR. HENDERSON, magenta,
+holding the game's modes off) with PAD-457's instruments. The Right ramp (switches 46, 48) before the film started
+nothing; PAD-428's instrument put Diamonds Are Forever's four parts through the game's own collect (`f5=1111/4*`) and
+16 ms later `lit at Right ramp exit opto for player 1`, the runtime holding the arrow and MR. HENDERSON. The shim's LED
+view (node 8 = I/O group 7 + 1) had MR. HENDERSON 0 -> 255 and the RIGHT RAMP ARROW [0,0,0] -> [255,0,255]. With game
+flag 139 set (one of the game's modes in the way) the ramp gave `not started (its lit shot) ... still ready` and the
+lights stayed; with it cleared the next ramp gave `START (its lit shot): player 1`, both inserts handed back (LED view
+0 / [0,0,0] again). No abort. A drain with the mode lit was proven on the desk harness only.
+
+Not done: two modes of one's own lit at the same shot, one of them lighting that shot again while it runs, leave the
+other's shot lights dark from that one's end to the next ball (its insert stays lit and the shot still starts it).
+
+### Round 2 (v1.169.0 in the owner's games): the light went out with the game's mode that lit it
+
+The owner, in the emulator: Diamonds Are Forever lit MR. HENDERSON while the mode that won its last part still ran, and
+once that mode was over the Right ramp was dark; then Mr Osato (You Only Live Twice's henchman) completed the film as it
+started, BLOFELD lit green, and when Mr Osato was over BLOFELD was off and the ramp started nothing. Two causes, both
+reproduced on the rig (PAD-Runtime rig 1, stock card, hidden, muted; C:/tmp/PAD-503 proof.sh / proof2.sh, the
+instrument rig/inwatch.c; the shipped blocks C against the fixed one, same steps):
+
+- **The game ends play at the end of its big modes, and the blocks read the next ball as a new game.** Every one of
+  Bond's multiballs and wizard modes ends with `0x3f79bc` (Dr. No, Disco Volante, Aston Martin, Little Nellie,
+  Powerpack, Helicopter, James Bond and Wizard mode multiballs, Ahoy Mr. Bond, Goldfinger's wizard): mode-mask bits
+  0x202, the same shutdown as its tilt, cleared only by its end of ball. `pm_in_game()` is 0 until the ball drains and
+  rises for the next ball, and the blocks C took any rise for a new game: the light, its "each game" values and its
+  timers were wiped. Rig, the game's own `0x3f79bc(0, 1)` with player 1 scored: shipped, the lights went at the end of
+  play, the mode said "still lit at the drain", and the next ball's rise wiped it (LED view dark, the ramp started
+  nothing); fixed, the lights came back with the next ball (arrow magenta, MR. HENDERSON 255) and the ramp gave
+  `START (its lit shot)`. A new game is now the SDK's witness (`new_game`: player 1's score back to 0, or
+  `pm_in_game()` rising while it is 0), as mode_file.c and the kit's `kit_new_game` have it.
+- **The ramp started the owner's mode in the middle of the game's own mode.** The game starts a mini-wizard only when
+  its check `0x110b90` says nothing of its own is in the way (its henchman, villain and Q Branch modes among them), and
+  the port's flags show none of those, so a Right ramp during Mr Osato started the lit mode (rig: runs 6 and 10,
+  shipped) - starting puts the light out, and the owner's mode ran under Mr Osato's screens. The ports now name the
+  check (`site wizard_way`, LE 0x110b90, Pro 0x10fbc4) and `pm_game_wizard_way()` answers it; the lit shot waits on it
+  whatever the mode's choice about the game's modes, and a start that waits for the game's modes waits on it too.
+  Rig, fixed: the game's Mr Osato (`0x123f84`) started (way check in the way), its film done lit the mode, a Right
+  ramp then gave `not started (its lit shot): one of the game's own modes is in its way - still lit`, Mr Osato ran out
+  its own clock (way check clear, play kept going with slingshots) and the arrow and BLOFELD stayed lit through it.
+
+The Right ramp's own handler (`0x1aee8c`) runs the game's modules before its mini-wizard start (`0x110d98`, last), and
+the Right ramp is where the game starts its henchman and villain modes: on the rig the first Right ramp of a fresh game
+started one (the check's `0x1360d4` 1 for some 88 s), and so did every later one there - the instrument collects a
+film's parts without playing their modes, so the rig's ramp never runs out of them. So a mode of the game's that the
+ramp starts goes first and the lit mode waits, lit, for the next ramp shot: the game's own precedence for its own
+mini-wizards. In a real game the film's own henchman and villain are played by the time it is done.
+
+### Round 3 (v1.169.3 in the owner's games): the ramp started a villain instead
+
+The owner, both modes: the film completed, the ramp lit, the film's last mode played out - and the Right ramp "just
+started a villain". Round 2's precedence in practice: the game handles a switch before the modes hear of it (the
+runtime's switch hooks only count a hit; the tick hands it on), and the Right ramp starts the selected film's next
+henchman or villain, so the lit mode found one running at every ramp. Now the lit mode CLAIMS its shot every tick while
+it would start there (`pm_lit_claim`: the player up's, not running, nothing of the game's in the way); the runtime's
+switch-edge hook, which runs as the drain hands the switch to the game, sees a hit on a claimed switch and holds off the
+game's mode starts (the PAD-363 veto, every one the port's `block_start` lines hook) while the game handles it; the lit
+mode starts on the tick. A refused henchman or villain is simply not started and the next ramp starts it; a refused
+mini-wizard of the game's stays lit (`wizard_refused`).
+
+Proven in the emulator (stock card, PAD-Runtime rig 1, hidden, muted; C:/tmp/PAD-503 run16, run17): You Only Live
+Twice's four parts lit the mode; the Right ramp gave `lit: the game's mode 24 (Fiona Volpe) did not start - switch 48 is
+YOLT WIZARD's lit shot` and `START (its lit shot)` 16 ms later, the game's check still clear. The owner's whole game:
+the game's Mr Osato running when the film completed (lit); a ramp mid-Osato `not started ... still lit`; Mr Osato ran
+out; the next ramp held off Under Water Fight and started the mode; it ran its 30 s out; the next ramp started the
+game's own mode as ever. No abort.
+
+## PAD-1026: the scoops count nothing under a mini-wizard of one's own
+
+The same owner: the game's four mini-wizards "suppress progress of DB5 (right scoop) and powerpack (left scoop)", and
+their own modes should too - "those 2 areas have videos that interrupt the new mini wizard mode videos". Read from
+the game program (LE 1.06): the right scoop is the Aston Martin VUK (its device handler `0x10f890` kicks with
+AD_ASTON_MARTIN_KICK_BACK_POWER; in the device table each record's handler word comes FIRST - `0x7d571c` is
+TROUGH's - so pairing it with the name before it reads every device one off) and its landing runs the DB5 countdown
+`0x6533c`; the left eject (`0x10fbfc`,
+AD_LEFT_EJECT_KICK_BACK_POWER, the port's `scoop_handler`) runs the Powerpack countdown `0x156568`. Each asks one
+check first - `0x651ec` (DB5: not `0x9f460` the multiballs, not `0x110b20` the mini-wizards, not `0x15f82c` a gadget
+lit, not `0x1d2978`) and `0x156424` (Powerpack, the same but the gadget) - and with 0 counts nothing, plays no clip
+and lights nothing; the Attache Case countdown `0xc6608` (a Right ramp shot) asks `0xc6410` the same way. The ports
+name the three checks as rules a blocking mode of ours refuses (MODE_SDK "A rule that asks first"); a mode keeps any
+of them counting with the Keep counting ticks.
+
+## PAD-521: the owner's own mini-wizards should LOOK like the game's own
+
+The same owner's list, for their YOLT and DAF modes: (1) villain inserts cycling while qualified and the film insert
+solid; (2) at the start, the name lettered over the splash; (3) a video cycling all through the mode; (4) its music;
+(5) a timer; (6) back to the cycling video after a shot's video; (7) a colour bar under it (green YOLT, blue DAF);
+(8) the name in that bar; (9) at the end, the total over a large image.
+
+What the game's own looks like (emulator, stock LE 1.06, rig 1, C:/tmp/PAD-521 run r2: `pm_game_wizard_named("Goldfinger's
+Jackpot", START)` on a fresh game): the INTRO clip in the TV frame with the name lettered into the clip itself; then the
+STATUS BAR under the TV, gold, "GOLDFINGER'S JACKPOT"; the BACKGROUND loop in the TV; a three-digit countdown at the lower
+left (090, 076...); an info line under the bar ("SUPER JACKPOT: 125,000"); at the drain the TOTAL clip (the vault) in the
+TV, the bar kept, "TOTAL 3,625,000" under the bar.
+
+Done:
+- (1) Light the mode at names several inserts (a Chase across them) and one more held solid (block_modes.py, 059f1f18).
+  PAD-556: the chase (and the shot's lights) wait while `pm_game_wizard_way()` is 0, as the game's own villains do: the
+  owner's Blofeld won YOLT and the villains roved through it. Only the solid film insert shows then. Emulator-proven on
+  the stock LE 1.06 (C:/tmp/PAD-556 run.sh, Mr Osato in the way): main held the chase at the lit, 86 s before Osato
+  ended; the branch held Y.O.L.T. alone and started the chase the tick the way check cleared.
+- (3)/(6) a clip "behind the HUD, over and over" loops in the TV and comes back after a one-shot, a full-screen clip
+  or a clip of the game's: the runtime's backdrop on the bank's surface, `value backdrop_surface 1` (a395dd56; MODE_SDK
+  "The backdrop on a clip v2 build"). Emulator-proven with the game's own clips (run r1).
+- (4) was already there: the mode's own Music... (program `music`), started with the mode.
+
+Done in run 2 (all nine now):
+- (5)/(7)/(8) `pm_status_bar` (MODE_SDK "The game's status bar") and a blocks mode's "its name in the game's bar": its
+  name in the bar under the TV in its colour, the clock as the wipe (the game's own modes show their clock this way;
+  Goldfinger's three-digit countdown is that mode's own bomb counter, not a general timer), full through its total.
+- (2)/(9) a mode's own screen "as words over the video" (`screen_style` words): its name large and white over its intro
+  for 4 s, a Words block's line for 3 s, its TOTAL over its end clip for 3 s. PAD-574: the TOTAL now as the game's own modes end:
+  two screens of its own (`PadMode_<slug>_TotalName` / `_Total`, built blank at the port's `info_line_at` + 12 / + 55 px,
+  the word at 0.9 and the number at 2.8, measured off the game's own TOTAL), "TOTAL" over the number under the bar for
+  3 s, its words screen hidden; an Award block with no HUD shows on its words screen, and an End the mode after one
+  waits out that Award (and one Award of When the mode ends after it) before the TOTAL. The game's own TOTAL is a blocking end
+  sequence that draws its own frames (Goldfinger 0xc0b50: the score display, the total scene 16d675aa, a frame, until
+  done), which a mode cannot borrow.
+- PAD-709: a scored number (a Words or Award block with a value) while a words-alone mode runs goes large under the
+  bar (`PadMode_<slug>_Points`, info_line_at + 110 px, 5x), the info line hidden meanwhile, not over the TV; laid out
+  in the Scenes editor as `points_layout`.
+- The loop takes the TV at once when asked or after a full-screen clip of the mode's, and back from the game's
+  main-play video (`text backdrop_idle MainPlayLoop`).
+- End to end in the emulator (runs e2-e6, and m1 with main's code for the before): the artifacts' emulator_yolt pair.
+
+What the game program says (kept for the next Bond ticket):
+
+- THE STATUS BAR (7, 8, and the timer as the bar's progress). Scene `hud` (6fb39344/7de1c159) IS the bar:
+  `StatusBarBg_Instance`, `StatusBar_Instance` { `bar_Color_Instance`, `NoProgress_Instance`, `Progress_Instance`
+  (a wipe), `Text_Instance`, `Bar_Overlay_Instance` }, at 218,449. Its owner is the score display object, a singleton:
+  getter `0x1862dc` (object at *(0x81e8f8 + 0x18), 0x128 bytes, built by `0x185e58`, nodes found by `0x183e60`:
+  +0x104 StatusBar, +0x108 StatusBarBg, +0x10c Progress, +0x110 NoProgress, +0x114 bar_Color, +0x118 Text). Its frame
+  update `0x1872b4` shows them from bytes: +0x11e bar, +0x11f text, +0x120 colour, +0x121 progress (NoProgress = !it),
+  +0x11c the progress frame (gotoFrame(+0x11c + 1), 0..100). Setters: text by MESSAGE ID `0x184834(obj, id)` (thunk
+  `0x184984`; it calls `0x38c6cc(id)` for the words, then the text node's set `0x566754`), colour by PALETTE INDEX
+  `0x184904(obj, idx)` (thunk `0x184988`; palette `0x164200`: 20 entries of 3 bytes at 0x62f6d4 + 0x3c, /255; then the
+  bar_Color node's vfn +0x4c and +0x44, each (node, r, g, b, 1.0f) in s0-s3 - so ANY rgb works the same way), progress
+  `0x18498c(obj, frame)` (strb +0x11c). The game's own "show" `0x18634c(text id, colour idx)`: bar 1, text, colour, text 1,
+  colour 1, progress 0. Goldfinger's wizard `0xbf2b8`: the same with progress 1 (id 0xd89, colour 9), then `0xbf308`
+  sets the frame from its clock (percent), 100 at its start (`0xc041c`).
+  Plan: runtime `pm_status_bar(const char *words, unsigned rgb, int percent)` (-1 = no progress; words NULL = hide and
+  give back the bytes it found), port `site status_bar 0x1862dc` + values for the offsets; the words through the
+  runtime's own set-text on the node at +0x118; the colour through the two vfns. Blocks: a program `bar`
+  {on, color} (the mode's name, the clock as its progress) shown while it runs and through its total.
+- THE COUNTDOWN DIGITS (5): `Timer_Instance.Digit_1/2` referenced at 0xdcc9c / 0xdcd2c (a timer element of the game's;
+  who owns it and how a mode raises it is not read yet). The bar's progress alone may do.
+- THE NAME OVER THE SPLASH (2) and THE TOTAL (9): the game letters the name into its intro clips, and shows its total in
+  scene 6fb39344/65222d79/16d675aa (`Sprite1.Text2`, found by `0x582a28`) over its `<MODE>_Total` clip
+  (`0x1ce1ec(*0x8185c8, &name, 0, 1)`, Goldfinger `0xc09c4`). For a mode of one's own: the TOTAL in that scene's text
+  under the bar, over the mode's own total clip/picture in the TV; the name in large letters over the TV for the intro
+  (a words-only screen of the mode's, or that same total scene's text) - check the HUD scene draws over the bank surface.
+
 The plan as it was written (PAD-428):
 
 What the user asked first: the game's mini-wizard (its own mode, music and screens) lit

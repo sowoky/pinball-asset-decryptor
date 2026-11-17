@@ -8,6 +8,9 @@
 # directory under games/ holding its own `game` ELF and assets. Which one boots
 # is decided here and nowhere else.
 . "$(dirname "$0")/padpath.sh"
+# Started by hand in a container without SYS_ADMIN (watch.sh has already done
+# this for its own runs): the card mounts in this run's user namespace.
+pad_card_ns "$0" "$@" || exit 1
 R=$ROOT
 S=$RIG
 
@@ -24,6 +27,30 @@ S=$RIG
 # never put under games/, a working copy, a network share. Same bind mount, one
 # fewer step. Both take a title that is not in the rootfs and put it there for
 # the length of the run without copying it.
+# ★ PAD-1279: A PAD TEST CARD'S MENU IS THE CARD'S OWN, AS IT IS. There are no
+# games trees to resolve and none to boot: the selector reads testcard=on and
+# stays in its TEST CARD menu, showing the files under test_dir=/games/testcard -
+# which is this run's title bind (cardmount.sh answers <p3>/testcard as the title
+# of a test card, watch.sh exports PAD_TESTCARD=1). So the card's images.conf goes
+# over verbatim but for media= and font= (paths on the card's rootfs, handed over
+# with --media exactly as for any card), with its media, and SEL_DIRS names the
+# one bind that is already in place. Called from the selector block below.
+sel_testcard() {
+    python3 "$S/parts.py" --rootfs-file /usr/local/codeselect/images.conf "$PAD_CARD" 2>/dev/null \
+        | tr -d '\r' | grep -vE '^[[:space:]]*(media|font)[[:space:]]*=' > "$R/dump/codeselect.conf"
+    : > "$R/dump/codeselect.cardidx"
+    rm -rf "$R/dump/media" 2>/dev/null
+    python3 "$S/parts.py" --rootfs-dir /usr/local/codeselect/media "$R/dump" "$PAD_CARD" >/dev/null 2>&1
+    if [ "$(id -u)" = 0 ] && [ -d "$R/dump/media" ]; then
+        local o
+        o=$(stat -c %U "$PAD_HOME" 2>/dev/null)
+        [ -n "$o" ] && [ "$o" != root ] && chown -R "$o" "$R/dump/media" 2>/dev/null
+    fi
+    SEL_N=1
+    SEL_DIRS="testcard"$'\t'"$CARD_SRC"$'\n'
+    echo "[select] a PAD test card: its own menu, $(grep -cE '^[[:space:]]*test_(image|video|scene|sound)[[:space:]]*=' "$R/dump/codeselect.conf") file(s) of its own in /games/testcard, $( [ -d "$R/dump/media" ] && ls "$R/dump/media" | wc -l || echo 0) media file(s)"
+}
+
 CARD_SRC=""
 if [ -n "${PAD_CARD:-}" ]; then
     CARD_SRC=$(bash "$S/cardmount.sh" "$PAD_CARD" | tail -1)
@@ -120,6 +147,13 @@ if [ -n "${PAD_CARD:-}" ]; then
         }
         [ -x "$PAD_SELECT_BIN" ] \
             || sel_giveup "the boot selector is not built ($PAD_SELECT_BIN is missing)"
+        # PAD-1279: a test card's menu is the card's own (sel_testcard, above);
+        # SEL_GIVEUP=1 then only skips the multi-boot steps - SEL_DIRS stays set,
+        # so the selector below still runs.
+        if [ -z "$SEL_GIVEUP" ] && [ "${PAD_TESTCARD:-}" = 1 ]; then
+            sel_testcard
+            SEL_GIVEUP=1
+        fi
         if [ -z "$SEL_GIVEUP" ]; then
             SEL_LIST=$(python3 "$S/parts.py" --list-games "$PAD_CARD" 2>/dev/null)
             [ -n "$SEL_LIST" ] \
@@ -288,29 +322,34 @@ if [ -n "${PAD_CARD:-}" ]; then
             # ...and counter= / countdown_word= / footer= (PAD-190), same reason:
             # a card whose counter line is off and whose countdown says
             # 'Launching' must preview as that card, not as the default menu.
-            printf '%s\n' "$SEL_CARDCONF" | grep -E '^[[:space:]]*(sound_move|sound_confirm|volume|machine_volume|mixer_volume|heading|text_size|counter|countdown_word|footer|theme|settings|color_[a-z_]+)[[:space:]]*=' \
+            printf '%s\n' "$SEL_CARDCONF" | grep -E '^[[:space:]]*(sound_move|sound_confirm|volume|machine_volume|mixer_volume|heading|text_size|counter|countdown_word|footer|theme|settings|back_hold|color_[a-z_]+)[[:space:]]*=' \
                 | grep -vE '^[[:space:]]*color_profile[[:space:]]*=' || true
             # ★ PAD-307: EACH IMAGE'S BUILT COLOR PROFILE, the lines that put the SETTINGS tile
             # in the menu. They name IMAGE INDEXES, so they ride on the group lines' gate: only
             # when the card's image lines and what resolved here are the same count, or a line
             # would name another build.
+            # ★ PAD-495: edition= (no menu; the game's EDITION setting picks an
+            # image by its index) rides on the same gate, for the same reason.
             if [ "$(printf '%s\n' "$SEL_CARDCONF" | grep -cE '^[[:space:]]*image[[:space:]]*=')" = "$SEL_N" ]; then
-                printf '%s\n' "$SEL_CARDCONF" | grep -E '^[[:space:]]*color_profile[[:space:]]*=' || true
-            elif printf '%s\n' "$SEL_CARDCONF" | grep -qE '^[[:space:]]*color_profile[[:space:]]*='; then
-                echo "[select] the card's color_profile line(s) are DROPPED: its image indexes do not line up with what resolved here" >&2
+                printf '%s\n' "$SEL_CARDCONF" | grep -E '^[[:space:]]*(color_profile|edition)[[:space:]]*=' || true
+            elif printf '%s\n' "$SEL_CARDCONF" | grep -qE '^[[:space:]]*(color_profile|edition)[[:space:]]*='; then
+                echo "[select] the card's color_profile / edition line(s) are DROPPED: its image indexes do not line up with what resolved here" >&2
             fi
         } > "$R/dump/codeselect.conf"
         # ★ PAD-226: THE CARD'S OWN INDEX FOR EACH DEVICE, and the store name its
         # scores= line gives it. The menu above counts the trees it found; the
         # card's per-image modes (modes/img<N>) and scores= lines count the
-        # card's images.conf lines. `<token><TAB><card index><TAB><scores name>`.
+        # card's images.conf lines. `<token><TAB><card index><TAB><scores name>
+        # <TAB><hiscores group>` (PAD-1194: the high-score table, apart from the store).
         printf '%s\n' "$SEL_CARDCONF" | awk -F'|' '
             /^[ \t]*image[ \t]*=/ { d = $1; sub(/^[ \t]*image[ \t]*=[ \t]*/, "", d)
                                     gsub(/[ \t]+$/, "", d); sub(/^\/dev\/mmcblk0/, "", d)
                                     dev[n++] = d }
             /^[ \t]*scores[ \t]*=/ { i = $1; sub(/^[ \t]*scores[ \t]*=[ \t]*/, "", i); gsub(/[ \t]/, "", i)
                                      nm = $2; gsub(/^[ \t]+|[ \t]+$/, "", nm); sc[i] = nm }
-            END { for (k = 0; k < n; k++) printf "%s\t%d\t%s\n", dev[k], k, sc[k] }' \
+            /^[ \t]*hiscores[ \t]*=/ { i = $1; sub(/^[ \t]*hiscores[ \t]*=[ \t]*/, "", i); gsub(/[ \t]/, "", i)
+                                       nm = $2; gsub(/^[ \t]+|[ \t]+$/, "", nm); hs[i] = nm }
+            END { for (k = 0; k < n; k++) printf "%s\t%d\t%s\t%s\n", dev[k], k, sc[k], hs[k] }' \
             > "$R/dump/codeselect.cardidx"
         echo "[select] menu: $SEL_N images; default $SEL_DEFAULT; auto-boot after $SEL_TIMEOUT s"
         # THE MEDIA (item 90 v2): the card's /usr/local/codeselect/media,
@@ -422,6 +461,12 @@ fi
 _cardmode_so=$(bash "$S/modes/cardmodes.sh" "${PAD_CARD:-}" | tail -1)
 [ -n "$_cardmode_so" ] && export PAD_MODE_SO="$_cardmode_so"
 unset _cardmode_so
+# PAD-1071: the Emulate tab's Sound and video log (PAD_SOUNDLOG=1): /dump/soundlog.on for the
+# runtime, and - for a boot with no runtime of its own - the tab's stage that hooks the sound worker
+# and nothing else (modes/soundlog.sh has the rules). Asked again after the menu below picks an image.
+_soundlog_so=$(bash "$S/modes/soundlog.sh" | tail -1)
+[ -n "$_soundlog_so" ] && export PAD_MODE_SO="$_soundlog_so"
+unset _soundlog_so
 
 # THE SHIM NEEDS THE TITLE BY NAME, not just the directory it is told to run
 # from, and until 2026-08-23 a CARD run never gave it one.
@@ -840,6 +885,12 @@ if [ -n "$SEL_DIRS" ]; then
             echo "[select]   the primary." >&2
             exit "$SEL_RC" ;;
     esac
+    # PAD-1279: a test card has no game to fall back to; its menu ending (it
+    # only does by a fault) is the end of the run.
+    if [ "${PAD_TESTCARD:-}" = 1 ]; then
+        echo "[select] the test card menu ended (exit $SEL_RC); a test card boots no game" >&2
+        exit "$SEL_RC"
+    fi
     SEL_CHOICE=$(head -1 "$R$PAD_SELECT_CHOICE" 2>/dev/null | tr -dc '0-9')
     SEL_DIR=""; SEL_IDX=""; SEL_PRIMARY_DIR=""; n=0
     while IFS=$'\t' read -r idx d; do
@@ -889,16 +940,35 @@ if [ -n "$SEL_DIRS" ]; then
     fi
     # ★ PAD-226: WHAT BELONGS TO THE IMAGE THAT BOOTS, as the card's select.sh
     # binds it on the machine, keyed by the CARD's index for the chosen device.
-    SEL_CARDIDX=""; SEL_SCORES=""
+    SEL_CARDIDX=""; SEL_SCORES=""; SEL_HISCORES=""
     if [ "$SEL_RC" = 0 ] && [ -n "$SEL_DIR" ] && [ -f "$R/dump/codeselect.cardidx" ]; then
-        IFS=$'\t' read -r _tok SEL_CARDIDX SEL_SCORES \
+        IFS=$'\t' read -r _tok SEL_CARDIDX SEL_SCORES SEL_HISCORES \
             < <(awk -F'\t' -v t="$SEL_IDX" '$1 == t' "$R/dump/codeselect.cardidx" | head -1)
+    fi
+    # ★ PAD-1194: HIGH SCORES APART FROM SETTINGS, as the card's select.sh hands them over.
+    # BEFORE the store is bound: the table of the store that booted this title last goes to
+    # that boot's group (data/nv.hs/<group>/<title>); after it, the group's table goes into
+    # the bound store as a new LKRAM generation (the same codeselect, chroot'd, as on the
+    # machine). data/nv.hs/last.<title> = '<group>|<store as the guest spells it>'.
+    _hs_title=$(basename "${SEL_DIR:-$GAME}"); _hs_own=""
+    _hs_sel() { chroot "$R" /usr/local/codeselect/codeselect "$@" </dev/null 2>/dev/null | head -1 | sed 's/^\[select\] //'; }
+    if [ -n "$SEL_CARDIDX" ] && [ -f "$R/data/nv.hs/last.$_hs_title" ]; then
+        IFS='|' read -r _hg _hp < "$R/data/nv.hs/last.$_hs_title"
+        case "$_hg" in ""|.*|*/*|*[!A-Za-z0-9._-]*) _hp="" ;; esac
+        case "$_hp" in "/data/nv/$_hs_title"|/data/nv.own/*/"$_hs_title") ;; *) _hp="" ;; esac
+        case "$_hp" in */../*) _hp="" ;; esac
+        if [ -n "$_hp" ] && [ -d "$R$_hp" ]; then
+            mkdir -p "$R/data/nv.hs/$_hg"
+            echo "[select] image $SEL_CARDIDX: $(_hs_sel --scores-save --store "$_hp" --to "/data/nv.hs/$_hg/$_hs_title") (group $_hg)"
+        fi
     fi
     # ITS OWN CUSTOM MODES: image N's set (or none) instead of the primary's -
     # only when the modes were the card's to decide (nothing the launch brought)
     if [ -n "$SEL_CARDIDX" ] && [ "$SEL_CARDIDX" != 0 ] \
             && [ "${PAD_CARDMODES_OWN:-}" = 1 ] && [ -n "${PAD_CARD:-}" ]; then
         PAD_MODE_SO=$(PAD_MODE_SO= PAD_CARD_IMAGE="$SEL_CARDIDX" bash "$S/modes/cardmodes.sh" "$PAD_CARD" | tail -1)
+        _soundlog_so=$(bash "$S/modes/soundlog.sh" | tail -1)    # PAD-1071: and the sound log's
+        [ -n "$_soundlog_so" ] && PAD_MODE_SO="$_soundlog_so"
         export PAD_MODE_SO
     fi
     # ITS OWN HIGH SCORES: scores=<N>|<name> gives image N its own machine store,
@@ -927,11 +997,29 @@ if [ -n "$SEL_DIRS" ]; then
                 [ -n "$_o" ] && [ -z "$(ls -A "$_store" 2>/dev/null)" ] && chown "$_o" "$_store" 2>/dev/null
             fi
             if [ -d "$_store" ] && mount --bind "$_store" "$R/data/nv/$_title"; then
+                _hs_own="/data/nv.own/$SEL_SCORES/$_title"
                 echo "[select] image $SEL_CARDIDX keeps its own high scores: data/nv.own/$SEL_SCORES/$_title bound over data/nv/$_title"
             else
                 echo "[select] image $SEL_CARDIDX: its own machine store could not be bound; it shares the title's" >&2
             fi ;;
     esac
+    # ★ PAD-1194 (above): the group's table into the store that boots, and this boot remembered
+    if [ -n "$SEL_CARDIDX" ]; then
+        case "$SEL_HISCORES" in
+            "") rm -f "$R/data/nv.hs/last.$_hs_title" ;;
+            .*|*/*|*[!A-Za-z0-9._-]*)
+                echo "[select] image $SEL_CARDIDX: bad hiscores group '$SEL_HISCORES': it keeps the table it has" >&2 ;;
+            *)
+                mkdir -p "$R/data/nv.hs"
+                echo "[select] image $SEL_CARDIDX: $(_hs_sel --scores-load --from "/data/nv.hs/$SEL_HISCORES/$_hs_title" --store "/data/nv/$_hs_title") (group $SEL_HISCORES)"
+                echo "$SEL_HISCORES|${_hs_own:-/data/nv/$_hs_title}" > "$R/data/nv.hs/last.$_hs_title"
+                # ROOT IS ELEVATION, NOT OWNERSHIP (PAD-182), as for the stores above
+                if [ "$(id -u)" = 0 ]; then
+                    _o=$(stat -c %u:%g "$R/data" 2>/dev/null)
+                    [ -n "$_o" ] && chown -R "$_o" "$R/data/nv.hs" 2>/dev/null
+                fi ;;
+        esac
+    fi
     # ★ PAD-307: THE COLOR CORRECTION SET ON THIS MACHINE, as the card's select.sh applies it on
     # the machine. The menu's Settings > Color correction keeps the operator's numbers per image
     # in /data/codeselect.color ($R/data persists across runs here); when the image that boots
@@ -963,6 +1051,25 @@ if [ -n "$SEL_DIRS" ]; then
             [ "$_crc" = 0 ] && echo "[select] image $SEL_COLIDX: the corrected copy could not be bound: its colors are as built" >&2
         fi
     fi
+fi
+
+# ★ PAD-1309 - HOLD BACK TO COME BACK TO THE MENU, AS THE CARD DOES. A multi-boot
+# card's game_monitor preloads /usr/local/codeselect/padmenu.so into the game
+# (modehook.MENU_HOOK_LINES); this rig execs ./game itself, so it puts the same
+# object in front here, ahead of the shim (which answers the cabinet SPI word
+# padmenu.so reads). Holding BACK (the coin door's, on the playfield's service
+# keys) for the card's back_hold= seconds (3 s unless set) then runs the card's own select.sh --reboot, and the reboot it
+# asks for is this rig's: dump/reboot.req, which watch.sh's poll turns into a
+# boot of the guest from the menu (restartgame.sh's path). PAD_MENU_BACK=0
+# leaves it out.
+PAD_MENU_SO=
+if [ -n "$SEL_DIRS" ] && [ "${PAD_MENU_BACK:-1}" != 0 ] && [ -f "$R/usr/local/codeselect/padmenu.so" ]; then
+    PAD_MENU_SO=/usr/local/codeselect/padmenu.so
+    # padmenu.restart: what asked for it, kept (reboot.req is taken the moment it lands)
+    export CODESELECT_REBOOT="touch /dump/padmenu.restart /dump/reboot.req"
+    # the card's own Hold BACK seconds (back_hold=): the rig's copy of its images.conf
+    export PADMENU_CONF=/dump/codeselect.conf
+    echo "[select] holding BACK on the coin door (the card's back_hold=, else 3 s) restarts into the menu, as on the card"
 fi
 
 # ★ ITEM 45 - THIS TITLE'S PANEL IS BOLTED IN UPSIDE DOWN AND OUR MONITOR IS NOT.
@@ -1190,7 +1297,7 @@ if [ -n "$PIVOT" ]; then
         cd /
         /busybox umount -l /oldroot
         cd "/games/$GAME" || exit 1
-        export LD_PRELOAD=${PAD_TRACE_SO:+$PAD_TRACE_SO:}${PAD_MODE_SO:+$PAD_MODE_SO:}/lib/hwshim.so PAD_AUDIO_OUT=/dump/audio.raw PAD_SEGV_REPORT=${PAD_SEGV_REPORT:-1}
+        export LD_PRELOAD=${PAD_TRACE_SO:+$PAD_TRACE_SO:}${PAD_MENU_SO:+$PAD_MENU_SO:}${PAD_MODE_SO:+$PAD_MODE_SO:}/lib/hwshim.so PAD_AUDIO_OUT=/dump/audio.raw PAD_SEGV_REPORT=${PAD_SEGV_REPORT:-1}
         # stdio has to point INSIDE the container. The caller's stdout is a file
         # on a host mount ($HOME/gzwatch.log for watch.sh), and that mount leaves
         # the namespace with the pivot - criu then refuses fd 1 ("Can't lookup
@@ -1218,5 +1325,5 @@ fi
 # LD_PRELOAD is applied to the game alone: the busybox tools in this rootfs do
 # not link libdl and fail to start with the shim forced on them.
 exec chroot "$R" /bin/sh -c \
-  "cd /games/$GAME && LD_PRELOAD=${PAD_TRACE_SO:+$PAD_TRACE_SO:}${PAD_MODE_SO:+$PAD_MODE_SO:}/lib/hwshim.so PAD_AUDIO_OUT=/dump/audio.raw PAD_SEGV_REPORT=${PAD_SEGV_REPORT:-1} exec ./game"
+  "cd /games/$GAME && LD_PRELOAD=${PAD_TRACE_SO:+$PAD_TRACE_SO:}${PAD_MENU_SO:+$PAD_MENU_SO:}${PAD_MODE_SO:+$PAD_MODE_SO:}/lib/hwshim.so PAD_AUDIO_OUT=/dump/audio.raw PAD_SEGV_REPORT=${PAD_SEGV_REPORT:-1} exec ./game"
 INNER

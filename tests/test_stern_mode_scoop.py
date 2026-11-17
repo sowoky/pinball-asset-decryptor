@@ -68,9 +68,35 @@ def test_the_game_holds_first_and_the_mode_after():
     body = wrap[wrap.index("{"):]
     assert body.index("scoop.orig(ev, a1, a2, a3)") < body.index("e != scoop.event")
     assert "return r;" in body                              # the game's own answer, unchanged
-    loop = body[body.index("while ("):body.index('fn("proc_sleep"))(1);')]
-    for cond in ("!scoop.release", "scoop.hold_ms", "running", "pm_in_game()", "pm_ms() < scoop.until"):
+    at = body.index("while (!scoop.release")                # the mode's own hold
+    loop = body[at:body.index('fn("proc_sleep"))(1);', at)]
+    for cond in ("!scoop.release", "scoop.hold_ms", "running", "pm_in_game()", "pm_ms() < scoop.until", "finish_on()"):
         assert cond in loop, cond
+    # PAD-707: a pick a mode took on the selection screen (inside the game's own hold) keeps the ball through its
+    # start clip, after the game's handler, and lets the game kick it as ever
+    assert body.index("scoop.orig(ev, a1, a2, a3)") < body.index("if (pick_at)") < at
+    intro = body[body.index("if (pick_at)"):at]
+    assert "intro_on(" in intro and "return r;" in intro
+    assert "pick_at = pm_ms() | 1;" in src                  # roster_take, when the mode took the pick
+
+
+def test_a_hold_of_ours_puts_the_games_ball_search_off_as_its_own_holds_do():
+    """PAD-733 (David: "The game also randomly went into ball search mode when I restarted King Caesar for the second
+    time"): the game's search countdown runs on through a hold of ours (its own holds put it off every tick with
+    ball_search_delay); a pick's 6 s start clip left 4 s at the kick-out, a 16 s hold searched with the ball still in
+    the scoop (rig, run bs_long). Every tick of both of our holds - the pick's start clip, the mode's own hold and its
+    finish - puts it off first, through the port's own function and time (none: as before)."""
+    src = RUNTIME.read_text(encoding="utf-8")
+    off = _lift(src, "static void scoop_search_off(void)")
+    assert 'fn("ball_search_delay")' in off and 'data("ball_search_time")' in off and "maps_has(at, 1," in off
+    body = _lift(src, "static unsigned scoop_wrap(")
+    loops = re.findall(r"while \((.*?)\) \{\s*scoop_search_off\(\);\s*\(\(void \(\*\)\(unsigned\)\)\(unsigned long\)fn\(\"proc_sleep\"\)\)\(1\);",
+                       body, re.S)
+    assert len(loops) == 2 and "intro_on(" in loops[0] and "!scoop.release" in loops[1]
+    for key, site, time in (("godzilla_le-1.16", "0x00379f0c", "0x007144f8"), ("godzilla_pro-1.16", "0x0041b188", "0x0070e904")):
+        text = (SDK / "ports" / (key + ".port")).read_text(encoding="utf-8")
+        assert re.search(r"^site ball_search_delay\s+%s 0x[0-9a-f]{8} 0x[0-9a-f]{8}$" % site, text, re.M), key
+        assert re.search(r"^data ball_search_time\s+%s$" % time, text, re.M), key
 
 
 def test_the_handlers_calls_are_logged_only_when_the_port_asks():

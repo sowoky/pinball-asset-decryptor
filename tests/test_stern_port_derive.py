@@ -164,7 +164,9 @@ def _draft(ref, placed, how=None, shots=("0x1 Left ramp",)):
                 missing=[], seconds=0.1)
 
 
-def test_the_merge_keeps_what_the_references_agree_on():
+def test_the_merge_keeps_what_the_references_agree_on(monkeypatch):
+    from pinball_decryptor.plugins.stern import portswitch
+    monkeypatch.setattr(portswitch, "drain", lambda elf, *a: None)   # PAD-645: a stand-in program has no drain
     refs = [_ref("a-1.0", "godzilla_pro", "1.15"), _ref("b-1.0", "godzilla_le", "1.16"), _ref("c-1.0", "jaws_le", "1.02")]
     core = {("site", "tick"): 0x100, ("site", "shot_dispatch"): 0x200, ("site", "ball_end"): 0x300,
             ("site", "score_add"): 0x400, ("data", "cur_player"): 0x9000, ("data", "scores"): 0x9100}
@@ -398,11 +400,16 @@ def test_a_draft_is_byte_identical_to_the_committed_one(ref, ref_elf, tgt_elf, g
 @pytest.mark.slow
 def test_tmnt_158_drafted_from_159_is_its_proven_port():
     """The current-player byte TMNT 1.58 loads in 400 places: the first 60 all changed, the
-    shortest of the rest line up."""
+    shortest of the rest line up. Every line both have agrees; what the draft lacks the build's own program
+    gives (portgen.generated, PAD-645's switch drain and the older framework's spare-output tables), and
+    what only the draft has are roles the proven port was never given."""
     want = _entries((PORTS / "turtles_pro-1.58.port").read_text(encoding="utf-8"))
     got = _entries((FIXTURES / "turtles_pro-1.58__from__turtles_pro-1.59.port").read_text(encoding="utf-8"))
     _elf_path("turtles_pro-1.58.0.elf")
-    assert got == want
+    own = {"switch_edge", "switch_drain", "switch_records", "switch_count", "sw_listen", "sw_boards", "coil_used"}
+    assert {k: got[k] for k in want if k in got} == {k: want[k] for k in want if k in got}
+    assert len(want.keys() & got.keys()) > 80 and ("data", "cur_player") in got
+    assert all(G.generated(k, n) or n in own for k, n in want.keys() - got.keys())
 
 
 @pytest.mark.slow
@@ -411,8 +418,29 @@ def test_ensure_port_finds_a_shipped_port(cache):
     assert r.origin == "shipped" and r.path == str(PORTS / "godzilla_le-1.16.port") and r.proven
 
 
+@pytest.fixture
+def unshipped(tmp_path, monkeypatch):
+    """unshipped(*names): the shipped ports as if those builds had none - a copy of the folder without their
+    ports and recipes, read as the SDK's. The builds these tests derive have shipped ports of their own since
+    2026-09-24 (Godzilla Pro 1.16, Star Wars ELG 1.10, X-Men LE 0.98)."""
+    import shutil
+
+    def hide(*names):
+        ports = tmp_path / "sdk" / "ports"
+        (ports / "recipes").mkdir(parents=True)
+        for p in PORTS.glob("*.port"):
+            if p.name[:-len(".port")] not in names:
+                shutil.copy2(p, ports / p.name)
+        for p in (PORTS / "recipes").glob("*.recipe.gz"):
+            if p.name[:-len(".recipe.gz")] not in names:
+                shutil.copy2(p, ports / "recipes" / p.name)
+        monkeypatch.setattr(MR, "_SDK_DIR", str(tmp_path / "sdk"))
+    return hide
+
+
 @pytest.mark.slow
-def test_ensure_port_derives_caches_and_rederives(cache):
+def test_ensure_port_derives_caches_and_rederives(cache, unshipped):
+    unshipped("godzilla_pro-1.16")
     elf = _elf_bytes("godzilla_pro-1.16.0.elf")
     seen = []
     r = D.ensure_port(elf, "godzilla_pro", "1.16.0", progress=lambda f, s: seen.append(f), workers=1)
@@ -438,9 +466,10 @@ def test_ensure_port_derives_caches_and_rederives(cache):
 
 
 @pytest.mark.slow
-def test_a_build_whose_rules_place_no_core_gets_the_frameworks(cache):
+def test_a_build_whose_rules_place_no_core_gets_the_frameworks(cache, unshipped):
     """Star Wars ELG 1.10: no reference places its shot dispatch; the framework's switch drain gives its
     shots (its own switch names), and no other title's struct values come across."""
+    unshipped("star_wars_elg-1.10")
     elf = _elf_bytes("star_wars_elg-1.10.0.elf")
     r = D.ensure_port(elf, "star_wars_elg", "1.10.0", workers=1)
     assert r.origin == "derived" and not r.missing and not r.proven
@@ -459,9 +488,10 @@ def test_a_build_whose_rules_place_no_core_gets_the_frameworks(cache):
 
 
 @pytest.mark.slow
-def test_a_build_without_its_core_gets_no_port(cache, monkeypatch):
+def test_a_build_without_its_core_gets_no_port(cache, monkeypatch, unshipped):
     """With no switch drain to fall back on (a build of a framework the app does not know), a build
     whose rules place no shot dispatch gets no port."""
+    unshipped("star_wars_elg-1.10")
     from pinball_decryptor.plugins.stern import portswitch
     monkeypatch.setattr(portswitch, "drain", lambda elf, *a: None)
     elf = _elf_bytes("star_wars_elg-1.10.0.elf")
@@ -476,7 +506,8 @@ def test_a_build_without_its_core_gets_no_port(cache, monkeypatch):
 
 
 @pytest.mark.slow
-def test_a_derivation_stops_when_asked(cache):
+def test_a_derivation_stops_when_asked(cache, unshipped):
+    unshipped("uncanny_xmen_le-0.98")
     from pinball_decryptor.plugins.stern.title_reader import Cancelled
     calls = []
 
@@ -488,15 +519,29 @@ def test_a_derivation_stops_when_asked(cache):
     assert not (cache / "uncanny_xmen_le-0.98.port").exists()
 
 
+#: a port's own numbered lists: each title numbers its light shows and mini-wizards its own way (Godzilla LE's
+#: show_3 is Godzilla Pro's show_11), so a derived number need not be the proven port's
+_OWN_LISTS = re.compile(r"^(?:show|wizard_obj)_\d+$")
+
+
 @pytest.mark.slow
 def test_leave_one_out_reproduces_godzilla_le_116(cache):
+    """What the other references carry comes out as Godzilla LE 1.16's proven port has it. Its title-only lines
+    (the Premium's magnet, bridge, shield and building, PAD-686's challenge menu frame) and the lines a build's
+    own program gives (portgen.generated) are not theirs to carry; its shows and mini-wizards land on its own."""
     elf = _elf_bytes("godzilla_le-1.16.0.elf")
     refs, _notes = D.references()
     others = [r for r in refs if r.name != "godzilla_le-1.16" and r.generation == "B"]
     d = D.derive(elf, "godzilla_le", "1.16.0", others, workers=1)
-    want = _entries((PORTS / "godzilla_le-1.16.port").read_text(encoding="utf-8"))
+    shipped = _entries((PORTS / "godzilla_le-1.16.port").read_text(encoding="utf-8"))
+    carried = set().union(*(_entries(r.text) for r in others))
+    want = {k: v for k, v in shipped.items()
+            if k in carried and not G.generated(k[0], k[1]) and not _OWN_LISTS.match(k[1])}
     got = _entries(d["text"])
-    assert d["ok"] and {k: got.get(k) for k in want} == want
+    assert d["ok"] and len(want) > 150 and {k: got.get(k) for k in want} == want
+    def own(entries, name):
+        return {v for (_k, n), v in entries.items() if n.startswith(name + "_")}
+    assert len(own(got, "show") & own(shipped, "show")) >= 6 and own(got, "wizard_obj") & own(shipped, "wizard_obj")
 
 
 @pytest.mark.slow
@@ -686,3 +731,25 @@ def test_a_real_program_cut_short_gets_no_port_not_an_error(cache):
     assert d["errors"] == {}
     r = D.ensure_port(half, "zzz_test", "1.00.0", workers=1)
     assert r.origin in ("", "derived")
+
+
+def test_the_port_list_is_kept_until_a_port_file_changes(cache):
+    """PAD-610: port_paths() is asked thousands of times while the Modes and Write tabs fill,
+    so it keeps its answer - but a port derived, removed or re-judged since must show at once,
+    even a sidecar rewritten in the same clock tick at the same size."""
+    first = MR.port_paths()
+    assert MR.port_paths() == first and MR.port_paths() is not MR.port_paths()
+    path = _put_derived("zzz_test-1.00", PORT_TEXT)
+    assert path in [p for _g, _v, p in MR.port_paths()]
+    side = os.path.join(D.user_ports_dir(), "zzz_test-1.00.json")
+    st = os.stat(side)
+    with open(side, "r", encoding="utf-8") as f:
+        text = f.read()
+    with open(side, "w", encoding="utf-8") as f:              # same size, ok: false
+        f.write(text.replace('"ok": true', '"ok": 0   '))
+    os.utime(side, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert os.path.getsize(side) == st.st_size
+    assert path not in [p for _g, _v, p in MR.port_paths()]
+    os.remove(side)
+    os.remove(path)
+    assert MR.port_paths() == first

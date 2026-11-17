@@ -1,7 +1,9 @@
 """Chicago Gaming Company manufacturer plugin."""
 
 import os
+import sys
 
+from ...core.ext4_grow import with_bundled_debugfs
 from ...core.registry import (Capabilities, Game, InputSpec, Manufacturer,
                               Prerequisite)
 from .formats import detect_game
@@ -92,17 +94,37 @@ class CGCManufacturer(Manufacturer):
         from .dup_sounds import scan_duplicate_sounds
         return scan_duplicate_sounds(assets_dir, log=log)
     # CGC's nested-disk-image extraction needs ext4 read/write tooling.
-    # All work runs in the executor (WSL on Windows, native on Linux,
-    # Docker on macOS) -- same model as JJP.
+    # All work runs in the executor: WSL on Windows, the machine itself on
+    # macOS and Linux.  So the rows are "native" - they were "wsl", which is
+    # "n/a" on a Mac, so a Mac without e2fsprogs showed nothing missing and
+    # then failed the extract with "Missing tool: debugfs ... Install in WSL"
+    # (PAD-571).  debugfs is looked for where Homebrew (keg-only), MacPorts
+    # and Debian (/sbin, off a user's PATH) keep it, as the executor does,
+    # and first in the macOS app itself, which ships its own (PAD-573).
     prerequisites = (
-        Prerequisite(name="debugfs", where="wsl",
-                     probe="command -v debugfs",
+        Prerequisite(name="debugfs", where="native",
+                     probe=with_bundled_debugfs(
+                         "command -v debugfs || "
+                         "test -x /opt/homebrew/opt/e2fsprogs/sbin/debugfs || "
+                         "test -x /usr/local/opt/e2fsprogs/sbin/debugfs || "
+                         "test -x /opt/local/sbin/debugfs || "
+                         "test -x /usr/sbin/debugfs || test -x /sbin/debugfs"),
                      reason="ext4 read/write on installer P3 + emmc.img P2",
-                     install_hint="apt-get install e2fsprogs (in WSL)"),
-        Prerequisite(name="xxd", where="wsl",
+                     install_hint=(
+                         "brew install e2fsprogs  (macOS)"
+                         if sys.platform == "darwin" else
+                         "apt-get install e2fsprogs (in WSL)"
+                         if sys.platform == "win32" else
+                         "sudo apt install e2fsprogs  (Debian/Ubuntu)"),
+                     mac_pkg="e2fsprogs"),
+        # Every Mac has xxd (/usr/bin/xxd, from vim).
+        Prerequisite(name="xxd", where="native",
                      probe="command -v xxd",
                      reason="Reading the inner emmc.img MBR partition table",
-                     install_hint="apt-get install xxd (in WSL)"),
+                     install_hint=(
+                         "apt-get install xxd (in WSL)"
+                         if sys.platform == "win32" else
+                         "sudo apt install xxd  (Debian/Ubuntu)")),
         # faster-whisper drives the Auto-transcribe checkbox.  Probed
         # via an in-process import so the check reflects the actual
         # Python the app is running on (sys.executable), not whatever
@@ -133,6 +155,13 @@ class CGCManufacturer(Manufacturer):
         return Game(key=key, display=info["display"],
                     manufacturer_key="cgc")
 
+    def slot_keep_dirs(self, assets_dir):
+        # The decoded DCS sounds (dcs_audio/, new_audio/) and the other
+        # derived renders are left out of the baseline on purpose, yet
+        # Write repacks the sounds: the Replace tabs keep listing them.
+        from .pipeline import _DERIVED_SUBDIRS
+        return tuple(_DERIVED_SUBDIRS)
+
     def audio_forces_length_match(self, assets_dir=None):
         # Pulp Fiction stores audio in JPS ``.bnk`` banks whose slots are
         # FIXED-LENGTH: Write splices each replacement into the original
@@ -159,7 +188,12 @@ class CGCManufacturer(Manufacturer):
                 "silence the sound and mistime the rest of the bank on the "
                 "machine). The WPC remakes (Medieval Madness / Attack From "
                 "Mars / Monster Bash) use loose .wav files that play at their "
-                "own length, so trimming isn't needed there.")
+                "own length, so trimming isn't needed there. Cactus Canyon's "
+                "added music and speech also play at their own length, as "
+                "long as the card has room: its game partition has about 20 "
+                "MB to spare (around 3.5 minutes of sound in all). Longer "
+                "sounds past that are cut to their original length when the "
+                "image is built, and the build log names each one.")
 
     def decode_dmd_applies(self, input_path):
         # MM/AFM/MB: decode the bundled Williams WPC ROM to PNG scenes + MP4s.

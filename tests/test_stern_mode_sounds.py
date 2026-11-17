@@ -1,11 +1,13 @@
 """A mode's own sounds (item 150): carriers per title, their assignment, mode-file lines."""
 import os
+import re
 import struct
 from collections import namedtuple
 
 import pytest
 
 from pinball_decryptor.plugins.stern import mode_sounds as MS
+from tests.mode_examples import form as MX  # noqa: E402
 
 Site = namedtuple("Site", "sid payload")
 
@@ -118,7 +120,7 @@ def test_every_key_written_is_one_mode_file_c_reads():
 
 def test_own_sound_lines_follow_the_spec():
     from pinball_decryptor.plugins.stern import mode_project as MP
-    spec = MP.example("KAIJU RUSH")
+    spec = MX.example("KAIJU RUSH")
     assert MS.wants(spec) == ()
     spec.sound_start, spec.music, spec.end_sound = "a.wav", "m.wav", "e.wav"
     assert MS.wants(spec) == ("sound_start", "sound_end", "music")
@@ -187,7 +189,7 @@ def test_tile_wav_repeats_the_music_whole_past_the_carrier(tmp_path):
 
 def test_call_ms_measures_only_the_calls(tmp_path):
     from pinball_decryptor.plugins.stern import mode_project as MP
-    spec = MP.example("KAIJU RUSH")
+    spec = MX.example("KAIJU RUSH")
     spec.sound_start = os.path.basename(_tone_wav(str(tmp_path / "s.wav"), 1.0, channels=1))
     spec.end_sound = os.path.basename(_tone_wav(str(tmp_path / "e.wav"), 0.25, channels=1))
     spec.music = os.path.basename(_tone_wav(str(tmp_path / "m.wav"), 0.5))
@@ -205,12 +207,12 @@ def test_mode_file_c_stops_a_call_after_its_own_length():
                   "S->end_ms = (unsigned)num(&a)"):
         assert field in text
     # every call goes through own_call (item 150 follow-up), which arms the stop when it plays
-    for call in ("own_call(S->start, own_swap_of(S, S->start), S->start_ms,",
-                 "own_call(S->shot, own_swap_of(S, S->shot), S->shot_ms,",
-                 "own_call(S->end, own_swap_of(S, S->end), S->end_ms,"):
+    for call in ("own_call(S->start, own_swap_of(S, S->start), own_sid_of(S, S->start), S->start_ms,",
+                 "own_call(S->shot, own_swap_of(S, S->shot), own_sid_of(S, S->shot), S->shot_ms,",
+                 "own_call(S->end, own_swap_of(S, S->end), own_sid_of(S, S->end), S->end_ms,"):
         assert call in text
     body = text[text.index("static void own_call("):text.index("static void own_calls_tick(")]
-    assert "own_sounds_stop_after(request, ms);" in body
+    assert "own_sounds_stop_after(request, ms, sid != 0);" in body
     tick = text[text.index("static void on_tick(void)"):]
     assert tick.index("own_sounds_stops_tick();") < tick.index("if (!run.active || !(M = run.slot)) return;")
 
@@ -430,9 +432,9 @@ def test_the_runtime_points_a_request_at_one_sid_and_fades():
                  "int pm_sound_playing(unsigned *requests, unsigned *buses, int max);"):
         assert decl in h
         assert decl[:-1] + "\n{" in c
-    assert "*(unsigned *)(rec + 8) = (unsigned)(unsigned long)sid_slot[i].list;" in c
-    assert "*(unsigned *)(rec + 8) = sid_slot[i].orig;" in c
-    tick = c[c.index("static void on_tick(unsigned *r)"):]
+    assert "REQ_LIST(rec) = (pm_addr)(unsigned long)sid_slot[i].list;" in c
+    assert "REQ_LIST(rec) = sid_slot[i].orig;" in c
+    tick = c[c.index("static void on_tick(pm_reg *r)"):]
     assert tick.index("sound_fades_tick();") < tick.index("m->tick();")
     assert "sound_fade_finish(request);" in c[c.index("int pm_sound(unsigned request)"):]
 
@@ -470,6 +472,62 @@ def test_mode_file_c_plays_its_own_bed_and_never_cuts_a_sound():
     assert "skipped - its previous call still sounds" in shot[:shot.index("\n}\n")]
     try_ = text[text.index("static int own_call_try("):text.index("static void own_call(")]
     assert "if (p < 0 || p >= (int)prio) return 0;" in try_ and "pm_sound_fade(reqs[i], 60);" in try_
+
+
+def test_the_mode_music_ducks_under_its_own_calls():
+    """PAD-678 (Bond LE 1.06, emulator-measured): a call's speech carrier ducks the music 20 steps, the
+    game's own clip sounds 48, so a mode's music takes 28 more while one of its own calls plays - in a
+    form mode (mode_file.c) and in a code or Blocks mode (pad_mode_assets.h) - ramped down and back, and
+    the runtime's duck ends with a fade or a stop and never moves the voice's own volume."""
+    h = open(os.path.join(SDK, "pad_mode.h"), encoding="utf-8").read()
+    c = open(os.path.join(SDK, "pad_mode_runtime.c"), encoding="utf-8").read()
+    decl = "int pm_sound_duck(unsigned request, unsigned steps, unsigned ms);"
+    assert decl in h and decl[:-1] + chr(10) + "{" in c
+    tick = c[c.index("static void on_tick(pm_reg *r)"):]
+    assert tick.index("sound_fades_tick();") < tick.index("sound_ducks_tick();") < tick.index("m->tick();")
+    ducks = c[c.index("static void sound_ducks_tick(void)"):]
+    ducks = ducks[:ducks.index(chr(10) + "}" + chr(10))]
+    assert "if (fading(r) || !pm_sound_active(r)) { ducks[i].request = 0; continue; }" in ducks
+    assert "set_voices(r, ducks[i].base + ducks[i].now);" in ducks
+    for path, steps, call, music in (("mode_file.c", "#define MUSIC_DUCK_STEPS   28", "own_music_duck(S);",
+                                      "pm_sound_duck(S->music, 0, MUSIC_DUCK_UP_MS)"),
+                                     ("pad_mode_assets.h", "#define PA_MUSIC_DUCK_STEPS   28", "pa_music_duck(a);",
+                                      "pm_sound_duck(a->music, 0, PA_MUSIC_DUCK_UP_MS)")):
+        text = open(os.path.join(SDK, path), encoding="utf-8").read()
+        assert steps in text and call in text and music in text, path
+
+
+def test_the_music_carrier_gets_its_own_steal_flag_back():
+    """PAD-682 (Bond LE 1.06: music carrier 94 is Bird One Multiball's own music, played through the game's music
+    process 0x19c91c, which no census reached): a mode clears the carrier's steal flag while its music plays, and
+    with it left cleared the game's next music could not take the bus back - Bird One's music played on through the
+    rest of the game. The runtime keeps each request's own pair the first time it changes it and puts it back (on a
+    swap still armed too); both music paths do that once the mode's music has faded, and fade the game's own play of
+    the carrier out before the mode's music starts on it."""
+    h = open(os.path.join(SDK, "pad_mode.h"), encoding="utf-8").read()
+    c = open(os.path.join(SDK, "pad_mode_runtime.c"), encoding="utf-8").read()
+    decl = "int pm_sound_priority_stock(unsigned request);"
+    assert decl in h and decl[:-1] + chr(10) + "{" in c
+    prio = c[c.index("int pm_sound_priority(unsigned request, int priority, int flags)" + chr(10)):]
+    prio = prio[:prio.index(chr(10) + "}" + chr(10))]
+    assert "prio_stock[i].pair = old;" in prio and prio.index("prio_stock[i].pair = old;") < prio.index("rec[REQ_PRIO] = ")
+    stock = c[c.index("int pm_sound_priority_stock(unsigned request)" + chr(10)):]
+    stock = stock[:stock.index(chr(10) + "}" + chr(10))]
+    assert "swaps[j].old = pair;" in stock and "pm_sound_priority(request, pair >> 8, pair & 0xff)" in stock
+    mf = open(os.path.join(SDK, "mode_file.c"), encoding="utf-8").read()
+    after = mf[mf.index("static void own_music_after_tick(void)"):]
+    after = after[:after.index(chr(10) + "}" + chr(10))]
+    assert after.index("pm_sound_active(music.after_request)") < after.index("pm_sound_priority_stock(music.after_request)")
+    pa = open(os.path.join(SDK, "pad_mode_assets.h"), encoding="utf-8").read()
+    after = pa[pa.index("static PA_UNUSED void pa_music_after(void)"):]
+    after = after[:after.index(chr(10) + "}" + chr(10))]
+    assert after.index("pm_sound_active(pa_music.after_request)") < after.index("pa_music_stock(pa_music.after_request);")
+    for text, begin, carrier in ((mf, "static void own_sounds_start(", "S->music"),
+                                 (pa, "static PA_UNUSED void pa_music_begin(", "a->music")):
+        body = text[text.index(begin):]
+        body = body[:body.index(chr(10) + "}" + chr(10))]
+        assert "} else if (!fading && pm_sound_active(%s)) {" % carrier in body, begin
+        assert "pm_sound_fade(%s, 250);" % carrier in body, begin
 
 
 def test_mode_file_c_fades_a_call_out_at_its_stop():
@@ -516,12 +574,49 @@ def test_a_swapped_sound_writes_a_swap_line_for_its_carrier(tmp_path):
     record's (``swap <request> <stock> <ours>``, read by mode_file.c and pad_mode_assets.h), only
     for a sound the mode has."""
     from pinball_decryptor.plugins.stern import mode_project as MP
-    spec = MP.example("KAIJU RUSH")
+    spec = MX.example("KAIJU RUSH")
     spec.sound_start, spec.sound_shot, spec.end_sound, spec.music = "s.wav", "", "", ""
     carried = {"sound_start": 901, "music": 70,
                "swaps": [(901, "a20a51102c1c0020", "d1eaa8b4ae100000"), (70, "11" * 8, "22" * 8)]}
     lines = MP.own_sound_lines(spec, carried, {"sound_start": 1200})
     assert lines == ["sound_start    901 1200", "swap           901 a20a51102c1c0020 d1eaa8b4ae100000"]
+
+
+def test_a_sound_in_a_bank_of_the_modes_own_points_its_carrier_at_the_banks_sid(tmp_path):
+    """PAD-595: a call the build put in a sound bank of its own is played by that bank's sound id:
+    ``sid <request> <sound id>`` (pointed for that play, by mode_file.c and pad_mode_assets.h), and
+    a bed in a bank is the ``music`` line's sid.  Only for a sound the mode has."""
+    from pinball_decryptor.plugins.stern import mode_project as MP
+    from pinball_decryptor.plugins.stern import mode_write as MW
+    spec = MX.example("KAIJU RUSH")
+    spec.sound_start, spec.sound_shot, spec.end_sound, spec.music = "s.wav", "", "", "m.wav"
+    carried = {"sound_start": 901, "music": 125, "music_sid": 0x10000,
+               "sids": [(901, 0x10001), (70, 0x10002)]}
+    lines = MP.own_sound_lines(spec, carried, {"sound_start": 1200})
+    assert lines == ["sound_start    901 1200", "music          125 65536", "sid            901 65537"]
+    # the build's carried list -> the lines' arguments: a bank bed and a bank call
+    used = [{"slug": "kaiju_rush", "key": "music", "request": 125, "sid": 618, "bank": 1, "bank_sid": 0x10000},
+            {"slug": "kaiju_rush", "key": "sound_start", "request": 901, "ms": 1200, "swap": True,
+             "bank": 1, "bank_sid": 0x10001},
+            {"slug": "kaiju_rush", "key": "sound_shot", "request": 70, "ms": 900, "swap": True,
+             "stock_key": "11" * 8, "our_key": "22" * 8}]
+    requests, ms = MW.own_cfg_args(None, "kaiju_rush", spec, used)
+    assert requests["music_sid"] == 0x10000 and requests["sids"] == [(901, 0x10001)]
+    assert requests["swaps"] == [(70, "11" * 8, "22" * 8)] and ms == {"sound_start": 1200, "sound_shot": 900}
+
+
+def test_a_reloaded_mode_file_starts_its_sound_lists_empty():
+    """PAD-597: mode_file.c re-reads a changed mode file in place, so every list own_sounds_key
+    appends to is emptied by own_sounds_clear first - else a removed ``sid`` line kept pointing its
+    call and, after 8 lines over all the reloads, new ones were logged 'ignored'."""
+    text = open(os.path.join(SDK, "mode_file.c"), encoding="utf-8").read()
+    keys = text[text.index("static int own_sounds_key("):text.index("static const unsigned char *own_swap_of(")]
+    clear = text[text.index("static void own_sounds_clear("):]
+    clear = clear[:clear.index("\n}\n")]
+    counts = set(re.findall(r"S->(n_\w+)\+\+", keys))
+    assert counts == {"n_point", "n_swap"}
+    for n in counts:
+        assert f"S->{n} = 0;" in clear, n
 
 
 def test_mode_file_c_and_code_modes_swap_the_carrier_key_right_before_playing():
@@ -539,6 +634,6 @@ def test_mode_file_c_and_code_modes_swap_the_carrier_key_right_before_playing():
     call = assets[assets.index("static PA_UNUSED int pa_call("):]
     assert call.index("pm_sound_swap(c->request, swap, swap + 8,") < call.index("pa_try(a, c->request")
     rt = open(os.path.join(SDK, "pad_mode_runtime.c"), encoding="utf-8").read()
-    hook = rt[rt.index("static void on_sound_lookup(unsigned *r)"):]
+    hook = rt[rt.index("static void on_sound_lookup(pm_reg *r)"):]
     assert hook.index("key_is(k, swaps[i].stock)") < hook.index("if (!sound_armed || !sound_key) return;")
     assert "sound_swaps_tick();" in rt

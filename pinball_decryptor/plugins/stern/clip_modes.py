@@ -20,9 +20,12 @@ table (:func:`.progreloc.reference_census` finds all three). So "which mode play
 Every other mode keeps the shared clip. Nothing is moved: the shared clip, its name and every
 other reference stay where they are, so a card built without the copy is the card it was.
 
-WHOSE CODE (a C++ title; a title whose rules are plain C has no mode classes, and this reading
-then names no mode at all). A mode is a class ``cmode_<name>``, its screens are display-layer
-classes ``BDL<Name>...`` (paired by name, as the SDK's stock-mode reader pairs them), the
+WHOSE CODE (a C++ title; a title whose rules are plain C has no mode classes, and Deadpool
+plays its clips from display files no mode class is in: both are read source file by source file
+instead, :mod:`.clip_files`, PAD-634). A mode is a class ``cmode_<name>``, a class deriving from ``cmode``
+named freely (``cberserker_rage``), or on a title with no ``cmode`` a rule class that is its own
+``Singleton<>`` (``Mode_Stopping_A_Juggernaut``: :func:`_mode_classes`, PAD-624); its screens
+are display-layer classes ``BDL<Name>...`` (paired by name, as the SDK's stock-mode reader pairs them), the
 functions of one source file lie together, and the file's static initialiser - the function
 that builds its global objects, often holding clip names - is at the end of the file. A code
 reference belongs to a mode when its function is
@@ -49,12 +52,19 @@ import bisect
 import hashlib
 import json
 import os
+import re
 import struct
 from dataclasses import dataclass, field
 
 #: bumped when what :func:`analyse` reads changes; older cached readings are read again
-#: (4: each clip's sounds, :mod:`.clip_sounds`)
-READ_REV = 4
+#: (4: each clip's sounds, :mod:`.clip_sounds`; 5: freely named and singleton mode classes, PAD-624,
+#: and a bank's clip another bank also names, and the scenes that play their own clips, PAD-627;
+#: 6: the clips of a scene that is no video bank, by name, PAD-624; 7: the plain-C titles and
+#: Deadpool, source file by source file, PAD-634: :mod:`.clip_files`; 8: how the program plays
+#: each clip, PAD-827: :mod:`.clip_static`)
+READ_REV = 8
+#: a :attr:`CardClips.bank_of` value's third item: the clip is a scene's own, not a video bank's
+SCENE = "scene"
 #: the most clip-name characters a project file keeps (engine._sanitize_title's cap)
 NAME_MAX = 64
 #: how far back from a table's pointer the table's start is looked for (words)
@@ -74,6 +84,11 @@ HOST_MAX = 256
 #: in-game bank holds most of a title's clips; a title with a clip in every scene is not
 #: read scene by scene)
 BANKS_MAX = 12
+#: a singleton rule class that serves every mode, not one (:func:`_mode_classes`): the mode
+#: select screen, the shared mode code, a manager, a display or lighting part (Uncanny X-Men
+#: ``Mode_Select``, ``Sentinels_Controller``)
+NOT_MODES = re.compile(r"(^|_)(Info|Shared|Select|Advance)$|(Manager|Controller|Display|"
+                       r"Lighting|Frame|Effect)$")
 
 
 class ClipModesError(ValueError):
@@ -132,25 +147,102 @@ class Reading:
 
 def mode_label(cls):
     """``cmode_battle_vs_ghidorah_and_gigan`` -> ``Battle vs Ghidorah and Gigan``, as the
-    Modes tab names the game's own modes (:class:`.stock_modes.Mode`)."""
-    from .stock_modes import Mode
-    return Mode(id=0, cls=cls).name
+    Modes tab names the game's own modes (:class:`.stock_modes.Mode`); ``cberserker_rage`` ->
+    ``Berserker Rage`` (:func:`.stock_scan.class_words`); a singleton rule class in words,
+    its kind's prefix dropped (``Mode_Stopping_A_Juggernaut`` -> ``Stopping a Juggernaut``,
+    ``Multiball_Berserker`` -> ``Berserker Multiball``, ``Rule_Danger_Room`` -> ``Danger
+    Room``); a plain-C title's mode key as the Modes tab names it (``SWEET_EMOTION`` -> ``Sweet
+    Emotion``, :func:`.clip_files.c_label`)."""
+    from .clip_files import c_label, is_c_key
+    if is_c_key(cls):
+        return c_label(cls)
+    if cls.startswith("cmode_"):
+        from .stock_modes import Mode
+        return Mode(id=0, cls=cls).name
+    if cls != cls.lower():
+        return _singleton_words(cls)
+    from .stock_scan import class_words
+    return re.sub(r"\bMball\b", "Multiball", class_words(cls))
+
+
+def _singleton_words(cls):
+    words = [w for w in cls.split("::")[-1].split("_") if w]
+    tail = []
+    if len(words) > 1 and words[0] in ("Mode", "Rule"):
+        words = words[1:]
+    elif len(words) > 1 and words[0] == "Multiball":
+        words, tail = words[1:], ["Multiball"]
+    out = []
+    for w in words + tail:
+        lw = w.lower()
+        out.append(lw if out and lw in _SMALL else w[:1].upper() + w[1:])
+    return " ".join(out)
+
+
+_SMALL = ("vs", "and", "of", "the", "a", "an", "to", "in", "on", "at", "for")
 
 
 def mode_slug(cls):
-    """The part of a mode's class a copy's name ends with: ``battle_vs_gigan``."""
-    return cls[6:] if cls.startswith("cmode_") else cls
+    """The part of a mode's class a copy's name ends with: ``battle_vs_gigan``
+    (``cberserker_rage`` -> ``berserker_rage``, ``Mode_Escape_Nimrod`` -> ``escape_nimrod``)."""
+    return _stem(cls).lower()
+
+
+def _stem(cls):
+    """A mode class less its kind's prefix: ``cmode_``, the ``c`` of a freely named class, a
+    singleton's ``Mode_`` / ``Multiball_`` / ``Rule_``."""
+    if cls.startswith("cmode_"):
+        return cls[6:]
+    if re.match(r"^c[a-z]", cls):
+        return cls[1:]
+    for pre in ("Mode_", "Multiball_", "Rule_"):
+        if cls.startswith(pre) and len(cls) > len(pre):
+            return cls[len(pre):]
+    return cls
 
 
 # ---- reading ---------------------------------------------------------------------------------
-def _mode_classes(S, model):
-    """The concrete mode classes: ``cmode_*`` that no other mode class derives from, less the
-    manager and the ``_null`` stand-ins."""
+def _mode_classes(S, model, prog=None):
+    """The concrete mode classes, less the manager and the ``_null`` stand-ins:
+
+    * ``cmode_*`` that no other mode class derives from (Godzilla, Jaws, King Kong);
+    * any other class deriving from ``cmode`` that none derives from, or that the game builds
+      an object of (:func:`.stock_scan_cpp.init_objects`: Deadpool's ``cbattle_juggernaut``
+      is a mode and the base of its Sauron variant) - the titles whose mode classes are
+      named freely (Deadpool, Star Wars, Mandalorian, Venom, TMNT: ``cberserker_rage``);
+    * on a title with no ``cmode`` (Uncanny X-Men, Jurassic Park the Pinball), each rule
+      class that is its own ``Singleton<>`` (``Mode_Stopping_A_Juggernaut``,
+      ``Multiball_Berserker``, ``Rule_Danger_Room``), less the parts that serve them all
+      (:data:`NOT_MODES`)."""
     allc = [c for c in model if c.startswith("cmode_") and c != "cmode_manager"]
     bases = set()
     for c in allc:
         bases.update(S.chain_of(model, c))
-    return [c for c in allc if c not in bases and not c.endswith("_null")]
+    out = [c for c in allc if c not in bases and not c.endswith("_null")]
+    if "cmode" in model:
+        free = [c for c in model if not c.startswith("cmode") and S.derives(model, c, "cmode")]
+        fb = set()
+        for c in free:
+            fb.update(S.chain_of(model, c))
+        got = {c for c in free if c not in fb}
+        if prog is not None and free:
+            try:
+                from . import stock_scan_cpp as SC
+                got |= {o["class"] for o in SC.init_objects(prog, model, "cmode")
+                        if o["class"] in free}
+            except Exception:                               # noqa: BLE001 - leaves alone
+                pass
+        if got:
+            # a framework class a freely named mode derives from is no mode (cmode_battle), nor
+            # a cmode_ class that is no cmode (Deadpool's cmode_song_player)
+            out = [c for c in out if c not in fb and S.derives(model, c, "cmode")]
+        out += sorted(c for c in got if not c.endswith("_null") and c != "cmode_manager")
+        return out
+    if out:
+        return out
+    return sorted(c for c in model if "Singleton<%s>" % c in S.chain_of(model, c)
+                  and not NOT_MODES.search(c))
+
 
 
 def _layers(model, modes):
@@ -159,7 +251,7 @@ def _layers(model, modes):
     multiball's, not king of the monsters')."""
     import re
     norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())          # noqa: E731
-    keys = sorted(((norm(c[6:]), c) for c in modes), key=lambda kc: -len(kc[0]))
+    keys = sorted(((norm(_stem(c)), c) for c in modes), key=lambda kc: -len(kc[0]))
     out = {}
     for layer in model:
         if not layer.startswith("BDL"):
@@ -342,29 +434,50 @@ def analyse(elf, names, ctx=None):
     if ctx is not None:
         ctx["prog"] = prog
     model = S.class_model(prog)
-    modes = _mode_classes(S, model)
-    if not modes:
-        return out
-    layers = _layers(model, modes)
-    owners = _Owners(S, prog, _anchors(S, prog, model, modes, layers), _inits(S, prog))
-    out.refs = clip_refs(prog, elf, names, owners)
+    modes = _mode_classes(S, model, prog)
+    anchors = {}
+    if modes:
+        layers = _layers(model, modes)
+        anchors = _anchors(S, prog, model, modes, layers)
+        owners = _Owners(S, prog, anchors, _inits(S, prog))
+        out.refs = clip_refs(prog, elf, names, owners)
+        if ctx is not None:
+            ctx["owners"] = owners      # PAD-1064: whose code each sound call is (:mod:`.clip_sounds`)
+    if not any(r.mode for rs in out.refs.values() for r in rs):
+        # PAD-634: no mode class's code names a clip (a plain-C title, Deadpool): by file
+        from . import clip_files
+        files, labels = clip_files.owners(S, prog, model, modes, anchors)
+        if files is not None:
+            if ctx is not None:
+                ctx["owners"], ctx["labels"] = files, labels
+            if out.refs:
+                own(prog, out.refs, files)
+            else:
+                out.refs = clip_refs(prog, elf, names, files)
+            for rs in out.refs.values():
+                for r in rs:
+                    if r.mode and r.mode not in out.labels:
+                        out.labels[r.mode] = labels.get(r.mode) or mode_label(r.mode)
+            return out
     for rs in out.refs.values():
         for r in rs:
             if r.mode and r.mode not in out.labels:
                 out.labels[r.mode] = mode_label(r.mode)
+    if ctx is not None:
+        ctx["labels"] = {m: out.labels.get(m) or mode_label(m) for m in modes}
     return out
 
 
 def clip_refs(prog, elf, names, owners=None):
     """``{clip name: [Ref]}``: every place in the game program *elf* (its
     :class:`.stock_scan.Program` *prog*) that names one of *names*, in address order, each
-    given its mode by *owners* (none without: a title whose rules are plain C)."""
+    given its mode by *owners* (:class:`_Owners`, :class:`.clip_files.FileOwners`; none
+    without)."""
     from . import progreloc
     from . import stock_scan as S
     spans, at_name = _spans(elf, sorted(set(names)))
     census = progreloc.reference_census(elf, spans)
     _wide_pairs(S, prog, elf, spans, at_name, census)
-    text_hi = prog.code_end
     out = {}
     for off, refs in census.items():
         for ref in refs:
@@ -375,15 +488,24 @@ def clip_refs(prog, elf, names, owners=None):
             at = prog.off2va(first)
             if at is None:
                 continue
-            mode, how = "", ""
-            if owners is not None:
-                code = ref["kind"] in (progreloc.KIND_A32, progreloc.KIND_T32) or (
-                    prog.tlo <= at < text_hi)
-                mode, how = owners.of_code(at) if code else owners.of_table(at)
-            out.setdefault(name, []).append(Ref(ref["kind"], list(ref["offs"]), at, mode, how))
+            out.setdefault(name, []).append(Ref(ref["kind"], list(ref["offs"]), at))
     for rs in out.values():
         rs.sort(key=lambda r: r.at)
+    if owners is not None:
+        own(prog, out, owners)
     return out
+
+
+def own(prog, refs, owners):
+    """Give each :class:`Ref` of *refs* (``{clip: [Ref]}``) its mode by *owners*: a code
+    reference by the function it is in, a pointer in a table by the code that loads the
+    table."""
+    from . import progreloc
+    for rs in refs.values():
+        for r in rs:
+            code = r.kind in (progreloc.KIND_A32, progreloc.KIND_T32) or (
+                prog.tlo <= r.at < prog.code_end)
+            r.mode, r.how = owners.of_code(r.at) if code else owners.of_table(r.at)
 
 
 # ---- a mode's own copy -----------------------------------------------------------------------
@@ -696,13 +818,27 @@ class CardClips:
     version: str = ""
     reading: Reading = field(default_factory=Reading)
     name_of: dict = field(default_factory=dict)    # project rel -> clip name
-    bank_of: dict = field(default_factory=dict)    # clip name -> its bank's directory
+    bank_of: dict = field(default_factory=dict)    # clip name -> [its directory, path(, SCENE)]
     note: str = ""                                  # why there is nothing, in words
     #: clips of a bank the game plays by name that nothing in the program names: never shown
     unplayed: list = field(default_factory=list)
     #: the sounds each clip's code asks for (:class:`.clip_sounds.SoundReading`, a dict here
     #: until :attr:`sound_reading` reads it)
     sounds: dict = field(default_factory=dict)
+    #: PAD-627: a clip name a second bank holds too (Godzilla's JUKEBOX loops are in the in-game
+    #: bank and the attract one): name -> [[directory, path], ...] past :attr:`bank_of`'s
+    twins: dict = field(default_factory=dict)
+    #: PAD-627: the scene directories read that are no bank: a scene that plays clips of its
+    #: own (Godzilla's Xilien broadcast, its city maps), shown with the scene, never by name
+    scenes: list = field(default_factory=list)
+    #: project rel -> clip name of a twin's row (:attr:`twins`; not :attr:`name_of`, whose
+    #: rows are the clips the modes and copies are about), and project rel -> scene directory
+    #: of a scene's own clip; both from the project's manifest, as :attr:`name_of`
+    twin_of: dict = field(default_factory=dict)
+    scene_of: dict = field(default_factory=dict)
+    #: PAD-827: clip name -> what the program says about how it is played (a table it is
+    #: picked from or played in turn with, a play call that loops it): :mod:`.clip_static`
+    static: dict = field(default_factory=dict)
 
     @property
     def sound_reading(self):
@@ -717,14 +853,18 @@ class CardClips:
         return {"rev": READ_REV, "card": self.card, "game": self.game, "version": self.version,
                 "reading": self.reading.to_json(), "name_of": dict(self.name_of),
                 "bank_of": dict(self.bank_of), "note": self.note,
-                "unplayed": list(self.unplayed), "sounds": dict(self.sounds)}
+                "unplayed": list(self.unplayed), "sounds": dict(self.sounds),
+                "twins": dict(self.twins), "scenes": list(self.scenes),
+                "static": dict(self.static)}
 
     @classmethod
     def from_json(cls, d):
         return cls(d.get("card", ""), d.get("game", ""), d.get("version", ""),
                    Reading.from_json(d.get("reading") or {}), dict(d.get("name_of") or {}),
                    dict(d.get("bank_of") or {}), d.get("note", ""),
-                   list(d.get("unplayed") or ()), dict(d.get("sounds") or {}))
+                   list(d.get("unplayed") or ()), dict(d.get("sounds") or {}),
+                   dict(d.get("twins") or {}), list(d.get("scenes") or ()),
+                   static=dict(d.get("static") or {}))
 
 
 def manifest_rows(project):
@@ -781,7 +921,7 @@ def read_card(card, rows, cancel=None):
         try:
             with open(cache, encoding="utf-8") as f:
                 got = CardClips.from_json(json.load(f))
-            got.name_of = _names_of(rows, got.bank_of, got)
+            _name_rows(got, rows)
             return got
         except (OSError, ValueError, KeyError, TypeError, IndexError):
             pass
@@ -793,7 +933,7 @@ def read_card(card, rows, cancel=None):
         out.note = str(e)
         return out
     out.game, out.version = game or "", version or ""
-    names, banks = set(), {}
+    names, banks, twins, scenes, own = set(), {}, {}, [], {}
     fragments = None
     try:
         with CardImage(card) as img:
@@ -804,16 +944,27 @@ def read_card(card, rows, cancel=None):
             for d in _bank_dirs(rows):
                 if cancel is not None and cancel():
                     return out
+                data = bank = None
                 try:
                     data = img.preview(part, "%s/scene.radium" % d, cap=64 << 20)
                     bank = VB.parse(data) if data else None
                 except (OSError, ValueError, VB.VideoBankError):
                     bank = None
                 if bank is None:
+                    if data:
+                        scenes.append(d)
+                        # PAD-624: its clips named as Extract names them (Batman 66, Bond 60th:
+                        # a library of several Videos is no video bank)
+                        for name, path in _scene_clips(data, d, rows):
+                            names.add(name)
+                            own.setdefault(name, [d, path, SCENE])
                     continue
                 for c in bank.library.entries:
                     names.add(c.name)
-                    banks.setdefault(c.name, [d, c.path])
+                    if c.name in banks:
+                        twins.setdefault(c.name, []).append([d, c.path])
+                    else:
+                        banks[c.name] = [d, c.path]
     except (OSError, ValueError) as e:
         out.note = "the card could not be read (%s)" % e
         return out
@@ -825,11 +976,15 @@ def read_card(card, rows, cancel=None):
     ctx = {}
     out.reading = analyse(elf, names, ctx=ctx)
     out.sounds = _sounds(elf, names, fragments, out, ctx)
+    out.static = _static(out, ctx)
+    for name, v in own.items():                     # a bank's clip of the name comes first
+        banks.setdefault(name, v)
     out.bank_of = {n: v for n, v in banks.items()}
+    out.twins, out.scenes = twins, scenes
     out.unplayed = unplayed(out.reading, banks)
     if not out.reading.labels:
         out.note = "the app can't tell this game's modes apart in its program"
-    out.name_of = _names_of(rows, out.bank_of, out)
+    _name_rows(out, rows)
     if cache:
         try:
             tmp = cache + ".tmp"
@@ -853,6 +1008,16 @@ def _sounds(elf, names, fragments, clips, ctx):
     return got.to_json()
 
 
+def _static(clips, ctx):
+    """:func:`.clip_static.analyse`'s facts per clip; {} when the program could not be read
+    (it rides along, it never breaks the tab)."""
+    from . import clip_static as ST
+    prog = ctx.get("prog")
+    if prog is None:
+        return {}
+    return ST.analyse(prog, clips.reading.refs, clips.game, clips.version).facts()
+
+
 def unplayed(reading, bank_of):
     """The clips nothing in the game program names, in the banks the game plays BY NAME (a
     bank a third of whose clips the program names: Godzilla's in-game bank, 443 of 598).
@@ -860,13 +1025,54 @@ def unplayed(reading, bank_of):
     clips (an attract scene's) play with the scene and are never in this list."""
     by_dir = {}
     for name, v in bank_of.items():
-        by_dir.setdefault(v[0], []).append(name)
+        if len(v) < 3:                      # not a scene's own clip (:data:`SCENE`)
+            by_dir.setdefault(v[0], []).append(name)
     out = []
     for _d, names in by_dir.items():
         named = [n for n in names if reading.refs.get(n)]
         if names and len(named) * 3 >= len(names):
             out += [n for n in names if not reading.refs.get(n)]
     return sorted(out)
+
+
+def _scene_clips(data, d, rows):
+    """``[(clip name, path under scene.assets)]`` of the project's clips in the scene directory
+    *d* whose ``scene.radium`` (*data*) is no video bank: each named by the scene element that
+    references it, as Extract named its file (:func:`.engine._parse_radium`)."""
+    from .engine import _parse_radium
+    pre = "%s/scene.assets/" % d
+    refs = [p[len(pre):] for p in rows.values() if p.startswith(pre)]
+    if not data or not refs:
+        return []
+    try:
+        named = _parse_radium(data)
+    except (ValueError, IndexError, struct.error):
+        return []
+    return [(named[r], r) for r in refs if named.get(r)]
+
+
+def _name_rows(clips, rows):
+    """*clips*' row maps for the project's manifest *rows*: :attr:`CardClips.name_of`,
+    :attr:`~CardClips.twin_of` and :attr:`~CardClips.scene_of`."""
+    clips.name_of = _names_of(rows, clips.bank_of, clips)
+    # PAD-624: a scene's own clip is named only where the program names it (Batman 66's
+    # attract loops); one it never names stays the scene's (PAD-627's words)
+    paired = (clips.sounds or {}).get("pairs") or {}
+    for rel, name in list(clips.name_of.items()):
+        if len(clips.bank_of.get(name, ())) > 2 and not (clips.reading.refs.get(name)
+                                                          or paired.get(name)):
+            del clips.name_of[rel]
+    twin = {"%s/scene.assets/%s" % (d, path): name
+            for name, at in clips.twins.items() for d, path in at}
+    scenes = set(clips.scenes)
+    clips.twin_of, clips.scene_of = {}, {}
+    for rel, path in rows.items():
+        if rel in clips.name_of:
+            continue
+        if path in twin:
+            clips.twin_of[rel] = twin[path]
+        elif "/scene.assets/" in path and path.split("/scene.assets/", 1)[0] in scenes:
+            clips.scene_of[rel] = path.split("/scene.assets/", 1)[0]
 
 
 def _names_of(rows, bank_of, clips):

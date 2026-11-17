@@ -301,6 +301,37 @@ def test_images_conf_defaults_and_refusals(mk):
         mk.render_images_conf(["/dev/mmcblk0p3"], timeout=-1)
 
 
+def test_back_hold_is_written_only_when_asked_and_carried_over(mk):
+    """PAD-1309: back_hold= (seconds BACK held in a game restarts into the menu) is a line only
+    when a value was given - a build without it is what it always was - reads back as an int,
+    refuses a negative or an over-long hold, and a menu-only inject keeps the card's own."""
+    import argparse
+    devs = ["/dev/mmcblk0p3", "/dev/mmcblk0p7"]
+    plain = mk.render_images_conf(devs, ["A", "B"])
+    assert not [l for l in plain.splitlines() if l.startswith("back_hold")]
+    assert mk.parse_images_conf(plain)["back_hold"] is None
+    held = mk.render_images_conf(devs, ["A", "B"], back_hold=4)
+    lines = [l for l in held.splitlines() if not l.startswith("#")]
+    assert lines.index("back_hold=4") == lines.index("timeout=15") + 1
+    assert mk.parse_images_conf(held)["back_hold"] == 4
+    assert "back_hold=0" in mk.render_images_conf(devs, ["A", "B"], back_hold=0).splitlines()
+    for bad in (-1, 61):
+        with pytest.raises(mk.Refused, match="back_hold"):
+            mk.render_images_conf(devs, ["A", "B"], back_hold=bad)
+    ap = argparse.ArgumentParser()
+    mk._add_conf_flags(ap)
+    assert ap.parse_args([]).back_hold is None and ap.parse_args(["--back-hold", "4"]).back_hold == 4
+    plan = _two_image_plan(mk)
+    args = argparse.Namespace(titles="A;B", subtitles="", timeout=None, default=0, debug_log=False)
+    assert "back_hold" not in mk.conf_for_plan(plan, args)
+    on_card = mk.parse_images_conf(mk.render_images_conf(plan.devices(), ["A", "B"], back_hold=7))
+    assert mk.parse_images_conf(mk.conf_for_plan(plan, args, existing=on_card))["back_hold"] == 7
+    args.back_hold = 2
+    assert mk.parse_images_conf(mk.conf_for_plan(plan, args, existing=on_card))["back_hold"] == 2
+    # the update path's like-for-like render keeps it too
+    assert "back_hold=7" in mk.render_images_conf_text(on_card).splitlines()
+
+
 def test_the_card_log_is_a_development_switch_the_app_never_sets(mk):
     """The selector's log on the card (/dump/log/codeselect.log) exists only on a card built or
     injected with --debug-log: the plain render carries no log= line (the hook then passes no
@@ -991,21 +1022,21 @@ def test_build_manifest_records_the_menu_and_where_each_image_came_from(mk):
     assert man["images"] == [
         {"device": "/dev/mmcblk0p3", "source": os.path.abspath("/img/a.raw"), "title": "STERN 1.59.0",
          "subtitle": "Original Stern code", "art": "art0.png", "anim": None, "music": None,
-         "confirm": None, "own_scores": None,
+         "confirm": None, "own_scores": None, "hiscores": None,
          "title_dir": "turtles_pro", "version": "1.59.0", "node_fw_version": "1.33.0",
          # item 106: null = this image is a card of its own
          "group": None},
         {"device": "/dev/mmcblk0p7", "source": os.path.abspath("/img/b.raw"), "title": "TMNT 1987",
          "subtitle": "1987 cartoon upscale", "art": "art1.png", "anim": "anim1.gif", "music": "music1.wav",
-         "confirm": None, "own_scores": None,
+         "confirm": None, "own_scores": None, "hiscores": None,
          "title_dir": "turtles_pro", "version": "1.58.0", "node_fw_version": "1.19.0",
          "group": None}]
     # it is JSON, and exactly the keys contract A names
     d = json.loads(json.dumps(man))
-    assert set(d) == {"tool", "version", "written", "layout", "images", "timeout", "default",
-                      "volume", "machine_volume", "mixer_volume", "sound_move", "sound_confirm",
-                      "heading", "text_size", "counter", "settings", "countdown_word", "footer",
-                      "theme", "colors", "groups"}
+    assert set(d) == {"tool", "version", "written", "layout", "images", "timeout", "back_hold", "default",
+                      "volume", "machine_volume", "edition", "mixer_volume", "sound_move",
+                      "sound_confirm", "heading", "text_size", "counter", "settings",
+                      "countdown_word", "footer", "theme", "colors", "groups"}
     # a card that never set one records null, not the selector's own line
     assert d["heading"] is None
     # a card with no media at all: the fields are null, not absent
@@ -1566,6 +1597,24 @@ def test_conf_for_plan_takes_own_scores_from_the_flag_else_the_card(mk):
         mk.conf_for_plan(plan, argparse.Namespace(own_scores=";../x"), existing=ex)
 
 
+def test_conf_for_plan_takes_hiscores_from_the_flag_else_the_card(mk):
+    """PAD-1194: hiscores=<N>|<group> lines, written, read back and carried like scores=."""
+    plan = _two_image_plan(mk)
+    out = mk.conf_for_plan(plan, argparse.Namespace(own_scores="original;heisei", hiscores="original;shared"))
+    assert "scores=0|original\n" in out and "hiscores=0|original\n" in out and "hiscores=1|shared\n" in out
+    ex = mk.parse_images_conf(out)
+    assert ex["hiscores"] == {0: "original", 1: "shared"} and ex["scores"] == {0: "original", 1: "heisei"}
+    # no flag: the card's own ride through
+    assert "hiscores=1|shared\n" in mk.conf_for_plan(plan, argparse.Namespace(), existing=ex)
+    # --hiscores '' clears them all; the stores stay
+    out = mk.conf_for_plan(plan, argparse.Namespace(hiscores=""), existing=ex)
+    assert "hiscores=" not in out and "scores=1|heisei\n" in out
+    with pytest.raises(mk.Refused):
+        mk.conf_for_plan(plan, argparse.Namespace(hiscores=";../x"), existing=ex)
+    # a line select.sh would refuse is dropped on the way in
+    assert mk.parse_images_conf(out + "hiscores=1|../x\n")["hiscores"] == {}
+
+
 def test_conf_for_plan_takes_the_heading_from_the_flag_else_the_card(mk):
     plan = _two_image_plan(mk)
     ex = mk.parse_images_conf(_menu_conf(mk, plan, heading="OLD LINE"))
@@ -2045,6 +2094,81 @@ def test_the_stock_card_reads_1_59_0_from_both_sources(mk):
     assert rec["elf_version"] == "1.59" and rec["elf_name"] == "TMNT PRO"
     assert rec["node_fw_version"] == "1.33.0" and len(rec["node_fw"]) == 17
     assert rec["notes"] == [] and rec["bypass"] == "armed"
+
+
+def _sidx_head(pkg, code, major, minor, patch):
+    return (b"SIDX" + b"\x64\x93\x05\x00" + (pkg.encode() + bytes(32))[:29] + code.encode()
+            + bytes([major, minor, patch, 2]) + bytes(8))
+
+
+def test_a_sidx_header_records_its_own_version(mk):
+    """The bytes the 59 library cards carry: name+code in 32 bytes, then major, minor, patch."""
+    assert mk.sidx_header_version(_sidx_head("godzilla_le", "ZIL", 1, 16, 0)) == "1.16.0"
+    assert mk.sidx_header_version(_sidx_head("king_kong_le", "SKK", 0, 97, 0)) == "0.97.0"
+    assert mk.sidx_header_version(b"not a manifest\n") is None       # the synthetic cards' stand-in
+    assert mk.sidx_header_version(b"SIDX") is None                    # too short to say
+
+
+def _ident(major, minor):
+    return {"version": "%d.%02d" % (major, minor), "raw": (major << 8) | minor}
+
+
+def test_an_updated_card_reads_as_the_game_code_it_runs(mk):
+    """PAD-697: a stock 1.08 card updated to 1.16 on the machine kept 'godzilla_le-1_08_0.sidx'
+    while its game became 1.16, and the gate refused to pair it with another 1.16 card.  The
+    game ELF is the code that runs: its major.minor wins, whatever the stale file says."""
+    for head in (None, "1.08.0"):
+        ver, src, notes = mk.pick_version("1.08.0", head, _ident(1, 16))
+        assert (ver, src) == ("1.16.0", "game ELF")
+        assert any("package name says 1.08.0" in n and "1.16.0 is used" in n for n in notes)
+    # the file's own header already says 1.16: that agrees with the ELF and gives the patch
+    ver, src, notes = mk.pick_version("1.08.0", "1.16.0", _ident(1, 16))
+    assert (ver, src) == ("1.16.0", "spk index + game ELF")
+    assert notes == ["the package file is named 1.08.0 but its own header says 1.16.0"]
+    # the stock shapes keep their answers
+    assert mk.pick_version("1.59.0", "1.59.0", _ident(1, 59)) == ("1.59.0", "spk index + game ELF", [])
+    assert mk.pick_version("1.59.0", None, None)[:2] == ("1.59.0", "spk index")
+    assert mk.pick_version(None, None, _ident(1, 59))[:2] == ("1.59", "game ELF")
+    assert mk.pick_version(None, None, None)[:2] == (None, None)
+    # and two such images pass the gate together
+    recs = [_vrec(mk, 0, version=mk.pick_version("1.08.0", None, _ident(1, 16))[0]),
+            _vrec(mk, 1, version="1.16.0")]
+    assert mk.version_findings(recs)["version_mismatch"] is None
+
+
+def test_the_live_package_is_the_one_the_link_names_else_the_newest(mk):
+    """PAD-1336: a Godzilla LE updated 1.13 -> 1.16 on the machine keeps all four packages, and
+    the stale 1_13_0 one, first in name order, was read as the tree's own - a NOTE that read as
+    a version mismatch, and the package the validator bypass refreshed.  The live one is the
+    bare link's target, else the title's newest."""
+    cands = [("godzilla_le-1_%02d_0.sidx" % m, "godzilla_le", "1.%d.0" % m) for m in (13, 14, 15, 16)]
+    link = {"godzilla_le.sidx": "godzilla_le-1_16_0.sidx"}
+    assert mk.live_sidx_order(cands, link, "godzilla_le")[0] == "godzilla_le-1_16_0.sidx"
+    # the link wins even over a newer file: it is what the machine reads
+    assert mk.live_sidx_order(cands, {"godzilla_le.sidx": "/spk/index/godzilla_le-1_14_0.sidx"},
+                              "godzilla_le")[0] == "godzilla_le-1_14_0.sidx"
+    # no link: the newest of the title's own, by number not text (1.9 < 1.10)
+    nine = [("godzilla_le-1_09_0.sidx", "godzilla_le", "1.9.0"),
+            ("godzilla_le-1_10_0.sidx", "godzilla_le", "1.10.0")]
+    assert mk.live_sidx_order(nine, {}, "godzilla_le")[0] == "godzilla_le-1_10_0.sidx"
+    # a package of another name never beats the title's own
+    other = cands[:1] + [("zz_other-9_00_0.sidx", "zz_other", "9.0.0")]
+    assert mk.live_sidx_order(other, {}, "godzilla_le")[0] == "godzilla_le-1_13_0.sidx"
+
+
+_GZ_LE = "godzilla_le-1_16_0_spike2.Release.8G.sdcard.raw"
+GZ_LE_CARD = next((p for p in (os.path.join("D:\\Pinball\\images\\Stern\\spike2", _GZ_LE),
+                               os.path.join("/mnt/d/Pinball/images/Stern/spike2", _GZ_LE))
+                   if os.path.isfile(p)), "")
+
+
+@pytest.mark.skipif(not GZ_LE_CARD, reason="the stock godzilla_le 1.16 card is not on this machine")
+def test_the_stock_godzilla_package_header_matches_its_name(mk):
+    """Read-only: the real .sidx carries the same three numbers in its header as in its name."""
+    f, r = mk.open_source(GZ_LE_CARD, mk.source_part(GZ_LE_CARD))
+    with f:
+        pkgs = mk.tree_packages(r, mk.tree_root_inode(r, None), "godzilla_le")
+    assert pkgs == [("godzilla_le-1_16_0.sidx", "godzilla_le", "1.16.0", "1.16.0")]
 
 
 def test_the_selftests_check_recorder_names_the_line_that_failed(mk, capsys):
@@ -3096,6 +3220,8 @@ def test_tree_scratch_leaves_a_folder_that_refuses_symlinks(mk, monkeypatch, tmp
     linux.mkdir()
     monkeypatch.setattr(mk, "LINUX_SCRATCH", str(linux))
     monkeypatch.setattr(mk, "holds_symlinks", lambda d: os.path.abspath(d) != str(out_dir))
+    monkeypatch.setattr(mk, "holds_modes", lambda d: True)
+    monkeypatch.setattr(mk, "holds_case", lambda d: True)
     said = []
     monkeypatch.setattr(mk, "say", lambda m: said.append(m))
     d = mk.tree_scratch(str(out_dir), "mkmulticard.tree.")
@@ -3111,3 +3237,46 @@ def test_holds_symlinks_leaves_no_probe_behind(mk, tmp_path):
     mk.holds_symlinks(str(tmp_path))
     assert os.listdir(tmp_path) == []
     assert mk.holds_symlinks(str(tmp_path / "missing")) is False
+
+
+# ---- PAD-1336: a Windows folder keeps neither the modes nor the case of a Linux tree ---------
+@pytest.mark.parametrize("probe, words", [
+    ("holds_modes", "does not keep Linux file permissions"),
+    ("holds_case", "does not tell upper from lower case"),
+])
+def test_tree_scratch_leaves_a_windows_folder(mk, monkeypatch, tmp_path, probe, words):
+    """pb_lawww built a 3-image Godzilla card into a folder on C:.  The two extras' trees were
+    staged beside the card, on a drive WSL reads back 0777 whatever chmod said, mke2fs -d
+    copied those modes into p7, and verify failed the card.  Such a folder now sends the tree
+    to the Linux side, and the build says why."""
+    win = tmp_path / "win"
+    win.mkdir()
+    linux = tmp_path / "linux"
+    linux.mkdir()
+    monkeypatch.setattr(mk, "LINUX_SCRATCH", str(linux))
+    monkeypatch.setattr(mk, "holds_symlinks", lambda d: True)
+    monkeypatch.setattr(mk, "holds_modes", lambda d: True)
+    monkeypatch.setattr(mk, "holds_case", lambda d: True)
+    monkeypatch.setattr(mk, probe, lambda d: os.path.abspath(d) != str(win))
+    said = []
+    monkeypatch.setattr(mk, "say", lambda m: said.append(m))
+    d = mk.tree_scratch(str(win), "mkmulticard.tree.")
+    assert os.path.dirname(d) == str(linux)
+    assert len(said) == 1 and words in said[0] and str(linux) in said[0], said
+    assert mk.tree_unfit(str(linux)) == ""
+
+
+def test_the_mode_and_case_probes_leave_nothing_behind(mk, tmp_path):
+    mk.holds_modes(str(tmp_path))
+    mk.holds_case(str(tmp_path))
+    assert os.listdir(tmp_path) == []
+    assert mk.holds_modes(str(tmp_path / "missing")) is False
+    assert mk.holds_case(str(tmp_path / "missing")) is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a Linux filesystem's own answer")
+def test_a_linux_folder_holds_a_tree(mk, tmp_path):
+    """The Linux side's own disk keeps modes, and /var/tmp (LINUX_SCRATCH) is one."""
+    assert mk.holds_modes(str(tmp_path))
+    if mk.holds_case(str(tmp_path)):         # a case-folding tmp (macOS) is refused, rightly
+        assert mk.tree_unfit(str(tmp_path)) == ""

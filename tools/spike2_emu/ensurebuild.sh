@@ -64,7 +64,7 @@ _pad_run_live() {
     local n
     [ "$(bash "$RIG/alive.sh" --total 2>/dev/null)" != 0 ] && return 0
     [ "${PAD_SLOT:-0}" = 0 ] || return 1
-    for n in $(seq 1 "${PAD_SLOTS_MAX:-4}"); do
+    for n in $(seq 1 "${PAD_SLOTS_MAX:-5}"); do
         mountpoint -q "$PAD_HOME/padslots/$n/root" 2>/dev/null || continue
         [ "$(PAD_SLOT=$n bash "$RIG/alive.sh" --procs 2>/dev/null)" != 0 ] && return 0
     done
@@ -152,6 +152,23 @@ _pad_build() {           # <script> [args...]
     [ -n "$errs" ] || errs=$(printf '%s\n' "$out" | tail -8)
     printf '%s\n' "$errs" | sed 's/^/[build]   /' >&2
     [ -s "$log" ] && echo "[build]   full build output: $log" >&2
+    # A MISSING HEADER WITH THE CROSS COMPILER PRESENT IS A MISSING PACKAGE,
+    # not a bug in the rig (PAD-785, the first Mac to build the shim):
+    #
+    #     /usr/include/features-time64.h:20:10: fatal error: bits/wordsize.h:
+    #     No such file or directory
+    #
+    # gcc-arm-linux-gnueabihf only RECOMMENDS the ARM libc headers, so any apt
+    # that skips recommends (a Dockerfile's --no-install-recommends, a distro
+    # configured that way) has a cross compiler on PATH and nothing for it to
+    # include. -nostdlib governs the link, not the includes. Named here
+    # because the error itself names a header nobody has heard of.
+    if printf '%s\n' "$out" | grep -qE 'fatal error: [^ ]+\.h: No such file' \
+        && [ ! -e "${PAD_ARM_INCLUDE:-/usr/arm-linux-gnueabihf/include}/stdio.h" ]
+    then
+        echo "[build]   the ARM C headers are not installed (Debian/Ubuntu:" >&2
+        echo "[build]   apt install libc6-dev-armhf-cross)." >&2
+    fi
     return $rc
 }
 
@@ -436,6 +453,44 @@ pad_ensure_bridge() {
     return 0
 }
 
+# PAD-849: A CARD WAS PICKED, AND THIS LINUX CANNOT SEE IT. "Pick a card image"
+# about the card the user had picked sent them round in circles for an evening.
+# WSL mounts the PC's local drives and nothing else: the app spells a network
+# share (or a drive mapped to one) as /mnt/unc/<server>/<share> and mounts it
+# before a root run, so what is left here is a share that would not open, or a
+# drive WSL started without. Says which, and what to do; the caller exits.
+pad_card_unseen() {
+    echo "[$2]   $1" >&2
+    # THE MAC'S CONTAINER (PAD-1109): /pad/cards is padbox.sh's mount of the
+    # card's folder. macOS keeps Downloads, Desktop and Documents behind a
+    # permission, and the VM's share of them is served by whoever started
+    # Colima: started from Terminal without that permission, a card the app
+    # opened fine read "Operation not permitted" in here.
+    case $1 in
+        /pad/cards/*)
+            echo "[$2] cannot be opened inside the emulator's container on this Mac" >&2
+            echo "[$2] (it opens fine in the app). macOS keeps Downloads, Desktop and" >&2
+            echo "[$2] Documents behind a permission, and the container sees them" >&2
+            echo "[$2] through whoever started Colima. Either stop Colima in Terminal" >&2
+            echo "[$2] (colima stop) and let the app start it again, grant that" >&2
+            echo "[$2] program access to the folder (System Settings > Privacy &" >&2
+            echo "[$2] Security > Files and Folders), or copy the card to a folder" >&2
+            echo "[$2] outside those three and pick it there." >&2
+            return 0 ;;
+    esac
+    echo "[$2] cannot be opened from inside WSL, which is where the emulator" >&2
+    echo "[$2] runs (it opens fine in the app, which runs on Windows)." >&2
+    case $1 in
+        /mnt/unc/*)
+            echo "[$2] It is on a network share. Check that the share opens in" >&2
+            echo "[$2] File Explorer, or copy the card to a local drive." >&2 ;;
+        *)
+            echo "[$2] Copy the card to a local drive (C:, D: ...) and pick it" >&2
+            echo "[$2] there, or restart WSL if its drive was plugged in after" >&2
+            echo "[$2] WSL started." >&2 ;;
+    esac
+}
+
 # ---- THE GUEST FILESYSTEM, WHICH IS STEP ONE AND WAS NOT CHECKED EITHER -----
 #
 # run_game.sh chroots into $ROOT, and $ROOT is what rootfs.sh builds out of a
@@ -472,7 +527,13 @@ pad_ensure_rootfs() {
     [ -d "$ROOT/usr/lib" ] && return 0          # already built
 
     _card=${PAD_CARD:-}
-    if [ -z "$_card" ] || [ ! -f "$_card" ]; then
+    if [ -n "$_card" ] && [ ! -f "$_card" ]; then
+        echo "[build] There is no guest filesystem at $ROOT yet, and the card" >&2
+        echo "[build] image it is built from is not there either:" >&2
+        pad_card_unseen "$_card" build
+        return 1
+    fi
+    if [ -z "$_card" ]; then
         echo "[build] There is no guest filesystem at $ROOT, and that is what" >&2
         echo "[build] the game runs inside - it is built once, from a card" >&2
         echo "[build] image, and this machine has not done it yet." >&2
@@ -545,9 +606,21 @@ _pad_guest_probe() {
 #: (e_machine 0x28 = ARM, at offset 18), because THAT is the fact and the name
 #: is only a convention. aarch64 and armeb are 64-bit and big-endian and would
 #: both match a sloppier test.
+#:
+#: A TABLE THAT CANNOT BE SEEN IS NOT AN EMPTY ONE (PAD-837). A container
+#: without privileges has no binfmt_misc mounted, however many handlers the
+#: server registered - and a registration made with the F flag (as Debian's
+#: and Ubuntu's qemu-arm.conf do) runs ARM programs in that container all the
+#: same, qemu or no qemu inside it. So when the table is not there to read,
+#: the answer is got the only other way: by running a 32-bit ARM program and
+#: seeing it exit 0. "exec" then stands where the table's file would.
+#: PAD_BINFMT_DIR lets the tests point it at a fake table.
 _pad_binfmt_arm() {
-    local d=/proc/sys/fs/binfmt_misc f
-    [ -d "$d" ] || return 1
+    local d=${PAD_BINFMT_DIR:-/proc/sys/fs/binfmt_misc} f
+    if [ ! -e "$d/status" ]; then
+        _pad_arm_runs && { echo exec; return 0; }
+        return 1
+    fi
     [ -f "$d/qemu-arm" ] && { printf '%s\n' "$d/qemu-arm"; return 0; }
     for f in "$d"/*; do
         case "${f##*/}" in register|status|*aarch64*|*armeb*) continue ;; esac
@@ -556,6 +629,26 @@ _pad_binfmt_arm() {
             printf '%s\n' "$f"; return 0; }
     done
     return 1
+}
+
+#: The smallest 32-bit ARM Linux program: `mov r0,#0; mov r7,#1; svc 0`,
+#: exit(0), in a 96-byte ELF (EABI5, loaded at 0x10000). Base64, because a
+#: shell cannot hold the bytes any other way that every printf agrees on.
+PAD_ARM_EXIT0_B64=f0VMRgEBAQAAAAAAAAAAAAIAKAABAAAAVAABADQAAAAAAAAAAAQABTQAIAABAAAAAAAAAAEAAAAAAAAAAAABAAAAAQBgAAAAYAAAAAUAAAAAEAAAAACg4wFwoOMAAADv
+
+#: Does this kernel run 32-bit ARM programs? Asked by running one. A temp
+#: directory that will not take the file (or one mounted noexec) answers no
+#: rather than guessing yes: the caller then names the handler, which is the
+#: likelier fault.
+_pad_arm_runs() {
+    local t rc=1
+    t=$(mktemp -d 2>/dev/null) || return 1
+    if printf '%s' "$PAD_ARM_EXIT0_B64" | base64 -d > "$t/armexit0" 2>/dev/null &&
+       chmod +x "$t/armexit0" 2>/dev/null; then
+        "$t/armexit0" >/dev/null 2>&1; rc=$?
+    fi
+    rm -rf "$t" 2>/dev/null
+    return $rc
 }
 
 #: The command that would register the ARM handler ON THIS MACHINE. Ubuntu
@@ -688,9 +781,21 @@ pad_ensure_guest_exec() {
             echo "[guest] restart. It lists what it will change before it changes it." >&2
             echo "[guest] By hand instead:" >&2
         fi
-        echo "[guest] Now:  $(_pad_binfmt_advice)" >&2
-        echo "[guest] Keep: put   [boot]   and   systemd=true   in /etc/wsl.conf," >&2
-        echo "[guest]       then wsl --shutdown once." >&2
+        # IN THE MAC'S BOX (PAD-884) none of that is the answer: the table is
+        # the container engine's, and padbox.sh registers the handler in it
+        # before every run. Reaching here means that step said why it could
+        # not, a few lines up.
+        if [ -f /.dockerenv ]; then
+            echo "[guest] This is the Mac's container: the handler is registered" >&2
+            echo "[guest] in the container engine before every run, and that step" >&2
+            echo "[guest] failed - its reason is a few lines above." >&2
+        else
+            echo "[guest] Now:  $(_pad_binfmt_advice)" >&2
+            if [ "${IS_WSL:-0}" = 1 ]; then
+                echo "[guest] Keep: put   [boot]   and   systemd=true   in /etc/wsl.conf," >&2
+                echo "[guest]       then wsl --shutdown once." >&2
+            fi
+        fi
         return 1
     fi
     if [ "$(head -1 "$entry" 2>/dev/null)" = disabled ]; then

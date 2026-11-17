@@ -31,9 +31,20 @@ TABS = (
     ("modes", "modes", "Modes", "Modes", "Make", "modes"),
     ("defaults", "defaults", "Default Settings", "Defaults", "Make",
      "defaults"),
+    # PAD-1204: what changes how the game plays or reports and keeps Insider Connected (Stern Spike 2)
+    ("playopts", "playopts", "Play Options", "Play options", "Make", "gear"),
+    # PAD-1382: the game's service menu as the card will show it, with the app's rows in it (Stern Spike 2)
+    ("svcmenu", "svcmenu", "Service Menu", "Service menu", "Make", "list"),
+    # PAD-782: the attract mode editor (Stern Spike 2)
+    ("attract", "attract", "Attract", "Attract", "Make", "film"),
+    # PAD-1040: the cabinet's expression light shows (Stern Spike 2)
+    ("lights", "lights", "Expression Lights", "Expression lights", "Make", "lights"),
     ("write", "write", "Write", "Write", "Build", "write"),
     ("multiboot", "multiboot", "Multi-boot", "Multi-boot", "Build",
      "multiboot"),
+    # PAD-1279: a small card that boots any Spike 2 machine into test pictures, videos,
+    # scenes and sounds (DragonRR: "make it independent" of the multi-boot)
+    ("testcard", "testcard", "Test Card", "Test card", "Build", "palette"),
     ("modpack", "modpack", "Mod Pack", "Mod Pack", "Build", "modpack"),
     ("partitions", "partitions", "Partition Explorer", "Partitions",
      "Inspect", "partitions"),
@@ -53,6 +64,10 @@ TABS = (
      "emulate"),
     ("emulate_pb", "emulate_pb", "Emulate PB", "Emulate", "Play",
      "emulate"),
+    # PAD-802: a Visual Pinball table played by the Spike 2 emulator (in
+    # every copy since PAD-1136, core/preview.RELEASED "vpx")
+    ("vpx", "vpx", "Visual Pinball", "Visual Pinball", "Play",
+     "playfield"),
     # Not a tab: the app-wide menus, windows and banners (settings, help,
     # projects, updates).  Its key is empty, so the rail never shows it.
     ("shell_extras", "shellx", "", "", "", ""),

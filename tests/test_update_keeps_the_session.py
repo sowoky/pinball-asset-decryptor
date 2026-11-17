@@ -81,6 +81,10 @@ class _App:
     _on_close = app_mod.App._on_close
     _launch_downloaded_installer = app_mod.App._launch_downloaded_installer
     _finish_appimage_update = app_mod.App._finish_appimage_update
+    _close_for_update = app_mod.App._close_for_update
+
+    def _show_update_splash(self, version):
+        pass                # a real window (PAD-1036): not from a test
 
     def __init__(self, settings_file, kill_at=None, state=None, boom=False):
         self.order = []

@@ -19,6 +19,7 @@ import sys
 import threading
 
 from . import compat
+from ..core.drives import stick_words
 
 
 def _fmt_size(n):
@@ -30,6 +31,19 @@ def _fmt_size(n):
     if n >= 10 ** 6:
         return "%.1f MB" % (n / 10 ** 6)
     return "%d bytes" % n
+
+
+def _size_change(img_size, original_size):
+    """' (0.19 GB more than the original's 3.21 GB)' or "" when the two are
+    within a megabyte or the original's size is unknown."""
+    if not original_size or not img_size:
+        return ""
+    diff = img_size - original_size
+    if abs(diff) < 10 ** 6:
+        return " (the same size as the original)"
+    return (" (%s %s than the original's %s)"
+            % (_fmt_size(abs(diff)), "more" if diff > 0 else "less",
+               _fmt_size(original_size)))
 
 
 def flash_words(mfr):
@@ -51,6 +65,10 @@ def flash_words(mfr):
                         or getattr(mfr, "direct_target_kind", "sd_card")),
         "target_label": (getattr(mfr, "flash_target_label", None)
                          or "Target %s:" % noun),
+        # the medium is formatted and the image's FILES copied onto it (a
+        # JJP install stick), so any stick of the right printed size will
+        # do: the readout names that size (PAD-1314)
+        "size_class": bool(getattr(mfr, "flash_size_class", False)),
         "filetypes": [tuple(ft) for ft in
                       getattr(mfr, "flash_image_filetypes", None)
                       or (("SD-card image", "*.img *.raw *.bin"),
@@ -97,6 +115,19 @@ class FlashDialog:
                        "SD card needs the first time this image goes onto "
                        "it. The machine's settings and scores are replaced "
                        "too.")
+    #: ...and with "Keep the SD card's settings..." ticked, which keeps them.
+    MENU_NOTE_WHOLE_KEPT = ("The whole image is written, games and all - "
+                            "what an SD card needs the first time this image "
+                            "goes onto it.")
+
+    #: "Keep the SD card's settings, audits and high scores" (PAD-736): a
+    #: whole-image flash that puts the card's own data partition back.
+    KEEP_LABEL = "Keep the SD card's settings, audits and high scores"
+    KEEP_NOTE = ("The machine keeps them in the SD card's data partition. It "
+                 "is read off the card first and goes back on in place of "
+                 "the image's, so the machine starts where it left off. A "
+                 "card with none (a new one) is refused before anything is "
+                 "written.")
     MENU_NOTE_BUILD = ("A freshly built image has never been on this card, "
                        "so the whole of it has to be written.")
     MENU_NOTE_FRESH = ("This card was only just built or updated, so no SD "
@@ -126,7 +157,8 @@ class FlashDialog:
                  fresh_image=False, flashed_fn=None, image_titles=None,
                  publish=None, ask_open=None, ask_save=None,
                  build_size=None, build_size_hint="", build_refusal=None,
-                 image_size_hint=None):
+                 image_size_hint=None, original_size=None,
+                 original_path=""):
         self._host = host                  # the UI loop (post)
         #: (image path, its size, the card's size) -> what else the user can
         #: do when an image already built won't fit the card ("" for
@@ -146,6 +178,11 @@ class FlashDialog:
         #: what else the user can do when the build won't fit the card: the
         #: words, or (card's size) -> the words, when they depend on it
         self._build_size_hint = build_size_hint or ""
+        # the original image's size (the Write tab's original, PAD-1314):
+        # what a build starts from, and what a built image is set against
+        self._original_size = int(original_size) if original_size else None
+        self._original_path = (os.path.normpath(original_path)
+                               if original_path else "")
         self._mfr = manufacturer
         self._on_flash = on_flash
         self._on_build_flash = on_build_flash
@@ -180,6 +217,14 @@ class FlashDialog:
         self.menu = False
         self.menu_enabled = False
         self.menu_note = ""
+        # "Keep the SD card's settings, audits and high scores" (PAD-736):
+        # remembered, like Build and Write - who keeps them once wants to
+        # every time
+        self.keep_offered = bool(getattr(manufacturer, "flash_keep_data",
+                                         False))
+        self.keep_data = bool(self.keep_offered
+                              and isinstance(initial_choices, dict)
+                              and initial_choices.get("keep_data"))
         # "Skip verify" (PAD-217): off every time the dialog opens, never
         # remembered - the read-back is what catches a bad write
         self.verify_offered = bool(getattr(manufacturer, "flash_skip_verify",
@@ -216,6 +261,8 @@ class FlashDialog:
         choices = {"write": bool(self.write)}
         if self._can_build:
             choices["build"] = bool(self.build)
+        if self.keep_offered:
+            choices["keep_data"] = bool(self.keep_data)
         try:
             self._on_choices(choices)
         except Exception:                               # noqa: BLE001
@@ -274,6 +321,13 @@ class FlashDialog:
         if publish:
             self.publish()
 
+    def keeping_data(self):
+        """True when the write about to start keeps the card's own
+        settings, audits and high scores (a whole-image flash only: the
+        menu-only write keeps them anyway)."""
+        return bool(self.keep_offered and self.keep_data and self.write
+                    and not self.menu and not self.to_disk())
+
     def skipping_verify(self):
         """True when the write about to start will not be read back."""
         return bool(self.verify_offered and self.skip_verify and self.write
@@ -316,7 +370,8 @@ class FlashDialog:
         self._menu_seen = self.image_path
         if can:
             why = (self.MENU_NOTE_OK if self.menu
-                   else self.MENU_NOTE_WHOLE if flashed
+                   else (self.MENU_NOTE_WHOLE_KEPT if self.keeping_data()
+                         else self.MENU_NOTE_WHOLE) if flashed
                    else self.MENU_NOTE_UNFLASHED)
         self.menu_note = why
 
@@ -355,10 +410,32 @@ class FlashDialog:
         card = self.selected
         card_size = card.size_bytes if card else None
         if building and img_size is None:
+            if self._original_size and self.words["size_class"]:
+                if card_size and self._original_size > card_size:
+                    return ("⚠ The original alone is %s, larger than the "
+                            "%s %s, so the build won't fit. Use %s."
+                            % (_fmt_size(self._original_size),
+                               self.words["noun"], _fmt_size(card_size),
+                               self._need(self._original_size)), "err")
+                return ("The build is about the size of the original "
+                        "(%s), plus whatever your changes add: %s. It is "
+                        "checked against the %s before anything is erased."
+                        % (_fmt_size(self._original_size),
+                           self._need(self._original_size),
+                           self.words["noun"]), "gray")
             return ("The image is built first — its size is checked "
                     "against the card before writing.", "gray")
         if img_size is None:
             return "", "gray"
+        # how it sets against the original it was built from (PAD-1314);
+        # with Build ticked and no size known up front, the size is the one
+        # an earlier build left at the build path, so it says so
+        label = ("Last build" if building and not self._build_size
+                 else "Image")
+        change = ""
+        if (not (building and self._build_size) and self._original_size
+                and img and os.path.normpath(img) != self._original_path):
+            change = _size_change(img_size, self._original_size)
         if self.to_disk():
             mode = self.current_disk_mode()
             if card is None:
@@ -382,9 +459,12 @@ class FlashDialog:
                     "installed onto it, as the machine's installer would."
                     % (_fmt_size(img_size), card.display), "gray")
         noun = self.words["noun"]
+        need = (" — needs %s" % self._need(img_size)
+                if self.words["size_class"] else "")
         if card is None:
-            return ("Image: %s  •  pick a target %s."
-                    % (_fmt_size(img_size), noun), "gray")
+            return ("%s: %s%s%s  •  pick a target %s."
+                    % (label, _fmt_size(img_size), change, need, noun),
+                    "gray")
         if card_size and img_size > card_size:
             if building and self._build_size:
                 return ("⚠ The build will be %s, larger than the %s %s — it "
@@ -392,18 +472,30 @@ class FlashDialog:
                         % (_fmt_size(img_size), noun, _fmt_size(card_size),
                            noun, (", " + self._build_hint(card_size))
                            if self._build_hint(card_size) else ""), "err")
+            if self.words["size_class"]:
+                return ("⚠ %s %s%s is larger than the %s %s — it won't "
+                        "fit. Use %s."
+                        % (label, _fmt_size(img_size), change, noun,
+                           _fmt_size(card_size), self._need(img_size)),
+                        "err")
             hint = self._image_hint(img, img_size, card_size)
-            return ("⚠ Image %s is larger than the %s %s — it won't fit. "
-                    "Use a larger %s%s." % (_fmt_size(img_size), noun,
-                                            _fmt_size(card_size), noun,
+            return ("⚠ %s %s%s is larger than the %s %s — it won't fit. "
+                    "Use a larger %s%s." % (label, _fmt_size(img_size), change,
+                                            noun, _fmt_size(card_size), noun,
                                             (", " + hint) if hint else ""),
                     "err")
         if card_size:
-            return ("Image %s  →  %s %s   ✓ fits"
-                    % (_fmt_size(img_size), noun, _fmt_size(card_size)),
-                    "ok")
-        return ("Image %s  →  %s size unknown (it will be checked before "
-                "writing)" % (_fmt_size(img_size), noun), "gray")
+            return ("%s %s%s  →  %s %s   ✓ fits"
+                    % (label, _fmt_size(img_size), change, noun,
+                       _fmt_size(card_size)), "ok")
+        return ("%s %s%s  →  %s size unknown (it will be checked before "
+                "writing)%s" % (label, _fmt_size(img_size), change, noun,
+                                (". It needs %s." % self._need(img_size))
+                                if need else ""), "gray")
+
+    def _need(self, n):
+        """'a 4 GB USB stick or larger' for an image of *n* bytes."""
+        return stick_words(n, self.words["noun"])
 
     def state(self):
         building, writing = self.building, bool(self.write)
@@ -471,6 +563,11 @@ class FlashDialog:
             "menu_offered": self.menu_offered, "menu": bool(self.menu),
             "menu_enabled": bool(self.menu_enabled),
             "menu_note": self.menu_note,
+            "keep_offered": bool(self.keep_offered and not self.to_disk()),
+            "keep_label": self.KEEP_LABEL,
+            "keep_data": bool(self.keep_data and not self.menu),
+            "keep_enabled": bool(writing and not self.menu),
+            "keep_note": self.KEEP_NOTE if self.keeping_data() else "",
             "verify_offered": bool(self.verify_offered
                                    and not self.to_disk()),
             "skip_verify": bool(self.skip_verify),
@@ -500,6 +597,11 @@ class FlashDialog:
             if self.verify_offered:
                 self.skip_verify = bool(value)
                 self.publish()
+            return
+        if key == "keep_data":
+            if self.keep_offered and not self.menu:
+                self.keep_data = bool(value)
+                self._sync_sections()
             return
         if key in ("build", "write", "menu"):
             if key == "build" and not self._can_build:
@@ -752,6 +854,11 @@ class FlashDialog:
                           "read back afterwards, so a bad write is not "
                           "caught here." % noun
                           if self.skipping_verify() else "")
+            kept = ("\n\nThe machine's settings, audits and high scores on "
+                    "it are kept: they are read off the %s first and put "
+                    "back. A %s with none is refused before anything is "
+                    "written." % (noun, noun)
+                    if self.keeping_data() else "")
             if self.menu and not building:
                 if not mb.askyesno(
                         "Write the boot menu?",
@@ -826,10 +933,10 @@ class FlashDialog:
                 if not mb.askyesno(
                         "Erase the %s and continue?" % noun,
                         "%s There is no undo.\n\n  Target: %s\n  On it now: "
-                        "%s\n  Image:  %s%s\n\nMake sure you have a backup "
+                        "%s\n  Image:  %s%s%s\n\nMake sure you have a backup "
                         "of anything on the %s.%s Proceed?"
                         % (lead, card.display, on_it or "(could not tell)",
-                           flash_what, alarm, noun, unverified),
+                           flash_what, alarm, kept, noun, unverified),
                         icon="warning"):
                     return False
 
@@ -837,6 +944,8 @@ class FlashDialog:
         device_path = card.device_path if (writing and card) else None
         extra = {}
         skip = {"verify": False} if self.skipping_verify() else {}
+        if self.keeping_data():
+            skip["keep_data"] = True
         if self.to_disk():
             extra["target"] = self._target()[0]
             mode = self.current_disk_mode()
@@ -1107,14 +1216,26 @@ class ImageInfo:
         self.publish()
         path = self.path
 
+        def _early(sections):
+            # the report but the video count (PAD-626)
+            self._host.post(self._early, seq, sections)
+
         def _worker():
             try:
-                sections = info_mod.collect(mfr, path, assets)
+                sections = info_mod.collect(mfr, path, assets,
+                                            partial=_early)
             except Exception as e:                      # noqa: BLE001
                 sections = [("Error", [("Could not read", str(e))])]
             self._host.post(self._done, seq, key, sections)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _early(self, seq, sections):
+        if seq != self._seq or not self.open or not self.busy:
+            return
+        self.sections = list(sections or [])
+        self.status = "Counting the videos…"
+        self.publish()
 
     def _done(self, seq, key, sections):
         if seq != self._seq or not self.open:
@@ -1127,7 +1248,7 @@ class ImageInfo:
 
     def report_text(self):
         from ..core import image_info as info_mod
-        if not self.sections:
+        if not self.sections or self.busy:     # not while it is half read
             return ""
         self.status = "Report copied to clipboard."
         self.publish()

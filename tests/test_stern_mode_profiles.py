@@ -19,6 +19,7 @@ import pytest
 
 from pinball_decryptor.plugins.stern import mode_assets as MA
 from pinball_decryptor.plugins.stern import mode_project as MP
+from tests.mode_examples import form as MX  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SDK = REPO / "tools" / "spike2_emu" / "modes" / "sdk"
@@ -30,13 +31,13 @@ CALLOUT_SOUND = ("callout", "own-sound")
 #: port -> (shots, shot_mask_bits, proven, parts it cannot do, what the runtime arms with)
 PORTS = {
     "godzilla_pro-1.15": (18, 64, True, set(), EVERY_CAPABILITY),   # item 160: + the three spinners; PAD-228: + 3 buttons
-    "godzilla_le-1.16": (24, 64, True, set(), EVERY_CAPABILITY),    # PAD-228: + 3 buttons
-    "turtles_pro-1.58": (17, 32, True, ALL, NO_FRAMEWORK_DISPLAY),
+    "godzilla_le-1.16": (26, 64, True, set(), EVERY_CAPABILITY),    # PAD-228: + 3 buttons; PAD-658: + the scoop, Mecha exit top
+    "turtles_pro-1.58": (17, 32, True, ALL - {"events"}, NO_FRAMEWORK_DISPLAY),   # f618285f: its event ids
     "turtles_pro-1.59": (17, 32, True, set(), ("callout", "screens", "clips", "own-sound", "messages")),
     "deadpool_pro-1.16": (25, 64, True, set(), ("callout", "screens", "clips", "own-sound", "messages")),
     "deadpool_le-1.14": (28, 64, True, set(), ("callout", "screens", "clips", "own-sound", "messages")),
     # item 162 (2026-09-24): every latest build, proven by a full build check in the emulator
-    "godzilla_pro-1.16": (23, 64, True, set(), EVERY_CAPABILITY),   # its census: two shield targets, as Pro 1.15; PAD-228: + 3 buttons
+    "godzilla_pro-1.16": (25, 64, True, set(), EVERY_CAPABILITY),   # its census: two shield targets, as Pro 1.15; PAD-228: + 3 buttons; PAD-658: + 2
     "aerosmith_le-1.15": (43, 64, True, {"countdown"}, ("callout", "screens", "clips", "own-sound")),
     "avengers_infinity_le-1.09": (36, 64, True, set(), ("callout", "screens", "clips", "own-sound")),
     "batman-1.13": (43, 64, True, set(), ("callout", "screens", "clips", "own-sound")),
@@ -46,15 +47,15 @@ PORTS = {
     "led_zeppelin_le-1.22": (31, 32, True, set(), ("callout", "screens", "clips", "own-sound")),
     "led_zeppelin_pro-1.22": (30, 32, True, set(), ("callout", "screens", "clips", "own-sound")),
     "metallica_spike-1.03": (40, 64, True, set(), ("callout", "screens", "clips", "own-sound")),
-    "metallica_spike-1.04": (40, 64, True, set(), ("callout", "screens", "clips", "own-sound")),   # PAD-306: drafted from 1.03, proven in the emulator
+    "metallica_spike-1.04": (40, 64, True, set(), ("callout", "screens", "clips", "own-sound", "messages")),   # PAD-306: drafted from 1.03, proven in the emulator
     "munsters_le-1.28": (27, 32, True, set(), ("callout", "screens", "clips", "own-sound")),
     "rush_le-1.18": (38, 64, True, set(), ("callout", "screens", "clips", "own-sound")),
     "star_wars_elg-1.10": (30, 64, True, set(), ("callout", "screens", "clips", "own-sound")),
     "star_wars_le-1.30": (42, 64, True, set(), ("callout", "screens", "clips", "own-sound")),
-    "uncanny_xmen_le-0.98": (33, 64, True, set(), ("callout", "screens", "clips", "own-sound")),
+    "uncanny_xmen_le-0.98": (33, 64, True, set(), ("callout", "screens", "clips", "own-sound", "messages")),
     "jaws_le-1.02": (27, 64, True, set(), ("callout", "screens", "clips", "own-sound", "messages")),
     "stranger_things_le-1.12": (39, 64, True, set(), ("callout", "screens", "clips", "own-sound")),   # item 165: its inserts lit
-    "king_kong_le-0.97": (55, 64, True, set(), ("callout", "screens", "clips", "own-sound")),
+    "king_kong_le-0.97": (55, 64, True, set(), ("callout", "screens", "clips", "own-sound", "messages")),
     "james_bond_le-1.06": (44, 64, True, set(), ("callout", "screens", "clips", "own-sound")),
     "jurassic_park_le-1.16": (38, 64, True, set(), ("callout", "screens", "clips", "own-sound")),
     "guardians_le-1.14": (34, 64, True, set(), ("callout", "screens", "clips", "own-sound")),
@@ -125,7 +126,8 @@ def _mb(name):
         (set() if name in MP.MAGNET_PROVEN else {"magnet"}) | \
         (set() if name in MP.SCOOP_PROVEN else {"scoop"}) | \
         (set() if any(b == name for b, _c in MP.HELD_COILS_PROVEN) else {"coils"}) |         (set() if name in MP.SHIELD_PROVEN else {"shield"}) |         (set() if name in GAME_SHOW_PORTS else {"shows"}) | (set() if name in MP.SHAKER_PROVEN else {"shaker"}) | \
-        (set() if name in MP.WIZARDS_PROVEN else {"wizard"})   # PAD-225; PAD-381 magnet, scoop, coils; PAD-392; PAD-418; PAD-414; PAD-436
+        (set() if name in MP.WIZARDS_PROVEN else {"wizard"}) |         (set() if name in MP.BUILDING_PROVEN else {"building"}) |         (set() if name in MP.ROSTER_PROVEN else {"roster"}) | \
+        (set() if name in MP.CHALLENGE_PROVEN or name in MP.CHALLENGE_MENU_PROVEN else {"challenge"})   # PAD-225; PAD-381 magnet, scoop, coils; PAD-392; PAD-418; PAD-414; PAD-436; PAD-589; PAD-615
 
 
 def _check_runtime_file(p, spec, slug):
@@ -162,7 +164,7 @@ def test_a_profile_per_port(name):
     assert len(p.shots) == shots and len({n for n, _m in p.shots}) == shots
     assert p.shot_mask_bits == bits and p.proven is proven
     cannot = (set(cannot) - {"multiball", "ball_save", "magnet", "scoop", "coils", "shield", "shaker", "shows",
-                             "wizard"}) | _mb(name)
+                             "wizard", "building", "roster", "challenge", "place", "done"}) | _mb(name)         | (set() if name in MP.PLACE_PROVEN else {"place"})          | (set() if name in MP.DONE_PROVEN else {"done"})            # PAD-710: a game mode's place where proven; PAD-747: the game's modes completed
     assert {part for part in MP.PARTS if not p.can(part)} == cannot
     for part in MP.PARTS:
         assert bool(p.why_not(part)) == (part in cannot)
@@ -209,7 +211,7 @@ def test_stack_needs_the_ports_own_mode_queries_as_the_runtime_asks_for_them(tmp
     p = MP.profile_from_port(str(tmp_path / "godzilla_le-1.16.port"))
     assert not p.can("stack") and "tells that one of its own modes is running" in p.why_not("stack")
     assert [part for part in MP.PARTS if not p.can(part)] == ["stack", "multiball", "ball_save"] + \
-        ([] if "godzilla_le-1.16" in MP.MAGNET_PROVEN else ["magnet"]) + ["wizard"]   # no count: no multiball, no ball save; PAD-436: no mini-wizards
+        ([] if "godzilla_le-1.16" in MP.MAGNET_PROVEN else ["magnet"]) + ["wizard"] +         ([] if "godzilla_le-1.16" in MP.DONE_PROVEN else ["done"])   # no count: no multiball, no ball save; PAD-436: no mini-wizards; PAD-619: its challenges need no mode query; PAD-747
     # with the count alone it is the balls route, greyed until seen (item 164's STACK_BALLS_PROVEN)
     only = "\n".join(line for line in text.splitlines() if "stock_" not in line)
     (tmp_path / "godzilla_le-1.16.port").write_text(only, encoding="utf-8")
@@ -257,7 +259,7 @@ def test_stack_on_the_titles_with_no_cmode_rules_is_multiballs_only(tmp_path):
     body = src[src.index("static int stock_balls_route"):src.index("int pm_stock_mode_running")]
     assert set(MP.STACK_BALLS_NEEDS) <= set(re.findall(r'fn\("([a-z_]+)"\)', body))
     for key in MP.STACK_BALLS_PROVEN:
-        q = MP.profile(key.replace("-", "_").replace(".", "_"))
+        q = MP.profile(key.replace("/spike3", "_spike3").replace("-", "_").replace(".", "_"))   # PAD-1285: a Spike 3 key
         assert q.can("stack"), key
         if (key in MP.STACK_FLAGS_PROVEN or key in MP.STACK_RECORDS_PROVEN or key in MP.STACK_BYTES_PROVEN
                 or key in MP.STACK_OBJECTS_PROVEN):
@@ -292,6 +294,7 @@ def test_clip_v2_needs_are_what_the_runtime_checks():
 
     def names(var):
         body = re.search(r"%s\[\] = \{(.*?)\};" % var, src, re.S).group(1)
+        body = body.replace("PM_STRING_SITE", '"string_new"')     # PAD-1284: Spike 2's; resource_get on 64-bit
         return tuple(re.findall(r'"([a-z_0-9]+)"', body))
     assert MP.CLIP_V2_NEEDS == (names("clip2_s"), names("clip2_d"), names("clip2_v"))
     assert MP.CLIP_LAYER_NEEDS == (names("clip3_s"), names("clip3_d"), names("clip3_v"))
@@ -353,7 +356,9 @@ def test_godzilla_pro_1_15_is_unchanged_and_is_what_its_port_says():
     assert g.hud_scene == "32e6ae280ddaec08e203a02289bb39a04968e7b0"
     assert g.bank_scene == "60ed7e5036b8ce09d35a3e101ea6fc1380b37d97"
     assert (g.version, g.port) == ("1.15", "godzilla_pro-1.15.port")
-    assert all(g.can(part) for part in MP.PARTS if part not in _mb("godzilla_pro-1.15"))
+    # PAD-710: a game mode's place is offered where proven in the emulator; PAD-714 proved Pro 1.15's (Hedorah)
+    assert all(g.can(part) for part in MP.PARTS if part not in _mb("godzilla_pro-1.15")
+               and not (part == "done" and "godzilla_pro-1.15" not in MP.DONE_PROVEN))   # PAD-747: where proven
     assert not any(g.can(part) for part in _mb("godzilla_pro-1.15"))   # item 167: greyed until proven
     derived = MP.profile_from_port(MP.port_path(g))
     assert derived.why_not("multiball") == g.why_not("multiball")
@@ -363,7 +368,7 @@ def test_godzilla_pro_1_15_is_unchanged_and_is_what_its_port_says():
         assert getattr(derived, f) == getattr(g, f), f
     # a blank mode on it is exactly the mode the tab made before item 148
     assert MP.blank_spec(g).to_json() == MP.ModeSpec().to_json()
-    assert [n for n, _ in MP.examples_for(g)] == [n for n, _ in MP.example_specs()]
+    assert [n for n, _ in MP.examples_for(g)] == ["TARGET RUSH"]        # PAD-691: no title has examples of its own
 
 
 def test_premium_1_16_offers_godzillas_names_with_three_shield_targets():
@@ -372,7 +377,7 @@ def test_premium_1_16_offers_godzillas_names_with_three_shield_targets():
     assert p.label == "Godzilla Premium/LE 1.16"
     assert {"Maser target", "Left ramp", "Shield target left", "Shield target center",
             "Shield target right"} <= set(names)
-    assert [n for n, _ in MP.examples_for(p)][0] == "KAIJU RUSH"
+    assert [n for n, _ in MP.examples_for(p)] == ["TARGET RUSH"]        # PAD-691: Godzilla's own examples are gone
     # the same shot NAME is another bit on LE: the masks are the LE port's own
     assert p.mask(["Shield target right"]) == 0x200000000 != MP.GODZILLA_PRO_1_15.mask(["Shield target right"])
 
@@ -391,7 +396,7 @@ def test_a_card_with_no_port_gets_none_and_the_help_names_making_a_port():
 
 def test_retarget_matches_shots_by_name():
     tmnt = MP.profile("turtles_pro_1_59")
-    kaiju = MP.example("KAIJU RUSH")
+    kaiju = MX.example("KAIJU RUSH")
     spec, dropped = MP.retarget(kaiju, tmnt)
     assert spec is not kaiju and kaiju.title == "godzilla_pro_1_15"
     assert spec.title == "turtles_pro_1_59"
@@ -580,7 +585,7 @@ def test_a_premium_card_builds_its_own_port_for_modes_saved_as_godzilla_pro_1_15
 
 def test_a_build_refuses_a_mode_naming_shots_the_cards_game_lacks(tmp_path):
     project = _card_project(tmp_path, "jaws_le-1_02_0.Release.16G.sdcard.raw", "1.02.0")
-    MP.new_mode(str(project), spec=MP.example("KAIJU RUSH"))
+    MP.new_mode(str(project), spec=MX.example("KAIJU RUSH"))
     with pytest.raises(MA.ModeAssetError) as e:
         MA.build(str(project), None, None, str(tmp_path / "out"))
     text = str(e.value)
@@ -631,9 +636,12 @@ def test_events_come_from_the_port_as_the_runtime_arms_them(tmp_path):
     assert list(le.events) == [line.split()[1] for line in text.splitlines() if line.startswith("event ")]
     assert le.can("events") and MP.GODZILLA_PRO_1_15.can("events")
     assert set(MP.profile_from_port(_port("godzilla_pro-1.15")).events) == set(MP.GODZILLA_PRO_1_15.events)
-    for key in ("turtles_pro_1_58",):
-        p = MP.profile(key)
-        assert p.events == () and "events yet" in p.why_not("events")
+    # f618285f: TMNT Pro 1.58 was the last title with no events; it arms the bus ones now
+    assert MP.profile("turtles_pro_1_58").events == ("game_start", "ball_start", "ball_end", "bonus_start", "bonus_end")
+    no_events = "\n".join(line for line in text.splitlines() if not line.startswith("event "))
+    (tmp_path / "godzilla_le-1.16.port").write_text(no_events, encoding="utf-8")
+    p = MP.profile_from_port(str(tmp_path / "godzilla_le-1.16.port"))
+    assert p.events == () and "events yet" in p.why_not("events")
     no_bus = "\n".join(line for line in text.splitlines() if not line.startswith("site hook_dispatch"))
     (tmp_path / "godzilla_le-1.16.port").write_text(no_bus, encoding="utf-8")
     assert MP.profile_from_port(str(tmp_path / "godzilla_le-1.16.port")).events == (
@@ -672,7 +680,7 @@ def test_a_premium_build_of_a_pro_titled_mode_that_starts_on_an_event(tmp_path):
 def _advanced_kaiju():
     """KAIJU RUSH made on Godzilla Pro 1.15 with Advanced set: points on a Powerline and a
     ramp, a Powerline that ends it early, the two measured callouts and one typed by hand."""
-    spec = MP.example("KAIJU RUSH")
+    spec = MX.example("KAIJU RUSH")
     spec.shot_award = [["Powerline left", 750000], ["Left ramp", 500000]]
     spec.end_shot = "Powerline right"
     spec.callout_at = [[10, 1291], [5, 1295], [3, 1111]]
@@ -749,6 +757,34 @@ def test_a_title_with_no_spoken_numbers_says_so():
             continue                 # PAD-420: a new build's port ships with the integrator's merge
         prof = MP.profile_from_port(os.path.join(MP.PORTS_DIR, key + ".port"))
         assert "never says a number on its own" in prof.why_not("countdown"), key
+        assert prof.limit("countdown"), key             # PAD-479: the game's limit, said in grey
+
+
+def test_a_title_with_no_time_up_line_is_a_game_limit():
+    """PAD-479: every voice clip on these builds was transcribed (mono and stereo) and none says the time is up,
+    so no time-up callout is landed and the profile marks it as the game's limit (grey on the tab); a mode's own
+    end sound still rides a carrier there."""
+    import os
+    assert len(MP.TIME_UP_NONE) == 16
+    for key in MP.TIME_UP_NONE:
+        prof = MP.profile_from_port(os.path.join(MP.PORTS_DIR, key + ".port"))
+        assert prof.callout_time_up == 0 and prof.limit("end_game"), key
+        assert MP.end_sound_carried(*key.split("-")), key
+    gz = MP.profile_from_port(os.path.join(MP.PORTS_DIR, "godzilla_le-1.16.port"))
+    assert gz.callout_time_up and not gz.limit("end_game") and not gz.limits
+
+
+def test_no_spare_music_is_a_game_limit():
+    """PAD-479: The Beatles and Deadpool have no stereo music the game never plays (item 163's census) and no
+    free music bed, so a mode's own music cannot ride there: a game limit. Godzilla (beds) and Jaws (spare
+    music) are not."""
+    for game, version in (("beatles", "1.29"), ("deadpool_le", "1.16"), ("deadpool_pro", "1.16")):
+        assert MP.own_music_none(game, version), game
+    for game, version in (("godzilla_le", "1.16"), ("jaws_le", "1.02"), ("no_such_game", "1.00")):
+        assert not MP.own_music_none(game, version), game
+    import os
+    assert MP.profile_from_port(os.path.join(MP.PORTS_DIR, "beatles-1.29.port")).limit("own_music")
+    assert MP.profile_from_port(os.path.join(MP.PORTS_DIR, "beatles-1.29.port")).limit("stack")
 
 
 # ---- one title's builds share their sound numbers; copying modes to another card ----------

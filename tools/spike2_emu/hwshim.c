@@ -842,15 +842,92 @@ int shim_clock_nanosleep(int clk, int flags, const struct shim_ts *req,
     return 4 /* EINTR */;
 }
 
+/* ★ PAD-603: THE NODE BUS IS ALWAYS READY TO BE READ. The shim answers every
+ * read() on /dev/ttymxc1 itself, so as far as the game can tell a reply is
+ * waiting the moment it has asked. But the fd underneath is a pty nobody
+ * writes to, and the real select/poll says "not readable" - which older
+ * builds believe: deadpool_le 0.99's ASYNCSERIAL_ReadBytes waits in
+ * select(1024, ...) before every read, timed out on every exchange ("short
+ * response (got 0, expected 12)"), never called read(), and the game stopped
+ * at "LOCATING NODE BOARDS - 1 8 9 NODES NOT FOUND". Later builds read
+ * without asking, which is why only older code met it. So when a node bus
+ * fd is in the read set, the other fds are asked without waiting and the bus
+ * fd is reported ready. *done says whether a bus fd was involved; when it
+ * was not, the caller takes its normal path. */
+static int nb_fd_set_has(int n, const void *set, int fd)
+{
+    return set && fd < n &&
+           ((((const unsigned *)set)[fd >> 5] >> (fd & 31)) & 1u);
+}
+
+static int nb_select_ready(int n, void *r, void *w, void *e,
+                           int (*real)(int, void *, void *, void *,
+                                       struct shim_tv *), int *done)
+{
+    unsigned char want[MAXFD / 8];
+    struct shim_tv zero = { 0, 0 };
+    int fd, any = 0, ret, top = n < MAXFD ? n : MAXFD;
+    for (fd = 0; fd < top; fd++) {
+        int is = faked[fd] == 'T' && nb_fd_set_has(n, r, fd);
+        if (is) any = 1;
+        want[fd >> 3] = (unsigned char)((want[fd >> 3] & ~(1u << (fd & 7)))
+                                        | ((unsigned)is << (fd & 7)));
+    }
+    *done = any;
+    if (!any) return 0;
+    ret = real(n, r, w, e, &zero);
+    if (ret < 0) return ret;
+    for (fd = 0; fd < top; fd++)
+        if ((want[fd >> 3] >> (fd & 7)) & 1u) {
+            if (!nb_fd_set_has(n, r, fd)) ret++;
+            ((unsigned *)r)[fd >> 5] |= 1u << (fd & 31);
+        }
+    return ret;
+}
+
+struct nb_pollfd { int fd; short events; short revents; };
+
+static int nb_poll_ready(void *fds, unsigned long nfds,
+                         int (*real)(void *, unsigned long, int), int *done)
+{
+    struct nb_pollfd *p = fds;
+    unsigned long i;
+    int any = 0, ret;
+    for (i = 0; p && i < nfds; i++)
+        if (p[i].fd >= 0 && p[i].fd < MAXFD && faked[p[i].fd] == 'T' &&
+            (p[i].events & 1 /* POLLIN */))
+            any = 1;
+    *done = any;
+    if (!any) return 0;
+    ret = real(fds, nfds, 0);
+    if (ret < 0) return ret;
+    for (i = 0; i < nfds; i++)
+        if (p[i].fd >= 0 && p[i].fd < MAXFD && faked[p[i].fd] == 'T' &&
+            (p[i].events & 1)) {
+            if (!p[i].revents) ret++;
+            p[i].revents |= 1;
+        }
+    return ret;
+}
+
+static int real_poll_ms(void *fds, unsigned long nfds, int ms)
+{
+    static int (*real)(void *, unsigned long, int);
+    if (!real) real = dlsym(RTLD_NEXT, "poll");
+    return real(fds, nfds, ms);
+}
+
 int shim_select(int n, void *r, void *w, void *e, struct shim_tv *tv) __asm__("select");
 int shim_select(int n, void *r, void *w, void *e, struct shim_tv *tv)
 {
     static int (*real)(int, void *, void *, void *, struct shim_tv *);
     long long g, b, left;
     struct shim_tv k;
-    int ret;
+    int ret, done;
     if (!real) real = dlsym(RTLD_NEXT, "select");
     warp_poll();
+    ret = nb_select_ready(n, r, w, e, real, &done);
+    if (done) return ret;
     if (!w_on || !tv) return real(n, r, w, e, tv);
     g = (long long)tv->s * 1000000LL + tv->us;
     b = warp_budget(g);
@@ -871,9 +948,14 @@ int shim_pselect(int n, void *r, void *w, void *e, const struct shim_ts *ts,
                  const void *mask)
 {
     static int (*real)(int, void *, void *, void *, const struct shim_ts *, const void *);
+    static int (*real_sel)(int, void *, void *, void *, struct shim_tv *);
     struct shim_ts k;
+    int ret, done;
     if (!real) real = dlsym(RTLD_NEXT, "pselect");
+    if (!real_sel) real_sel = dlsym(RTLD_NEXT, "select");
     warp_poll();
+    ret = nb_select_ready(n, r, w, e, real_sel, &done);
+    if (done) return ret;
     if (!w_on || !ts) return real(n, r, w, e, ts, mask);
     us_ts(warp_budget(ts_us(ts)), &k);
     return real(n, r, w, e, &k, mask);
@@ -888,8 +970,11 @@ int shim_poll(void *fds, unsigned long nfds, int ms)
 {
     static int (*real)(void *, unsigned long, int);
     struct shim_ts k;
+    int ret, done;
     if (!real) real = dlsym(RTLD_NEXT, "poll");
     warp_poll();
+    ret = nb_poll_ready(fds, nfds, real_poll_ms, &done);
+    if (done) return ret;
     if (!w_on || ms <= 0) return real(fds, nfds, ms);
     if (!real_ppoll) real_ppoll = dlsym(RTLD_NEXT, "ppoll");
     if (!real_ppoll) return real(fds, nfds, ms);
@@ -903,8 +988,11 @@ int shim_ppoll(void *fds, unsigned long nfds, const struct shim_ts *ts,
                const void *mask)
 {
     struct shim_ts k;
+    int ret, done;
     if (!real_ppoll) real_ppoll = dlsym(RTLD_NEXT, "ppoll");
     warp_poll();
+    ret = nb_poll_ready(fds, nfds, real_poll_ms, &done);
+    if (done) return ret;
     if (!w_on || !ts) return real_ppoll(fds, nfds, ts, mask);
     us_ts(warp_budget(ts_us(ts)), &k);
     return real_ppoll(fds, nfds, &k, mask);
@@ -2678,14 +2766,47 @@ int shim_system(const char *cmd)
     return rc;
 }
 
+/* ★ PAD-603: THE CPU BOARD SAYS WHAT IT IS IN /proc/cpuinfo, and older
+ * builds ask. The node bus library in deadpool_le 0.99 (2019) picks its
+ * platform in a static constructor, PLATFORMUTIL_getPlatform: it popens
+ * `/bin/cat /proc/cpuinfo | /bin/grep Hardware` and looks for
+ * "Freescale i.MX6" (Spike 2, platform 2) or "Atmel AT91SAM9M10G45"
+ * (Spike 1, platform 1). Under qemu-user that file is the HOST's, which has
+ * neither, so the platform read 0 and NODEBUS_Init took the Spike 1 branch -
+ * open("/dev/gpio") - which fails here: the node bus control thread returned
+ * at once, /dev/ttymxc1 was never opened, and the game sat at "bringing up
+ * node boards" for good. Later builds dropped the probe (deadpool_le 1.16,
+ * venom_le 0.95 have no "cpuinfo" string at all), which is why only older
+ * code hit it. So a `cat /proc/cpuinfo` in a command answers the board's
+ * own Hardware line, and the rest of the pipeline runs as written. */
+#define SPIKE2_CPUINFO_HW "Hardware\t: Freescale i.MX6 Quad/DualLite (Device Tree)"
+
+static const char *cpuinfo_cmd(const char *cmd, char *out, unsigned long n)
+{
+    const char *p, *s;
+    if (!cmd || !(p = strstr(cmd, "cat /proc/cpuinfo"))) return cmd;
+    for (s = p; s > cmd && s[-1] != ' ' && s[-1] != '|' && s[-1] != ';'
+                && s[-1] != '&' && s[-1] != '('; s--) ;     /* "/bin/" too */
+    snprintf(out, n, "%.*secho '%s'%s", (int)(s - cmd), cmd, SPIKE2_CPUINFO_HW,
+             p + sizeof "cat /proc/cpuinfo" - 1);
+    return out;
+}
+
 void *shim_popen(const char *cmd, const char *mode) __asm__("popen");
 void *shim_popen(const char *cmd, const char *mode)
 {
     static void *(*real_popen)(const char *, const char *);
-    char b[320];
+    char b[320], swapped[512];
+    const char *run;
     void *f;
     if (!real_popen) real_popen = dlsym(RTLD_NEXT, "popen");
-    f = real_popen ? real_popen(cmd, mode) : 0;
+    run = cpuinfo_cmd(cmd, swapped, sizeof swapped);
+    if (run != cmd) {
+        snprintf(b, sizeof b, "[popen] /proc/cpuinfo answered as the Spike 2 "
+                 "CPU board's: \"%.200s\"\n", run);
+        logmsg(b);
+    }
+    f = real_popen ? real_popen(run, mode) : 0;
     snprintf(b, sizeof b, "[popen] \"%.240s\" (%s) -> %s\n", cmd ? cmd : "(null)", mode ? mode : "?", f ? "ok" : "NULL");
     logmsg(b);
     return f;
@@ -4341,24 +4462,15 @@ static unsigned nv_udiv(unsigned n, unsigned d)
     return q;
 }
 
-static void nv_factory_hz_apply(void)
+/* The record's twelve bytes out of the EEPROM, or 0 when it does not decode
+ * or fails its check (*seed gets word 0, the generator's start). */
+static int nv_ident_decode(unsigned char *rec, unsigned *seed)
 {
-    const char *p = getenv("PAD_FACTORY_HZ");
     unsigned char *e = store[0];
-    unsigned char rec[12];
-    unsigned seed, state, key, w, sum, want, had, i;
-    char m[240];
-    if (!p || !*p) return;
-    if (p[0] == '5' && p[1] == '0' && !p[2]) want = 50;
-    else if (p[0] == '6' && p[1] == '0' && !p[2]) want = 60;
-    else {
-        logmsg("[i2c] PAD_FACTORY_HZ must be 50 or 60; the board is left as "
-               "it is\n");
-        return;
-    }
-    seed = (unsigned)e[0] | (unsigned)e[1] << 8 | (unsigned)e[2] << 16 |
-           (unsigned)e[3] << 24;
-    state = seed;
+    unsigned state, key, w, sum, i;
+    *seed = (unsigned)e[0] | (unsigned)e[1] << 8 | (unsigned)e[2] << 16 |
+            (unsigned)e[3] << 24;
+    state = *seed;
     for (i = 0; i < 12; i++) {
         state = state * 0x19660du + 1u;
         key = state >> 8;
@@ -4369,7 +4481,7 @@ static void nv_factory_hz_apply(void)
         if (w > 0xffu) {
             logmsg("[i2c] cabinet identity record does not decode; the board "
                    "is left as it is\n");
-            return;
+            return 0;
         }
         rec[i] = (unsigned char)w;
     }
@@ -4377,22 +4489,20 @@ static void nv_factory_hz_apply(void)
     if (((unsigned)rec[10] | (unsigned)rec[11] << 8) != (~sum & 0xffffu)) {
         logmsg("[i2c] cabinet identity record fails its checksum; the board "
                "is left as it is\n");
-        return;
+        return 0;
     }
-    had = (unsigned)rec[8] | (unsigned)rec[9] << 8;
-    if ((had == 50) == (want == 50)) {
-        snprintf(m, sizeof m, "[i2c] CPU board is already a %u Hz board "
-                 "(identity record says %u)\n", want, had);
-        logmsg(m);
-        return;
-    }
-    rec[8] = (unsigned char)want;
-    rec[9] = 0;
+    return 1;
+}
+
+/* Fix the check and write the record back under the same seed. */
+static void nv_ident_encode(unsigned char *rec, unsigned seed)
+{
+    unsigned char *e = store[0];
+    unsigned state = seed, key, w, sum, i;
     for (sum = 0, i = 0; i < 10; i++) sum += rec[i];
     sum = ~sum & 0xffffu;
     rec[10] = (unsigned char)sum;
     rec[11] = (unsigned char)(sum >> 8);
-    state = seed;
     for (i = 0; i < 12; i++) {
         state = state * 0x19660du + 1u;
         key = state >> 8;
@@ -4403,8 +4513,90 @@ static void nv_factory_hz_apply(void)
         e[4 + 4 * i + 2] = (unsigned char)(w >> 16);
         e[4 + 4 * i + 3] = (unsigned char)(w >> 24);
     }
+}
+
+static void nv_factory_hz_apply(void)
+{
+    const char *p = getenv("PAD_FACTORY_HZ");
+    unsigned char rec[12];
+    unsigned seed, want, had;
+    char m[240];
+    if (!p || !*p) return;
+    if (p[0] == '5' && p[1] == '0' && !p[2]) want = 50;
+    else if (p[0] == '6' && p[1] == '0' && !p[2]) want = 60;
+    else {
+        logmsg("[i2c] PAD_FACTORY_HZ must be 50 or 60; the board is left as "
+               "it is\n");
+        return;
+    }
+    if (!nv_ident_decode(rec, &seed)) return;
+    had = (unsigned)rec[8] | (unsigned)rec[9] << 8;
+    if ((had == 50) == (want == 50)) {
+        snprintf(m, sizeof m, "[i2c] CPU board is already a %u Hz board "
+                 "(identity record says %u)\n", want, had);
+        logmsg(m);
+        return;
+    }
+    rec[8] = (unsigned char)want;
+    rec[9] = 0;
+    nv_ident_encode(rec, seed);
     snprintf(m, sizeof m, "[i2c] CPU board made a %u Hz board (identity record "
              "line frequency %u -> %u)\n", want, had, want);
+    logmsg(m);
+}
+
+/* ══ PAD_MODEL=<code> - WHICH MODEL THE MACHINE IS: Pro, Premium, LE, SLE (PAD-519) ═
+ *
+ * One Premium/LE card runs every Premium, LE and SLE of a title; the machine
+ * says which it is with the MODEL CODE in bytes [4..7] of the cabinet identity
+ * record (see nv_ident_seed above). The game's classifier takes three code
+ * strings per class (batman 1.14.0 0x2b53c0: LE "I0", Premium "I2", SLE "I3");
+ * a Pro build answers Pro for every code. The service menu names the machine
+ * by it (Batman on "I3": "BATMAN SLE", code I3), and a class's alternate code
+ * can carry a title of its own (Elvira "X2": "ELVIRA'S BLOOD RED KISS LE").
+ * The boot screen does NOT follow it (its title is compiled in: Batman on
+ * "I3" still boots "BATMAN PRE"). "999" is
+ * the engine's wildcard - the build's own compiled-in model, what the seeded
+ * record says.
+ * The codes a card takes are read off its binary by the app
+ * (plugins/stern/cabinet_model.py); this only writes the one it was given:
+ * one to three letters or digits, zero-padded to the record's four bytes.
+ *
+ * Saved with the EEPROM like PAD_FACTORY_HZ, so a run that does not set it
+ * keeps the model the board has; the Emulate tab always sends one (999 for
+ * the card's own). A record that does not decode is left alone. */
+static void nv_model_apply(void)
+{
+    const char *p = getenv("PAD_MODEL");
+    unsigned char rec[12], want[4] = {0, 0, 0, 0};
+    unsigned seed, i, same;
+    char m[200], had[5];
+    if (!p || !*p) return;
+    for (i = 0; p[i]; i++) {
+        char c = p[i];
+        if (i >= 3 || !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z'))) {
+            logmsg("[i2c] PAD_MODEL must be a model code of one to three "
+                   "capitals or digits (I2, 999); the board is left as it "
+                   "is\n");
+            return;
+        }
+        want[i] = (unsigned char)c;
+    }
+    if (!nv_ident_decode(rec, &seed)) return;
+    for (i = 0, same = 1; i < 4; i++) {
+        had[i] = (char)rec[4 + i];
+        if (rec[4 + i] != want[i]) same = 0;
+    }
+    had[4] = 0;
+    if (same) {
+        snprintf(m, sizeof m, "[i2c] board model is already %s\n", p);
+        logmsg(m);
+        return;
+    }
+    for (i = 0; i < 4; i++) rec[4 + i] = want[i];
+    nv_ident_encode(rec, seed);
+    snprintf(m, sizeof m, "[i2c] board model set to %s (identity record said "
+             "%s)\n", p, had[0] ? had : "nothing");
     logmsg(m);
 }
 
@@ -4494,6 +4686,7 @@ static void nv_load(void)
         logmsg(m);
         nv_ident_seed();
         nv_factory_hz_apply();
+        nv_model_apply();
         nv_country_apply();
         nv_poke_apply();     /* a poke must land on a blank chip too */
         return;
@@ -4508,6 +4701,7 @@ static void nv_load(void)
     logmsg(m);
     nv_ident_seed();
     nv_factory_hz_apply();
+    nv_model_apply();
     nv_country_apply();
     nv_poke_apply();
 }
@@ -8206,6 +8400,26 @@ extern int close(int);
 static unsigned char sw_rest_set[8];
 static unsigned sw_rest_n;
 
+/* PAD-619: the id the RUNNING game's own table gives a wire, or `fallback`
+ * when the table is not readable or has no such wire. A list read out of the
+ * binary may number the switches another way than the game does (Aerosmith
+ * 1.16: 93 of 93 ids moved, Star Wars LE 1.30: 70 of 103) until mktables
+ * replaces it with this run's own dump - and the at-rest set is read before
+ * that, so it goes by wire, which both numberings agree on. */
+static unsigned sw_live_by_wire(unsigned node, unsigned bit, unsigned fallback)
+{
+    unsigned st, n, id;
+    if (!SW_STRUCT || !SW_COUNT) return fallback;
+    st = tread(SW_STRUCT);
+    n  = tread(SW_COUNT);
+    if (!sw_ok(st) || n > 4096) return fallback;
+    for (id = 1; id < n && id < 256; id++) {
+        const unsigned char *e = (const unsigned char *)(unsigned long)(st + id * 32);
+        if (e[20] == node && *(const unsigned short *)(e + 18) == bit) return id;
+    }
+    return fallback;
+}
+
 static void sw_rest_resolve(void)
 {
     static char buf[16384];
@@ -8255,7 +8469,7 @@ static void sw_rest_resolve(void)
             if (!seen[f]) break;
         }
         if (seen[1] && seen[2] && num[1] == 0 && num[2] == 23) {
-            sw_rest_set[0] = (unsigned char)id;   /* the door, per title */
+            sw_rest_set[0] = (unsigned char)sw_live_by_wire(0, 23, id);   /* the door, per title */
             continue;
         }
         for (; q < e - 8; q++) {
@@ -8269,7 +8483,8 @@ static void sw_rest_resolve(void)
                 (q[8] == '\n' || q[8] == '\r' || q[8] == 0 || q[8] == ' ')) {
                 t = (unsigned)(q[7] - '0');
                 if (sw_rest_n < sizeof sw_rest_set && t) {
-                    sw_rest_set[sw_rest_n++] = (unsigned char)id;
+                    unsigned live = seen[1] && seen[2] ? sw_live_by_wire(num[1], num[2], id) : id;
+                    sw_rest_set[sw_rest_n++] = (unsigned char)(live < sizeof sw_active ? live : id);
                     got++;
                 }
                 break;
@@ -8998,7 +9213,7 @@ static unsigned char sw_spin_phase[256]; /* the level the NEXT scan reports    *
 static unsigned sw_spin_scans[256];      /* scans of its node while ripping    */
 static unsigned sw_spin_made[256];       /* how many of them reported MADE     */
 static unsigned long sw_spin_t0[256];    /* pad_ms() when the rip began        */
-static int sw_spin_budget = 200;         /* [swspin] lines; saturates          */
+static int sw_spin_budget = 20000;       /* [swspin] lines; saturates (PAD-764: a replay reads them) */
 
 static int sw_latch_on(void)
 {
@@ -9205,8 +9420,8 @@ int pad_sw_level(unsigned id)
 struct nb_motor {
     unsigned char cfg;          /* cmd 51 seen for this motor              */
     signed char stop[2];        /* input bit per end: [0] cmd 53, [1] 54    */
-    signed char at;             /* the end it is at; -1 between             */
-    signed char going;          /* the end it is travelling to; -1 idle     */
+    signed char at;             /* the place it is at; -1 between           */
+    signed char going;          /* the place it is going to; -1 idle        */
     unsigned long due;          /* pad_ms() it arrives                     */
     /* PAD-249: an encoder motor - homed, then sent to positions */
     unsigned char enc;          /* cmd 51 named encoder inputs              */
@@ -9214,18 +9429,103 @@ struct nb_motor {
     short pos;                  /* where it is, in encoder counts           */
     short from, to;             /* the move under way (going >= 0)          */
     unsigned long start;        /* pad_ms() that move began                 */
+    unsigned char run55;        /* PAD-971: an end-stop motor sent a cmd 55 */
+    /* PAD-1339: the position switches an end-stop motor passes on the way */
+    signed char path_from, path_to;     /* input bits the move runs between; -1 none */
+    signed char sweep_on;               /* the in-between input made right now; -1 none */
+    /* PAD-1383: the move's own travel time and the inputs it runs between */
+    unsigned long travel;               /* ms this move takes (due - start)  */
+    signed char mv_from, mv_to;         /* input bits it left / goes to; -1 unknown */
 };
 static struct nb_motor nb_motors[64][NB_MOTORS];
 
+/* An end-stop motor's place: 0 and 1 are its ends (cmd 53's and 54's stop),
+ * 2 + bit a position switch a cmd 55 named, between them (PAD-955). */
+static int motor_place_bit(const struct nb_motor *m, int place)
+{
+    return place < 2 ? m->stop[place] : place - 2;
+}
+
+static long motor_ms_env(void)
+{
+    static long v = -2;
+    if (v == -2) {
+        const char *e = getenv("PAD_MOTOR_MS");
+        v = (e && *e) ? atoi(e) : -1;
+        if (v < -1) v = 0;
+    }
+    return v;
+}
+
 static unsigned long motor_ms(void)
 {
-    static long v = -1;
-    if (v < 0) {
-        const char *e = getenv("PAD_MOTOR_MS");
-        v = (e && *e) ? atoi(e) : 600;
-        if (v < 0) v = 0;
+    long v = motor_ms_env();
+    return v < 0 ? 600 : (unsigned long)v;
+}
+
+/* ---- PAD-1383: A MOVE TAKES THE TIME ITS SPEED SAYS ----------------------
+ *
+ * A cmd 55 to an end-stop motor carries the speed and the time the game gives
+ * the move. Read off jaws_le 1.02 (PAD_NB_TRACE=1, rig 2, 2026-11-17) and its
+ * builder (0x4c984):
+ *
+ *   55 mm | 40|in 00 | speed | LE16 limit (10 ms) | dir (2 up, 6 down)
+ *   self-test to POSITION 7: 55 00 60 00 0f d0 07 02  speed 15, 20 s
+ *   to POSITION 4:           55 00 63 00 53 8f 02 06  speed 83, 6.55 s
+ *
+ * The limit is the game's own 3000 + (1 - speed/118) x 12000 ms (speed held
+ * to 10..128), a fault past it. batman 1.14's turntable and crane send the
+ * same layout at speed 128 (limits 5 s and 2 s). Every move used to arrive in
+ * PAD_MOTOR_MS (600) whatever its speed, so the harpoon fin - the one SLOW
+ * move, speed 20, to POSITION 7 (0x1d1ad4) - crossed the track in 0.6 s and
+ * was gone before the post let the ball go (Mike St P, PAD-1383); on the real
+ * machine there is time for a second shot.
+ *
+ * So the full stop-to-stop run takes MOTOR_SPEED_K (120000) / speed ms (the drive
+ * speed is the car's speed), never more than 85% of the game's limit, and a
+ * shorter move its share of it: SLOW 6 s across the track, the self-test 8 s,
+ * NORMAL (83) 1.4 s, batman's speed 128 0.9 s. cmd 53/54 and a 55 with no
+ * speed keep PAD_MOTOR_MS (john_wick_le's car is re-sent after ~0.9 s), and a
+ * PAD_MOTOR_MS set in the environment still times every move. */
+static unsigned long motor_travel(const struct nb_motor *m, const unsigned char *p,
+                                  int n, int from_bit, int to_bit)
+{
+    const unsigned long MOTOR_SPEED_K = 120000;   /* ms x speed, stop to stop */
+    unsigned long full, limit, span, dist;
+    unsigned speed;
+    if (motor_ms_env() >= 0 || p[2] != 0x55 || n < 10 || !p[6]) return motor_ms();
+    speed = p[6] > 128 ? 128 : p[6];
+    full = MOTOR_SPEED_K / speed;
+    limit = 10UL * (p[7] | (p[8] << 8));
+    if (limit && full > limit * 85 / 100) full = limit * 85 / 100;
+    if (from_bit >= 0 && to_bit >= 0 && m->stop[0] >= 0 && m->stop[1] >= 0) {
+        span = (unsigned long)(m->stop[0] > m->stop[1] ? m->stop[0] - m->stop[1] : m->stop[1] - m->stop[0]);
+        dist = (unsigned long)(from_bit > to_bit ? from_bit - to_bit : to_bit - from_bit);
+        if (span && dist <= span) full = full * dist / span;
     }
-    return (unsigned long)v;
+    return full < 50 ? 50 : full;
+}
+
+/* PAD-1383: the input bit an end-stop motor is at or nearest now, -1 unknown -
+ * so a move sent while another is under way starts from where the car is. */
+static int motor_bit_now(const struct nb_motor *m)
+{
+    long a = m->mv_from, b = m->mv_to, t, e;
+    if (m->going < 0) return m->at >= 0 ? motor_place_bit(m, m->at) : -1;
+    if (a < 0 || b < 0) return -1;
+    t = (long)(m->due - m->start);
+    e = (long)(pad_ms() - m->start);
+    if (t <= 0 || e >= t) return (int)b;
+    return (int)(a + ((b - a) * e * 2 + (b > a ? t : -t)) / (2 * t));
+}
+
+/* The place (0, 1 = the stops, 2 + bit between) an input bit is. */
+static int motor_bit_place(const struct nb_motor *m, int bit)
+{
+    if (bit < 0) return -1;
+    if (bit == m->stop[0]) return 0;
+    if (bit == m->stop[1]) return 1;
+    return 2 + bit;
 }
 
 /* The switch id behind (node, input bit), from the game's own table - the
@@ -9239,6 +9539,26 @@ static unsigned motor_switch_id(unsigned nid, unsigned bit)
         if (e[20] == nid && *(const unsigned short *)(e + 18) == bit) return id;
     }
     return 0;
+}
+
+/* PAD-1339: the name the game's switch table gives (node, input bit), or 0. */
+static const char *motor_switch_name(unsigned nid, unsigned bit)
+{
+    unsigned st = tread(SW_STRUCT), id = motor_switch_id(nid, bit), nameobj;
+    if (!id || !sw_ok(st)) return 0;
+    nameobj = *(const unsigned *)(unsigned long)(st + id * 32 + 12);
+    if (!sw_ok(nameobj)) return 0;
+    return msg_row(*(const unsigned *)(unsigned long)(nameobj + 16));
+}
+
+static int motor_sweep_on(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PAD_MOTOR_SWEEP");
+        v = !(e && e[0] == '0');
+    }
+    return v;
 }
 
 /* One edge into the merge, with the bookkeeping sw_shm_merge() does for its
@@ -9299,11 +9619,32 @@ static int motor_status(unsigned nid, unsigned k, unsigned char *p)
     short pos;
     if (nid >= 64 || k >= NB_MOTORS || !nb_motor_on()) return 0;
     m = &nb_motors[nid][k];
-    if (!m->cfg || !m->enc) return 0;
-    pos = motor_pos(m);
-    p[0] = (unsigned char)(pos & 0xff);
-    p[1] = (unsigned char)((pos >> 8) & 0xff);
-    p[2] = m->going >= 0 ? 0x01 : (m->homed ? 0x08 : 0x00);
+    /* PAD-1339: an end-stop motor whose stops are BOTH past input 7 gets its
+     * status word from the start. The switch byte (inputs 0..7) answers
+     * john_wick's car because its stops sit there; for jaws_le's fin (stops
+     * 38 and 32) it was other switches' levels read as flags - 0x01 "moving"
+     * held its self-test waiting, 0x40 counted an error toward FIN MOTOR
+     * CONSECUTIVE / CUMULATIVE ERRORS/SHUTDOWN (jaws_le 1.02, 0x4ca48: bytes
+     * 2-3 of this reply are FinMotor's flags). */
+    if (!m->cfg || (!m->enc && !m->run55 &&
+                    !(m->stop[0] > 7 && m->stop[1] > 7))) return 0;
+    if (m->enc) {
+        pos = motor_pos(m);
+        p[0] = (unsigned char)(pos & 0xff);
+        p[1] = (unsigned char)((pos >> 8) & 0xff);
+        p[2] = m->going >= 0 ? 0x01 : (m->homed ? 0x08 : 0x00);
+    } else {
+        /* PAD-971: an end-stop motor the game runs with cmd 55 (batman's
+         * crane and turntable) waits for its move to FINISH: 0x01 while it
+         * travels, 0x20 once it is there. At boot batman sends each one a
+         * test move (crane to POS. #6 AWAY, turntable to POS. #2) and, on
+         * 0x20, sends it HOME. The node's switch byte never said 0x20, so
+         * both were left at the test move for good. Measured with
+         * PAD_NB_CREPLY=52:0000<v>00, one bit at a time: 0x20 alone gives
+         * the one clean test-then-home; 0x01 holds the game waiting. */
+        p[0] = p[1] = 0;
+        p[2] = m->going >= 0 ? 0x01 : 0x20;
+    }
     p[3] = 0;
     {   /* what the game was told, each time the flags change */
         static unsigned char last[64][NB_MOTORS];
@@ -9441,13 +9782,109 @@ static void disc_reply(unsigned nid, const unsigned char *req, unsigned char *p)
     }
 }
 
+/* ---- PAD-1339: AN END-STOP MOTOR PASSES ITS POSITION SWITCHES ----------
+ *
+ * jaws_le's fin (FinMotor, node 9 motor 0) runs between SHARK POSITION 1
+ * (input 38, cmd 53's stop) and SHARK POSITION 7 (input 32, cmd 54's), with
+ * POSITIONS 2..6 on inputs 37..33 between them. Its self-test (adjustment
+ * FIN MOTOR SELF TEST ENABLED, on by default) sends it to POSITION 7 and back
+ * to 1 and records every position switch it sees close on the way; unless
+ * all seven closed, every later move is refused (jaws_le 1.02: the move,
+ * 0x4b688, asks 0x4c2a8, which counts the bits of the seen mask and wants 7).
+ * The model jumped from one stop to the other, so the fin was seen at 1 and 7
+ * only and never moved again: it stood still in Attach A Barrel and every
+ * other fin mode (Mike St P, PAD-1339; the 45-minute log: one test move at
+ * 156 s, then not a single command).
+ *
+ * So a move made from a known place passes every input between the two, one
+ * after another over the travel time, each made for the first half of its
+ * stretch - the switches a real car runs over. Only when the stops and every
+ * input between them are one unbroken run of the game's switch ids (motor_path):
+ * an unrelated switch that happens to sit between two stop inputs is left
+ * alone. PAD_MOTOR_SWEEP=0 turns it off (the comparison run).
+ *
+ * The status reply (motor_status) is the other half: before this, the fin's
+ * cmd 52 got node 9's inputs 0..7 as its flags, and the self-test waited on a
+ * "moving" bit that was some other switch's level. */
+static void motor_sweep(unsigned nid, unsigned k, struct nb_motor *m)
+{
+    int a = m->path_from, b = m->path_to, step, n, want = -1;
+    unsigned long t = m->due - m->start, e;          /* PAD-1383: this move's time */
+    (void)k;
+    if (a >= 0 && b >= 0 && a != b && m->going >= 0 && t) {
+        step = b > a ? 1 : -1;
+        n = (b - a) * step - 1;
+        e = pad_ms() - m->start;
+        if (n > 0 && e < t) {
+            long h = (long)e * (n + 1) * 2 / (long)t;      /* half-stretches gone */
+            if (h % 2 == 0 && h / 2 >= 1 && h / 2 <= n) want = a + step * (int)(h / 2);
+        }
+    }
+    if (want == m->sweep_on) return;
+    if (m->sweep_on >= 0) motor_switch(nid, m->sweep_on, 0);
+    if (want >= 0) motor_switch(nid, want, 1);
+    m->sweep_on = (signed char)want;
+}
+
+/* PAD-1339: set up the switches a move from place `from` to `to` passes. */
+static void motor_path(unsigned nid, unsigned k, struct nb_motor *m, int from, int to)
+{
+    int a, b, step, bit, ida, idb, istep;
+    char line[200];
+    m->path_from = m->path_to = -1;
+    if (m->sweep_on >= 0) motor_switch(nid, m->sweep_on, 0);
+    m->sweep_on = -1;
+    if (!motor_sweep_on() || from < 0 || to < 0) return;
+    a = motor_place_bit(m, from);
+    b = motor_place_bit(m, to);
+    if (a < 0 || b < 0 || a == b || a > 63 || b > 63) return;
+    step = b > a ? 1 : -1;
+    if ((b - a) * step < 2) return;                 /* nothing in between */
+    /* the inputs from one stop to the other are ONE run of the game's switch
+     * ids (jaws_le: inputs 38..32 = SHARK POSITION 1..7 = ids 104..98): the
+     * game declared them together, as one mech's positions. A switch that
+     * merely sits between two stop inputs breaks the run and nothing is
+     * swept. (The names would say it too, but jaws_le's table gives none.) */
+    ida = (int)motor_switch_id(nid, (unsigned)a);
+    idb = (int)motor_switch_id(nid, (unsigned)b);
+    istep = idb > ida ? 1 : -1;
+    if (!ida || !idb || (idb - ida) * istep != (b - a) * step) {
+        static int said;
+        if (said++ < 4) {
+            snprintf(line, sizeof line, "[motor] node %u motor %u: passes no position "
+                     "switches between inputs %d and %d (switch ids %d and %d are no "
+                     "run of their own)\n", nid, k, a, b, ida, idb);
+            motor_say(line);
+        }
+        return;
+    }
+    for (bit = a + step; bit != b; bit += step)
+        if ((int)motor_switch_id(nid, (unsigned)bit) != ida + istep * (bit - a) * step)
+            return;
+    m->path_from = (signed char)a;
+    m->path_to = (signed char)b;
+    {
+        const char *na = motor_switch_name(nid, (unsigned)a), *nb = motor_switch_name(nid, (unsigned)b);
+        snprintf(line, sizeof line, "[motor] %lu ms node %u motor %u passes inputs "
+                 "%d..%d on its way (switches %d..%d%s%s%s%s)\n", pad_ms(), nid, k,
+                 a + step, b - step, ida + istep, idb - istep, na ? ", " : "",
+                 na ? na : "", nb ? " .. " : "", nb ? nb : "");
+    }
+    motor_say(line);
+}
+
 static void motor_tick(unsigned nid)
 {
     unsigned k;
     if (nid >= 64 || !nb_motor_cfg[nid] || !nb_motor_on()) return;
     for (k = 0; k < NB_MOTORS; k++) {
         struct nb_motor *m = &nb_motors[nid][k];
+        if (m->cfg && !m->enc && m->going >= 0) motor_sweep(nid, k, m);
         if (!m->cfg || m->going < 0 || pad_ms() < m->due) continue;
+        if (!m->enc && m->sweep_on >= 0) {          /* PAD-1339: off the last one */
+            motor_switch(nid, m->sweep_on, 0);
+            m->sweep_on = -1;
+        }
         if (m->enc) {                   /* PAD-249: homed, or at a position */
             char b[96];
             m->pos = m->to;
@@ -9460,14 +9897,18 @@ static void motor_tick(unsigned nid)
             motor_say(b);
             continue;
         }
-        motor_switch(nid, m->stop[(int)m->going], 1);
+        motor_switch(nid, motor_place_bit(m, m->going), 1);
         m->at = m->going;
         m->going = -1;
         {
             char b[96];
-            snprintf(b, sizeof b, "[motor] %lu ms node %u motor %u arrived at "
-                     "end %d (input %d made)\n", pad_ms(), nid, k, m->at,
-                     m->stop[(int)m->at]);
+            if (m->at < 2)
+                snprintf(b, sizeof b, "[motor] %lu ms node %u motor %u arrived "
+                         "at end %d (input %d made)\n", pad_ms(), nid, k, m->at,
+                         m->stop[(int)m->at]);
+            else
+                snprintf(b, sizeof b, "[motor] %lu ms node %u motor %u arrived "
+                         "at input %d (made)\n", pad_ms(), nid, k, m->at - 2);
             motor_say(b);
         }
     }
@@ -9493,6 +9934,8 @@ static void motor_note(const unsigned char *p, int n)
         m->stop[1] = (p[5] & 0x40) ? (signed char)(p[5] & 0x3f) : -1;
         m->at = -1;
         m->going = -1;
+        m->path_from = m->path_to = m->sweep_on = -1;            /* PAD-1339 */
+        m->mv_from = m->mv_to = -1;                              /* PAD-1383 */
         m->enc = n >= 9 && ((p[7] & 0x40) || (p[8] & 0x40));   /* PAD-249 */
         nb_motor_cfg[nid] = 1;
         if (m->enc)
@@ -9506,6 +9949,19 @@ static void motor_note(const unsigned char *p, int n)
                      m->stop[1],
                      nb_motor_on() ? "" : " - PAD_NB_MOTOR=0, not answered");
         motor_say(b);
+        /* PAD-1184: an end-stop motor powers up at rest at its cmd 53 end
+         * (HOME), that stop's switch made - where the game left it, and
+         * where a real mech sits. With no switch made batman 1.14 sends the
+         * turntable its test move only on a Guided Setup boot; on every later
+         * boot it never commands it again (no Bat Phone turn in a game), and
+         * switch 77 (TURNTABLE POS. #1 HOME) stays open for good. */
+        if (!m->enc && nb_motor_on() && m->stop[0] >= 0) {
+            m->at = 0;
+            motor_switch(nid, m->stop[0], 1);
+            snprintf(b, sizeof b, "[motor] node %u motor %u at rest at end 0 "
+                     "(input %d made)\n", nid, k, m->stop[0]);
+            motor_say(b);
+        }
         return;
     }
     if (!m->cfg || !nb_motor_on()) return;
@@ -9540,19 +9996,52 @@ static void motor_note(const unsigned char *p, int n)
         motor_say(b);
         return;
     }
-    if (p[2] == 0x55) return;   /* batman's end-stop motor sends 55 too: not
-                                 * ours to play (PAD-237 never did) */
     {
-        int end = p[2] == 0x53 ? 0 : 1;
+        /* PAD-955: cmd 55 on an end-stop motor runs it until the input its
+         * byte 4 names (0x40|bit) is made - batman's turntable to TURNTABLE
+         * POS. #2 (input 3, between its stops 2 and 4), its crane to
+         * positions #2..#5 (inputs 9..12, between 13 and 8). Ignored, the
+         * game sent both in attract and neither ever arrived. */
+        int end;
+        char spd[16];
+        if (p[2] == 0x55) {
+            if (!(p[4] & 0x40)) return;
+            m->run55 = 1;               /* PAD-971: it reports its status */
+            end = 2 + (p[4] & 0x3f);
+            if (end - 2 == m->stop[0]) end = 0;     /* an end by its input */
+            else if (end - 2 == m->stop[1]) end = 1;
+        } else {
+            end = p[2] == 0x53 ? 0 : 1;
+        }
         if (m->going == end || (m->going < 0 && m->at == end)) return;
-        if (m->going < 0 && m->at >= 0)
-            motor_switch(nid, m->stop[(int)m->at], 0);   /* it leaves the stop */
+        {
+            /* PAD-1383: from where the car is now - a place, or part way
+             * along the move under way - at the speed this move names */
+            int from_bit = motor_bit_now(m), to_bit = motor_place_bit(m, end);
+            int from = m->going < 0 ? m->at : motor_bit_place(m, from_bit);
+            /* PAD-1339: from a known place it passes the switches between */
+            motor_path(nid, k, m, from, end);
+            if (m->going < 0 && m->at >= 0)           /* it leaves where it is */
+                motor_switch(nid, motor_place_bit(m, m->at), 0);
+            m->travel = motor_travel(m, p, n, from_bit, to_bit);
+            m->mv_from = (signed char)from_bit;
+            m->mv_to = (signed char)to_bit;
+        }
+        spd[0] = 0;
         m->at = -1;
         m->going = (signed char)end;
-        m->due = pad_ms() + motor_ms();
-        snprintf(b, sizeof b, "[motor] %lu ms node %u motor %u sent to end %d "
-                 "(cmd %02x), arrives in %lu ms\n", pad_ms(), nid, k, end,
-                 p[2], motor_ms());
+        m->start = pad_ms();
+        m->due = m->start + m->travel;
+        if (p[2] == 0x55 && n >= 10)
+            snprintf(spd, sizeof spd, ", speed %u", p[6]);
+        if (end < 2)
+            snprintf(b, sizeof b, "[motor] %lu ms node %u motor %u sent to end "
+                     "%d (cmd %02x%s), arrives in %lu ms\n", pad_ms(), nid, k,
+                     end, p[2], spd, m->travel);
+        else
+            snprintf(b, sizeof b, "[motor] %lu ms node %u motor %u sent to "
+                     "input %d (cmd %02x%s), arrives in %lu ms\n", pad_ms(), nid,
+                     k, end - 2, p[2], spd, m->travel);
         motor_say(b);
     }
 }
@@ -9592,11 +10081,20 @@ static void motor_note(const unsigned char *p, int n)
  * PAD_STEPPER_SPS steps a second (default 5000: floor 0 to floor 3 in 1.5 s).
  * The far switch closes at PAD_STEPPER_TRAVEL steps from home (default 7500).
  *
- * WHICH SWITCH IS HOME IS NOT KNOWN. Here it is BUILDING UP (the config's byte
- * 8), because home is beside floor 0, where the building rests between games
- * and the floors are the damage it takes; nothing in the rig can tell, and the
- * game reads only the status, never these switches, to move it. PAD_STEPPER_HOME=down swaps them. The building
- * starts between the switches, position unknown, as on a machine at power on.
+ * WHICH SWITCH IS HOME: BUILDING UP (the config's byte 8), because home is
+ * beside floor 0, where the building rests between games and the floors are
+ * the damage it takes. PAD-393 could only guess; PAD-656 (D&D LE's dragon, the
+ * same board with two axes, its switches named HOME) settled the rule: cmd
+ * 34's direction byte picks the end (stepper_ends). PAD_STEPPER_HOME=down
+ * swaps them. The building starts between the switches, position unknown, as
+ * on a machine at power on.
+ *
+ * D&D LE 1.10's dragon (PAD-656): node 10 motor 0 = left-right (byte 7 LR
+ * HOME, byte 8 LR AWAY), motor 1 = up-down (byte 7 UD HOME, no byte 8), both
+ * configured and homed (34 <m> 01) at boot, then moved by small positive
+ * steps (attract: up-down 0 <-> 69, left-right 35 <-> 50). With motor 1
+ * refused (one input) and motor 0 homed onto LR AWAY, the game showed
+ * "OPERATOR ALERT! Dragon Jam - DEVICE MALFUNCTION" after a Start.
  *
  * PAD_STEPPER=0 restores the zero reply and stops the model. */
 #define NB_STEPPERS 6
@@ -9604,9 +10102,10 @@ static void motor_note(const unsigned char *p, int n)
 struct nb_stepper {
     unsigned char cfg;          /* cmd 32 seen for this motor              */
     signed char sw[2];          /* input bit: [0] home end, [1] far end    */
+    signed char in[2];          /* the config's byte 7 / byte 8 inputs     */
     unsigned char homed;
     signed char going;          /* -1 idle, 0 homing, 1 a move             */
-    long pos;                   /* steps from home (<= 0)                   */
+    long pos;                   /* steps from home, either side (PAD-656)   */
     long from, to;              /* the move under way                       */
     unsigned long start, due;   /* pad_ms() it began / ends                 */
     unsigned long moves, homes; /* counts, for the log                      */
@@ -9614,6 +10113,9 @@ struct nb_stepper {
 };
 static struct nb_stepper nb_steppers[64][NB_STEPPERS];
 static unsigned char nb_stepper_cfg[64];
+/* PAD-1228: where each stepper was last sent, into padled (version 8) for a
+ * reader that shows the mechanism - defined beside led_shm below. */
+static void stepper_publish(unsigned nid, unsigned k, long pos);
 
 static int stepper_on(void)
 {
@@ -9663,7 +10165,8 @@ static void stepper_switches(unsigned nid, struct nb_stepper *s)
     int moving = s->going >= 0 && pad_ms() < s->due, e;
     unsigned char made[2];
     made[0] = pos == 0 && !(moving && s->from == 0);
-    made[1] = pos <= -stepper_travel() && !(moving && s->from <= -stepper_travel());
+    made[1] = (pos < 0 ? -pos : pos) >= stepper_travel() &&
+              !(moving && (s->from < 0 ? -s->from : s->from) >= stepper_travel());
     for (e = 0; e < 2; e++) {
         motor_switch(nid, s->sw[e], made[e]);
         if (made[e] != s->made[e]) {
@@ -9711,12 +10214,33 @@ static void stepper_go(unsigned nid, unsigned k, int going, long to)
     if (s->due == s->start) s->due++;
     if (going == 0) s->homes++;
     else s->moves++;
+    stepper_publish(nid, k, to);
     stepper_switches(nid, s);           /* it leaves the switch it was on */
     snprintf(b, sizeof b, "[stepper] %lu ms node %u motor %u %s %ld -> %ld "
              "(%ld steps), %lu ms\n", pad_ms(), nid, k,
              going == 0 ? "homing" : "move", s->from, s->to, s->to - s->from,
              s->due - s->start);
     motor_say(b);
+}
+
+/* Which configured input is home (PAD-656). cmd 34's last byte is the way
+ * home: 1 runs it to byte 7's input, 0 to byte 8's. D&D LE homes both dragon
+ * axes with 1, and its byte 7 inputs are the ones named HOME (LR HOME, UD
+ * HOME; byte 8 = LR AWAY, and none on the up-down axis); godzilla_le homes the
+ * building with 0, so its home is byte 8, BUILDING UP - PAD-393's pick. The
+ * one-input steppers agree: Rush LE and John Wick home with 1 and name byte 7,
+ * James Bond 60th LE's four with 0 and name byte 8. A direction with no input
+ * there homes to the one there is. PAD_STEPPER_HOME=down turns the rule
+ * round. Returns 1 when home moved to the other end. */
+static int stepper_ends(struct nb_stepper *s, unsigned dir)
+{
+    const char *h = getenv("PAD_STEPPER_HOME");
+    int e = dir ? 0 : 1, was = s->sw[0];
+    if (h && (h[0] == 'd' || h[0] == 'D')) e = !e;
+    if (s->in[e] < 0) e = !e;
+    s->sw[0] = s->in[e];
+    s->sw[1] = s->in[!e];
+    return was != s->sw[0];
 }
 
 /* On the write: 32 configures, 34 homes, 31 moves. */
@@ -9732,21 +10256,21 @@ static void stepper_note(const unsigned char *p, int n)
     s = &nb_steppers[nid][k];
     if (p[2] == 0x32) {
         char b[160];
-        const char *h = getenv("PAD_STEPPER_HOME");
-        int down = h && (h[0] == 'd' || h[0] == 'D');
-        /* only the 23-byte stepper frame, both ends named as inputs */
-        if (n < 23 || p[1] != 0x14 || !(p[7] & 0x40) || !(p[8] & 0x40)) return;
+        /* only the 23-byte stepper frame, an end named as an input (PAD-656:
+         * D&D LE's up-down axis has one, byte 7 = UD HOME, byte 8 = 00) */
+        if (n < 23 || p[1] != 0x14 || !((p[7] | p[8]) & 0x40)) return;
         if (s->cfg) return;
         s->cfg = 1;
-        s->sw[0] = (signed char)((down ? p[7] : p[8]) & 0x3f);
-        s->sw[1] = (signed char)((down ? p[8] : p[7]) & 0x3f);
+        s->in[0] = (p[7] & 0x40) ? (signed char)(p[7] & 0x3f) : -1;
+        s->in[1] = (p[8] & 0x40) ? (signed char)(p[8] & 0x3f) : -1;
+        stepper_ends(s, 0);             /* until a 34 says which way home is */
         s->going = -1;
         s->homed = 0;
         s->pos = -stepper_travel() / 2;     /* between the switches */
         nb_stepper_cfg[nid] = 1;
-        snprintf(b, sizeof b, "[stepper] node %u motor %u: home on input %d, "
-                 "far end on input %d at %ld steps, %ld steps/s%s\n", nid, k,
-                 s->sw[0], s->sw[1], -stepper_travel(), stepper_sps(),
+        snprintf(b, sizeof b, "[stepper] node %u motor %u: inputs %d (byte 7) "
+                 "and %d (byte 8), far end %ld steps from home, %ld steps/s%s\n",
+                 nid, k, s->in[0], s->in[1], stepper_travel(), stepper_sps(),
                  stepper_on() ? "" : " - PAD_STEPPER=0, not answered");
         motor_say(b);
         if (stepper_on()) stepper_switches(nid, s);
@@ -9755,6 +10279,19 @@ static void stepper_note(const unsigned char *p, int n)
     if (!s->cfg || !stepper_on()) return;
     stepper_tick(nid);
     if (p[2] == 0x34) {
+        if (n >= 6 && stepper_ends(s, p[4])) {
+            /* home is the other end from the one assumed: where it is now
+             * is not known any more */
+            char b[128];
+            s->going = -1;
+            s->homed = 0;
+            s->pos = -stepper_travel() / 2;
+            stepper_switches(nid, s);
+            snprintf(b, sizeof b, "[stepper] %lu ms node %u motor %u: home "
+                     "toward direction %u = input %d, far end input %d\n",
+                     pad_ms(), nid, k, p[4], s->sw[0], s->sw[1]);
+            motor_say(b);
+        }
         if (s->going == 0) return;          /* already on its way home */
         stepper_go(nid, k, 0, 0);
         return;
@@ -9763,8 +10300,12 @@ static void stepper_note(const unsigned char *p, int n)
         long steps = (short)(p[4] | (p[5] << 8)), to;
         if (!steps) return;
         to = stepper_pos(s) + steps;
-        if (to > 0) to = 0;                 /* the home end stops it */
-        if (to < -stepper_travel() - 2000) to = -stepper_travel() - 2000;
+        /* no stop at home: which side of it the positions lie is the
+         * title's (godzilla's floors are negative, the dragon's and Bond
+         * 60th's moves positive), and the game asks only for places it can
+         * reach (PAD-656) */
+        if ((to < 0 ? -to : to) > stepper_travel() + 2000)
+            to = to < 0 ? -(stepper_travel() + 2000) : stepper_travel() + 2000;
         stepper_go(nid, k, 1, to);
     }
 }
@@ -9832,6 +10373,23 @@ static int stepper_status(unsigned nid, unsigned k, unsigned char *p)
  * inputs 38 and 32 - PAD-237's end-stop model already answers its cmd 53 / 54,
  * and 90 s from Start the game sent the fin no move at all.
  *
+ * NOT a motor either (PAD-1239): a HELD coil that a switch lets go. Rush LE's
+ * TROUGH LOCK (node 9 coil 0) is held up until a ball crosses SIDE SCOOP OPTO
+ * (input 16), re-sent with a short 40 every ~258 ms while it waits:
+ *
+ *   cmd 41 `41 00 ff 03 00 50 2c 01 .. [26]=00 .. [30]=d0 ..`
+ *          pulse ff for 3 ticks, then HOLD at 0x50 (byte 7, 300 ticks), and
+ *          byte 30 = 0x80|0x40|16
+ *
+ * Played as a motor, the opto closed 600 ms after the ball landed on LOWER
+ * SIDE SCOOP and stayed closed: the game never kicked the scoop and called
+ * it SIDE SCOOP DEVICE MALFUNCTION (emulator, rush_le 1.19; the reporter's
+ * photos). Every motor rule seen - jaws_le's shark `5a e8 03 00`, rush_le's
+ * topper `46 e8 03 00` [30]=44, pokemon_le's balloon on Spike 3 - runs on a
+ * 1000-tick pulse with NO hold and a plain 0x40 stop byte. So a rule with a
+ * hold power, or 0x80 on its stop byte, is a coil the switch releases, and
+ * the model leaves its switch to the ball.
+ *
  * PAD_COIL_MOTOR=0 turns this off (the comparison run). */
 #define COIL_MOTOR_IDX 16
 
@@ -9893,7 +10451,9 @@ static void coil_motor_note(const unsigned char *p, int n)
     coil_motor_tick(nid);
     if (p[2] == 0x41) {
         signed char stop = -1;
-        if (n >= 31 && (p[30] & 0x40) && !(p[26] & 0x40))
+        /* a stop input, no firing input, no hold and no 0x80 on the stop:
+         * a held coil a switch releases is not a motor (PAD-1239) */
+        if (n >= 31 && (p[30] & 0x40) && !(p[30] & 0x80) && !(p[26] & 0x40) && !p[7])
             stop = (signed char)(p[30] & 0x3f);
         if (stop == c->stop) return;        /* the board re-init's re-send */
         if (stop >= 0) {
@@ -9951,7 +10511,12 @@ static void sw_shm_edges(void)
 {
     static unsigned char prev[256];
     static int primed;
-    static int budget = 2000;
+    /* PAD-764: a recording (runrec.py) is this log, so it has to last a whole
+     * session: David's ten minutes of Godzilla were 315 lines, and 2000 was an
+     * hour's play. Still a bound for a writer bumping gen forever. */
+    static int budget = 200000;
+    static int pause_primed;
+    static unsigned pause_seen;
     static int on = -1;
     char line[160];
     int n, len, count = 0;
@@ -9963,6 +10528,22 @@ static void sw_shm_edges(void)
      * REQUIRE it. pad_ms() first, because the base is armed lazily. */
     (void)pad_ms();
     sw_shm->guest_t0_ms = (unsigned)pad_ms_base;
+    /* PAD-764: THE TIME THE GAME SPENT FROZEN, beside the edges. Every [sw]
+     * stamp is the raw CLOCK_MONOTONIC, but a Pause (padglhost, PAD-204) takes
+     * its length off every clock the game reads, so a replay that times a
+     * paused session's edges on the raw stamps hands every edge after the
+     * pause late by the pause. The total as this boot first finds it (a
+     * Restart game keeps the block, and the total, of the boot before) and
+     * every change after: swreplay.py takes it off the stamps. The guest is
+     * stopped while frozen, so a change is seen when it resumes. */
+    if (!pause_primed || sw_shm->paused_ms != pause_seen) {
+        char pl[96];
+        pause_seen = sw_shm->paused_ms;
+        snprintf(pl, sizeof pl, "[pause] %lu ms frozen %u ms in all%s\n",
+                 pad_ms(), pause_seen, pause_primed ? "" : " (at boot)");
+        pause_primed = 1;
+        logmsg(pl);
+    }
     if (!on || budget <= 0) return;
     sw_shm_merge();
     if (!primed) {
@@ -10034,10 +10615,87 @@ static int sw_rest_pending(unsigned id)
     return 0;
 }
 
+/* ★ PAD-826: SPARE INPUTS - a board input the game has no switch on. The scan
+ * above only ever places the game's own switches, so every other bit goes out 0,
+ * and a mode reading a spare input (pad_mode_runtime.c, pm_spare_shot) could
+ * never be shown one opening and closing. /dump/spare_in sets them: one line per
+ * input, `<node> <bit> <level>` (level 0 or 1), re-read at most every 200 ms, so
+ * a job flips an input by rewriting the file. Only bits the file names change,
+ * and only on boards that already answer the scan; with no file nothing changes.
+ * A real board's unwired input reads whatever its pull leaves it at - 1 on a
+ * pulled-up input - which is what `<node> <bit> 1` stands in for.
+ *
+ * `pullup` on a line of its own: every input no switch of the game's is on
+ * reads 1, as a Stern board's open inputs do. WITHOUT IT THE FIRST SCAN OF A
+ * BOARD LOOKS LIKE A CLOSE (the PAD-826 sweep): the game keeps a board's bits
+ * at 1 until it scans the board, and this shim scans a board only when it has
+ * news, so on a board with no news for a while the first scan came seconds into
+ * attract and took every unused input from 1 to 0 at once. The lines naming a
+ * bit win over it. Write the file whole (a temporary name, then a rename): a
+ * read between a truncate and the write sees no lines at all. */
+#define SPARE_IN_MAX 16
+static void sw_spare_in(unsigned nid, unsigned char out[8], const unsigned char named[8])
+{
+    static unsigned char sn[SPARE_IN_MAX], sb[SPARE_IN_MAX], sl[SPARE_IN_MAX];
+    static int n_spare = -1, pullup;
+    static unsigned long read_at;
+    static unsigned char said[64][64];
+    int i;
+    if (n_spare < 0 || pad_ms() - read_at >= 200) {
+        char buf[512];
+        long r = 0;
+        int fd = real_open("/dump/spare_in", 0, 0);
+        read_at = pad_ms();
+        n_spare = 0;
+        pullup = 0;
+        if (fd >= 0) {
+            long (*rd)(int, void *, unsigned long) = dlsym(RTLD_NEXT, "read");
+            if (rd) r = rd(fd, buf, sizeof buf - 1);
+            real_close(fd);
+        }
+        if (r > 0) {
+            char *p = buf;
+            buf[r] = 0;
+            while (*p && n_spare < SPARE_IN_MAX) {
+                unsigned v[3] = { 0, 0, 0 }, k;
+                while (*p == ' ' || *p == '\t') p++;
+                if (!strncmp(p, "pullup", 6)) pullup = 1;
+                for (k = 0; k < 3; k++) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (*p < '0' || *p > '9') break;
+                    while (*p >= '0' && *p <= '9') v[k] = v[k] * 10 + (unsigned)(*p++ - '0');
+                }
+                if (k == 3 && v[0] < 64 && v[1] < 64) {
+                    sn[n_spare] = (unsigned char)v[0];
+                    sb[n_spare] = (unsigned char)v[1];
+                    sl[n_spare] = (unsigned char)(v[2] ? 1 : 0);
+                    n_spare++;
+                }
+                while (*p && *p != '\n') p++;
+                if (*p) p++;
+            }
+        }
+    }
+    if (pullup)
+        for (i = 0; i < 8; i++) out[i] |= (unsigned char)~named[i];
+    for (i = 0; i < n_spare; i++) {
+        if (sn[i] != nid) continue;
+        if (sl[i]) out[sb[i] >> 3] |= (unsigned char)(1u << (sb[i] & 7));
+        else out[sb[i] >> 3] &= (unsigned char)~(1u << (sb[i] & 7));
+        if (nid < 64 && said[nid][sb[i]] != sl[i] + 1) {
+            char m[96];
+            said[nid][sb[i]] = (unsigned char)(sl[i] + 1);
+            snprintf(m, sizeof m, "[sparein] %lu ms node %u bit %u -> %u\n", pad_ms(), nid, sb[i], sl[i]);
+            logmsg(m);
+        }
+    }
+}
+
 static int sw_scan_bytes(unsigned nid, unsigned char out[8])
 {
     unsigned st, n, id;
     int placed = 0;
+    unsigned char named[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
     out[0] = out[1] = out[2] = out[3] = 0;
     out[4] = out[5] = out[6] = out[7] = 0;
@@ -10164,9 +10822,11 @@ static int sw_scan_bytes(unsigned nid, unsigned char out[8])
          * sent next to the bit the game recorded in NodeRec.cur[], and those
          * two must be equal on every single sample. */
         if (id < 256) sw_sent[id] = (unsigned char)level;
+        named[bit >> 3] |= (unsigned char)(1u << (bit & 7));   /* PAD-826: a switch of the game's is here */
         if (level) out[bit >> 3] |= (unsigned char)(1u << (bit & 7));
         placed = 1;
     }
+    if (placed) sw_spare_in(nid, out, named);   /* PAD-826: inputs the game has no switch on */
     return placed;
 }
 
@@ -11599,11 +12259,34 @@ struct padled_shm {
     unsigned short drive_pulse_t[16][16], drive_hold_t[16][16];
     unsigned char drive_pulse_pwr[16][16], drive_hold_pwr[16][16];
     unsigned drive_fires, drive_offs, drive_rule_fires;
+    /* Version 6 (PAD-500), a strip board's channels past its first 96 - the
+     * twin of padled.h, which carries the meaning; keep the two in step. */
+    unsigned char hi[16][4 * 96];
+    /* PAD-658's paint plane is the MODE RUNTIME's (pad_mode_runtime.c), never
+     * this shim's; it sits here only so the version-7 fields below land where
+     * padled.h says they do (paint_magic 13500). */
+    unsigned paint_magic, paint_gen;
+    unsigned char paint[256][8];
+    /* Version 7 (PAD-775), each coil's firing rule (cmd 41: power, and the
+     * input the board fires it from) - the twin of padled.h; keep in step. */
+    unsigned char rule_pwr[16][16], rule_in[16][16];
+    unsigned rule_sets;
+    /* Version 8 (PAD-1228), each node-board stepper's place - the twin of
+     * padled.h, which carries the meaning; keep the two in step. */
+    unsigned char step_cfg[16];
+    int step_pos[16][4];
 };
 #define PADLED_MAGIC 0x44454c50u
 
 static struct padled_shm *led_shm;
-static unsigned led_shm_len;                 /* 4096 (v3 file) or 8192 (v4)  */
+static unsigned led_shm_len;                 /* 4096 (v3), 8192 (v5), 16384 (v6) */
+
+static void stepper_publish(unsigned nid, unsigned k, long pos)
+{
+    if (!led_shm || led_shm_len < 16384 || nid >= 16 || k >= 4) return;
+    led_shm->step_pos[nid][k] = (int)pos;
+    led_shm->step_cfg[nid] |= (unsigned char)(1u << k);
+}
 static unsigned char led_known[16][96];      /* seen in the boot enumeration */
 /* The same enumeration IN ORDER, which is what a bitmap frame indexes into:
  * led_order[node][k] is the LED index the board announced k-th. */
@@ -11675,17 +12358,44 @@ static void led_map(void)
      * published when the mapping is too small (see led_seen). */
     {
         long sz = lseek(fd, 0, 2 /*SEEK_END*/);
-        led_shm_len = (sz >= 8192) ? 8192u : 4096u;
+        led_shm_len = (sz >= 16384) ? 16384u : (sz >= 8192) ? 8192u : 4096u;
     }
     m = mmap(0, led_shm_len, 3, 1, fd, 0);
     close(fd);
     if (!m || m == (void *)-1) return;
     led_shm = (struct padled_shm *)m;
     led_shm->magic = PADLED_MAGIC;
-    /* 4 adds the addressed plane, 5 the coil drive block (PAD-381); see
-     * padled.h. A reader tells them apart by this number, so it must not claim
-     * either over a one-page mapping. Both fit in the second page. */
-    led_shm->version = (led_shm_len >= 8192) ? 5 : 3;
+    /* 4 adds the addressed plane, 5 the coil drive block (PAD-381), 6 the
+     * strip boards' banks past the first (PAD-500), 7 each coil's firing rule
+     * (PAD-775), 8 each stepper's place (PAD-1228); see padled.h. A reader
+     * tells them apart by this number, so it must not claim one over a
+     * mapping too small to hold it: 4 and 5 fit in two pages, 6 to 8 need
+     * four. */
+    led_shm->version = (led_shm_len >= 16384) ? 8 : (led_shm_len >= 8192) ? 5 : 3;
+}
+
+/* ★ A BANKED STRIP FRAME'S LEVELS, INTO VERSION 6's `hi` PLANE (PAD-500).
+ *
+ * Both swelf paths below walk a bank > 0 frame exactly and, until this, threw
+ * the levels away: "walked and counted; no plane to put it in". That is where
+ * the cabinet's expressive-lighting blades live past their first 32 pixels
+ * (Rush 1.18's proof: "its expressive-lighting strip past bank 0 is not in the
+ * plane"), and most of every topper. Channel 96 * bank + index lands at
+ * hi[node][(bank - 1) * 96 + index], banks 1 to 4.
+ *
+ * LEVELS ONLY, ON PURPOSE. No led_val(), so the light-show announcer's move
+ * count, `seen` and `decoded` see exactly the frames they saw before - a
+ * cabinet strip running its own show must not be what decides a run reached
+ * attract. A silent no-op on a mapping too small for the plane (an older
+ * watch.sh), like led_seen. */
+static void led_hi(unsigned node, int bank, const unsigned char *idx,
+                   const unsigned char *val, unsigned cnt)
+{
+    unsigned i;
+    if (!led_shm || led_shm_len < 16384 || node >= 16 || bank < 1 || bank > 4) return;
+    for (i = 0; i < cnt; i++)
+        if (idx[i] < 96)
+            led_shm->hi[node][(unsigned)(bank - 1) * 96u + idx[i]] = val[i];
 }
 
 /* One bit of the version-4 roster. Silently a no-op on a short mapping, which
@@ -11703,6 +12413,110 @@ static void led_seen(unsigned node, unsigned idx)
 {
     if (!led_shm || led_shm_len < 8192) return;
     if (node < 16 && idx < 96) led_shm->seen[node][idx] = 1;
+}
+
+/* ★ WHAT THE GAME SAID BEFORE THE VOTE CAME IN (PAD-1093).
+ *
+ * Nothing in the swelf dialect is published until the title's 200-frame vote
+ * (led_wide_dialect) is in, and the vote's own note says why that was thought
+ * free: "200 frames is well under a second of attract". It is not on every
+ * build. A Guardians LE 1.15 boot took 19 s to fill the sample (t=19074 ms,
+ * PAD_NB_TRACE=1, rig 3), and at t=12909 ms - in the middle of it - the game
+ * sent ONE long `8a` frame to each of nodes 8 and 9 that turns the playfield
+ * GI on (BOTTOM/TOP RED, WHITE, BLUE GI, index 0..2, all 255) with a dozen
+ * inserts beside it, and then never touched those six lamps again: a GI is
+ * set once and held. The frame was walked, closed exactly, and was dropped
+ * for the vote, so the GI read 0 for the whole run - in attract and in play -
+ * and a Visual Pinball table behind the rig drew its playfield unlit.
+ *
+ * So a frame that closes exactly while the vote is still out is KEPT here,
+ * the last level per lamp (bank 0 only: the `hi` banks are toppers, repainted
+ * all the time), and applied the moment the title is ACCEPTED - as levels
+ * only, like a strip's bulk frame, so the light-show announcer counts nothing
+ * it did not count before. A title the vote REFUSES drops the lot: it never
+ * wrote a lamp, which is what the vote is for. A lamp another path writes in
+ * the meantime (cmd 70, the godzilla shapes) is newer than what is kept, and
+ * is let go of here (led_val, led_strip_levels).
+ *
+ * "Newer" means a LATER frame. The older shapes further down led_publish
+ * still get the very frame that was kept (that is how a title the vote will
+ * refuse is read, unchanged), and on Guardians they read the GI frame as
+ * zeros on those six lamps; a write from the frame that was kept is not
+ * news about it (led_pub_seq, one count per frame). */
+static unsigned char led_pend_val[16][96], led_pend_has[16][96];
+static unsigned led_pend_seq[16][96];
+static unsigned led_pend_n, led_pub_seq;
+
+static void led_pend_drop(unsigned node, unsigned idx)
+{
+    if (led_pend_n && node < 16 && idx < 96 && led_pend_has[node][idx]
+            && led_pend_seq[node][idx] != led_pub_seq) {
+        led_pend_has[node][idx] = 0;
+        led_pend_n--;
+    }
+}
+
+static void led_pend_put(unsigned node, int bank, const unsigned char *idx,
+                         const unsigned char *val, unsigned cnt)
+{
+    unsigned i;
+    if (bank != 0 || node >= 16) return;
+    for (i = 0; i < cnt; i++) {
+        if (idx[i] >= 96) continue;
+        if (!led_pend_has[node][idx[i]]) {
+            led_pend_has[node][idx[i]] = 1;
+            led_pend_n++;
+        }
+        led_pend_val[node][idx[i]] = val[i];
+        led_pend_seq[node][idx[i]] = led_pub_seq;
+    }
+}
+
+/* the vote is in: what was kept goes onto the plane (accepted) or away */
+static void led_pend_settle(int accepted)
+{
+    unsigned node, i, n = 0;
+    if (!led_pend_n) return;
+    for (node = 0; node < 16; node++)
+        for (i = 0; i < 96; i++) {
+            if (!led_pend_has[node][i]) continue;
+            led_pend_has[node][i] = 0;
+            if (!accepted || !led_shm) continue;
+            led_shm->val[node][i] = led_pend_val[node][i];
+            led_seen(node, i);
+            led_wide_owns[node][i] = 1;
+            n++;
+        }
+    led_pend_n = 0;
+    if (n && led_shm) {
+        char m[120];
+        led_shm->gen++;
+        snprintf(m, sizeof m, "[ledwide] %u lamp level(s) the game sent before the vote applied now\n", n);
+        logmsg(m);
+    }
+}
+
+/* ★ A STRIP BOARD'S BULK FRAME, AS LEVELS ONLY (PAD-500) - bank 0 into val[]
+ * (and `seen`), banks 1 to 4 into `hi` (led_hi). led_wide_publish's long-body
+ * branch is the one caller; see it for why. Deliberately NOT led_val(): these
+ * frames were dropped whole before, so the light-show announcer never counted
+ * them, and a cabinet strip's own show must not start counting now - it is
+ * the "past Tech Alerts" signal (led_show_gate). */
+static void led_strip_levels(unsigned node, int bank, const unsigned char *idx,
+                             const unsigned char *val, unsigned cnt)
+{
+    unsigned i;
+    if (bank > 0) {
+        led_hi(node, bank, idx, val, cnt);
+        return;
+    }
+    if (!led_shm || node >= 16) return;
+    for (i = 0; i < cnt; i++) {
+        if (idx[i] >= 96) continue;
+        led_shm->val[node][idx[i]] = val[i];
+        led_seen(node, idx[i]);
+        led_pend_drop(node, idx[i]);
+    }
 }
 
 /* ★ WHEN THE PICTURE LAST MOVED - one timestamp, written by every path that
@@ -11752,9 +12566,14 @@ static void led_seen(unsigned node, unsigned idx)
 static unsigned long led_move_at[LED_MOVE_RING];
 static unsigned led_moves;               /* moving lamp writes, ever */
 
+/* PAD-965: a motor the board drives on two LED-class outputs, as cmd 50 left
+ * it (see led_motor_publish); 0 = not driven, the lamp frames own the cell. */
+static unsigned char led_motor_out[16][96];
+
 static void led_val(unsigned node, unsigned idx, unsigned char v)
 {
     if (!led_shm || node >= 16 || idx >= 96) return;
+    if (led_motor_out[node][idx]) v = led_motor_out[node][idx];
     if (led_shm->val[node][idx] != v
             && (led_shm_len < 8192 || led_shm->seen[node][idx])) {
         led_move_at[led_moves % LED_MOVE_RING] = pad_ms();
@@ -11762,6 +12581,53 @@ static void led_val(unsigned node, unsigned idx, unsigned char v)
     }
     led_shm->val[node][idx] = v;
     led_seen(node, idx);
+    led_pend_drop(node, idx);
+}
+
+/* ---- PAD-965: A MOTOR ON TWO LED-CLASS OUTPUTS (cmd 50) ------------------
+ *
+ *     88 05 50 <A> <B> <SPEED> <cksum> 00
+ *
+ * beatles' spinning record (SpinningDiscMotor) has no coil. Its device records
+ * are two LEDs, MOTOR A0 DRIVER and MOTOR A1 DRIVER (node 8, outputs 4 and
+ * 5), and the game never writes them in a lamp frame: it sends cmd 50 naming
+ * the pair and a speed - `50 04 05 ff` to run the record, `50 04 05 00` to
+ * stop it. Measured on beatles 1.29 (PAD_NB_TRACE=1, rig 3, 2026-11-03): one
+ * run at boot (the record's test spin, 14.5 s .. 17.7 s) and then one before
+ * EVERY burst of MAGNET-RECORD, 15 ms ahead of the coil, stopped 5.2 s later
+ * - six catches, six spins. The real record throws the ball it caught.
+ *
+ * Nothing read cmd 50, so outputs 4 and 5 sat at 0 in the LED plane, the
+ * Visual Pinball table's record (lamp calls 1804/1805 -> PadRecordMotor) never
+ * turned, and every ball the magnet caught dropped off it down the middle.
+ * So the speed is published on output A while B is held at 0 - one side of
+ * the bridge driven, which is the motor running - and the cells stay that
+ * way against the lamp frames until the next cmd 50 says otherwise. Which
+ * way round SPEED turns the disc is not known (only 00 and ff were ever
+ * sent); the table only needs to know it runs. */
+static void led_motor_publish(const unsigned char *p, int n)
+{
+    unsigned node, a, b;
+    unsigned char v;
+    char line[128];
+    static int budget = 40;
+    if (n < 6 || !(p[0] & 0x80) || p[2] != 0x50) return;
+    node = p[0] & 0x3f;
+    a = p[3];
+    b = p[4];
+    v = p[5];
+    if (node >= 16 || a >= 96 || b >= 96 || a == b) return;
+    led_motor_out[node][a] = 0;
+    led_motor_out[node][b] = 0;
+    led_val(node, a, v);
+    led_val(node, b, 0);
+    led_motor_out[node][a] = v;
+    if (budget > 0) {
+        budget--;
+        snprintf(line, sizeof line, "[motor] %lu ms node %u outputs %u/%u: speed %02x%s\n",
+                 pad_ms(), node, a, b, v, v ? " (running)" : " (stopped)");
+        logmsg(line);
+    }
 }
 
 /* Is the picture moving at show rate right now: LED_MOVE_RING lamp writes
@@ -11815,13 +12681,20 @@ static int led_moved_recently(unsigned long now)
  *
  * The FIRST 0x40 for a given coil is its boot configuration - nine arrive back
  * to back on node 8 at startup, one on node 9 - so it seeds the record and does
- * not count as an event. Everything after it does. */
+ * not count as an event. Everything after it does.
+ *
+ * PAD-968: the SHORT form, 89 03 40 <IDX> <cksum> 00, fires the coil by the
+ * rule a cmd 41 just set (Foo Fighters lets the Overlord's fork go that way:
+ * a 20 ms FORK DOWN rule, then the short 40). It carries no power byte and is
+ * never a boot configuration, so it only counts. Uncounted, a table played
+ * through the controller never saw that coil fire and the ball stayed held. */
 static void coil_publish(const unsigned char *p, int n)
 {
     static unsigned char configured[16][16];
     unsigned node, idx;
+    int brief = (n == 6 && p[1] == 0x03);
 
-    if (n != 14 || !(p[0] & 0x80) || p[2] != 0x40) return;
+    if ((n != 14 && !brief) || !(p[0] & 0x80) || p[2] != 0x40) return;
     node = (unsigned)p[0] & 0x3f;
     if (node != 8 && node != 9) return;
     idx = p[3];
@@ -11829,8 +12702,10 @@ static void coil_publish(const unsigned char *p, int n)
 
     led_map();
     if (!led_shm) return;
-    led_shm->lvl[node][idx] = p[4];
-    if (!configured[node][idx]) { configured[node][idx] = 1; return; }
+    if (!brief) {
+        led_shm->lvl[node][idx] = p[4];
+        if (!configured[node][idx]) { configured[node][idx] = 1; return; }
+    }
     led_shm->coil[node][idx]++;
     led_shm->coil_decoded++;
     led_shm->coil_gen++;
@@ -11926,6 +12801,89 @@ static unsigned lcd_le32(const unsigned char *q)
          | ((unsigned)q[2] << 16) | ((unsigned)q[3] << 24);
 }
 
+/* ---- PAD-1184: WHERE THE DISPLAY'S PLAYBACK IS ---------------------------
+ *
+ * The f2 90 reply's word0 is read back by the game's channel layer as the
+ * playback position (see the 0x90 answer below), and a "play A..D" waits for
+ * it to leave [A, D). So each display index (the low 2 bits of the selector)
+ * keeps the position a real board would report:
+ *   8-byte form  [0][u32 A]              a seek: at A, not moving
+ *   4-byte form  [verb]                  1 = the next play loops, 2 = plays
+ *                                        once; 3 and 4 hold where it is, 5
+ *                                        carries on (their names are not
+ *                                        traced - holding is what the old
+ *                                        echo did for every one of them)
+ *   14/24-byte   [flags][u32 A][u32 D][u16 rate]  plays A..D at the rate's
+ *                                        fps (lcd_fps; 30 when unknown) -
+ *                                        once ends AT D, a loop wraps to A
+ * The clock is pad_ms(), the game's own, so a sped-up rig runs it with the
+ * game. A position nothing has commanded is "not known" and the old asset
+ * echo answers instead. */
+static struct {
+    unsigned known, run, loop, from, to, at, fps;
+    unsigned long t0;
+} lcd_pl[4];
+
+static unsigned lcd_play_pos(unsigned idx)
+{
+    unsigned long steps;
+    unsigned span;
+    idx &= 3;
+    if (!lcd_pl[idx].run) return lcd_pl[idx].at;
+    if (lcd_pl[idx].to <= lcd_pl[idx].from) {
+        lcd_pl[idx].run = 0;
+        return lcd_pl[idx].at = lcd_pl[idx].to;
+    }
+    span = lcd_pl[idx].to - lcd_pl[idx].from;
+    steps = (pad_ms() - lcd_pl[idx].t0) * lcd_pl[idx].fps / 1000ul;
+    if (steps >= span) {
+        if (!lcd_pl[idx].loop) {
+            lcd_pl[idx].run = 0;
+            return lcd_pl[idx].at = lcd_pl[idx].to;
+        }
+        steps %= span;
+    }
+    return lcd_pl[idx].at = lcd_pl[idx].from + (unsigned)steps;
+}
+
+static int lcd_play_known(unsigned idx)
+{
+    return lcd_pl[idx & 3].known;
+}
+
+static void lcd_play_note(const unsigned char *p, unsigned ilen, unsigned sel)
+{
+    unsigned idx = sel & 3, fps;
+    if ((sel & 0xf8u) != 0x98u) return;
+    if (ilen == 4) {
+        if (p[4] == 1 || p[4] == 2) {
+            lcd_pl[idx].loop = p[4] == 1;
+        } else if (p[4] == 3 || p[4] == 4) {
+            lcd_play_pos(idx);
+            lcd_pl[idx].run = 0;
+        } else if (p[4] == 5 && !lcd_pl[idx].run && lcd_pl[idx].known
+                   && lcd_pl[idx].at < lcd_pl[idx].to) {
+            /* carry on from where it was held */
+            lcd_pl[idx].run = 1;
+            fps = lcd_pl[idx].fps ? lcd_pl[idx].fps : 30;
+            lcd_pl[idx].t0 = pad_ms()
+                - (unsigned long)(lcd_pl[idx].at - lcd_pl[idx].from) * 1000ul / fps;
+        }
+    } else if (ilen == 8) {
+        lcd_pl[idx].known = 1;
+        lcd_pl[idx].run = 0;
+        lcd_pl[idx].at = lcd_le32(p + 5);
+    } else if (ilen == 14 || ilen == 24) {
+        fps = lcd_fps((unsigned)p[13] | ((unsigned)p[14] << 8));
+        lcd_pl[idx].known = 1;
+        lcd_pl[idx].from = lcd_pl[idx].at = lcd_le32(p + 5);
+        lcd_pl[idx].to = lcd_le32(p + 9);
+        lcd_pl[idx].fps = fps ? fps : 30;
+        lcd_pl[idx].t0 = pad_ms();
+        lcd_pl[idx].run = 1;
+    }
+}
+
 /* ★ WRITTEN AGAINST THE GAME'S OWN FRAME BUILDERS AND ITS DISPATCHER
  * (padlcd.h documents the table, the addresses, and what is still unnamed).
  *
@@ -11959,6 +12917,7 @@ static void lcd_publish(const unsigned char *p, int n)
     if (sel < 0x80u) return;      /* every LCD selector is >= 0x80          */
     ilen = p[1];                  /* cmd..cksum, so payload ends at p[1+ilen]*/
     if (ilen < 3 || (unsigned)n < ilen + 2) return;
+    lcd_play_note(p, ilen, sel);  /* PAD-1184: with or without the panel   */
     lcd_map();
     if (!lcd_shm) return;
 
@@ -12138,14 +13097,19 @@ static int led_dec_log(void)
  * window at all - can be read without inventing a rule about which boards are
  * allowed to be lamps. Frames that do not close are counted in wide_skipped.
  *
- * CHANNEL B IS DECODED BUT NOT PUBLISHED. Every lamp on this generation
- * carries two bytes (the cmd 0x70 builder at 0x51c2b4 scales and sends both).
- * What the second one MEANS is not established: the values seen on the wire
- * come from a small repeating alphabet (0x08, 0x0f, 0x1e) that looks like a
- * rate or a curve id beside channel A's plain 0x00/0x10/0xff levels, and
- * "looks like" is not a finding. Its bytes are walked so the frame can be
- * length-checked, and then dropped. When somebody reads the board firmware or
- * runs the service LED test against it, it gets a name and a plane of its own.
+ * ★ CHANNEL B IS THE LAMP'S FADE TIME (PAD-1189), the time the board takes
+ * to go from the lamp's level to the new one. Over 76,804 lamp writes in two
+ * Spike 3 attracts (star_wars_2025_le, pokemon_le - the same grammar) it was
+ * never 255 and never equal to a lit lamp's level, so not a second level a
+ * lamp blinks to (a steady lamp would carry its own), only a small alphabet
+ * 0..62; and the larger it is the longer the game holds the lamp before its
+ * next change (2: ~35 ms, 6: ~170 ms, 20: ~0.67 s, 30: ~1 s). The board
+ * ramps; the wire never carries the steps. led_wide_fades puts each change
+ * that has one in the fade ring as a one-way envelope (old -> new, back in
+ * 0), which the window already runs on top of val[]. The UNIT is not
+ * established (the boards' firmware is encrypted): PAD_FADE_B_UNIT_MS,
+ * default 10 - pokemon_le's B=60 chase steps every 0.600 s exactly.
+ * leddecode.wide_fades is the twin.
  */
 static unsigned popcount8(unsigned v)
 {
@@ -12174,7 +13138,8 @@ static int led_wide_long(unsigned cmd, const unsigned char *body, unsigned blen)
 }
 
 static int led_wide_walk(const unsigned char *body, unsigned blen, unsigned cmd,
-                         unsigned char *idx, unsigned char *val, unsigned *nout)
+                         unsigned char *idx, unsigned char *val, unsigned char *fade,
+                         unsigned *nout)
 {
     unsigned A = cmd & 0x03, B = cmd & 0x1c, M = cmd & 0x20;
     unsigned p = 0, cnt = 0, i, k, sel = 0, sl = 0;
@@ -12298,18 +13263,33 @@ static int led_wide_walk(const unsigned char *body, unsigned blen, unsigned cmd,
         p++;
     }
 
-    /* Channel B is walked for its LENGTH and then dropped - see the header. */
-    if (B == 0) {
+    /* Channel B: each lamp's FADE TIME (PAD-1189 - see the header), into
+     * fade[] when the caller wants it (0 = the frame says none: snap). */
+    if (B == 0) {                            /* one time each                */
         if (p + cnt > blen) return 0;
+        if (fade) for (i = 0; i < cnt; i++) fade[i] = body[p + i];
         p += cnt;
     } else {
-        if (B & 0x10) p++;
-        if ((B & 0x0c) == 0x08) {
+        unsigned char base = 0;
+        if (B & 0x10) {                      /* the unselected lamps' time    */
+            if (p + 1 > blen) return 0;
+            base = body[p++];
+        }
+        if (fade) for (i = 0; i < cnt; i++) fade[i] = base;
+        if ((B & 0x0c) == 0x08) {            /* one time for the selected     */
+            if (p + 1 > blen) return 0;
+            if (fade)
+                for (k = 0; k < cnt; k++)
+                    if (body[sel + (k >> 3)] >> (k & 7) & 1) fade[k] = body[p];
             p++;
-        } else if ((B & 0x0c) == 0x0c) {
+        } else if ((B & 0x0c) == 0x0c) {     /* one time per selected lamp    */
             if (!sl) return 0;
             for (k = 0; k < cnt; k++)
-                p += body[sel + (k >> 3)] >> (k & 7) & 1;
+                if (body[sel + (k >> 3)] >> (k & 7) & 1) {
+                    if (p >= blen) return 0;
+                    if (fade) fade[k] = body[p];
+                    p++;
+                }
         }
     }
     if (p != blen) return 0;                 /* ★ the whole safety net       */
@@ -12328,8 +13308,9 @@ static int led_wide_walk(const unsigned char *body, unsigned blen, unsigned cmd,
  * and until this was read every one of them was refused - which is what put a
  * whole board in wide_skipped. Returns the bank (0 for a frame with no prefix),
  * rewriting cmd, body and blen for the walk; -1 for a malformed prefix. Only
- * bank 0 fits the [16][96] plane: the others are walked (they vote, and count
- * as decoded) and published nowhere. leddecode.wide_bank is the twin. */
+ * bank 0 fits the [16][96] plane: banks 1 to 4 are walked (they vote, and
+ * count as decoded) and their levels go to version 6's `hi` plane (PAD-500,
+ * led_hi). leddecode.wide_bank is the twin. */
 static int led_wide_strip_bank(unsigned *cmd, const unsigned char **body, unsigned *blen)
 {
     unsigned pre;
@@ -12379,6 +13360,7 @@ static int led_wide_dialect(int accepted)
     if (seen < SAMPLE) return 0;
 
     led_wide_verdict = (ok * 100 >= seen * 50);
+    led_pend_settle(led_wide_verdict);           /* PAD-1093: before this frame publishes */
     {
         char m[160];
         snprintf(m, sizeof m,
@@ -12414,10 +13396,73 @@ static int led_wide_settled(void)
  * nothing decoded, which is what keeps them comparable with older runs.
  * wide_decoded/wide_skipped answer the separate question "how did THIS decoder
  * do", and a frame can honestly appear in both. */
+/* PAD-1189: the fade ring entries for one wide frame's lamps - each lamp
+ * whose level changes with a fade time (channel B) goes FROM its level in
+ * val[] (read BEFORE the frame lands there) TO the new one at that time, and
+ * back in 0, so the window ramps it and lets go on val[]. Neighbours going
+ * the same way at the same time share one entry (a range), so a chase step
+ * of 45 lamps is a handful of entries in the 96-entry ring. The ring's rate
+ * unit is the window's (playfield.py FADE_UNIT_MS, 12 ms); channel B's is
+ * PAD_FADE_B_UNIT_MS (default 10). s3leds.PadLed._fades is the twin. */
+static void led_fade_entry(unsigned node, unsigned start, unsigned end,
+                           unsigned char from, unsigned char to, unsigned units)
+{
+    unsigned slot = led_shm->fade_head % 96u;
+    led_shm->fade[slot].ms    = (unsigned)pad_ms();
+    led_shm->fade[slot].node  = (unsigned char)node;
+    led_shm->fade[slot].start = (unsigned char)start;
+    led_shm->fade[slot].end   = (unsigned char)end;
+    led_shm->fade[slot].from  = from;
+    led_shm->fade[slot].to    = to;
+    led_shm->fade[slot].rise  = (unsigned char)(to >= from ? units : 0);
+    led_shm->fade[slot].fall  = (unsigned char)(to >= from ? 0 : units);
+    led_shm->fade[slot].pad   = 0;
+    led_shm->fade_head++;     /* AFTER the entry, single writer */
+}
+
+static void led_wide_fades(unsigned node, const unsigned char *idx,
+                           const unsigned char *val, const unsigned char *fade,
+                           unsigned cnt)
+{
+    static int unit10 = -1;                  /* channel-B unit, in 0.1 ms   */
+    unsigned i, have = 0, s0 = 0, s1 = 0, u0 = 0;
+    unsigned char f0 = 0, t0 = 0;
+    if (!led_shm || node >= 16 || !fade) return;
+    if (unit10 < 0) {                        /* "10", "12.5": tenths of a ms */
+        const char *e = getenv("PAD_FADE_B_UNIT_MS");
+        int v = 0, frac = -1;
+        for (; e && *e; e++) {
+            if (*e == '.' && frac < 0) { frac = 0; continue; }
+            if (*e < '0' || *e > '9' || v > 100000) break;
+            if (frac < 0) v = v * 10 + (*e - '0');
+            else if (frac++ == 0) v = v * 10 + (*e - '0');
+        }
+        if (frac < 1) v *= 10;               /* no tenths digit given        */
+        unit10 = v > 0 ? v : 100;
+    }
+    for (i = 0; i < cnt; i++) {
+        unsigned char old, to = val[i];
+        unsigned units;
+        if (idx[i] >= 96 || !fade[i]) continue;
+        old = led_shm->val[node][idx[i]];
+        if (old == to) continue;
+        units = (fade[i] * (unsigned)unit10 + 60) / 120;   /* -> 12 ms units */
+        if (units < 1) units = 1;
+        if (units > 255) units = 255;
+        if (have && idx[i] == s1 + 1 && old == f0 && to == t0 && units == u0) {
+            s1 = idx[i];
+            continue;
+        }
+        if (have) led_fade_entry(node, s0, s1, f0, t0, u0);
+        have = 1; s0 = s1 = idx[i]; f0 = old; t0 = to; u0 = units;
+    }
+    if (have) led_fade_entry(node, s0, s1, f0, t0, u0);
+}
+
 static int led_wide_publish(unsigned node, unsigned cmd,
                             const unsigned char *body, unsigned blen)
 {
-    unsigned char idx[96], val[96];
+    unsigned char idx[96], val[96], fade[96];
     unsigned cnt = 0, i, cmd0 = cmd;
     int bank;
 
@@ -12432,12 +13477,50 @@ static int led_wide_publish(unsigned node, unsigned cmd,
     if ((cmd & 0xc0) != 0x80 || blen < 1) return 0;
     bank = led_wide_strip_bank(&cmd, &body, &blen);
 
-    /* The long bitmap body is refused on THIS path, as the walk refused it before
+    /* The long bitmap body is refused on THIS path
      * item mode-leds: the per-title verdict and what it publishes stay exactly
      * what they were. The per-node path below (led_node_wide_publish) reads it. */
-    if (bank < 0 || led_wide_long(cmd, body, blen) || !led_wide_walk(body, blen, cmd, idx, val, &cnt)) {
+    if (bank < 0 || led_wide_long(cmd, body, blen) || !led_wide_walk(body, blen, cmd, idx, val, fade, &cnt)) {
         led_wide_dialect(0);
         led_map();
+        /* ★ EXCEPT A STRIP BOARD'S, ONCE THE TITLE'S VERDICT IS IN (PAD-500).
+         * That refusal is how a strip lost most of its picture: the long body
+         * is the form a strip is repainted in bulk, and on a title that speaks
+         * this dialect the per-node path never runs (it stands down once the
+         * title has settled). A live John Wick LE 1.02 run sat with five blade
+         * pixels lit for a minute while its traced game had sent 4361 long
+         * frames to node 2 (of 7283; 557 of the speakers' 2385 on node 7, 1779
+         * of the topper's 5036 on node 12), every one of which this walk
+         * closes exactly. Read as LEVELS ONLY (led_strip_levels) and only after
+         * the vote: the frame still votes no above, exactly as it always did,
+         * so the verdict is drawn from the same frames; nothing that counts
+         * toward the light-show announcer sees it.
+         *
+         * ★ AND THE INSERT BOARDS' TOO (PAD-658). A blocks mode's light show
+         * paints every placed insert each tick (83 on Godzilla), and the game
+         * sends that many held lamps as LONG bitmap frames - so on a title
+         * whose verdict is in (Godzilla LE 1.16: 200 of 200) the show reached
+         * the boards and never the view: the long frames fell through to the
+         * godzilla shapes, which refuse or misread them, and David saw no show
+         * at all on the playfield. The same levels-only read as the strips -
+         * the announcer's moves and notes untouched - and the lamps marked as
+         * the wide layer's, as a short frame's are, so a base `cmd 70` does
+         * not put them back. */
+        if (bank >= 0 && led_wide_settled() && led_shm
+                && led_wide_long(cmd, body, blen)
+                && led_wide_walk(body, blen, cmd, idx, val, 0, &cnt)) {
+            if (led_insert_node(node) && bank == 0)
+                for (i = 0; i < cnt; i++)
+                    if (node < 16 && idx[i] < 96) led_wide_owns[node][idx[i]] = 1;
+            led_strip_levels(node, bank, idx, val, cnt);
+            if (led_shm_len >= 8192) led_shm->wide_decoded++;
+            return 1;
+        }
+        /* PAD-1093: the vote is still out - keep what this long frame says */
+        if (bank >= 0 && led_wide_verdict < 0 && !led_wide_settled()
+                && led_wide_long(cmd, body, blen)
+                && led_wide_walk(body, blen, cmd, idx, val, 0, &cnt))
+            led_pend_put(node, bank, idx, val, cnt);
         if (led_shm && led_shm_len >= 8192) led_shm->wide_skipped++;
         return 0;
     }
@@ -12457,7 +13540,11 @@ static int led_wide_publish(unsigned node, unsigned cmd,
      * So nothing is published until the rate is in evidence, and once it says
      * no it says no for the rest of the run. Same reasoning as the light-show
      * announcer above - a rate, not a count. */
-    if (!led_wide_dialect(1)) return 0;
+    if (!led_wide_dialect(1)) {
+        /* PAD-1093: not yet decided - keep it; refused - nothing is kept */
+        if (led_wide_verdict < 0) led_pend_put(node, bank, idx, val, cnt);
+        return 0;
+    }
 
     /* ★ NO ENUMERATION GATE HERE ANY MORE (item 165, Stranger Things LE 1.12).
      * This used to refuse a frame addressing any index the board "never
@@ -12476,10 +13563,12 @@ static int led_wide_publish(unsigned node, unsigned cmd,
      * board that never publishes. */
     led_map();
     if (!led_shm) return 0;
-    if (bank > 0) {                          /* walked and counted; no plane to put it in */
+    if (bank > 0) {                          /* walked and counted; levels to `hi` (v6) */
+        led_hi(node, bank, idx, val, cnt);
         if (led_shm_len >= 8192) led_shm->wide_decoded++;
         return 1;
     }
+    led_wide_fades(node, idx, val, fade, cnt);    /* PAD-1189, before val[] moves */
     for (i = 0; i < cnt; i++) {
         if (node < 16 && idx[i] < 96) led_wide_owns[node][idx[i]] = 1;
         led_val(node, idx[i], val[i]);
@@ -12529,19 +13618,45 @@ static int led_wide_publish(unsigned node, unsigned cmd,
  * says no, or has not decided, is read exactly as before, and a title whose own
  * verdict is yes (batman) never comes here. Premium 1.16: nodes 1, 7, 8, 9 yes
  * (200 of 200 each, decided 53-76 s into the boot), 12 and 14 no. */
+/* PAD-1093: an insert board's frame that led_publish turns away before the
+ * title's vote is in - any command the godzilla shapes do not own (8a, 84,
+ * 85, 96 ...) left at their gate, never reaching led_wide_publish. Guardians
+ * LE turns its GI on with exactly such a frame (cmd 8a, nodes 8 and 9) twelve
+ * seconds into a nineteen-second vote. It is walked and KEPT (led_pend_put),
+ * and NOT voted on: the vote is drawn from the frames it always was (see
+ * led_wide_settled), so this changes what a title shows once it is believed,
+ * never whether it is. */
+static void led_pend_offer(unsigned node, unsigned cmd,
+                           const unsigned char *body, unsigned blen)
+{
+    static int wide = -1;
+    unsigned char idx[96], val[96];
+    unsigned cnt = 0;
+    int bank;
+    if (wide < 0) {
+        const char *e = getenv("PAD_LED_WIDE");
+        wide = (e && *e == '0') ? 0 : 1;
+    }
+    if (!wide || led_wide_verdict >= 0 || led_wide_settled()) return;
+    if ((cmd & 0xc0) != 0x80 || blen < 1) return;
+    bank = led_wide_strip_bank(&cmd, &body, &blen);
+    if (bank < 0 || !led_wide_walk(body, blen, cmd, idx, val, 0, &cnt)) return;
+    led_pend_put(node, bank, idx, val, cnt);
+}
+
 static signed char led_node_verdict[16];         /* 0 undecided, 1 yes, -1 no   */
 static unsigned short led_node_votes[16], led_node_yes[16];
 
 static int led_node_wide_publish(unsigned node, unsigned cmd,
                                  const unsigned char *body, unsigned blen)
 {
-    unsigned char idx[96], val[96];
+    unsigned char idx[96], val[96], fade[96];
     unsigned cnt = 0, i, ok, cmd0 = cmd;
     int bank;
     if (node >= 16 || (cmd & 0xc0) != 0x80 || blen < 1 || led_wide_settled()) return 0;
     if (led_node_verdict[node] < 0) return 0;
     bank = led_wide_strip_bank(&cmd, &body, &blen);     /* item 165: a banked board's prefix */
-    ok = bank >= 0 && led_wide_walk(body, blen, cmd, idx, val, &cnt);
+    ok = bank >= 0 && led_wide_walk(body, blen, cmd, idx, val, fade, &cnt);
     if (!led_node_verdict[node]) {
         if (ok && cnt < 2) return 0;             /* one lamp: no vote           */
         led_node_votes[node]++;
@@ -12565,10 +13680,12 @@ static int led_node_wide_publish(unsigned node, unsigned cmd,
      * note in led_wide_publish (item 165) */
     led_map();
     if (!led_shm) return 0;
-    if (bank > 0) {                              /* walked and counted; no plane to put it in */
+    if (bank > 0) {                              /* walked and counted; levels to `hi` (v6) */
+        led_hi(node, bank, idx, val, cnt);
         if (led_shm_len >= 8192) led_shm->wide_decoded++;
         return 1;
     }
+    led_wide_fades(node, idx, val, fade, cnt);    /* PAD-1189, before val[] moves */
     for (i = 0; i < cnt; i++) {
         led_wide_owns[node][idx[i]] = 1;
         led_val(node, idx[i], val[i]);
@@ -12761,6 +13878,7 @@ static void led_publish(const unsigned char *p, int n)
     if (n < 5 || !(p[0] & 0x80)) return;
     node = p[0] & 0x3f;
     cmd  = p[2];
+    led_pub_seq++;                       /* PAD-1093: one count per frame (led_pend_drop) */
 
     /* THE ATTRACT LIGHT SHOW, announced once, because it is the "past Tech
      * Alerts" signal gamestate.sh reads (item 27). The old test - "a clip
@@ -13033,7 +14151,10 @@ static void led_publish(const unsigned char *p, int n)
         return;
     }
     if (cmd != 0x97 && cmd != 0xa2 && cmd != 0xa3 && cmd != 0xa4 &&
-        cmd != 0xa5 && cmd != 0xa6 && cmd != 0xb4 && cmd != 0xb5) return;
+        cmd != 0xa5 && cmd != 0xa6 && cmd != 0xb4 && cmd != 0xb5) {
+        led_pend_offer(node, cmd, p + 3, (unsigned)n - 5);   /* PAD-1093 */
+        return;
+    }
 
     led_map();
     if (!led_shm) return;
@@ -13643,6 +14764,34 @@ static void coil_drive_note(const unsigned char *p, int n)
         snprintf(line, sizeof line, "[coildrive] %u ms node %u coil %u: fired "
                  "by its rule (short cmd 40)\n", now, d.node, d.idx);
     logmsg(line);
+}
+
+/* ---- PAD-775: A COIL'S RULE, PUBLISHED (padled v7) ----
+ *
+ * cmd 41 hands a board the rule a coil fires by - byte 4 its power, byte 26
+ * the INPUT whose closing fires it (0x40 | input; coil_motor_note() reads
+ * byte 30, the input that STOPS a motor, from the same frame). Flippers,
+ * slingshots and pop bumpers are fired by the BOARD from their own switch
+ * under such a rule, and the game sends nothing per flip - so a reader that
+ * plays a board for a playfield the rig does not draw (vpx/padcontroller.py)
+ * learns here that the coil is live and which switch drives it. A cleared
+ * rule carries power 0. Same frame check as coil_drive_decode(): shape and
+ * checksum, so a stray frame never arms a coil. */
+static void coil_rule_note(const unsigned char *p, int n)
+{
+    unsigned s = 0, node, idx;
+    int i;
+    if (n < 31 || !(p[0] & 0x80) || p[2] != 0x41 || n != (int)p[1] + 3) return;
+    for (i = 0; i < n - 1; i++) s += p[i];
+    if (s & 0xff) return;
+    node = (unsigned)p[0] & 0x3f;
+    idx = p[3];
+    if (node >= 16 || idx >= 16) return;
+    led_map();
+    if (!led_shm || led_shm_len < 16384) return;
+    led_shm->rule_pwr[node][idx] = p[4];
+    led_shm->rule_in[node][idx] = p[26];
+    led_shm->rule_sets++;
 }
 
 static void nb_log(const char *dir, const unsigned char *p, int n, unsigned long want)
@@ -14374,6 +15523,21 @@ long shim_read(int fd, void *b, unsigned long n)
              * stays present with no fault (nbsched flags 0x0 all run). The
              * word0=asset content below is HUMAN-FACING telemetry only - it
              * makes a raw bus dump readable - not something the game reads.
+             *
+             * ★ PAD-1184 CORRECTS (1): the display object's get_status is
+             * dead, but a SECOND poller is not. The channel layer (0x498fe8,
+             * channel table at 0x8716ac) sends the same f2 90 and stores
+             * word0 as the channel's playback POSITION, and 0x4988e4 - "play
+             * from A to D and wait" - spins until that position leaves
+             * [A, D). batman's Bat Phone show 0x1c is one such wait (A 0x1e4,
+             * D 0x1f0), and while it runs the game will not turn the
+             * turntable to the Bat Phone (0x2f97c). Echoing the commanded A
+             * kept the position inside [A, D) for good: the show only ended
+             * if another show re-commanded the display, so in about half of
+             * long rig games every hurry-up after the first was played with
+             * the phone facing away. word0 is now the modelled position
+             * (lcd_play_pos); the asset echo stays for a display never sent
+             * a play or a seek.
              *   PAD_LCD_R=<24 hex chars>  force an exact 12-byte payload
              *   PAD_LCD_R=0               all-zero reply (same game effect)
              * Nothing here can revive the villain-TV renderer: those pixels
@@ -14389,6 +15553,13 @@ long shim_read(int fd, void *b, unsigned long n)
                         p[i] = (unsigned char)(hexval(q[0]) * 16 + hexval(q[1]));
                         q += 2;
                     }                       /* "0" = fewer than 2 digits: zeros */
+                } else if (nb_req_len > 4 && lcd_play_known(nb_req[4])) {
+                    /* PAD-1184: where its playback IS, not what it was told */
+                    unsigned pos = lcd_play_pos(nb_req[4]);
+                    p[0] = (unsigned char)pos;
+                    p[1] = (unsigned char)(pos >> 8);
+                    p[2] = (unsigned char)(pos >> 16);
+                    p[3] = (unsigned char)(pos >> 24);
                 } else if (lcd_shm && lcd_shm->asset) {
                     p[0] = (unsigned char)lcd_shm->asset;
                     p[1] = (unsigned char)(lcd_shm->asset >> 8);
@@ -14505,7 +15676,14 @@ long shim_read(int fd, void *b, unsigned long n)
                     }
                 }
             }
-            if (nb_req_len > 2 && nb_req[2] == 0xfe && plen >= 11) {
+            /* PAD-603: OLDER BUILDS ASK FOR 10 BYTES, NOT 11. deadpool_le 0.99
+             * (2019) sends `8n 02 fe xx 0c` - a 12-byte reply, 10 of payload,
+             * from before the VARIANT byte at [10] was added - and this block
+             * used to require 11, so every identity it got was zeros and the
+             * game stopped at "LOCATING NODE BOARDS - 1 8 9 NODES NOT FOUND".
+             * The first ten bytes are the same layout either way; [10] is
+             * only written when the caller asked for it. */
+            if (nb_req_len > 2 && nb_req[2] == 0xfe && plen >= 10) {
                 unsigned nid = (unsigned)(nb_req[0] & 0x3f);
                 const struct nb_ident *ident = nb_ident_for(nid);
                 unsigned part = nb_env_hex("PAD_NB_PART",
@@ -14562,7 +15740,7 @@ long shim_read(int fd, void *b, unsigned long n)
                  *     if (hex_variant != identity[10] && hex_variant != 0) fail
                  * so a non-zero variant in the image forces this to match.
                  * pinnode-*-1_35_0.hex carries 01, ws2812node 05. */
-                p[10] = (unsigned char)var;
+                if (plen >= 11) p[10] = (unsigned char)var;
             }
             /* ★ PAD-237: A NODE BOARD'S MOTOR STATUS CARRIES ITS OWN SWITCH
              * INPUTS, and answering it with zeros is what kept john_wick_le's
@@ -14690,6 +15868,27 @@ long shim_write(int fd, const void *b, unsigned long n)
          * completes the same way the boot one does. See i2c_ready_arm(). */
         if (nb_req_len == 3 && nb_req[0] == 0x08 && !(nb_req[0] & 0x80))
             i2c_ready_arm();
+        /* PAD-603: `0d 05 <op> <4 bytes>` asks the CPU board's bus master
+         * to compute a 4-byte answer. venom_le 0.95 - the only build of the
+         * 94 in the library that sends it - unscrambles each answer with a
+         * TinyMT32 it mirrors (transport 0x45da8c) and decodes its own data
+         * with the results. What the board computes lives in its firmware,
+         * which no card ships (the one netbridge hex on any card, deadpool
+         * 0.99's 0.29, has neither the command nor the TinyMT), and the
+         * answer is not the value echoed back (tried under gdb: same crash).
+         * So this rig cannot answer it; its zeros decode to a
+         * 200-million-entry copy that faults at 0x348128, 15 s in. This line
+         * is here so the run can say why it ended instead of leaving a bare
+         * segv. One line per run; watch.sh turns it into the explanation. */
+        if (nb_req_len >= 2 && nb_req[0] == 0x0d && nb_req[1] == 0x05) {
+            static int said;
+            if (!said) {
+                said = 1;
+                logmsg("[busmaster] the game asked the CPU board's bus"
+                       " master for bus command 0x0d, which this emulator"
+                       " cannot answer\n");
+            }
+        }
         {
             static int rabudget = 12;
             unsigned long ra = (unsigned long)__builtin_return_address(0);
@@ -14760,8 +15959,10 @@ long shim_write(int fd, const void *b, unsigned long n)
         nb_log("TX", nb_req, nb_req_len, 0);
         sw_find_maybe();
         led_publish(nb_req, nb_req_len);
+        led_motor_publish(nb_req, nb_req_len);  /* PAD-965 */
         coil_publish(nb_req, nb_req_len);
         coil_drive_note(nb_req, nb_req_len);    /* PAD-381 */
+        coil_rule_note(nb_req, nb_req_len);     /* PAD-775 */
         motor_note(nb_req, nb_req_len);
         coil_motor_note(nb_req, nb_req_len);    /* PAD-256 */
         stepper_note(nb_req, nb_req_len);       /* PAD-393 */

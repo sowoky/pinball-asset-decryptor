@@ -14,6 +14,9 @@ program's compile) are called out in multiboot_docker's own docstring.
 """
 import hashlib
 import os
+import re
+import shlex
+import subprocess
 import sys
 from dataclasses import replace
 
@@ -33,6 +36,15 @@ def mac(monkeypatch, tmp_path):
     monkeypatch.setattr(mt.sys, "platform", "darwin")
     monkeypatch.setattr(D.sys, "platform", "darwin")
     monkeypatch.setattr(D, "cache_root", lambda: str(tmp_path / "cache"))
+    monkeypatch.setattr(D, "_STAGED", set())
+    monkeypatch.setattr(D, "_PREVIEW_REFUSED", set())
+    monkeypatch.setattr(D, "_BUILD_FAILED", set())
+    # the build streams through its own Popen; route it to whatever _docker
+    # fake the test installs, so no test here ever runs a real docker build
+    def build(args, on_line, timeout):
+        r = D._docker(args, timeout=timeout)
+        return r.returncode, (r.stderr or r.stdout or "")
+    monkeypatch.setattr(D, "_docker_build", build)
     os.makedirs(str(tmp_path / "cache"), exist_ok=True)
     return tmp_path
 
@@ -44,7 +56,7 @@ def test_a_root_step_carries_no_sudo_at_all(mac):
     doing rather than teaching a GUI to ask for a password that could not
     have been spent on a losetup which is not there."""
     argv = mt.wsl_shell_root("make -C x")
-    assert argv[:3] == ["docker", "exec", D.CONTAINER]
+    assert argv[:3] == [D._cli(), "exec", D.CONTAINER]
     assert "sudo" not in argv
     # The Log echoes argv[-1] with a "$ " in front, so the line stays last.
     assert argv[-1] == "make -C x"
@@ -56,7 +68,10 @@ def test_linux_and_windows_are_untouched(monkeypatch):
     monkeypatch.setattr(mt.sys, "platform", "linux")
     monkeypatch.setattr(D.sys, "platform", "linux")
     assert mt.wsl_shell("x") == ["bash", "-lc", "x"]
-    assert mt.wsl_shell_root("x") == ["sudo", "-n", "bash", "-lc", "x"]
+    monkeypatch.setattr(mt._root.root_session, "route", lambda: "sudo")
+    monkeypatch.setattr(mt._root, "_user_home", lambda: "/home/u")
+    assert mt.wsl_shell_root("x") == ["sudo", "-n", "env", "HOME=/home/u",
+                                      "bash", "-lc", "x"]
 
 
 # --------------------------------------------------------------------- paths
@@ -231,6 +246,31 @@ def test_a_build_with_no_prepared_media_prepares_it(monkeypatch, tmp_path):
     assert not any("text-only" in s for s in said), said
 
 
+def test_a_failed_verify_says_which_check_failed(monkeypatch, tmp_path):
+    """PAD-1336: a build whose verify failed said "verify failed (exit 1) -
+    see the tool output", and the person who reported it pasted the version
+    table and the verdict - never the one row that said what was wrong.  The
+    error line names the failed check now."""
+    form = MultibootForm(
+        images=[ImageRow(path=ISO0, art="none"),
+                ImageRow(path=ISO1, art="none")],
+        sound_move="none", sound_confirm="none",
+        out=str(tmp_path / "multi.iso"), platform="jjp")
+    panel, ran, said = _build_panel(monkeypatch, tmp_path, form)
+    panel.run_cancelled = lambda: False
+    panel._build_card()
+    said.clear()
+    out = ("ok: partition table\nFAIL: image 1 game md5 - got 3f2a, want 9c01\n"
+           "verify: FAIL (2 check(s), 1 failed)\n")
+    ran["done"](1, "verify", {"verify": out})
+    assert said == ["verify failed (exit 1) - the check that failed: "
+                    "image 1 game md5 (got 3f2a, want 9c01)"], said
+    # ...and a verify that names nothing still points at the output
+    said.clear()
+    ran["done"](1, "verify", {"verify": "verify: FAIL\n"})
+    assert said == ["verify failed (exit 1) - see the tool output."], said
+
+
 def test_a_text_only_form_still_builds_text_only(monkeypatch, tmp_path):
     """...and one that asked for nothing to look at or hear is not handed a
     prepare it has no use for."""
@@ -291,14 +331,25 @@ def test_the_image_carries_ffmpeg_for_the_menu_media():
     assert "ffmpeg" in D.DOCKERFILE
 
 
+def test_the_image_carries_the_arm_toolchain_and_qemu_for_stern_spike2():
+    """Stern Spike 2's ensureselect.sh cross-compiles the 32-bit ARM
+    codeselect binary with arm-linux-gnueabihf-gcc (needing
+    libc6-dev-armhf-cross explicitly because --no-install-recommends skips
+    recommended packages), and the preview renders its snapshot with
+    qemu-arm-static."""
+    assert "gcc-arm-linux-gnueabihf" in D.DOCKERFILE
+    assert "libc6-dev-armhf-cross" in D.DOCKERFILE
+    assert "qemu-user-static" in D.DOCKERFILE
+
+
 #: (tag, sha256 of DOCKERFILE) as they were last agreed.  A machine that has
 #: already built an image is offered the tag, not the file: ``ensure_image``
 #: asks ``docker image inspect`` about IMAGE and returns happily, so a changed
 #: package list under an unchanged tag reaches nobody who needs it - which is
 #: the mistake PAD-194's fix would have made.  Change one, change both.
 _IMAGE_AS_AGREED = (
-    "pad-multiboot:4",
-    "44260b35c00af9e2e1cb98d608e98b736368a9e3bfa73141af745ea0ce8b2014",
+    "pad-multiboot:5",
+    "68307675b7e90eba9c7e3c40e0430119caf79233cb698ff5a86917963164e79e",
 )
 
 
@@ -323,10 +374,12 @@ class _Fake:
     """A stand-in for :func:`multiboot_docker._docker` that records every
     call and answers ``image inspect`` / ``inspect`` from *state*."""
 
-    def __init__(self, arch="", image_id="sha256:new", container=None):
+    def __init__(self, arch="", image_id="sha256:new", container=None,
+                 volumes=()):
         self.arch = arch                # "" = no image on this machine
         self.image_id = image_id
         self.container = container      # (image id, {mounts}) or None
+        self.volumes = set(volumes)     # named-volume sources, not binds
         self.running = "true"           # .State.Running of that container
         self.calls = []
 
@@ -345,8 +398,11 @@ class _Fake:
             if self.container is None:
                 rc = 1
             else:
+                mounts = set(self.container[1])
+                if 'eq .Type "bind"' not in " ".join(args):
+                    mounts |= self.volumes
                 out = "\n".join([self.running, self.container[0]]
-                                + sorted(self.container[1]))
+                                + sorted(mounts))
         elif args[0] == "build":
             self.arch = D.ARCH
 
@@ -443,6 +499,152 @@ def test_a_stopped_container_is_started_again(mac, monkeypatch):
         "the stopped one still holds the name"
 
 
+def test_ensure_ready_container_builds_and_starts_in_background(
+        mac, monkeypatch):
+    """Background warm-up, preview and size-check runs call
+    ensure_ready_container on a worker thread: when the image is not built
+    yet it builds it and starts the container; once the image exists it
+    starts (or remounts) the container and logs the mounted folders."""
+    monkeypatch.setattr(D, "unavailable_reason", lambda: "")
+    monkeypatch.setattr(D, "stage_rig", lambda src: D.staged_repo())
+
+    no_img = _Fake(arch="")
+    monkeypatch.setattr(D, "_docker", no_img)
+    logs = []
+    assert D.ensure_ready_container([ISO0], "/repo", log=logs.append) is True
+    assert any(c[0] == "build" for c in no_img.calls)
+    run = [c for c in no_img.calls if c[0] == "run"]
+    assert run and "%s:/root" % D.ROOT_VOLUME in run[0]
+    assert any("building the Linux toolbox image" in m for m in logs)
+
+    ready = _Fake(arch=D.ARCH, image_id="sha256:new")
+    monkeypatch.setattr(D, "_docker", ready)
+    logs = []
+    assert D.ensure_ready_container([ISO0], "/repo", log=logs.append) is True
+    assert not any(c[0] == "build" for c in ready.calls)
+    assert any(c[0] == "run" for c in ready.calls)
+    assert any("starting the Linux toolbox container" in m for m in logs)
+
+
+def test_ensure_ready_container_with_no_paths_only_builds_image(
+        mac, monkeypatch):
+    """Opening the tab before any image is picked builds the image and stages
+    the rig in the background, waiting to start the container until there are
+    folders to mount."""
+    monkeypatch.setattr(D, "unavailable_reason", lambda: "")
+    staged = []
+    monkeypatch.setattr(D, "stage_rig", lambda src: staged.append(src))
+    no_img = _Fake(arch="")
+    monkeypatch.setattr(D, "_docker", no_img)
+    assert D.ensure_ready_container([], "/repo") is True
+    assert any(c[0] == "build" for c in no_img.calls)
+    assert not any(c[0] == "run" for c in no_img.calls)
+    assert staged == ["/repo"]
+
+
+def test_a_failed_background_build_is_not_retried_per_keystroke(
+        mac, monkeypatch):
+    """If a background build fails, ensure_ready_container records
+    _BUILD_FAILED so every keystroke does not start another docker build;
+    pressing Build (ensure_container) clears it."""
+    monkeypatch.setattr(D, "unavailable_reason", lambda: "")
+    tries = []
+
+    def fail(paths, repo_src, log):
+        tries.append(paths)
+        raise RuntimeError("could not build the Linux toolbox image")
+    monkeypatch.setattr(D, "_ensure_container", fail)
+    monkeypatch.setattr(D, "_docker", _Fake(arch=""))
+    assert D.ensure_ready_container([ISO0], "/repo") is False
+    assert D.ensure_ready_container([ISO0], "/repo") is False
+    assert len(tries) == 1
+    monkeypatch.setattr(D, "_ensure_container", lambda p, r, l: None)
+    D.ensure_container([ISO0], "/repo")
+    assert not D._BUILD_FAILED
+
+
+@pytest.mark.parametrize("source", [
+    "/var/lib/docker/volumes/%s/_data" % D.ROOT_VOLUME,
+    "/var/home/core/.local/share/containers/storage/volumes/%s/_data"
+    % D.ROOT_VOLUME,
+])
+def test_running_state_ignores_named_volume_mount_source(mac, monkeypatch,
+                                                         source):
+    """ROOT_VOLUME mounted at /root appears in .Mounts with the engine's own
+    storage path, which is not under /var/lib on a rootless Podman machine;
+    _running_state asks for bind mounts only, so the host bind-mount
+    comparison matches and the container is not restarted per redraw."""
+    want = set(D.mount_points([ISO0])) | {D.cache_root()}
+    fake = _Fake(arch=D.ARCH, image_id="sha256:new",
+                 container=("sha256:new", want), volumes=[source])
+    monkeypatch.setattr(D, "_docker", fake)
+    assert D.ensure_ready_container([ISO0], "/repo") is True
+    assert not any(c[0] == "run" for c in fake.calls)
+
+
+def test_a_preview_finds_the_container_up_with_two_calls(mac, monkeypatch):
+    """Every redraw calls ensure_ready_container.  A container already up
+    on this image with these folders mounted costs one ``inspect`` and one
+    ``image inspect``: no ``docker info``, no ``run``, and the ~50 MB rig
+    copy only on the session's first call."""
+    staged = []
+    monkeypatch.setattr(D, "stage_rig", lambda src: staged.append(src))
+    want = set(D.mount_points([ISO0])) | {D.cache_root()}
+    fake = _Fake(arch=D.ARCH, image_id="sha256:new",
+                 container=("sha256:new", want))
+    monkeypatch.setattr(D, "_docker", fake)
+    for _ in range(3):
+        assert D.ensure_ready_container([ISO0], "/repo") is True
+    assert staged == ["/repo"], "staged once per session, not per redraw"
+    assert [c[0] for c in fake.calls] == ["inspect", "image"] * 3
+    assert not any(c[0] in ("info", "run", "rm") for c in fake.calls)
+
+
+def test_a_preview_does_not_retry_folders_the_engine_cannot_see(
+        mac, monkeypatch):
+    """Unshared from a preview is remembered: retrying it on every redraw
+    would start and remove a container per keystroke.  A writing run that
+    brings a container up clears it."""
+    monkeypatch.setattr(D, "unavailable_reason", lambda: "")
+    tries = []
+
+    def unshared(paths, repo_src, log):
+        tries.append(paths)
+        raise D.Unshared(["/Volumes/Cards"])
+    monkeypatch.setattr(D, "_ensure_container", unshared)
+    monkeypatch.setattr(D, "_docker", _Fake(arch=D.ARCH))
+    assert D.ensure_ready_container([ISO0], "/repo") is False
+    assert D.ensure_ready_container([ISO0], "/repo") is False
+    assert len(tries) == 1
+    monkeypatch.setattr(D, "_ensure_container", lambda p, r, l: None)
+    D.ensure_container([ISO0], "/repo")
+    assert not D._PREVIEW_REFUSED
+
+
+def test_a_build_waits_for_the_preview_s_container_start(mac, monkeypatch):
+    """The UI thread's Build and the preview's worker share one container
+    name: two rm -f / run pairs interleaved fail one run on the name."""
+    import threading
+    import time
+    inside, overlap = [], []
+
+    def slow(paths, repo_src, log):
+        if inside:
+            overlap.append(True)
+        inside.append(True)
+        time.sleep(0.05)
+        inside.pop()
+    monkeypatch.setattr(D, "_ensure_container", slow)
+    monkeypatch.setattr(D, "unavailable_reason", lambda: "")
+    monkeypatch.setattr(D, "_docker", _Fake(arch=D.ARCH))
+    t = threading.Thread(target=D.ensure_ready_container,
+                         args=([ISO0], "/repo"))
+    t.start()
+    D.ensure_container([ISO0], "/repo")
+    t.join()
+    assert not overlap
+
+
 def test_a_stopped_container_gets_the_same_sentence(mac):
     """What the reporter's preview and size check printed, a dozen times."""
     raw = ("Error response from daemon: container 888b1f58e3f1 is not "
@@ -460,9 +662,26 @@ def test_a_step_before_the_container_is_up_gets_a_sentence(mac):
     note = mt.container_note(raw)
     assert "not up yet" in note and "Build / flash card" in note
     assert D.CONTAINER not in note, "the sentence is for a person"
+    # Podman spells the same refusal with a lowercase "no such container".
+    podman_raw = ('Error: no container with name or ID "%s" found: '
+                  'no such container' % D.CONTAINER)
+    assert mt.container_note(podman_raw) == note
     # Anything else a step says is not this.
     assert mt.container_note("partclone.restore failed") == ""
     assert mt.container_note("") == ""
+
+
+def test_a_step_for_an_unmounted_host_folder_gets_a_sentence(mac):
+    """When a container from an earlier build is already running, adding a
+    card from a new folder runs the preview/plan before Build / flash card...
+    has recreated the container with that folder's /host/... bind mount."""
+    for raw in ("mkmulticard.py: REFUSED: /host/Users/me/cards/a.raw: "
+                "No such file or directory",
+                "selectmedia.py: REFUSED: card image "
+                "/host/Users/me/cards/a.raw does not exist",
+                "[rootfs] no card image at /host/Users/me/cards/a.raw"):
+        note = mt.container_note(raw)
+        assert "mounted yet" in note and "Build / flash card" in note
 
 
 def test_only_a_mac_gets_that_sentence(monkeypatch):
@@ -471,6 +690,7 @@ def test_only_a_mac_gets_that_sentence(monkeypatch):
     monkeypatch.setattr(mt.sys, "platform", "linux")
     monkeypatch.setattr(D.sys, "platform", "linux")
     assert mt.container_note("No such container: x") == ""
+    assert mt.container_note("/host/x: No such file or directory") == ""
 
 
 # ---------------------------------------------------------------- guard rails
@@ -508,6 +728,16 @@ def test_staging_skips_the_host_pycache(mac, tmp_path):
     staged = os.path.join(D.staged_repo(), "tools", "jjp_emu")
     assert os.path.isfile(os.path.join(staged, "mkjjpmulti.py"))
     assert not os.path.exists(os.path.join(staged, "__pycache__"))
+
+
+def test_staging_includes_stern_multiboot_leaf_modules(mac):
+    """mkmulticard.py and selectmedia.py run on the container's bare python3
+    with only the staged tree on sys.path; every Stern and core leaf module
+    they import must be staged by stage_rig."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    staged = D.stage_rig(repo_root)
+    for rel in D._PACKAGE_FILES:
+        assert os.path.isfile(os.path.join(staged, rel)), rel
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX path shapes")
@@ -553,3 +783,792 @@ def test_cancel_reaches_the_tools_whatever_their_parent(monkeypatch):
         assert pat.search(cmd), cmd
     assert not pat.search(line)
     assert not pat.search("umount /var/tmp/jjp_x/iso")
+
+
+# ------------------------------------------------- folders the engine shares
+
+class _R:
+    def __init__(self, out, rc=0):
+        self.returncode, self.stdout, self.stderr = rc, out, ""
+
+
+class _Engine(_Fake):
+    """A _Fake whose container sees only what *sees(path)* allows, the way
+    colima's VM has the home folder and nothing else: a bind mount of any
+    other folder is the VM's own empty one (PAD-885).  Answers the probe
+    line ``[ -e <in container> ] || echo <host dir>; ...`` from that."""
+
+    def __init__(self, sees, name="colima", context="colima", **kw):
+        super().__init__(arch=D.ARCH, **kw)
+        self.sees, self.name, self.context = sees, name, context
+
+    def __call__(self, args, timeout=30):
+        args = list(args)
+        if args[0] == "exec" and args[-2] == "-c":
+            self.calls.append(args)
+            out = []
+            for part in args[-1].split("; "):
+                m = re.match(r"\[ -e (.+) \] \|\| echo (.+)$", part)
+                assert m, part
+                cpath = shlex.split(m.group(1))[0]
+                host = shlex.split(m.group(2))[0]
+                if not self.sees(cpath):
+                    out.append(host)
+            return _R("\n".join(out))
+        if args[:2] == ["context", "show"]:
+            self.calls.append(args)
+            return _R(self.context, 0 if self.context else 1)
+        if args[0] == "info":
+            self.calls.append(args)
+            return _R(self.name, 0 if self.name else 1)
+        return super().__call__(args, timeout)
+
+
+def _cache_only(cpath):
+    return cpath.startswith("/tmp/")
+
+
+@pytest.fixture
+def unix_paths(mac, monkeypatch, tmp_path):
+    """Host folders spelled the way a Mac spells them (``/Volumes/...``),
+    backed by real folders under tmp_path so they can be listed.  Returns
+    the function that maps one to its real folder."""
+    root = str(tmp_path / "fs")
+
+    def back(p):
+        if not p.startswith("/") or p.startswith(root):
+            return p          # a real path already (os is patched for all)
+        return root + p
+    real_isdir, real_listdir = os.path.isdir, os.listdir
+    real_open, real_remove = open, os.remove
+    monkeypatch.setattr(D.os.path, "isdir", lambda p: real_isdir(back(p)))
+    monkeypatch.setattr(D.os, "listdir", lambda p: real_listdir(back(p)))
+    monkeypatch.setattr(D.os, "remove", lambda p: real_remove(back(p)))
+    monkeypatch.setattr(D, "open", lambda p, *a, **k: real_open(back(p), *a, **k),
+                        raising=False)
+    monkeypatch.setattr(D, "cache_root", lambda: "/Users/me/Library/Caches/pad")
+    monkeypatch.setattr(D.os.path, "expanduser",
+                        lambda p: p.replace("~", "/Users/me", 1))
+    monkeypatch.setattr(D, "unavailable_reason", lambda: "")
+    monkeypatch.setattr(D, "stage_rig", lambda src: D.staged_repo())
+    os.makedirs(back(D.staged_repo()))
+    iso_dir = back("/Volumes/Mac SSD/Sonichedge")
+    os.makedirs(iso_dir)
+    with real_open(iso_dir + "/Sonic-v00.930.iso", "wb") as fh:
+        fh.write(b"\0")
+    os.makedirs(back("/Volumes/Mac SSD/out"))
+    return back
+
+
+OUT = "/Volumes/Mac SSD/out/multi.iso"
+
+
+def test_a_folder_colima_does_not_share_stops_the_run(unix_paths, monkeypatch):
+    """The ISOs on /Volumes: docker run succeeds, the mount is colima's
+    own empty folder, and every tool after it would have found nothing.
+    The run stops before it starts, saying which folders and how."""
+    eng = _Engine(_cache_only)
+    monkeypatch.setattr(D, "_docker", eng)
+    with pytest.raises(RuntimeError) as e:
+        D.ensure_container([ISO0, OUT], "/repo")
+    why = str(e.value)
+    assert "/Volumes/Mac SSD/Sonichedge" in why and "/Volumes/Mac SSD/out" in why
+    assert "colima stop\n" in why
+    # --mount replaces colima's list: home must be named again, or the
+    # cache (and the rig in it) goes next; /Volumes is shared whole.
+    assert 'colima start --mount "$HOME:w" --mount /Volumes:w\n' in why
+    assert D.cache_root() not in why, "the cache was seen: not named"
+    # ...and the container that cannot see them is not left for the next
+    # run to call "already right".
+    probed = [i for i, c in enumerate(eng.calls) if c[0] == "exec"][-1]
+    assert ["rm", "-f", D.CONTAINER] in eng.calls[probed:]
+
+
+def test_the_empty_output_folder_is_checked_with_a_marker_it_does_not_keep(
+        unix_paths, monkeypatch):
+    eng = _Engine(_cache_only)
+    monkeypatch.setattr(D, "_docker", eng)
+    with pytest.raises(RuntimeError):
+        D.ensure_container([OUT], "/repo")
+    probe = [c for c in eng.calls if c[0] == "exec"][0][-1]
+    assert D._PROBE in probe
+    assert os.listdir(unix_paths("/Volumes/Mac SSD/out")) == []
+
+
+def test_folders_it_shares_run_as_before(unix_paths, monkeypatch):
+    """OrbStack, Docker Desktop with /Volumes shared, or colima started
+    with the mounts the message gives: nothing said, the run goes on."""
+    eng = _Engine(lambda p: True)
+    monkeypatch.setattr(D, "_docker", eng)
+    D.ensure_container([ISO0, OUT], "/repo")
+    assert eng.calls[-1] != ["rm", "-f", D.CONTAINER]
+    probe = [c for c in eng.calls if c[0] == "exec"][0][-1]
+    # the ISO itself is what is looked for, quoted for the space in it
+    assert "'/host/Volumes/Mac SSD/Sonichedge/Sonic-v00.930.iso'" in probe
+    assert "[ -e /tmp/repo ]" in probe
+
+
+def test_a_kept_container_is_checked_too(unix_paths, monkeypatch):
+    """The one a failed run left would be "already right" next time: same
+    mounts, same image.  So the check is on every run, not only a new one."""
+    mounts = {D.cache_root(), "/Volumes/Mac SSD/Sonichedge"}
+    eng = _Engine(_cache_only, container=("sha256:new", mounts))
+    monkeypatch.setattr(D, "_docker", eng)
+    with pytest.raises(RuntimeError, match="cannot see"):
+        D.ensure_container([ISO0], "/repo")
+    assert not any(c[0] == "run" for c in eng.calls)
+
+
+def test_a_colima_profile_gets_its_own_commands(mac, monkeypatch):
+    monkeypatch.setattr(D, "_docker", _Engine(_cache_only, name="",
+                                              context="colima-work"))
+    why = D.unshared_reason(["/Volumes/Big/isos"])
+    assert "colima stop -p work\n" in why
+    assert "colima start -p work --mount" in why
+    # lima's name for the VM, when the context is not colima's
+    monkeypatch.setattr(D, "_docker", _Engine(_cache_only, name="lima-colima",
+                                              context="default"))
+    why = D.unshared_reason(["/Volumes/Big/isos"])
+    assert "colima stop\n" in why and "Big/isos: Colima" in why
+
+
+def test_a_folder_outside_volumes_is_shared_by_name(mac, monkeypatch):
+    monkeypatch.setattr(D, "_docker", _Engine(_cache_only))
+    why = D.unshared_reason(["/opt/isos", "/Volumes/A/x", "/Volumes/B/y"])
+    assert '--mount "$HOME:w" --mount /opt/isos:w --mount /Volumes:w\n' in why
+    assert "Share them" in why and "those folders" in why
+
+
+def test_docker_desktop_and_others_get_their_own_sentence(mac, monkeypatch):
+    monkeypatch.setattr(D, "_docker", _Engine(_cache_only, name="docker-desktop",
+                                              context="desktop-linux"))
+    why = D.unshared_reason(["/Volumes/A/x"])
+    assert "File sharing" in why and "colima" not in why.lower()
+    monkeypatch.setattr(D, "_docker", _Engine(_cache_only, name="orbstack",
+                                              context="orbstack"))
+    why = D.unshared_reason(["/Volumes/A/x"])
+    assert "shared folders" in why and "colima" not in why.lower()
+
+
+def test_a_container_that_cannot_be_asked_is_not_called_unshared(
+        unix_paths, monkeypatch):
+    """No answer is not "empty": the steps say what is wrong themselves."""
+    monkeypatch.setattr(D, "_docker", lambda args, timeout=30: _R("x", 1))
+    assert D.unseen_mounts(["/Volumes/Mac SSD/Sonichedge"]) == []
+    assert D.unseen_mounts(["/Volumes/not there"]) == []
+
+
+# ------------------------------------- the app shares them itself (PAD-903)
+
+from pinball_decryptor.webui import emulate_core as E
+
+
+def _colima_yaml(monkeypatch, tmp_path, text, profile="default"):
+    home = tmp_path / "colima"
+    (home / profile).mkdir(parents=True)
+    (home / profile / "colima.yaml").write_text(text, encoding="utf-8")
+    monkeypatch.setenv("COLIMA_HOME", str(home))
+    monkeypatch.setattr(E.os.path, "expanduser",
+                        lambda p: p.replace("~", "/Users/me", 1))
+
+
+def test_a_fresh_colima_is_started_sharing_home_and_volumes(monkeypatch,
+                                                            tmp_path):
+    """Set up emulator's own start: the ISOs on another disk are seen from
+    the first run.  Home is named, because --mount replaces colima's list
+    and home is in it only while the list is empty."""
+    monkeypatch.setenv("COLIMA_HOME", str(tmp_path / "none"))
+    monkeypatch.setattr(E.os.path, "expanduser",
+                        lambda p: p.replace("~", "/Users/me", 1))
+    assert E.colima_start_argv("/opt/homebrew/bin/colima") == [
+        "/opt/homebrew/bin/colima", "start",
+        "--mount", "/Users/me:w", "--mount", "/Volumes:w"]
+
+
+def test_the_folders_colima_already_shares_are_kept(monkeypatch, tmp_path):
+    _colima_yaml(monkeypatch, tmp_path, (
+        "cpu: 2\n"
+        "mounts:\n"
+        "  - location: ~\n"
+        "    writable: true\n"
+        "  - location: '/opt/src'   # theirs\n"
+        "    writable: false\n"
+        "mountType: virtiofs\n"))
+    assert E.colima_mounts() == [("/Users/me", True), ("/opt/src", False)]
+    assert E.colima_start_argv("colima", share=["/Volumes", "/opt/src/x"]) == [
+        "colima", "start", "--mount", "/Users/me:w", "--mount", "/opt/src",
+        "--mount", "/Volumes:w"]
+
+
+def test_an_empty_mount_list_is_colimas_home_default(monkeypatch, tmp_path):
+    _colima_yaml(monkeypatch, tmp_path, "mounts: []\nmountType: sshfs\n",
+                 profile="work")
+    assert E.colima_mounts("work") == []
+    assert E.colima_start_argv("colima", "work") == [
+        "colima", "start", "-p", "work",
+        "--mount", "/Users/me:w", "--mount", "/Volumes:w"]
+
+
+def test_volumes_already_shared_is_not_named_twice(monkeypatch, tmp_path):
+    _colima_yaml(monkeypatch, tmp_path, (
+        "mounts:\n- location: /Users/me\n  writable: true\n"
+        "- location: /Volumes\n  writable: true\n"))
+    assert E.colima_start_argv("colima").count("/Volumes:w") == 1
+
+
+def test_the_unshared_error_carries_colimas_fix(unix_paths, monkeypatch):
+    """stop, then a start sharing /Volumes: what the panel offers to run."""
+    monkeypatch.setattr(D, "_docker", _Engine(_cache_only, context="colima-work"))
+    monkeypatch.setattr(E, "which_tool", lambda n, *a: "/usr/local/bin/" + n)
+    monkeypatch.setattr(E, "colima_mounts", lambda profile="": [])
+    monkeypatch.setattr(E, "colima_resource_args", lambda: [])   # sized elsewhere
+    monkeypatch.setattr(E.os.path, "expanduser",
+                        lambda p: p.replace("~", "/Users/me", 1))
+    with pytest.raises(D.Unshared) as e:
+        D.ensure_container([ISO0], "/repo")
+    assert e.value.unseen == ["/Volumes/Mac SSD/Sonichedge"]
+    assert e.value.fix == [
+        ["/usr/local/bin/colima", "stop", "-p", "work"],
+        ["/usr/local/bin/colima", "start", "-p", "work",
+         "--mount", "/Users/me:w", "--mount", "/Volumes:w"]]
+    assert "colima stop -p work" in str(e.value)        # the sentence stays
+
+
+def test_docker_desktop_gets_no_fix_to_run(unix_paths, monkeypatch):
+    monkeypatch.setattr(D, "_docker", _Engine(_cache_only, name="docker-desktop",
+                                              context="desktop-linux"))
+    with pytest.raises(D.Unshared) as e:
+        D.ensure_container([ISO0], "/repo")
+    assert e.value.fix is None and "File sharing" in str(e.value)
+
+
+def test_share_folders_runs_each_command_into_the_log():
+    lines = []
+    py = sys.executable
+    ok = D.share_folders([[py, "-c", "print('stopped')"],
+                          [py, "-c", "print('started')"]], log=lines.append)
+    assert ok and "stopped" in lines and "started" in lines
+    assert lines[0].startswith("$ ")
+    lines = []
+    assert not D.share_folders([[py, "-c", "import sys; sys.exit(3)"],
+                                [py, "-c", "print('never')"]],
+                               log=lines.append)
+    assert "never" not in lines
+
+
+class _Panel:
+    """Just enough of MultibootPanel for _run_commands' container guard."""
+
+    def __init__(self):
+        self._busy = self._pv_busy = False
+        self._cancelled = self._cancel_pending = False
+        self._drain_job = None
+        self.asked, self.errors, self.written, self.started = [], [], [], []
+        self.busy_log = []
+
+    def _set_busy(self, b):
+        self._busy = b
+        self.busy_log.append(b)
+
+    def _write(self, line):
+        self.written.append(line)
+
+    _append = _write
+
+    def _error(self, msg):
+        self.errors.append(msg)
+
+    def _ui(self, fn):
+        fn()
+
+    def _drain(self):
+        pass
+
+    def _run_paths(self):
+        return [ISO0]
+
+    def _start_worker(self, *a):
+        self.started.append(a)
+
+    def _phase_cancelled(self):
+        self.written.append("cancelled")
+
+    def _phase_fn(self, index, total=None, status=None):
+        self.written.append("status: %s" % status)
+
+    def _phase_done(self, rc, failed):
+        self.written.append("status: %s failed" % failed)
+
+
+def _panel_run(monkeypatch, times, answer, shared_ok=True):
+    """A build whose first *times* container checks say the ISO folder is
+    unseen, the user answering *answer* to the offer."""
+    p = _Panel()
+    for name in ("_run_commands", "_share_and_retry", "_prepare_container"):
+        monkeypatch.setattr(_Panel, name, getattr(mt.MultibootPanel, name),
+                            raising=False)
+    monkeypatch.setattr(D, "enabled", lambda: True)
+    monkeypatch.setattr(D, "colima_fix", lambda unseen: [["colima", "stop"]])
+    monkeypatch.setattr(D, "unshared_reason", lambda unseen: "cannot see it")
+    calls = {"ensure": 0, "share": 0}
+
+    def ensure(paths, repo, log=None):
+        calls["ensure"] += 1
+        if calls["ensure"] <= times:
+            raise D.Unshared(["/Volumes/Mac SSD/Sonichedge"])
+    monkeypatch.setattr(D, "ensure_container", ensure)
+
+    def share(fix, log=None):
+        calls["share"] += 1
+        return shared_ok
+    monkeypatch.setattr(D, "share_folders", share)
+
+    def ask(title, body):
+        p.asked.append(body)
+        return answer
+    monkeypatch.setattr(mt.messagebox, "askyesno", ask)
+
+    class _T:                       # the worker thread, run in place
+        def __init__(self, target, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+    monkeypatch.setattr(mt.threading, "Thread", _T)
+    p._run_commands([("build", ["true"])])
+    return p, calls
+
+
+def test_a_yes_restarts_colima_and_runs_again(monkeypatch):
+    p, calls = _panel_run(monkeypatch, times=1, answer=True)
+    assert len(p.asked) == 1 and "/Volumes/Mac SSD/Sonichedge" in p.asked[0]
+    assert calls == {"ensure": 2, "share": 1}
+    assert len(p.started) == 1 and not p.errors
+    assert p.busy_log[:2] == [True, False]   # greyed while Colima restarts
+
+
+def test_a_no_stops_with_the_sentence(monkeypatch):
+    p, calls = _panel_run(monkeypatch, times=1, answer=False)
+    assert calls["share"] == 0 and not p.started
+    assert p.errors == ["cannot see it"]
+
+
+def test_a_colima_still_blind_is_not_asked_again(monkeypatch):
+    p, calls = _panel_run(monkeypatch, times=2, answer=True)
+    assert len(p.asked) == 1 and calls["share"] == 1 and not p.started
+    assert p.errors == ["cannot see it"]
+
+
+def test_a_failed_restart_says_so(monkeypatch):
+    p, calls = _panel_run(monkeypatch, times=1, answer=True, shared_ok=False)
+    assert calls["ensure"] == 1 and not p.started
+    assert "did not restart" in p.errors[0]
+
+
+def test_the_config_is_found_where_colima_keeps_it(monkeypatch, tmp_path):
+    """colima's config/files.go: COLIMA_HOME when it exists, ~/.colima,
+    then the XDG config folder when ~/.colima is not there."""
+    monkeypatch.setenv("COLIMA_HOME", str(tmp_path / "missing"))
+    monkeypatch.setattr(E.os.path, "expanduser",
+                        lambda p: p.replace("~", str(tmp_path / "home"), 1))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    assert E.colima_profile_dir("work") == os.path.join(
+        str(tmp_path / "xdg"), "colima", "work")
+    (tmp_path / "home" / ".colima").mkdir(parents=True)
+    assert os.path.normpath(E.colima_profile_dir()) == os.path.join(
+        str(tmp_path / "home"), ".colima", "default")
+    (tmp_path / "ch").mkdir()
+    monkeypatch.setenv("COLIMA_HOME", str(tmp_path / "ch"))
+    assert E.colima_profile_dir() == os.path.join(str(tmp_path / "ch"),
+                                                  "default")
+
+
+# ------------------------------------------- the build is a worker's (PAD-911)
+
+_real_docker_build = D._docker_build
+
+
+def _held_panel(monkeypatch, ensure):
+    """A Build press whose worker thread is HELD, not run: what the main
+    thread has done by the time the button handler returns."""
+    p = _Panel()
+    for name in ("_run_commands", "_share_and_retry", "_prepare_container"):
+        monkeypatch.setattr(_Panel, name, getattr(mt.MultibootPanel, name),
+                            raising=False)
+    monkeypatch.setattr(D, "enabled", lambda: True)
+    monkeypatch.setattr(D, "ensure_container", ensure)
+    threads = []
+
+    class _T:
+        def __init__(self, target, daemon):
+            self.target = target
+
+        def start(self):
+            threads.append(self.target)
+    monkeypatch.setattr(mt.threading, "Thread", _T)
+    return p, threads
+
+
+def test_build_press_does_not_build_the_image_on_the_main_thread(monkeypatch):
+    """THE BUG (PAD-911).  The reporter's log: three "could not build the
+    Linux toolbox image ... CANCELED ... context canceled", each a few
+    seconds before the app opened again.  ensure_container ran from the
+    button handler, so the minutes of `docker build` froze the window, and
+    quitting it cancelled the build.  The press now only greys the tab and
+    hands the build to a worker."""
+    seen = []
+    p, threads = _held_panel(
+        monkeypatch, lambda paths, repo, log=None: seen.append(paths))
+    assert p._run_commands([("build", ["true"])]) is True
+    assert seen == [] and p.started == []          # nothing ran yet
+    assert p._busy and len(threads) == 1           # busy: actions greyed
+    threads.pop()()                                # the worker
+    assert seen == [[ISO0]] and len(p.started) == 1 and not p.errors
+
+
+def test_a_second_press_while_the_image_builds_is_refused(monkeypatch):
+    p, threads = _held_panel(monkeypatch, lambda *a, **k: None)
+    p._run_commands([("build", ["true"])])
+    assert p._run_commands([("build", ["true"])]) is False
+    assert p.errors == ["A run is already in progress."] and len(threads) == 1
+
+
+def test_a_failed_image_build_says_so_and_frees_the_tab(monkeypatch):
+    def ensure(paths, repo, log=None):
+        raise RuntimeError("could not build the Linux toolbox image:\nboom")
+    p, threads = _held_panel(monkeypatch, ensure)
+    p._run_commands([("build", ["true"])])
+    threads.pop()()
+    assert not p._busy and not p.started
+    assert p.errors and "could not build" in p.errors[0]
+
+
+def test_cancel_during_the_image_build_stops_it_and_runs_nothing(monkeypatch):
+    killed = []
+    monkeypatch.setattr(D, "cancel_build", lambda: killed.append(1) or True)
+    monkeypatch.setattr(D, "kill_running", lambda: None)
+
+    def ensure(paths, repo, log=None):
+        raise RuntimeError("could not build the Linux toolbox image:\n"
+                           "Canceled: context canceled")
+    p, threads = _held_panel(monkeypatch, ensure)
+    p._proc = None
+    p._proc_preview = False
+    p._pending_run = None
+    p._ok = p._write
+    p._sync_build_button = lambda: None
+    p._phase_fn = lambda *a, **k: None
+    p._run_commands([("build", ["true"])])
+    assert mt.MultibootPanel.cancel_run(p) is True
+    assert killed == [1]
+    threads.pop()()
+    assert not p._busy and not p.started and not p.errors
+    assert p.written[-1] == "cancelled"
+
+
+class _Proc:
+    """A `docker build` client: prints *lines*, then exits *rc*."""
+
+    def __init__(self, lines, rc=0):
+        self.stdout = iter(line + "\n" for line in lines)
+        self.rc, self.killed = rc, False
+
+    def wait(self):
+        return self.rc
+
+    def kill(self):
+        self.killed = True
+
+
+def test_the_build_streams_and_says_it_is_still_going(mac, monkeypatch):
+    """Minutes of a silent Log read as a hung app.  The build's own lines
+    are read as they come, and every BUILD_HEARTBEAT seconds the Log says
+    it is still going and the step it is on."""
+    monkeypatch.setattr(D, "_image_field", lambda f: "")
+    # a machine with docker AND podman (the Linux runner) asks the clock
+    # inside docker_cli() too, and would eat the build's ticks
+    monkeypatch.setattr(D, "_cli", lambda: "docker")
+    clock = iter([0, 5, 31, 40, 70, 75])
+    monkeypatch.setattr(D.time, "monotonic", lambda: next(clock))
+    lines = ["#5 1.0 Get:1 http://deb.debian.org/debian bookworm/main gzip",
+             "#5 30.9 Get:287 qemu-user-static [62.6 MB]",
+             "#5 40.0 Unpacking ffmpeg",
+             "#5 69.0 Setting up ffmpeg"]
+    proc = _Proc(lines)
+    monkeypatch.setattr(D, "_docker_build", _real_docker_build)
+    monkeypatch.setattr(D.subprocess, "Popen", lambda *a, **k: proc)
+    log = []
+    D.ensure_image(log=log.append)
+    still = [line for line in log if "still building" in line]
+    assert len(still) == 2, log
+    assert "qemu-user-static" in still[0] and "(31s)" in still[0]
+    assert "Setting up ffmpeg" in still[1] and "1m 10s" in still[1]
+    assert "is built (1m 15s)" in log[-1]
+    assert D._BUILD["proc"] is None                 # nothing left to cancel
+
+
+def test_a_failed_build_carries_its_last_lines(mac, monkeypatch):
+    monkeypatch.setattr(D, "_image_field", lambda f: "")
+    monkeypatch.setattr(D, "_docker_build", _real_docker_build)
+    monkeypatch.setattr(D.subprocess, "Popen", lambda *a, **k: _Proc(
+        ["#5 CANCELED", "ERROR: failed to build: failed to solve: Canceled"],
+        rc=1))
+    with pytest.raises(RuntimeError) as e:
+        D.ensure_image()
+    assert "failed to solve" in str(e.value)
+
+
+def test_cancel_build_kills_the_client(monkeypatch):
+    """Killing the client is what stops a BuildKit build - the reporter's
+    "context canceled" is exactly that happening by accident."""
+    proc = _Proc([])
+    monkeypatch.setitem(D._BUILD, "proc", proc)
+    assert D.cancel_build() is True and proc.killed
+    monkeypatch.setitem(D._BUILD, "proc", None)
+    assert D.cancel_build() is False
+
+
+def test_warm_container_runs_in_background_without_locking_ui(monkeypatch):
+    """Opening the tab or adding an image warms the container in the
+    background without setting _busy, then schedules a preview and plan."""
+    monkeypatch.setenv("PAD_UI_NO_RIG", "0")
+    monkeypatch.setenv("PAD_MULTIBOOT_AUTO", "1")
+    monkeypatch.setattr(D, "enabled", lambda: True)
+    seen, scheduled, planned = [], [], []
+    p = _Panel()
+    p._rows = [ImageRow(path=ISO0)]
+    p._plan_info = None
+    p._pv_src = None
+    p._pv_say = lambda msg, **kw: p.written.append("pv: %s" % msg)
+    p.schedule_preview = lambda: scheduled.append(1)
+    p._maybe_plan = lambda: planned.append(1)
+    for name in ("_warm_container", "_warm_log"):
+        monkeypatch.setattr(_Panel, name, getattr(mt.MultibootPanel, name),
+                            raising=False)
+
+    def ensure_ready(paths, repo, log=None):
+        seen.append(paths)
+        if log:
+            log("starting the Linux toolbox container...")
+        return True
+    monkeypatch.setattr(D, "ensure_ready_container", ensure_ready)
+    threads = []
+
+    class _T:
+        def __init__(self, target, daemon):
+            self.target = target
+
+        def start(self):
+            threads.append(self.target)
+    monkeypatch.setattr(mt.threading, "Thread", _T)
+    assert p._warm_container() is True
+    assert not p._busy and p._warming_container and len(threads) == 1
+    assert p._warm_container() is False             # already warming
+    threads.pop()()
+    assert not p._warming_container
+    assert seen == [[ISO0]] and scheduled == [1] and planned == [1]
+    assert any("pv: starting the Linux toolbox" in w for w in p.written)
+
+
+def test_preview_worker_skips_docker_exec_when_container_not_ready(
+        mac, monkeypatch):
+    """When ensure_ready_container returns False, _start_worker does not
+    spawn a doomed `docker exec` process and instead records the container
+    note once."""
+    monkeypatch.setattr(D, "ensure_ready_container", lambda *a, **k: False)
+    popens = []
+    monkeypatch.setattr(mt.subprocess, "Popen",
+                        lambda *a, **k: popens.append(a))
+    p = _Panel()
+    p._pv_cancel = False
+    p._pending_run = None
+    p._pv_say = lambda *a, **k: None
+    for name in ("_start_worker", "_say_once"):
+        monkeypatch.setattr(_Panel, name, getattr(mt.MultibootPanel, name),
+                            raising=False)
+
+    class _T:
+        def __init__(self, target, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+    monkeypatch.setattr(mt.threading, "Thread", _T)
+    done = []
+    p._start_worker(
+        [("selector", ["docker", "exec", D.CONTAINER, "bash", "-lc", "make"])],
+        on_step=None,
+        on_done=lambda rc, failed, texts: done.append((rc, failed, texts)),
+        quiet=frozenset(),
+        preview=True)
+    assert not popens
+    assert len(done) == 1 and done[0][0] == 1 and done[0][1] == "selector"
+    assert any("not up yet" in w for w in p.written)
+
+
+def test_strip_sha256():
+    assert D._strip_sha256("sha256:abcdef0123") == "abcdef0123"
+    assert D._strip_sha256("abcdef0123") == "abcdef0123"
+    assert D._strip_sha256("") == ""
+    assert D._strip_sha256(None) == ""
+
+
+def test_unavailable_reason_when_podman_cli_used(monkeypatch):
+    monkeypatch.setattr(D, "_cli", lambda: "/opt/podman/bin/podman")
+    monkeypatch.setattr(D, "_docker", lambda *a, **k: subprocess.CompletedProcess(
+        ["podman", "info"], 1, stdout="", stderr="error"))
+    reason = D.unavailable_reason()
+    assert "Podman is installed but not running" in reason
+
+
+def test_running_state_ignores_var_lib_volume_mounts(monkeypatch):
+    stdout = "true\nsha256:img123\n/tmp\n/host/Volumes/Card\n/var/lib/containers/storage/volumes/pad-vol\n"
+    monkeypatch.setattr(D, "_docker", lambda *a, **k: subprocess.CompletedProcess(
+        ["podman", "inspect"], 0, stdout=stdout))
+    img, mounts = D._running_state()
+    assert img == "sha256:img123"
+    assert mounts == {"/tmp", "/host/Volumes/Card"}
+
+
+def test_unshared_reason_podman(monkeypatch):
+    monkeypatch.setattr(D, "_engine_name", lambda: "podman")
+    msg = D.unshared_reason(["/Volumes/External"])
+    assert "Podman" in msg
+    assert "Settings > Resources" in msg
+
+
+def test_exec_argv_uses_podman_when_selected(monkeypatch):
+    monkeypatch.setattr(D, "_cli", lambda: "/opt/podman/bin/podman")
+    argv = D.exec_argv("echo test")
+    assert argv[:3] == ["/opt/podman/bin/podman", "exec", D.CONTAINER]
+
+
+def test_engine_name_is_podman_without_asking_podman(monkeypatch):
+    """The podman CLI is Podman whatever it prints for a context or an info
+    name, so the unshared-folder advice stays the Podman one."""
+    monkeypatch.setattr(D, "_cli", lambda: "/opt/podman/bin/podman")
+    asked = []
+    monkeypatch.setattr(D, "_docker", lambda args, **kw: asked.append(args))
+    assert D._engine_name() == "podman"
+    assert asked == []
+
+
+def test_docker_env_adds_docker_dirs_on_macos(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(D, "_cli", lambda: "/Users/test/.docker/bin/docker")
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
+    env = D._docker_env()
+    parts = env["PATH"].split(os.pathsep)
+    assert "/Users/test/.docker/bin" in parts
+    assert "/Applications/Docker.app/Contents/Resources/bin" in parts
+
+    from pinball_decryptor.webui.emulate_core import docker_env
+    # Empty PATH shouldn't leave a stray separator
+    env_empty = docker_env(env={"PATH": ""}, cli="/custom/bin/docker")
+    assert not env_empty["PATH"].endswith(os.pathsep)
+    assert not env_empty["PATH"].startswith(os.pathsep)
+    assert env_empty["PATH"].startswith("/custom/bin")
+
+    # The inherited PATH stays first, so the user's own tools still win, and
+    # a folder already on it is not repeated
+    env_existing = docker_env(env={"PATH": os.pathsep.join(["/system/bin", "/usr/local/bin"])},
+                              cli="/custom/bin/docker")
+    parts = env_existing["PATH"].split(os.pathsep)
+    assert parts[:3] == ["/system/bin", "/usr/local/bin", "/custom/bin"]
+    assert parts.count("/usr/local/bin") == 1
+
+    # Other keys pass through untouched, and the caller's mapping is not changed
+    given = {"PATH": "/a", "HOME": "/Users/test"}
+    out = docker_env(env=given, cli="/custom/bin/docker")
+    assert out["HOME"] == "/Users/test" and given["PATH"] == "/a"
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_docker_env_leaves_path_alone_off_macos(monkeypatch, platform):
+    from pinball_decryptor.webui.emulate_core import docker_env
+    monkeypatch.setattr(sys, "platform", platform)
+    env = docker_env(env={"PATH": "/system/bin", "X": "1"},
+                     cli="/custom/bin/docker")
+    assert env == {"PATH": "/system/bin", "X": "1"}
+
+
+def test_plugin_executors_env():
+    from pinball_decryptor.plugins.jjp.executor import DockerExecutor as JjpExecutor
+    from pinball_decryptor.plugins.spooky.executor import DockerExecutor as SpookyExecutor
+
+    jjp_ex = JjpExecutor()
+    env = jjp_ex._env()
+    assert env is not None
+    assert "PATH" in env
+
+    spk_ex = SpookyExecutor()
+    env_spk = spk_ex._env()
+    assert env_spk is not None
+    assert "PATH" in env_spk
+
+
+def test_docker_build_and_run_pass_env(monkeypatch):
+    monkeypatch.setattr(D, "_cli", lambda: "/usr/local/bin/docker")
+    popen_calls = []
+    run_calls = []
+
+    class DummyProc:
+        stdout = []
+
+        def wait(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **kw):
+        popen_calls.append((cmd, kw))
+        return DummyProc()
+
+    def fake_run(cmd, **kw):
+        run_calls.append((cmd, kw))
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(D.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(D.subprocess, "run", fake_run)
+
+    D._docker_build(["build", "."], lambda l: None, 10)
+    assert len(popen_calls) == 1
+    assert "env" in popen_calls[0][1]
+    assert popen_calls[0][1]["env"] is not None
+
+    D._docker(["info"], 10)
+    assert len(run_calls) == 1
+    assert "env" in run_calls[0][1]
+    assert run_calls[0][1]["env"] is not None
+
+
+# ---- PAD-1109: Colima's machine sized to the Mac --------------------------------
+
+def test_colima_gets_cpus_and_memory_from_the_macs_own_size():
+    gib = 1 << 30
+    assert E.colima_resource_args(10, 32 * gib) == ["--cpu", "4", "--memory", "4"]
+    assert E.colima_resource_args(8, 16 * gib) == ["--cpu", "4", "--memory", "4"]
+    assert E.colima_resource_args(6, 8 * gib) == ["--cpu", "3", "--memory", "3"]
+    assert E.colima_resource_args(4, 8 * gib) == ["--cpu", "2", "--memory", "3"]
+    assert E.colima_resource_args(2, 4 * gib) == []          # Colima's own defaults
+    assert E.colima_resource_args(0, 0) == []
+
+
+def test_colima_start_carries_the_resources_after_the_mounts():
+    argv = E.colima_start_argv("colima", resources=["--cpu", "4", "--memory", "4"])
+    assert argv[-4:] == ["--cpu", "4", "--memory", "4"]
+    assert argv[:2] == ["colima", "start"]
+
+
+def test_the_pacer_env_names_the_frozen_app_on_a_mac(monkeypatch):
+    monkeypatch.setattr(E.sys, "platform", "darwin")
+    monkeypatch.setattr(E.sys, "executable", "/Applications/P.app/Contents/MacOS/P")
+    monkeypatch.setattr(E.sys, "frozen", True, raising=False)
+    assert E.mac_pacer_env() == ["PAD_PACER=/Applications/P.app/Contents/MacOS/P"]
+    monkeypatch.setattr(E.sys, "frozen", False, raising=False)
+    env = E.mac_pacer_env()
+    assert env[0] == "PAD_PACER=/Applications/P.app/Contents/MacOS/P"
+    assert env[1].startswith("PAD_PACER_SCRIPT=") and env[1].endswith("padrelay.py")
+    monkeypatch.setattr(E.sys, "platform", "win32")
+    assert E.mac_pacer_env() == []

@@ -543,8 +543,9 @@ Its picture is a menu gear the selector draws itself (`gfx_gear`: eight teeth, a
 the card's title colour, so no file rides on the card): in the picture panel when the menu has
 artwork, above the words when it does not.  START on it opens a list - COLOR CORRECTION, BACK TO THE GAMES -
 and Color correction shows, per game, the Color profile tab's own controls: START FROM (As built,
-Recommended, No change, Black and white), MIDDLE SHADES and COLOR LEVEL for red, green and blue,
-COLOR STRENGTH, DARKEST SHADES; then SAVE FOR THIS GAME, SAVE FOR EVERY GAME (two or more
+Recommended, No change, Black and white), BRIGHTNESS, CONTRAST and SATURATION (PAD-537: the plain
+controls an owner reaches for; saturation is the tab's "Color strength"), MIDDLE SHADES and COLOR
+LEVEL for red, green and blue, DARKEST SHADES; then SAVE FOR THIS GAME, SAVE FOR EVERY GAME (two or more
 adjustable images) and BACK / LEAVE WITHOUT SAVING.  A GAME row picks which image is being set.
 The right half is the tab's test card, corrected on the CPU with the same maths the shaders run,
 so a press moves the picture.  Flippers (or Service -/+) move between rows; START / ACTION (or
@@ -562,7 +563,10 @@ eight characters.  `mkmulticard` reads each tree's game program (`tree_colour`) 
 numbers it was built with as `color_profile=<image>|<gamma>|<gain>|<lift>|<saturation>|<name>`;
 that line is what makes an image adjustable and what "As built" puts back.  Saved numbers go to
 `/data/codeselect.color`, one `<device>|...` line per image (a line equal to the build's is
-removed rather than written).  A v1.60 build (its `pad_cp` leaves out terms it did not need) has
+removed rather than written).  BRIGHTNESS and CONTRAST have no shader slot of their own: a line
+carries them as a fifth field (`|<brightness> <contrast>`, only when either is not 1) so the menu
+shows them again, and the apply step and the test card fold them into gain and gamma the way the
+Color profile tab's `Profile.curve()` does (`colour_folded`; settings_test holds the two together).  A v1.60 build (its `pad_cp` leaves out terms it did not need) has
 no slot to write into and gets no line.
 
 **How they reach the game.**  `select.sh` (`own_color`, after the image is mounted and its scores
@@ -590,6 +594,134 @@ error.  Run 2 (a power-up later): Color correction remembered Black and white; S
 As built and SAVE removed the line; image 1 booted with `nothing set on this machine: as built`,
 no copy, no bind, attract in colour.  Teardown `alive.sh` 0 after each.  The emulator proof is the
 verification: David is not running it on the machine.
+
+## Editions, no menu: the game's EDITION setting picks (PAD-495)
+
+A tester keeps a Standard and a 70th Anniversary look of one Godzilla card and asked for "a
+feature that allows mass change of color profiles, scene settings and small assets ... selected
+in the service menu", then for "a separate bank of videos/images/scene assets" the setting pulls
+from.  The bank is this card: every image is an edition of one game, in order.
+
+**The setting.**  Each edition's Write takes over the game's DEPRECATED INSERT LED MAX BRIGHTNESS
+(id 33 on Godzilla 1.16, read by nothing) as **EDITION**, values 1..n, on the Attract Mode page
+beside the game's own BOOT SCREEN, with the editions' names in its help line
+(`plugins/stern/menu_settings.py`, `editions.py`; PAD-494's MUSIC MODE is the same mechanism on id
+31, and both share one category table).  The machine keeps the value in its settings store under
+SHA1("EDITION"), as it keeps every setting, and writes a new `/data/nv/<title>/NVM` generation the
+moment it is accepted.
+
+**The boot.**  `edition=<store>|<sha1>|<n>` in images.conf (conf.c) sends `edition_boot` before
+anything is drawn: the live value off the newest generation (nvm.c, the reader `volume=machine`
+uses), and edition k boots image k-1.  No record (a machine that never set it), a value outside
+1..n or past the image lines boots image 0, which is the game's own default too.  Nothing reads a
+button and nothing is drawn; the choice and last files are written as a confirm writes them, so
+select.sh and run_game.sh need nothing new.  `--snapshot` still draws the cards (the tab's
+preview).  A line this cannot read is warned about and the menu comes up.
+
+**What the card builder refuses** (`mkmulticard.py --editions`, `edition_for_plan`): an image whose
+game program does not carry EDITION, carries it for another count, names the editions otherwise,
+is another title or version, or captions any setting differently - every edition shares one
+settings store, and a store meeting a different table is what PAD-148 suspects of resetting a
+machine.  For the same reason no group and no `scores=` line on such a card.  The selector must be
+3.2 or later (`SELECTOR_EDITION_VERSION`): an older one ignores the key and shows its menu.
+
+**Proven in the emulator, 2026-10-10** (rig slot 1, hidden and muted; card built by `mkmulticard
+build --editions` from a Write-built Standard card and the stock card plus a 70th Anniversary
+edits folder carrying the Black and white profile).  Boot 1, a store with no EDITION record:
+`edition: no EDITION setting read (...); edition 1 boots`, attract in colour.  EDITION set to 2 in
+Adjustments > Machine Settings > Attract Mode: generation 00000012 holds 2.  Boot 2: `the
+machine's EDITION is 2 of 2`, `[select] chose 1 70TH ANNIVERSARY`, attract and the service menu in
+greys, the menu showing Edition 2.  Set back to 1, boot 3 chose image 0 and the colours came back.
+Frames and logs in the ticket's artifacts (`work/artifacts/PAD-495/emulator`).  Not run on a
+machine.
+
+**Round 2, the same day, the whole user flow on both models.**  Premium/LE and Pro 1.16, each
+edition a whole Write-built card carrying MUSIC MODE (PAD-494) and EDITION in one program, put on a
+card by the Multi-boot tab's own `build_args` (Compact build + the tick): image 1 cost 2 files, and
+its music-modes runtime went to `modes/img1`.  EDITION 2 -> the next power-up chose image 1, drew it
+in greys, and image 1's runtime played mode 2 from the MUSIC MODE the other edition had set (one
+store).  Apply to card with the tick off (`--no-editions`) brought the menu back, highlighting the
+image the editions boot had remembered; on again, the card booted by EDITION.
+
+## Back to the menu without a power cycle (PAD-1309)
+
+A tester: "a way to call up the multi-boot menu without having to turn the machine off and
+then back on".  **Hold BACK on the coin door for 3 s during a game** (Menu settings: Hold BACK, the card's `back_hold=`; 0 = off) and the machine restarts
+into the menu, as at power-up.
+
+**How the game's own button is seen.**  `padmenu.so` (padmenu.c) is preloaded into THE GAME by
+the multi-boot form of the game_monitor hook (`modehook.MENU_HOOK_LINES`: padmenu.so and the
+booted image's mode.so, each when it is there; `mkmulticard.ensure_menu_hook` on every inject).
+It passes every call through.  It remembers the fd the game opens for the cabinet chain,
+`/dev/spidev1.0` (any fd: the rig's shim answers with a stand-in), and after each of the game's
+own 8-byte SPI_IOC_MESSAGE transfers on it reads rx[1] bit 3, Service Back, active low - the
+hardware, so the same on every title and version.  It never sends a byte (the tx half drives
+the amplifier enable).  Only that device counts: another SPI device's bytes read as BACK would
+restart a machine nobody asked to.  An unbroken hold runs `select.sh --reboot` (`sync;
+reboot`) once, detached, with no LD_PRELOAD.  A 2 s press (autoattract's, a tech's tap) does
+nothing.
+
+**Spike 3** (`-DPADMENU_S3`, `make PLATFORM=s3`): BACK is rx[0] bit 3 of `/dev/spidev4.0`.
+padselect_s3.sh copies padmenu.so to /tmp before the bind over /games hides /games/pad, and
+puts it first in the game's LD_PRELOAD (a mode hook appends after it); the restart is `sync;
+reboot` itself.  A game restarted by game_monitor after a crash runs without it until the next
+boot.
+
+**In the emulators** a real reboot is never right (the guest runs as root on the PC's Linux):
+each rig passes `CODESELECT_REBOOT`, and padmenu.so does nothing when it sees a rig's
+variables without one.  Spike 2: `run_game.sh` preloads it on menu runs and the restart is
+`dump/reboot.req` (+ `dump/padmenu.restart`, kept), which watch.sh boots from the menu.  Spike
+3: `s3run.sh` leaves `connectivity/dump/padmenu.restart`; `PAD_S3_MENU_SO` tries the object on
+any card.
+
+**Proven in the emulator, 2026-11-14.**  Spike 2: a two-image Godzilla LE 1.16 card built by
+mkmulticard (game_monitor hooked), booted with the menu; in attract a 2 s BACK did nothing; a
+6.5 s hold from 20:46:44 -> padmenu asked at 20:46:49.56 -> watch.sh restarted -> the menu came
+up again -> it booted again.  Spike 3: Fallout LE 0.82 with padmenu.so in front of the rig's
+shims; a 2 s BACK nothing; a 6.5 s hold -> the restart asked 6.1 s in, `padmenu: BACK held` in
+the game's stderr.  `test/padmenu_test.sh` (none / hold / pulse / another device / a rig with no
+stand-in), `select_sh_test.sh --reboot`, `padselect_s3_test.sh`, mkmulticard selftest part 9b.
+
+### The other makers (PAD-1309, run 2)
+
+* **Barrels of Fun** (`make PLATFORM=bof`, `-DPADMENU_FAST`): the game's FAST Neuron port
+  (`/dev/ttyACM*`) pushes `-L:05` / `/L:05` when EXIT (switch 5 on every title) changes;
+  padmenu.so passes `read()` / `__read_chk()` through and reads those lines, and a thread of its
+  own times the hold (lines come only on a change).  The update's `.bash_profile` hook exports
+  LD_PRELOAD for the loop that starts the game.  `sync; sudo -n reboot`.  x86-64, dlsym and
+  pthread pinned to GLIBC_2.2.5: it asks for 2.17 at most.
+* **Spooky** (the same object, `make PLATFORM=spk`): padselect_spk.sh starts the game with it,
+  `PADMENU_PROTO=warden|pinotaur` and `PADMENU_SWITCH` from spk.conf's `B=` (94 / 63).  The
+  boards' binary stream is followed a message at a time by opcode size, so a byte inside a
+  coil config or an LED row is never read as BACK.
+* **Spooky's P-ROC titles** (Rick and Morty, Alice Cooper): Python 2.7 procgame games, and the
+  rig runs a pure-Python pinproc, so the hook is Python (`padmenu_proc.py`, the game's
+  sitecustomize via PYTHONPATH): it wraps `pinproc.PinPROC` and asks the game's own `exit`
+  Switch `is_active()` on each `get_events()`.
+* **The Big Lebowski** already has a way back: Version Select in its service menu restarts the
+  game into the menu.
+* **Jersey Jack** (PAD-1318): the game is Sentinel-wrapped (no LD_PRELOAD), and `/dev/jjpio100`
+  pairs every read with an OUT frame the game drives at 1 kHz, so a second reader on it is not
+  safe, and its service menu has no reboot item; the way back comes through the game's own
+  exits.  The game exits 254 when Escape is pressed on a USB keyboard (rungame.sh's own
+  `254) # pressed escape` case, which stock leaves empty, so the loop starts the game again).
+  mkjjpmulti's third rungame.sh patch puts `padselect.sh --menu-reboot` first in that case: with
+  a multi-boot conf it drops the maintenance mark (the menu must show), syncs and reboots;
+  without one it returns and the stock loop goes on.  `strip_hook` takes the line back out.
+  Proven on the real Guns N' Roses 3.03 rungame.sh in a private overlay of the image, with a
+  stand-in game exiting 254 and a stand-in `reboot`: stock restarted the game 13,217 times in
+  6 s and never rebooted; patched, each boot went menu, game, 254, reboot, and the next boot
+  showed the menu again.  And on the real game, 2026-11-15, in the JJP rig with the Sentinel
+  key (hidden, muted): from attract, Guns N' Roses 3.03 exited 254 within a second of an Escape
+  press, in two runs (a 500 ms hold, then a single 150 ms press on a fresh game).  An instant XTEST tap (`xdotool key`, down and up in
+  microseconds) is not seen; a human press is.  Rig catch: Sentinel calls any `DISPLAY` above
+  `:1` a remote session and stops with "Terminal services detected (H0027)", so a hidden JJP
+  run needs its Xephyr on `:1` (`:0` is WSLg), not a high display number.
+
+Proven on the real games in each rig: Dune (BoF), Looney Tunes (Warden), Halloween (Pinotaur),
+Rick and Morty and Alice Cooper (P-ROC): a 2 s press did nothing, a 6.5 s hold asked for the
+restart 5.1-5.8 s in.  Tests: `test/padmenu_fast_test.sh`, `tests/test_padmenu_proc.py`,
+`padselect_spk_test.sh` 9, `padselect_proc_test.sh` 9/9b, `test_mkbofmulti` (the profile).
 
 ## What is deliberately NOT in the proof of concept
 

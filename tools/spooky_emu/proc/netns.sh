@@ -15,12 +15,23 @@ PY
 mount --bind "$SPP_RIG/game" /game || exit 3
 echo $$ > "$SPP_RIG/ns.pid"
 if [ "${SPP_XVFB:-0}" = 1 ]; then
-    Xvfb "$DISPLAY" -screen 0 "${SPP_SCREEN}x24" -nolisten tcp -nocursor < /dev/null > "$SPP_RIG/xvfb.log" 2>&1 &
+    # -noreset with the multi-boot's launcher (PAD-980): its menu is the server's first
+    # client, and a server that resets when its last client leaves cut off the game's player
+    # connecting just then (XIO fatal IO error) - a cabinet's X session stays up between them
+    Xvfb "$DISPLAY" -screen 0 "${SPP_SCREEN}x24" -nolisten tcp -nocursor ${SPP_MACHINE_LAUNCH:+-noreset} \
+        < /dev/null > "$SPP_RIG/xvfb.log" 2>&1 &
     echo $! > "$SPP_RIG/xvfb.pid"
     for _ in $(seq 1 50); do grep -q "@/tmp/.X11-unix/X${DISPLAY#:}\$" /proc/net/unix && break; sleep 0.1; done
 fi
 
 E=$SPP_PY
+# PAD-1309: the multi-boot launcher puts padmenu_proc.py (as sitecustomize) first on the game's
+# PYTHONPATH: EXIT held 3 s (Hold BACK, back_hold=) restarts the machine into the menu.  A real reboot from the rig is
+# never right, so every run hands it a stand-in that leaves $SPP_RIG/padmenu.restart.
+# SPP_MENU_PY=<a folder holding that sitecustomize.py> tries it on any title.
+printf '#!/bin/sh\n: > %s/padmenu.restart\n' "$SPP_RIG" > "$SPP_RIG/padmenu_reboot"
+chmod 755 "$SPP_RIG/padmenu_reboot"
+rm -f "$SPP_RIG/padmenu.restart"
 run_as() {      # <log> <cmd...>: as $SPP_USER, env built from scratch
     local log=$1; shift
     runuser -u "$SPP_USER" -- env -i \
@@ -30,7 +41,7 @@ run_as() {      # <log> <cmd...>: as $SPP_USER, env built from scratch
         PULSE_SERVER="${PULSE_SERVER:-}" PULSE_CLIENTCONFIG="${PULSE_CLIENTCONFIG:-}" \
         SPP_VISIBLE="${SPP_VISIBLE:-0}" \
         LD_LIBRARY_PATH="$E/lib" PYSDL2_DLL_PATH="$E/lib" \
-        PYTHONPATH="$SPP_STUB:$SPP_SITE" PROC_EMU_FPGA="$PROC_EMU_FPGA" SPP_LOG="$SPP_RIG/rig.log" SPP_OSFILES="${SPP_OSFILES:-}" \
+        PYTHONPATH="${SPP_MENU_PY:+$SPP_MENU_PY:}$SPP_STUB:$SPP_SITE" CODESELECT_REBOOT="$SPP_RIG/padmenu_reboot" PROC_EMU_FPGA="$PROC_EMU_FPGA" SPP_LOG="$SPP_RIG/rig.log" SPP_OSFILES="${SPP_OSFILES:-}" \
         SPP_BALLS="${SPP_BALLS:-}" PROC_EMU_CTL="${PROC_EMU_CTL:-}" SPK_MARK="$SPP_RIG" \
         PYGAME_HIDE_SUPPORT_PROMPT=1 \
         "$@" < /dev/null > "$log" 2>&1 &
@@ -46,6 +57,21 @@ for c in unlock-root lock-root reboot shutdown killall hwclock timedatectl mount
     chmod 755 "$SPP_RIG/bin/$c"
 done
 
+# THE MULTI-BOOT'S LAUNCHER (machine_sim.sh, PAD-980), where the machine's start script runs
+# it: the menu on this display, the buttons through dpprocsw on a real libpinproc over the
+# Big Lebowski rig's fake P3-ROC (SPP_MSIM_SHIM, presses on SPP_MSIM_FIFO), the chosen build
+# moved into the game's folder - and then the game starts below, the rig's own way.
+if [ -n "${SPP_MACHINE_LAUNCH:-}" ]; then
+    : > "$SPP_RIG/launcher.running"
+    runuser -u "$SPP_USER" -- env -i PATH="$SPP_RIG/bin:/usr/local/bin:/usr/bin:/bin" HOME="$SPP_RIG" \
+        USER="$SPP_USER" LANG=C.UTF-8 DISPLAY="$DISPLAY" PADSELECT_START=: \
+        AAIW_PROC_CHIP=p3 DPEMU_FIFO="$SPP_MSIM_FIFO" DPEMU_LOG="$SPP_RIG/shim.log" \
+        PADSELECT_PROCSW_PRELOAD="$SPP_MSIM_SHIM" LD_LIBRARY_PATH="$SPP_MSIM_LIB" \
+        bash "$SPP_MACHINE_LAUNCH" < /dev/null > "$SPP_RIG/launcher.out" 2>&1
+    echo "launcher exit $?" >> "$SPP_RIG/launcher.out"
+    # launcher.running stays until the game's pid is written (below): run_game.sh's wait
+    # would otherwise give up in the seconds between the menu and the game's start
+fi
 cd "/game/$SPP_DIR" || exit 3
 if [ -n "$SPP_UNITY" ]; then
     # Alice Cooper: the Unity player draws the screen and listens on :9999;
@@ -69,4 +95,5 @@ for n in unity game; do
     r=$(cat "$SPP_RIG/$n.rpid"); c=$(pgrep -P "$r" | head -1)
     echo "${c:-$r}" > "$SPP_RIG/$n.pid"
 done
+rm -f "$SPP_RIG/launcher.running"
 wait

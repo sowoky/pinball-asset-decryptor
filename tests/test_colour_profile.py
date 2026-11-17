@@ -103,7 +103,7 @@ def test_to_text_round_trips_and_keeps_the_header(tmp_path):
                       lift=(.05, .05, .05), saturation=1.2)
     path = cp.save(prof, str(tmp_path / "m.txt"))
     text = open(path, encoding="utf-8").read()
-    assert text.startswith("# Pinball Asset Decryptor colour profile")
+    assert text.startswith("# Pinball Asset Decryptor color profile")
     back, problems = cp.read_file(path)
     assert problems == [] and back == prof
     assert cp.to_text(RECOMMENDED) == cp.DEFAULT_TEXT
@@ -347,7 +347,11 @@ def test_color_tab_stages_on_the_project(tmp_path):
         s = w.state("color")
         assert s["has_project"] and s["active"] is False
         assert s["sample_url"].startswith("data:image/png;base64,")
-        rev = s["rev"]
+        # PAD-864: Spike 2 opens on individual files; this is the overlay's
+        assert s["mode"] == "assets"
+        w.call("color.set_mode", "display")
+        w.drain()
+        rev = w.state("color")["rev"]
 
         w.call("color.preset", "recommended")
         w.drain()

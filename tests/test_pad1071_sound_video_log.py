@@ -1,0 +1,550 @@
+"""PAD-1071: the Emulate tab's Sound and video log - every sound and clip the game started during a run, in a
+window of its own, each one opened from its row.
+
+The sounds come from the mode runtime's sound-worker hook (``soundlog.on``; a stock card gets the pinned runtime
+with ``soundlog.only``, which hooks nothing else), read off mode.log by the playfield window
+(``tools/spike2_emu/soundwatch.py``) beside the clips it already records (PAD-827), and named by the app from the
+project (``plugins/stern/emulator_log.py``). Proven in the emulator on Deadpool Pro 1.16 (the ticket's summary)."""
+import json
+import os
+import re
+import sys
+
+import pytest
+
+from pinball_decryptor.plugins.stern import emulator_log as EL
+from tests.webui_harness import web_app
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RIG = os.path.join(ROOT, "tools", "spike2_emu")
+sys.path.insert(0, RIG)
+import soundwatch as SW  # noqa: E402
+
+
+def _text(*parts):
+    with open(os.path.join(RIG, *parts), encoding="utf-8") as f:
+        return f.read()
+
+
+def _lines(path):
+    return [json.loads(ln) for ln in open(path, encoding="utf-8").read().splitlines()] if os.path.exists(path) else []
+
+
+def _append(path, text, mode="a"):
+    with open(path, mode, encoding="utf-8") as f:
+        f.write(text)
+
+
+# ---- the playfield window's reading of mode.log ----------------------------------------------------------
+@pytest.mark.parametrize("line, want", [
+    ("   25168 [pad] sound 388 0", {"request": 388, "n": 0}),
+    ("   43857 [pad] sound 386 1", {"request": 386, "n": 1}),
+    ("       0 [pad] sound log: every request the sound worker takes (soundlog.on)", {"log": "on"}),
+    ("       0 [pad] sound log: off - the port names no sound_worker",
+     {"log": "off", "why": "the port names no sound_worker"}),
+    ("      12 [pad] NOT THIS GAME'S PORT - the core functions do not match (3 site(s) wrong). x",
+     {"log": "off", "why": "the port is not this game's"}),
+    ("      14 [pad] insider: score reports stay on this machine", None),
+    ("      20 [KAIJU] sound 12 0", None),                # a mode's own line, not the worker's
+    ("   47595 [pad] sound key faa94d070a00508f", {"key": "faa94d070a00508f"}),   # round 2: what it played
+    ("       0 [pad] sound log: and the recording each one played (sound_lookup at 0x002dc4e0)", {"log": "keys"}),
+])
+def test_the_runtimes_lines_are_read_as_sounds_and_the_logs_state(line, want):
+    assert SW.line_event(line) == want
+
+
+def test_the_sounds_are_recorded_as_the_log_grows_and_from_the_top_after_a_new_boot(tmp_path):
+    log, seen = tmp_path / "mode.log", tmp_path / "sounds_seen_0.jsonl"
+    _append(log, "       0 [pad] port /dump/game.port: deadpool_pro 1.16, 113 sites, 25 shots\n"
+                 "       0 [pad] sound log: every request the sound worker takes (soundlog.on)\n"
+                 "   25168 [pad] sound 388 0\n   2516", "w")
+    w = SW.SoundWatch(str(log), str(seen))
+    assert w.poll(1.0) == 1
+    _append(log, "9 [pad] sound 392 0\n")                  # the half line, finished
+    assert w.poll(1.1) == 0                               # not before POLL_S
+    assert w.poll(2.0) == 1
+    assert [e.get("request", e.get("log")) for e in _lines(seen)] == ["on", 388, 392]
+    assert all(isinstance(e["t"], float) for e in _lines(seen))
+    # a new boot's install took the old log out and the runtime wrote a new one
+    _append(log, "       0 [pad] port /dump/game.port: deadpool_pro 1.16, 113 sites\n   10 [pad] sound 7 0\n", "w")
+    assert w.poll(3.0) == 1
+    assert _lines(seen)[-1]["request"] == 7
+
+
+def test_the_playfield_window_records_the_sounds_beside_the_volume_file(monkeypatch, tmp_path):
+    try:
+        import playfield as pf
+    except Exception:                                    # noqa: BLE001
+        pytest.skip("playfield not importable")
+    monkeypatch.setattr(pf.padpath, "dump", lambda: str(tmp_path / "dump"))
+    monkeypatch.setattr(pf.padpath, "slot", lambda: 4)
+    monkeypatch.setattr(pf, "AUDIO_CTL", None)
+    assert pf.sound_watch() is None                      # started by hand: no tab to read the record
+    monkeypatch.setattr(pf, "AUDIO_CTL", str(tmp_path / "audio_ctl.json"))
+    w = pf.sound_watch()
+    assert w.log_path == str(tmp_path / "dump" / "mode.log")
+    assert w.seen_path == EL.sounds_file(str(tmp_path), 4)
+
+
+# ---- the rows, named from the project ----------------------------------------------------------------------
+def _project(tmp_path):
+    p = tmp_path / "proj"
+    (p / "audio").mkdir(parents=True, exist_ok=True)
+    (p / "sound_requests.tsv").write_text(
+        "# The game's sound requests\nrequest\tidx\tsids\tname\talso\n"
+        "151\t\t1441796\t\t\n"
+        "388\t24\t1\t\t\n"
+        "392\t8034,4920\t6175,5843\tSPEECH: GAME START\t\n", encoding="utf-8")
+    for n in ("idx0024.wav", "idx8034 - kaiju roar.wav", "idx4920.wav"):
+        (p / "audio" / n).write_bytes(b"RIFF")
+    return str(p)
+
+
+def _run(ctl, sounds=(), clips=()):
+    os.makedirs(ctl, exist_ok=True)
+    for path, evs in ((EL.sounds_file(ctl, 0), sounds), (EL.clips_file(ctl, 0), clips)):
+        with open(path, "a", encoding="utf-8") as f:
+            for ev in evs:
+                f.write(json.dumps(ev) + "\n")
+
+
+def test_sounds_and_clips_are_one_list_in_the_order_they_started_named_as_their_tab_rows(tmp_path):
+    ctl = str(tmp_path / "ctl")
+    _run(ctl, sounds=[{"log": "on", "t": 99.0}, {"request": 392, "n": 0, "t": 101.0},
+                      {"request": 151, "n": 0, "t": 103.0}, {"request": 388, "n": 1, "t": 104.0}],
+         clips=[{"path": "./a/0.asset", "rel": "video/CloneMultiballStart.mov", "name": "CloneMultiballStart",
+                 "switch": "RIGHT RAMP MADE", "t": 102.0},
+                {"path": "./a/0.asset", "rel": "video/CloneMultiballStart.mov", "name": "CloneMultiballStart",
+                 "loop": True, "t": 105.0}])
+    lg = EL.Log(ctl, 0, _project(tmp_path))
+    assert lg.poll() is True
+    got = [(r["kind"], r["name"], r["what"], r["rel"]) for r in lg.rows]
+    assert got == [
+        ("sound", "SPEECH: GAME START", "#392", "audio/idx8034 - kaiju roar.wav"),
+        ("video", "CloneMultiballStart", "after RIGHT RAMP MADE", "video/CloneMultiballStart.mov"),
+        ("sound", "Unnamed sound", "#151", ""),              # a song in a music bank: no Audio tab file
+        ("sound", "idx0024", "#388", "audio/idx0024.wav"),
+        ("video", "CloneMultiballStart", "loops", "video/CloneMultiballStart.mov"),
+    ]
+    assert lg.rows[0]["rels"] == ["audio/idx8034 - kaiju roar.wav", "audio/idx4920.wav"]
+    assert any("music bank" in t for t in lg.rows[2]["tip"])
+    assert any("numbered variant" in t for t in lg.rows[3]["tip"])
+    assert lg.status == "on"
+    assert lg.poll() is False                               # nothing new
+
+
+def test_a_page_asks_only_for_the_rows_past_its_last_and_a_new_run_starts_the_list_again(tmp_path):
+    ctl = str(tmp_path / "ctl")
+    _run(ctl, sounds=[{"request": 388, "n": 0, "t": float(t)} for t in range(5)])
+    lg = EL.Log(ctl, 0, _project(tmp_path))
+    lg.poll()
+    page = lg.page(-1)
+    assert [r["i"] for r in page["rows"]] == [0, 1, 2, 3, 4] and page["first"] == 0
+    assert page["counts"] == {"sound": 5, "video": 0}
+    _run(ctl, sounds=[{"request": 392, "n": 0, "t": 9.0}])
+    lg.poll()
+    assert [r["i"] for r in lg.page(4)["rows"]] == [5]
+    # Start: the tab takes the files out (the clips' with the names map), the next run's arrive
+    EL.clear_sounds(ctl, 0)
+    lg.poll()
+    _run(ctl, sounds=[{"request": 151, "n": 0, "t": 20.0}])
+    lg.poll()
+    page = lg.page(5)
+    assert page["first"] == 6 and [(r["i"], r["what"]) for r in page["rows"]] == [(6, "#151")]
+
+
+def test_a_run_whose_sounds_cannot_be_logged_says_why(tmp_path):
+    ctl = str(tmp_path / "ctl")
+    _run(ctl, sounds=[{"log": "off", "why": "the port names no sound_worker", "t": 1.0}])
+    lg = EL.Log(ctl, 0, str(tmp_path / "no project"))
+    assert lg.poll() is True
+    assert (lg.page()["status"], lg.page()["why"]) == ("off", "the port names no sound_worker")
+
+
+def test_a_project_without_the_request_map_still_lists_the_sounds_by_number(tmp_path):
+    ctl = str(tmp_path / "ctl")
+    _run(ctl, sounds=[{"request": 12, "n": 0, "t": 1.0}])
+    lg = EL.Log(ctl, 0, str(tmp_path))
+    lg.poll()
+    assert (lg.rows[0]["name"], lg.rows[0]["what"]) == ("Unnamed sound", "#12")
+    assert any("Extract the card into it again" in t for t in lg.rows[0]["tip"])
+
+
+# ---- the Emulate tab ------------------------------------------------------------------------------------------
+def test_a_start_empties_the_last_runs_sounds_and_the_launch_asks_for_the_log(tmp_path, monkeypatch):
+    from tests.test_webui_emulate import _svc
+    monkeypatch.setenv("PAD_SLOT", "3")
+    with web_app(tmp_path, mfr="stern") as w:
+        from pinball_decryptor.webui.tabs import emulate as emod
+        svc = _svc(w)
+        ctl = os.path.dirname(emod.audio_ctl_file())
+        _run(ctl)
+        _append(EL.sounds_file(ctl, 3), json.dumps({"request": 1, "n": 0, "t": 1.0}) + "\n")
+        monkeypatch.setattr(svc, "_assets", lambda: _project(tmp_path))
+        w.run(svc._clip_names_for_run)
+        assert not os.path.exists(EL.sounds_file(ctl, 3))
+        assert "PAD_SOUNDLOG=1" in svc._launch_env([])
+        # what the playfield window then writes is what the page reads
+        _append(EL.sounds_file(ctl, 3), json.dumps({"request": 392, "n": 0, "t": 5.0}) + "\n")
+        got = w.call("emulate.log_rows", -1)
+        assert [(r["name"], r["rel"]) for r in got["rows"]] == [("SPEECH: GAME START",
+                                                                 "audio/idx8034 - kaiju roar.wav")]
+        assert got["root"] == _project(tmp_path) and got["project"] == "proj"
+        assert w.call("emulate.log_rows", got["rows"][-1]["i"])["rows"] == []
+        # no native window in the tests: the page opens the address itself
+        assert w.call("emulate.log_open")["url"].startswith("/static/js/tabs/emulate_log.html?t=")
+
+
+def test_open_takes_a_row_to_its_tab_selected_and_playing(tmp_path, monkeypatch):
+    from tests.test_webui_emulate import _svc
+    with web_app(tmp_path, mfr="stern") as w:
+        svc = _svc(w)
+        asked = []
+        audio, video = w.window.service("audio"), w.window.service("video")
+        monkeypatch.setattr(audio, "play_row", lambda rel: asked.append(("audio", rel)) or True)
+        monkeypatch.setattr(video, "play", lambda rel: asked.append(("video", rel)) or True)
+        assert w.call("emulate.log_show", "sound", "audio/idx0024.wav") is True
+        assert w.ctx.store.get("shell", "tab") == "audio"
+        assert w.call("emulate.log_show", "video", "video/CloneMultiballStart.mov") is True
+        assert w.ctx.store.get("shell", "tab") == "video"
+        assert asked == [("audio", "audio/idx0024.wav"), ("video", "video/CloneMultiballStart.mov")]
+        assert w.call("emulate.log_show", "sound", "") is False
+
+
+def test_a_stock_card_gets_the_stage_that_hooks_the_sound_worker_and_nothing_else(tmp_path, monkeypatch):
+    from pinball_decryptor.plugins.stern import mode_runtime as MR
+    from pinball_decryptor.plugins.stern import mode_tryit as MT
+    from pinball_decryptor.webui import emulate_log as ELW
+    said = []
+
+    class Tab:
+        def _log(self, line):
+            said.append(line)
+
+        def _elog_dir_slot(self):
+            return str(tmp_path), 2
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(MT, "card_title", lambda card: ("deadpool_pro", "1.16.0", 2))
+    port = MR.port_file("deadpool_pro", "1.16")
+    assert port, "Deadpool Pro 1.16 ships a port"
+    # a launch that brings its own runtime (the override set's modes, Try it) needs none
+    assert ELW.EmulateLogMixin._elog_stage_env(Tab(), ["PAD_MODE_SO=/lib/pad_mode.so"], "card.raw") == []
+    env = ELW.EmulateLogMixin._elog_stage_env(Tab(), ["PAD_AUDIO=1"], "card.raw")
+    assert len(env) == 1 and env[0].startswith("PAD_SOUNDLOG_STAGE=")
+    stage = tmp_path / "pad_soundlog_stage_2"
+    assert sorted(os.listdir(stage)) == ["game.port", "pad_mode.so", "soundlog.only"]
+    assert (stage / "pad_mode.so").read_bytes() == open(MR.prebuilt_object(), "rb").read()
+    assert (stage / "game.port").read_bytes() == open(port, "rb").read()
+    # a build with no port: no stage, and the log says the sounds are not listed
+    monkeypatch.setattr(MT, "card_title", lambda card: ("some_title", "9.99", 2))
+    assert ELW.EmulateLogMixin._elog_stage_env(Tab(), [], "card.raw") == []
+    assert "lists no sounds this run" in said[-1] and "no port for some_title" in said[-1]
+
+
+def test_the_windows_card_offers_the_log_and_the_page_reads_the_rows():
+    js = open(os.path.join(ROOT, "pinball_decryptor", "webui", "static", "js", "tabs", "emulate.js"),
+              encoding="utf-8").read()
+    assert 'call("emulate.log_open")' in js and "Sound and video log" in js
+    page = open(os.path.join(ROOT, "pinball_decryptor", "webui", "static", "js", "tabs", "emulate_log.js"),
+                encoding="utf-8").read()
+    assert '"emulate.log_rows"' in page and '"emulate.log_show"' in page and "/media?p=" in page
+
+
+# ---- the rig ----------------------------------------------------------------------------------------------------
+def test_the_runtime_arms_the_sound_log_right_after_the_port_gate_and_stops_there_for_a_stock_card():
+    src = _text("modes", "sdk", "pad_mode_runtime.c")
+    start = src[src.index("static void pad_mode_start(void)"):]
+    assert re.search(r"if \(!port_gate\(\)\) return;\s*\n\s*if \(soundlog_arm\(\)\) return;", start)
+    arm = src[src.index("static int soundlog_arm(void)"):src.index("static void pad_mode_start(void)")]
+    assert 'pm_trigger("soundlog.only")' in arm and 'pm_trigger("soundlog.on")' in arm
+    # its own allowance: mode.log's 40000 lines would end a long session's list
+    assert "sound_say(WORKER_REQ(r), WORKER_N(r));" in src
+    # round 2: the recording it played - the record key looked up just after the request, as the game asked
+    look = src[src.index("static void on_sound_lookup(pm_reg *r)"):]
+    first = look.split("\n")[2]
+    assert "sound_key_say" in first and "worker_log" in first          # before any swap re-points r[1]
+    assert "hook(fn(\"sound_lookup\"), on_sound_lookup)" in arm
+    say = src[src.index("static void sound_key_say("):src.index("static void on_sound_worker(")]
+    assert "!sound_last" in say                                        # not the bank's index lookups at boot
+    # round 4: a later lookup (a song's next part) is "sound next", at most SOUND_NEXT_MAX a second
+    assert "later = now - sound_last > SOUND_KEY_MS" in say and '"next" : "key"' in say
+    assert "++next_n > SOUND_NEXT_MAX" in say
+
+
+def test_every_boot_asks_soundlog_sh_after_the_cards_modes_and_the_launch_carries_its_variables():
+    run = _text("run_game.sh")
+    first = run.index('_cardmode_so=$(bash "$S/modes/cardmodes.sh"')
+    assert run.index('bash "$S/modes/soundlog.sh"', first) > first
+    image = run.index('PAD_CARD_IMAGE="$SEL_CARDIDX" bash "$S/modes/cardmodes.sh"')
+    assert run.index('bash "$S/modes/soundlog.sh"', image) < run.index("export PAD_MODE_SO", image)
+    watch = _text("watch.sh")
+    launch = watch[watch.index('setsid env PAD_THREAD_ENTRY=1'):watch.index('bash "$RIG/run_game.sh"')]
+    assert 'PAD_SOUNDLOG="${PAD_SOUNDLOG:-}"' in launch and 'PAD_SOUNDLOG_STAGE="${PAD_SOUNDLOG_STAGE:-}"' in launch
+    tryit = _text("modes", "tryit.sh")
+    install = tryit[tryit.index("    install)"):]
+    assert '"$DUMP"/soundlog.only' in install.split('put "$S/pad_mode.so"')[0]     # cleared first
+    assert 'put "$S/soundlog.only" "$DUMP/soundlog.only"' in install
+
+
+def test_soundlog_sh_rules():
+    sh = _text("modes", "soundlog.sh")
+    off = sh[sh.index('if [ "${PAD_SOUNDLOG:-}" != 1 ]'):sh.index("so=\"\"")]
+    assert 'rm -f "$DUMP/soundlog.on" "$DUMP/soundlog.only"' in off and "exit 0" in off
+    own = sh[sh.index('if [ -n "${PAD_MODE_SO:-}" ]'):sh.index("elif")]
+    assert 'rm -f "$DUMP/soundlog.only"' in own                        # never cuts a brought runtime short
+    assert 'bash "$HERE/tryit.sh" install "$PAD_SOUNDLOG_STAGE"' in sh
+    assert sh.rstrip().endswith("exit 0")                              # it never stops a run
+
+
+# ---- round 2: which recording played, and Stop ----------------------------------------------------------
+def test_extract_writes_each_sounds_record_key_and_the_log_reads_it_back(tmp_path):
+    from pinball_decryptor.plugins.stern import clip_sounds as CSD
+    params = [{"idx": 4154, "findkey": bytes.fromhex("faa94d070a00508f")},
+              {"idx": 24, "findkey": bytes.fromhex("b165724302003003")}, {"idx": 7}]
+    assert CSD.write_keys(str(tmp_path), params) == 2
+    assert CSD.read_keys(str(tmp_path)) == {"faa94d070a00508f": 4154, "b165724302003003": 24}
+    assert CSD.read_keys(str(tmp_path / "nothing")) == {}
+
+
+def _keyed(tmp_path):
+    """Deadpool Pro 1.16's request 363 (four recordings, the probe run's keys) and 392."""
+    p = _project(tmp_path)
+    with open(os.path.join(p, "sound_requests.tsv"), "a", encoding="utf-8") as f:
+        f.write("363\t6305,6196,6206,6154\t217,435,355,679\t\t\n")
+    for i in (6305, 6196, 6206, 6154):
+        open(os.path.join(p, "audio", "idx%04d.wav" % i), "wb").close()
+    with open(os.path.join(p, "sound_keys.tsv"), "w", encoding="utf-8") as f:
+        f.write("# keys\n6305\t68267f6b040020df\n6196\t892d57640a0040cc\n6154\td4664161030080c3\n"
+                "6206\td966e7010000d0cd\n4920\t7dc0870d0a00f0bf\n")
+    return p
+
+
+def test_a_row_of_several_recordings_names_and_plays_the_one_the_game_played(tmp_path):
+    ctl = str(tmp_path / "ctl")
+    # the probe run: four presses of one switch played request 363's four recordings in turn
+    keys = ["68267f6b040020df", "892d57640a0040cc", "d4664161030080c3", "d966e7010000d0cd"]
+    evs = [{"log": "keys", "t": 9.0}]
+    for n, k in enumerate(keys):
+        evs += [{"request": 363, "n": 0, "t": 10.0 + n * 0.4}, {"key": k, "t": 10.0 + n * 0.4}]
+    evs += [{"request": 392, "n": 0, "t": 12.0}, {"key": "7dc0870d0a00f0bf", "t": 12.25}]
+    _run(ctl, sounds=evs)
+    lg = EL.Log(ctl, 0, _keyed(tmp_path))
+    lg.poll(now=12.3)
+    got = [(r["name"], r["what"], r["rel"]) for r in lg.rows]
+    assert got == [("idx6305", "#363  1 of 4", "audio/idx6305.wav"),
+                   ("idx6196", "#363  2 of 4", "audio/idx6196.wav"),
+                   ("idx6154", "#363  4 of 4", "audio/idx6154.wav"),
+                   ("idx6206", "#363  3 of 4", "audio/idx6206.wav"),
+                   ("SPEECH: GAME START", "#392  2 of 2", "audio/idx4920.wav")]
+    assert lg.rows[4]["tip"][1] == "Played this time: idx4920.wav (2 of its 2 recordings)"
+
+
+def test_a_row_waits_for_its_key_then_shows_without_it_and_keeps_its_place(tmp_path):
+    ctl = str(tmp_path / "ctl")
+    _run(ctl, sounds=[{"log": "keys", "t": 9.0}, {"request": 363, "n": 0, "t": 10.0}],
+         clips=[{"path": "./a", "rel": "video/x.mov", "name": "x", "switch": "", "t": 10.2}])
+    lg = EL.Log(ctl, 0, _keyed(tmp_path))
+    assert lg.poll(now=10.3) is False and lg.rows == []           # the clip waits behind the sound
+    _run(ctl, sounds=[{"key": "d4664161030080c3", "t": 10.5}])
+    lg.poll(now=10.5)
+    assert [(r["kind"], r["rel"]) for r in lg.rows] == [("sound", "audio/idx6154.wav"), ("video", "video/x.mov")]
+    # a key that never comes: shown after HOLD_S with the first recording, as not played
+    _run(ctl, sounds=[{"request": 363, "n": 0, "t": 20.0}])
+    lg.poll(now=20.5)
+    assert len(lg.rows) == 2
+    lg.poll(now=20.0 + EL.HOLD_S + 0.1)
+    assert (lg.rows[-1]["rel"], lg.rows[-1]["what"]) == ("audio/idx6305.wav", "#363  not played")
+    assert "hold" not in lg.rows[-1]
+
+
+def test_a_run_from_an_emulator_that_logs_no_recordings_never_waits_nor_says_not_played(tmp_path):
+    ctl = str(tmp_path / "ctl")
+    _run(ctl, sounds=[{"log": "on", "t": 9.0}, {"request": 363, "n": 0, "t": 10.0}])
+    lg = EL.Log(ctl, 0, _keyed(tmp_path))
+    lg.poll(now=10.0)
+    assert [(r["what"], r["rel"], r.get("unplayed", False)) for r in lg.rows] == [("#363", "audio/idx6305.wav", False)]
+    assert any("not known for this run" in t for t in lg.rows[0]["tip"])
+
+
+def test_a_project_without_the_keys_says_to_extract_again_and_never_waits(tmp_path):
+    ctl = str(tmp_path / "ctl")
+    p = _keyed(tmp_path)
+    os.remove(os.path.join(p, "sound_keys.tsv"))
+    _run(ctl, sounds=[{"request": 363, "n": 0, "t": 10.0}, {"key": "d4664161030080c3", "t": 10.0}])
+    lg = EL.Log(ctl, 0, p)
+    lg.poll(now=10.0)
+    assert lg.rows[0]["rel"] == "audio/idx6305.wav"
+    assert any("one of 4 recordings" in t for t in lg.rows[0]["tip"])
+    assert any("Extract the card into it again to see which one played" in t for t in lg.rows[0]["tip"])
+
+
+def test_a_sound_playing_in_the_log_can_be_stopped():
+    page = open(os.path.join(ROOT, "pinball_decryptor", "webui", "static", "js", "tabs", "emulate_log.js"),
+                encoding="utf-8").read()
+    assert "function stopHere()" in page and "player.pause()" in page
+    assert 'icon="stop"' in page and 'e.key === "Escape"' in page
+    assert 'addEventListener("ended"' in page                       # the button turns back by itself
+
+
+def test_a_request_the_game_did_not_play_says_so(tmp_path):
+    ctl = str(tmp_path / "ctl")
+    # the round-2 run: Colossus' line (364) asked for while a call it ranks higher held the voice - no
+    # recording looked up - and a one-recording sound that did play
+    _run(ctl, sounds=[{"log": "keys", "t": 9.0}, {"request": 388, "n": 0, "t": 10.0},
+                      {"key": "b165724302003003", "t": 10.0},
+                      {"request": 363, "n": 0, "t": 10.4}])
+    p = _keyed(tmp_path)
+    with open(os.path.join(p, "sound_keys.tsv"), "a", encoding="utf-8") as f:
+        f.write("24\tb165724302003003\n")
+    lg = EL.Log(ctl, 0, p)
+    lg.poll(now=10.4)
+    assert [(r["what"], r.get("unplayed", False)) for r in lg.rows] == [("#388", False)]
+    lg.poll(now=10.4 + EL.HOLD_S + 0.1)
+    row = lg.rows[-1]
+    assert row["what"] == "#363  not played" and row["unplayed"] is True
+    assert "did not play it this time" in row["tip"][1]
+    page = open(os.path.join(ROOT, "pinball_decryptor", "webui", "static", "js", "tabs", "emulate_log.js"),
+                encoding="utf-8").read()
+    assert 'r.unplayed && "elog-unplayed"' in page
+
+
+# ---- round 3: Length, and Open keeps the main window as it was ---------------------------------------------
+def _wav(path, secs, rate=8000):
+    import wave
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"\0\0" * int(secs * rate))
+
+
+@pytest.mark.parametrize("secs, want", [(None, ""), (0.42, "0.4 s"), (12.0, "12.0 s"), (83.4, "1:23"), (600, "10:00")])
+def test_the_length_column_reads_like_a_player(secs, want):
+    assert EL.length_text(secs) == want
+
+
+def test_each_row_has_the_length_of_what_it_names(tmp_path):
+    ctl = str(tmp_path / "ctl")
+    p = _keyed(tmp_path)
+    _wav(os.path.join(p, "audio", "idx6305.wav"), 0.4)
+    _wav(os.path.join(p, "audio", "idx6154.wav"), 1.75)
+    _wav(os.path.join(p, "audio", "idx0024.wav"), 0.5)
+    _run(ctl, sounds=[{"log": "keys", "t": 9.0}, {"request": 363, "n": 0, "t": 10.0},
+                      {"key": "d4664161030080c3", "t": 10.0}, {"request": 151, "n": 0, "t": 10.1}],
+         clips=[{"path": "./a", "rel": "video/x.mov", "name": "x", "switch": "", "dur": 9.47, "t": 10.2},
+                {"path": "./a", "rel": "video/y.mov", "name": "y", "switch": "", "t": 10.3}])
+    lg = EL.Log(ctl, 0, p)
+    lg.poll(now=12.0)
+    got = [(r["what"], r["len"]) for r in lg.rows]
+    assert got == [("#363  4 of 4", "1.8 s"),          # the recording that played, not the first (0.4 s)
+                   ("#151", ""),                       # a music bank's song: no Audio tab file
+                   ("", "9.5 s"),                      # a clip: frames / rate, as clipwatch records it
+                   ("", "")]                            # a clip from before the length was recorded
+    page = open(os.path.join(ROOT, "pinball_decryptor", "webui", "static", "js", "tabs", "emulate_log.js"),
+                encoding="utf-8").read()
+    assert '{ key: "len", label: "Length"' in page
+
+
+def test_the_clip_watch_records_each_clips_length(tmp_path):
+    import clipwatch as CW
+    log = tmp_path / "padvid.log"
+    log.write_text("[padvid   50.00] ch0 serving 1360x768 284 frames (acked 0.9 ms after notice) "
+                   "./assets/a/2.asset/0.asset  (30.000 fps)\n", encoding="utf-8")
+    cw = CW.ClipWatch(str(log), seen_path=str(tmp_path / "seen.jsonl"), names={})
+    cw.poll(1.0)
+    assert _lines(str(tmp_path / "seen.jsonl"))[0]["dur"] == 9.47
+
+
+def test_open_brings_the_windows_forward_without_restoring_them():
+    """Round 3 (Jim-Beam: Open "shrinked" the main window): restore() un-maximizes on Windows, so the
+    log never calls it - to_front only un-minimizes a minimized window (proven on a real maximized
+    window: 5136x1408 kept; the old restore() made it 216x239)."""
+    from pinball_decryptor.webui import emulate_log as ELW
+    src = open(ELW.__file__, encoding="utf-8").read()
+    assert ".restore" not in src.replace("SW_RESTORE", "")
+    assert "IsIconic" in src and "SetForegroundWindow" in src
+    shown = []
+
+    class Win:
+        native = None
+
+        def show(self):
+            shown.append(1)
+
+        def restore(self):
+            raise AssertionError("restore() un-maximizes the window")
+    assert ELW.to_front(Win()) is True and shown == [1]
+
+
+# ---- round 4: a song in parts lists every part it plays ---------------------------------------------------
+def _maiden(tmp_path):
+    """Iron Maiden Pro 1.18's song select: RUN (552) = opening idx 775 then parts 882, 887; ICARUS (564) =
+    445 then 149; GAME START (367) one of several. Keys as the emulator saw them."""
+    p = tmp_path / "maiden"
+    (p / "audio").mkdir(parents=True)
+    (p / "sound_requests.tsv").write_text(
+        "request\tidx\tsids\tname\talso\n552\t775\t1\tMUSIC: RUN\t882,887\n564\t445\t2\tMUSIC: ICARUS\t149\n"
+        "367\t300,547\t3,4\tSPEECH: GAME START\t\n", encoding="utf-8")
+    for i, secs in ((775, 7.5), (882, 180.0), (887, 30.0), (445, 0.6), (149, 300.0), (300, 1.0), (547, 1.0)):
+        _wav(str(p / "audio" / ("idx%04d.wav" % i)), secs, rate=200)
+    (p / "sound_keys.tsv").write_text(
+        "775\ta9bcd9e70f0000c6\n882\ta71f1921050080e5\n887\t00000000000000c7\n445\t1111111111111111\n"
+        "149\t2222222222222222\n300\t3333333333333333\n547\t4444444444444444\n", encoding="utf-8")
+    return str(p)
+
+
+def test_a_song_in_parts_lists_each_part_as_it_starts(tmp_path):
+    ctl = str(tmp_path / "ctl")
+    _run(ctl, sounds=[{"log": "keys", "t": 60.0},
+                      {"request": 552, "n": 0, "t": 68.336}, {"key": "a9bcd9e70f0000c6", "t": 68.338},
+                      {"next": "a71f1921050080e5", "t": 75.886},           # the emulator: 7.55 s later
+                      {"next": "00000000000000c7", "t": 255.9},
+                      # ICARUS' opening is 0.6 s: its body comes as a "key" line, still a later part
+                      {"request": 564, "n": 0, "t": 300.0}, {"key": "1111111111111111", "t": 300.0},
+                      {"key": "2222222222222222", "t": 300.4},
+                      {"next": "5555555555555555", "t": 301.0}])           # a bank's song: not this project's
+    lg = EL.Log(ctl, 0, _maiden(tmp_path))
+    lg.poll(now=400.0)
+    got = [(r["name"], r["what"], r["len"], bool(r.get("part"))) for r in lg.rows]
+    assert got == [("MUSIC: RUN", "#552", "7.5 s", False),            # not "1 of 3": its parts are no picks
+                   ("MUSIC: RUN", "#552  part 2 of 3", "3:00", True),
+                   ("MUSIC: RUN", "#552  part 3 of 3", "30.0 s", True),
+                   ("MUSIC: ICARUS", "#564", "0.6 s", False),
+                   ("MUSIC: ICARUS", "#564  part 2 of 2", "5:00", True)]
+    assert lg.rows[1]["rel"] == "audio/idx0882.wav"
+    assert any("later parts" in t for t in lg.rows[0]["tip"])
+    page = open(os.path.join(ROOT, "pinball_decryptor", "webui", "static", "js", "tabs", "emulate_log.js"),
+                encoding="utf-8").read()
+    assert 'r.part && "elog-part"' in page
+
+
+def test_the_reader_takes_the_next_part_lines():
+    assert SW.line_event("   75886 [pad] sound next a71f1921050080e5") == {"next": "a71f1921050080e5"}
+
+
+def test_an_earlier_runs_log_is_skipped_until_this_runs_boot_rewrites_it(tmp_path):
+    log, seen = tmp_path / "mode.log", tmp_path / "sounds_seen_0.jsonl"
+    _append(log, "       0 [pad] port /dump/game.port: iron_maiden_pro 1.18\n   20250 [pad] sound 113 0\n", "w")
+    old = os.path.getmtime(log) - 60
+    os.utime(log, (old, old))                                   # the run before: nothing new for a minute
+    w = SW.SoundWatch(str(log), str(seen))
+    assert w.poll(1.0) == 0 and _lines(str(seen)) == []
+    # this boot's install took it out and the runtime wrote its own
+    _append(log, "       1 [pad] port /dump/game.port: iron_maiden_pro 1.18, 140 sites\n   9000 [pad] sound 126 0\n", "w")
+    assert w.poll(2.0) == 1 and [e["request"] for e in _lines(str(seen)) if "request" in e] == [126]
+
+
+def test_a_window_reopened_mid_run_adds_no_second_copy(tmp_path):
+    log, ctl = tmp_path / "mode.log", str(tmp_path / "ctl")
+    os.makedirs(ctl)
+    seen = EL.sounds_file(ctl, 0)
+    _append(log, "       0 [pad] port x\n       0 [pad] sound log: every request the sound worker takes\n"
+                 "   20250 [pad] sound 113 0\n", "w")
+    SW.SoundWatch(str(log), seen).poll(1.0)
+    _append(log, "   30000 [pad] sound 126 0\n")
+    SW.SoundWatch(str(log), seen).poll(1.0)                    # the reopened window reads from the top
+    assert sum(1 for e in _lines(seen) if e.get("request") == 113) == 2
+    lg = EL.Log(ctl, 0, str(tmp_path))
+    lg.poll()
+    assert [r["what"] for r in lg.rows] == ["#113", "#126"]

@@ -76,7 +76,7 @@ def _modes_on_disk(project):
 
 # ------------------------------------------------------------------ gating
 MFRS = ["stern", "jjp", "spooky", "pb", "williams", "cgc", "dp", "ap", "bof",
-        "data_east", "sega"]
+        "data_east", "sega", "capcom"]
 
 
 def _mfr_keys():
@@ -86,12 +86,13 @@ def _mfr_keys():
 
 
 @pytest.mark.parametrize("mfr", MFRS)
-def test_visible_only_for_spike2_with_the_preview_switch(tmp_path, preview_on, mfr):
+def test_visible_only_for_spike2_and_jjp_with_the_preview_switch(tmp_path, preview_on, mfr):
     if mfr not in _mfr_keys():
         pytest.skip("no %s plugin" % mfr)
     with web_app(tmp_path, mfr=mfr) as w:
         tabs = {t["ns"]: t for t in w.state("shell")["tabs"]}
-        assert tabs["modes"]["visible"] == (mfr == "stern")
+        # PAD-1350: JJP has the tab too - its custom-modes editor (tests/test_webui_modes_jjp.py)
+        assert tabs["modes"]["visible"] == (mfr in ("stern", "jjp"))
         st = w.state("modes")
         if mfr == "stern":
             # no project yet: the Tk tab's no-project state
@@ -103,6 +104,7 @@ def test_visible_only_for_spike2_with_the_preview_switch(tmp_path, preview_on, m
             assert st["about"].startswith("Make a game mode of your own")
 
 
+@pytest.mark.usefixtures("preview_modes_off")
 def test_hidden_without_the_preview_switch(tmp_path):
     with web_app(tmp_path, mfr="stern") as w:
         tabs = {t["ns"]: t for t in w.state("shell")["tabs"]}
@@ -121,19 +123,17 @@ def test_examples_duplicate_delete_and_the_cap(tmp_path, preview_on, monkeypatch
     proj = tmp_path / "proj"
     with web_app(tmp_path, mfr="stern") as w:
         _project(w, proj)
-        names = [e["name"] for e in w.state("modes")["examples"] if not e["code"]]
-        assert names[:4] == ["KAIJU RUSH", "ATOMIC BREATH", "MOTHRA'S SONG", "MECHAGODZILLA"]
-        codes = [e for e in w.state("modes")["examples"] if e["code"]]
-        assert codes and codes[0]["label"].endswith(" (code mode)")
-        assert w.call("modes.example", "KAIJU RUSH") == "kaiju_rush"
-        assert w.state("modes")["form"]["name"] == "KAIJU RUSH"
+        names = [e["name"] for e in w.state("modes")["examples"]]
+        assert names == ["TARGET RUSH"]                 # PAD-691: the one example, on Godzilla too; none in C
+        assert w.call("modes.example", "TARGET RUSH") == "target_rush"
+        assert w.state("modes")["form"]["name"] == "TARGET RUSH"
         assert w.call("modes.duplicate")
         assert len(_modes_on_disk(proj)) == 2
         # Delete asks first; "no" keeps it
         w.answers.append("no")
         assert w.call("modes.delete") is False
         assert w.asked[-1]["title"] == "Delete mode"
-        assert w.asked[-1]["message"].startswith("Delete KAIJU RUSH COPY, with its picture")
+        assert w.asked[-1]["message"].startswith("Delete TARGET RUSH COPY, with its picture")
         w.answers.append("yes")
         assert w.call("modes.delete") is True
         assert len(_modes_on_disk(proj)) == 1
@@ -146,8 +146,7 @@ def test_examples_duplicate_delete_and_the_cap(tmp_path, preview_on, monkeypatch
         assert len(_modes_on_disk(proj)) == 3
         assert st["new_ok"] is False
         assert st["cap_text"].startswith("3 of 3 modes: delete one to add another.")
-        assert all(e["disabled"] for e in st["examples"] if not e["code"])
-        assert not any(e["disabled"] for e in st["examples"] if e["code"])
+        assert all(e["disabled"] for e in st["examples"])
         # the plugin's refusal is a message box titled as the Tk one
         n = len(w.asked)
         w.call("modes.new")
@@ -299,6 +298,35 @@ def test_tryit_refusals_before_the_hand_off(tmp_path, preview_on):
         assert w.state("modes")["tryit_line"].startswith("Try it runs on Windows and Linux for now")
 
 
+def test_tryit_refuses_a_blocks_mode_with_a_clip_too_many(tmp_path, preview_on):
+    """PAD-1030: a mode's clips past the limit used to build with the last left out (a Bond owner's 13th, a loop
+    behind the HUD, never played); 13 are fine now (32 at most), and past 32 Try it says so before the Emulate tab
+    is asked anything."""
+    from pinball_decryptor.plugins.stern import block_modes as BM
+    proj = tmp_path / "proj"
+    with web_app(tmp_path, mfr="stern") as w:
+        svc = _svc(w)
+        svc._platform = "win32"
+        _project(w, proj)
+        slug, _p = BM.new_blocks_mode(str(proj), "Diamond", shots=["Left ramp"])
+        for f in ("c.mp4", "bg.mp4"):
+            (proj / "modes" / slug / f).write_bytes(b"x")
+        prog = BM.load(str(proj), slug)
+        prog["clips"] = [{"name": "crem%d" % i, "file": "c.mp4"} for i in range(1, 33)]
+        prog["clips"].append({"name": "background2", "file": "bg.mp4"})
+        BM.save(str(proj), slug, prog)
+        emu = _FakeEmulate()
+        _with_emu(w, emu)
+        assert w.call("modes.tryit") is False
+        st = w.state("modes")
+        assert st["tryit"]["state"] == "failed"
+        assert st["tryit_line"] == "Diamond: 33 clips of its own: 32 at most."
+        assert emu.handed == []
+        prog["clips"] = prog["clips"][-13:]     # the reporter's 13: handed on
+        BM.save(str(proj), slug, prog)
+        assert w.call("modes.tryit") is True and emu.handed == [svc.tryit_prepare]
+
+
 def test_tryit_hands_off_and_refuses_a_missing_card(tmp_path, preview_on):
     proj = tmp_path / "proj"
     with web_app(tmp_path, mfr="stern") as w:
@@ -335,7 +363,7 @@ def test_tryit_cancel_and_run_ended(tmp_path, preview_on):
         w.call("modes.tryit")
         # the same button is Cancel while it works
         assert w.call("modes.tryit") is False
-        assert w.state("modes")["tryit_line"] == "cancelling…"
+        assert w.state("modes")["tryit_line"] == "canceling…"
         assert svc._tryit_cancelled()
         # a launch that never came up: failed, with where to look
         w.run(lambda: svc.run_ended(1))
@@ -499,10 +527,16 @@ def test_tmnt_shots_and_greying(tmp_path, preview_on):
         w.call("modes.new")
         st = w.state("modes")
         assert st["profile"]["label"] == "TMNT Pro 1.59" and len(st["profile"]["shots"]) == 17
-        # item 163: its countdown is heard (441); item 164: with no time-up call known, a mode's own
+        # item 163: its countdown is heard (441); item 164: with no time-up call, a mode's own
         # end sound rides a carrier (heard at time-up in the emulator), so nothing is greyed
         assert not st["dis"]["countdown"] and not st["dis"]["own_sound"]
-        assert st["dis"]["end_game"] and "time-up callout" in st["reasons"]["sound"]
+        # PAD-479: its voice has no time-is-up line at all - the game's limit, said in grey, not yellow
+        assert st["dis"]["end_game"] and "sound" not in st["reasons"]
+        assert "no time-is-up line" in st["reasons"]["sound_limit"] and st["limits"]["sound_limit"] is True
+        assert "My sound" in st["reasons"]["sound_limit"]
+        # PAD-475: its pizza magnet is used only inside a feature of the game's - a game limit, grey too
+        assert st["dis"]["magnet"] and "only inside a feature" in st["reasons"]["magnet"]
+        assert st["limits"]["magnet"] is True and "lights" not in st["limits"]
         assert not st["dis"]["film_clip"] and not st["dis"]["film_still"] and not st["dis"]["film_sound"]
         assert "film" not in st["reasons"]
 
@@ -603,22 +637,6 @@ def test_film_cut_becomes_the_modes_clip_and_saves(tmp_path, preview_on):
         assert data["clip_file"] == "clip.mp4" and data["clip_source"] == os.path.abspath(str(film))
 
 
-# ------------------------------------------------------------------ a code example
-def test_a_code_example_without_its_films(tmp_path, preview_on):
-    proj = tmp_path / "proj"
-    with web_app(tmp_path, mfr="stern") as w:
-        _project(w, proj)
-        code = [e["name"] for e in w.state("modes")["examples"] if e["code"]]
-        name = code[0]
-        w.answers.append("")                  # "Where are the films?" - cancelled
-        assert w.call("modes.code_example", name)
-        assert w.asked[-1]["kind"] == "file" and w.asked[-1]["title"].startswith("Where are the films? ")
-        assert _wait(w, lambda: w.state("modes")["tryit_line"].startswith("added the example "),
-                     timeout=60)
-        assert _wait(w, lambda: any(r["kind"] == "code" for r in w.state("modes")["rows"]))
-        assert w.state("modes")["sel"]["kind"] == "code"
-
-
 # ------------------------------------------------------------------ the game's own modes, staged
 def test_stock_value_staged_for_the_next_write(tmp_path, preview_on):
     proj = _card_project(tmp_path / "gz", "godzilla_le-1_16_0.raw")
@@ -697,7 +715,7 @@ def test_spinboxes_carry_the_tk_bounds(tmp_path, preview_on):
     from pinball_decryptor.plugins.stern import mode_project as MP
     with web_app(tmp_path, mfr="stern") as w:
         spin = w.state("modes")["spin"]
-        assert spin["seconds"] == [0, 300] and spin["start_count"] == [1, 20]   # 0: a multiball with no clock
+        assert spin["seconds"] == [0, 300] and spin["start_count"] == [1, MP.START_COUNT_MAX]   # 0: a multiball with no clock
         assert spin["balls"] == [2, 6] and spin["ball_save"] == [0, MP.BALL_SAVE_MAX]
         assert spin["add_ball_max"] == [1, MP.ADD_BALL_MAX]
         assert spin["starts_count"] == [1, MP.STARTS_MAX]
@@ -1188,7 +1206,10 @@ def test_no_port_says_why_and_the_server_refuses(tmp_path, preview_on, beatles):
         assert st["new_ok"] is False and st["ex_ok"] is False and st["examples"] == []
         assert st["shots_text"] == "(no shots: modes of your own can't be made for this card yet)"
         # the game's own modes do not need a port: they are listed and can be changed
-        assert [r["name"] for r in st["game_rows"]][:2] == ["Drive My Car", "Main Multiball"]
+        game = {r["name"]: r for r in st["game_rows"]}
+        assert not game["Drive My Car"]["bare"] and not game["Main Multiball"]["bare"]
+        # PAD-834: a mode with nothing to change is listed too, and says so
+        assert game["All My Loving"]["bare"] and "Nothing of it to change" in game["All My Loving"]["chip_tip"]
         n = len(w.asked)
         assert w.call("modes.new") is None
         assert w.asked[n]["title"] == "New mode" and "hands out its shots" in w.asked[n]["message"]
@@ -1309,9 +1330,7 @@ def test_godzilla_uses_its_shipped_port_while_the_card_is_read(tmp_path, preview
         st = w.state("modes")
         assert _reading(w)["state"] == "reading"
         assert st["profile"]["key"] == "godzilla_pro_1_15" and st["new_ok"] and not st["no_port"]
-        names = [e["name"] for e in st["examples"] if not e["code"]]
-        assert names[:4] == ["KAIJU RUSH", "ATOMIC BREATH", "MOTHRA'S SONG", "MECHAGODZILLA"]
-        assert any(e["code"] for e in st["examples"])
+        assert [e["name"] for e in st["examples"]] == ["TARGET RUSH"]      # PAD-691
         assert w.call("modes.new") == "new_mode"
         gate.set()
         assert _wait(w, lambda: _reading(w)["state"] == "done")
@@ -1424,7 +1443,7 @@ def test_own_sounds_grey_where_no_carriers_were_measured(tmp_path, preview_on):
     start sound, shot sound and music are greyed with a plain reason, refused on the server, and
     the Try it words drop the "about a minute" sentence; on Godzilla Premium/LE 1.16 (measured)
     they stay live. Item 163: Jaws carries them now, and The Beatles greys only the music (no
-    stock tune to carry it)."""
+    spare music to carry it: PAD-479, a game limit)."""
     proj = _card_project(tmp_path / "tmnt", "turtles_pro-1_58_0.raw")
     with web_app(tmp_path, mfr="stern") as w:
         _project(w, proj)
@@ -1451,7 +1470,11 @@ def test_own_sounds_grey_where_no_carriers_were_measured(tmp_path, preview_on):
         w.call("modes.new")
         st = w.state("modes")
         assert not st["dis"]["own_extra"] and st["dis"]["own_music"]
-        assert "stock tune" in st["reasons"]["own_music"] and "Beatles" in st["reasons"]["own_music"]
+        # PAD-479: every piece of its music is one the game plays - a game limit, said in grey
+        assert "none is spare" in st["reasons"]["own_music"] and "Beatles" in st["reasons"]["own_music"]
+        assert st["limits"].get("own_music") is True
+        # and its songs always run, so a mode waits for its multiballs only: the game's, grey too
+        assert "songs is always running" in st["reasons"]["stack"] and st["limits"].get("stack") is True
         asked = len(w.asked)
         assert w.call("modes.choose", "music") is None             # the server refuses the music
         assert len(w.asked) == asked
@@ -1548,7 +1571,7 @@ def test_copy_to_puts_the_modes_in_another_cards_project(tmp_path, preview_on):
     with web_app(tmp_path, mfr="stern") as w:
         _project(w, src, card=None)
         assert w.state("modes")["copy_ok"] is False
-        assert w.call("modes.example", "KAIJU RUSH") == "kaiju_rush"
+        assert w.call("modes.example", "TARGET RUSH") == "target_rush"
         assert w.state("modes")["copy_ok"] is True
         # cancelled: nothing copied
         w.answers.append("")
@@ -1558,11 +1581,11 @@ def test_copy_to_puts_the_modes_in_another_cards_project(tmp_path, preview_on):
         w.answers.append(str(dest))
         r = w.call("modes.copy_to")
         assert r["label"] == "Godzilla Pro 1.16"
-        assert [(m["state"], m["new_slug"]) for m in r["modes"]] == [("carried", "kaiju_rush")]
-        assert _modes_on_disk(dest) == ["kaiju_rush"]
+        assert [(m["state"], m["new_slug"]) for m in r["modes"]] == [("carried", "target_rush")]
+        assert _modes_on_disk(dest) == ["target_rush"]
         assert w.asked[-1]["title"] == "Copy modes"
         assert w.asked[-1]["message"].startswith("Copied 1 mode into ")
-        assert "KAIJU RUSH -> modes/kaiju_rush: runs on Godzilla Pro 1.16 as it is" in w.asked[-1]["message"]
+        assert "TARGET RUSH -> modes/target_rush: runs on Godzilla Pro 1.16 as it is" in w.asked[-1]["message"]
         # this project itself is refused in a message box
         w.answers.append(str(src))
         assert w.call("modes.copy_to") is None
@@ -1583,18 +1606,18 @@ def test_pad396_port_to_the_other_model(tmp_path, preview_on):
         assert st["port_shown"] is True and st["port_ok"] is False
         assert st["port_word"] == "Pro"
         assert st["port_targets"] == [{"folder": str(dest), "label": "Godzilla Pro 1.16 (pro)"}]
-        assert w.call("modes.example", "KAIJU RUSH") == "kaiju_rush"
+        assert w.call("modes.example", "TARGET RUSH") == "target_rush"
         assert w.state("modes")["port_ok"] is True
         r = w.call("modes.port_to", str(dest))
-        assert [(m["state"], m["new_slug"]) for m in r["modes"]] == [("carried", "kaiju_rush")]
+        assert [(m["state"], m["new_slug"]) for m in r["modes"]] == [("carried", "target_rush")]
         assert w.asked[-1]["title"] == "Port modes" and w.asked[-1]["message"].startswith("Ported 1 mode into ")
         w.answers.append("no")
         assert w.call("modes.port_to", str(dest)) is None
-        assert "KAIJU RUSH is already in pro" in w.asked[-1]["message"]
+        assert "TARGET RUSH is already in pro" in w.asked[-1]["message"]
         w.answers.append("yes")
         r = w.call("modes.port_to", str(dest))
-        assert [(m["state"], m["new_slug"]) for m in r["modes"]] == [("carried", "kaiju_rush")]
-        assert _modes_on_disk(dest) == ["kaiju_rush"]
+        assert [(m["state"], m["new_slug"]) for m in r["modes"]] == [("carried", "target_rush")]
+        assert _modes_on_disk(dest) == ["target_rush"]
         _project(w, tmnt)
         assert w.state("modes")["port_shown"] is True and w.state("modes")["port_targets"] == []
 
@@ -1655,3 +1678,21 @@ def test_pad363_the_hand_written_godzilla_profile_offers_its_ports_modes():
     p = MP.profile("godzilla_pro_1_15")
     assert dict((i, n) for i, n, _on in p.game_modes)[21] == "Jet Fighter Attack"
     assert p.game_modes == MP.profile_from_port(MP.port_path(p)).game_modes
+
+
+def test_the_one_blocks_example_is_target_rush(tmp_path, preview_on):
+    """PAD-675 (David): the modes converted from C to blocks "don't look normal like what a human would program";
+    TARGET RUSH, the plain starter on the card's own shots, is New mode > Blocks' one example on every game."""
+    import json
+    proj = tmp_path / "proj"
+    with web_app(tmp_path, mfr="stern") as w:
+        _project(w, proj)
+        assert [e["name"] for e in w.state("modes")["blocks_examples"]] == ["TARGET RUSH"]
+        assert w.call("modes.blocks_example", "GODZILLA ANGRY") is False          # a converted one: not offered
+        assert w.call("modes.blocks_example", "TARGET RUSH") is True
+        with open(proj / "modes" / "target_rush" / "blocks.json", encoding="utf-8") as f:
+            prog = json.load(f)
+        assert prog["name"] == "TARGET RUSH"
+        starts = [s["hat"]["shot"] for s in prog["scripts"] if s["hat"].get("kind") == "shot"
+                  and s["hat"].get("when") == "idle"]
+        assert starts and starts[0]                                        # a start shot of the card's own

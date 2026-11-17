@@ -5,6 +5,7 @@
 import { html, useEffect, useLayoutEffect, useRef, useState, Button, Field, Select, Seg, Check, Card, Chip,
          Icon, InfoBadge, Modal, PageHead, Spinner, openMenu, menuOpen, tip, cx, fmtBytes, call } from "../core/ui.js";
 import { useNs } from "../core/store.js";
+import { Spike3KeyGuide } from "../core/spike3_guide.js";
 
 export const css = true;
 
@@ -48,11 +49,12 @@ function PathCombo({ k, value, history, placeholder, onBrowse, badge, title, bro
   const caret = history && history.length ? html`<button type="button" ...${tip("Recent paths")} class="x-caret" aria-label="Recent paths"
       onClick=${(e) => openMenu(e.currentTarget.closest(".field") || e.currentTarget,
         history.map((p) => ({ label: p, onClick: () => call("extract.use_recent", k, p) })))}>▾</button>` : null;
-  return html`<div class="row x-pathrow">
+  // a file (or folder) dropped on the path or Browse… answers Browse… (PAD-838)
+  return html`<div class="row x-pathrow" data-drop>
     <${Field} id=${id} ns="extract" k=${k} value=${value} mono cls="grow" placeholder=${placeholder} title=${title}
       suffix=${caret} onCommit=${(v) => call("extract.unmap", k, v)} />
     ${badge}
-    <${Button} onClick=${onBrowse} title=${browseTitle}>Browse…<//>
+    <${Button} drop onClick=${onBrowse} title=${browseTitle}>Browse…<//>
   </div>`;
 }
 
@@ -154,6 +156,54 @@ export function SourceBody({ s, hist }) {
     </div>`;
 }
 
+// A locked Spike 3 card: unlock extraction with the board's OTP key, pasted
+// or from a key file (PAD-1086). PAD-1090 removed PAD-1091's unchecked
+// secure-boot paragraph; PAD-1133 adds a verified "How to get the OTP key"
+// guide (core/spike3_guide.js). The extractor-card button is NOT brought back:
+// every shipped Spike 3 board enforces secure boot (David, PAD-1133), so the
+// patched card never boots - the only proven route is the hardware DMA dump the
+// guide documents.
+// PAD-1090: the key pasted as text (David: "can't we just make it a text
+// field?"); a hidden field, never echoed - the window's spike3_paste_key
+// checks it against the selected card and keeps it for every Spike 3 tab.
+function KeyPaste({ busy }) {
+  const [key, setKey] = useState("");
+  const send = () => { if (key.trim()) { call("ui.spike3_paste_key", key.trim()); setKey(""); } };
+  return html`<div class="row wrap">
+    <div class=${cx("field mono sx-s3key-in", busy && "disabled")}>
+      <input type="password" autocomplete="off" spellcheck="false" aria-label="Your Spike 3 OTP key"
+        placeholder="Paste your OTP key (64 hex characters)" value=${key} disabled=${busy}
+        onInput=${(e) => setKey(e.target.value)} onKeyDown=${(e) => { if (e.key === "Enter") send(); }} />
+    </div>
+    <${Button} size="sm" kind="primary" icon="unlock" disabled=${busy || !key.trim()} onClick=${send}>Use this key<//>
+  </div>`;
+}
+
+function Spike3UnlockPanel({ s }) {
+  const u = s.spike3_unlock;
+  if (!u) return null;
+  if (u.verified) {
+    return html`<div class="x-alert x-spike3 ok" role="status">
+      <div class="x-alert-hd"><${Icon} name="check" /><span>Card unlocked</span></div>
+      <div class="x-alert-bd"><div class="small x-spike3-status ok">${u.status}</div></div>
+    </div>`;
+  }
+  return html`<div class="x-alert x-spike3" role="group">
+    <div class="x-alert-hd" aria-expanded="true">This Spike 3 card is encrypted — it needs its board's OTP key</div>
+    <div class="x-alert-bd">
+      <p class="small x-spike3-why">The 256-bit key is fused into the machine's Raspberry Pi, not stored on the card, and it is the same across machines. If you already have it, paste it here (64 hex characters): PAD verifies it against this card, unlocks extraction, and keeps it for every Spike 3 tab.</p>
+      <${KeyPaste} busy=${u.busy} />
+      <div class="row wrap">
+        <${Button} size="sm" kind="ghost" disabled=${u.busy} onClick=${() => call("extract.spike3_ingest_key")}>Or choose a key file…<//>
+        <${Spike3KeyGuide} disabled=${u.busy} />
+        ${u.busy ? html`<${Spinner} />` : null}
+      </div>
+      ${u.status ? html`<div class="small x-spike3-status">${u.status}</div>` : null}
+      ${u.instructions ? html`<pre class="small mono x-pre x-spike3-steps">${u.instructions}</pre>` : null}
+    </div>
+  </div>`;
+}
+
 function projectHint(p) {
   if (!p) return "";
   if (!p.exists) return "A new folder: Extract creates it.";
@@ -181,7 +231,7 @@ function Options({ s, shell }) {
         <span class="lbl">Optional: updates to merge on top</span>
         <div class="small dim x-pre">${s.deltas_help}</div>
         <div class="row wrap">
-          <${Button} size="sm" icon="plus" onClick=${() => call("extract.add_deltas")}>Add updates...<//>
+          <${Button} drop size="sm" icon="plus" onClick=${() => call("extract.add_deltas")}>Add updates...<//>
           <${Button} size="sm" onClick=${() => call("extract.clear_deltas")} disabled=${!(s.deltas || []).length}>Clear<//>
           <span class="small dim" title=${(s.deltas || []).join("\n")}>${s.deltas_summary}</span>
         </div>
@@ -196,16 +246,17 @@ function Options({ s, shell }) {
       </div>` : null}
     ${s.dongle_cap ? html`<${Check} wrap ns="extract" k="dongle" checked=${s.dongle}
         label="Decrypt using the game's HASP dongle (advanced — for titles not yet supported dongle-free)" />` : null}
+    ${s.dongle_cap && s.dongle && s.dongle_where ? html`<span class="small muted">${s.dongle_where}</span>` : null}
     ${s.capture_cap ? html`<div class="stack x-sec">
         <span class="lbl">Extract</span>
         ${capturePrimary ? null : html`<${Check} wrap ns="extract" k="static" checked=${s.static}
-          label="Basic extract (raw ROM asset bitmaps + animation MP4s)" />`}
+          label=${s.basic_label || "Basic extract (raw ROM asset bitmaps + animation MP4s)"} />`}
         <div class="row wrap x-checks">
           <${Check} wrap ns="extract" k="capture" checked=${s.capture}
             label="Use PinMAME runtime capture (composed cinematics + audio)" />
           <span class="row x-dur"><label class="small dim" for="x-dur">Duration (s):</label>
             <${Field} id="x-dur" ns="extract" k="capture_duration" value=${s.capture_duration} sm width=${72} /></span>
-          ${capturePrimary ? null : html`<${Check} ns="extract" k="capture_gameplay" checked=${s.capture_gameplay} label="Simulate gameplay" />`}
+          ${capturePrimary || s.gameplay_cap === false ? null : html`<${Check} ns="extract" k="capture_gameplay" checked=${s.capture_gameplay} label="Simulate gameplay" />`}
         </div>
         ${s.capture_help ? html`<div class=${cx("x-help", s.capture_help_kind)}>${s.capture_help}</div>` : null}
       </div>` : null}
@@ -242,7 +293,7 @@ function RunButton({ s, shell }) {
   if (mine) {
     const cancelling = !!shell.cancelling;
     return html`<${Button} kind="danger" size="big" disabled=${cancelling} title=${cancelling ? "" : CANCEL_TIP}
-        onClick=${() => call("extract.cancel")}>${cancelling ? "Cancelling…" : "Cancel"}<//>
+        onClick=${() => call("extract.cancel")}>${cancelling ? "Canceling…" : "Cancel"}<//>
       <span class="dim small grow">${cancelling ? "Stopping as soon as it's safe to." : CANCEL_TIP}</span>`;
   }
   const reason = running ? BUSY_TIP : (s.block_reason || "");
@@ -277,6 +328,7 @@ function CardSummary({ s }) {
       ${badge ? (badge.switch
         ? html`<button type="button" class=${cx("x-badge link", badge.kind)} onClick=${() => call("extract.switch_suggested")}><${Icon} name="warn" /><span>${badge.text}</span></button>`
         : html`<div class=${cx("x-badge", badge.kind)}><${Icon} name=${badge.kind === "info" ? "info" : "warn"} /><span>${badge.text}</span></div>`) : null}
+      <${Spike3UnlockPanel} s=${s} />
     </div>
     ${s.ssd && s.admin_panel ? html`<${AdminPanel} s=${s} />` : null}
     ${s.ssd && s.fda_panel ? html`<${FdaPanel} s=${s} />` : null}`;
@@ -549,7 +601,7 @@ function ImageInfo({ info }) {
         <span class="small dim grow">${info.loading ? "" : info.status}</span>
         <${Button} kind="primary" onClick=${close}>Close<//>`}>
     <div class="mono small dim x-wrapany">${info.path}</div>
-    ${info.loading ? html`<div class="x-loading"><${Spinner} /><span>Reading image…</span></div>` : null}
+    ${info.loading ? html`<div class="x-loading"><${Spinner} /><span>${sections.length ? info.status : "Reading image…"}</span></div>` : null}
     ${sections.map((sec) => html`<section class="x-isec">
         <div class="h2 x-isec-t">${sec.title}</div>
         <div class="kv x-ikv">${sec.rows.map(([k, v]) => html`<span class="k">${k}</span><span class="x-wrapany">${v}</span>`)}</div>

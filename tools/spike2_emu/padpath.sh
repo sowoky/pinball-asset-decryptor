@@ -119,7 +119,9 @@ fi
 PAD_PATHS_SLOT=$PAD_SLOT
 export PAD_PATHS_SLOT
 #: The slot count a machine offers. Each running guest is ~1.5 cores.
-: "${PAD_SLOTS_MAX:=4}"
+# 5 since PAD-649: rigbatch fits nproc*10/20 rigs at its 15 pictures a second - five on this VM's 10 cores -
+# and the sixth colour is on every rig surface (pfpage/pf.css, core/rigslot.py, pad-triage rigboard.py).
+: "${PAD_SLOTS_MAX:=5}"
 export PAD_SLOTS_MAX
 #: The one rootfs every slot is layered over - slot 0's own.
 PAD_BASE_ROOT=$PAD_HOME/spike2root
@@ -521,6 +523,44 @@ pad_can_write() {                 # <path> [<log-tag>]
     return 1
 }
 
+# HAS THE LINUX DISK GONE READ-ONLY? (PAD-816) ext4 remounts itself read-only
+# the moment a write to its disk fails, and in WSL that disk is ext4.vhdx on a
+# Windows drive: when that drive fills, the vhdx cannot grow, and the whole
+# distro turns read-only mid-run - every write after it is "Read-only file
+# system" or "Input/output error" until WSL restarts. A reporter's card cache
+# copy did exactly that at 3.6 of 14.7 GB, and what he was told next was
+# "LOG=... is not writable here - fix or unset LOG" and, from the setup
+# button, "this PC can run the emulator now". Not an owner or a mode, so
+# pad_can_write's cures are the wrong ones too; this asks the filesystem by
+# writing to it, which is the only question it answers truthfully (root's
+# `-w` says yes on a read-only mount on some kernels).
+pad_disk_readonly() {             # [<dir>]  -> 0 when nothing can be written there
+    local d=${1:-$PAD_HOME} f err
+    [ -d "$d" ] || d=/
+    f="$d/.pad_rw_probe.$$"
+    if err=$( { : > "$f"; } 2>&1 ); then
+        rm -f "$f"
+        return 1
+    fi
+    case $err in
+        *"Read-only file system"*|*"Input/output error"*) return 0 ;;
+    esac
+    return 1
+}
+pad_disk_readonly_say() {         # [<log-tag>]
+    local tag=${1:-rig} free
+    echo "[$tag] THE LINUX DISK HAS GONE READ-ONLY: nothing can be written inside WSL." >&2
+    echo "[$tag] Linux does that to protect its files when a write to its disk fails, most" >&2
+    echo "[$tag] often because the Windows drive that holds WSL's disk (ext4.vhdx) is full." >&2
+    if [ -n "${PAD_HOST_DRIVE:-}" ] && \
+       free=$(df -k --output=avail "$PAD_HOST_DRIVE" 2>/dev/null | tail -1 | tr -d " ") && \
+       [ -n "$free" ]; then
+        echo "[$tag] That drive ($PAD_HOST_DRIVE) has $(awk "BEGIN { printf \"%.1f\", $free / 1048576 }") GB free now." >&2
+    fi
+    echo "[$tag] Free some space on it, then restart WSL: close the app, run 'wsl --shutdown'" >&2
+    echo "[$tag] in PowerShell, and open the app again. Card images on Windows are not touched." >&2
+}
+
 # Which distro this is, so a Windows child can ask questions of the RIGHT one.
 # WSL sets WSL_DISTRO_NAME; if it is somehow unset the Windows side falls back
 # to the default distro, which is right far more often than it is wrong.
@@ -549,6 +589,96 @@ pad_is_wsl() {
     grep -qi microsoft /proc/version 2>/dev/null
 }
 
+# ---- A CARD WITHOUT SYS_ADMIN (PAD-872) ------------------------------------
+#
+# cardmount.sh mounts the card with fuse2fs through the setuid fusermount3,
+# and that mount(2) needs CAP_SYS_ADMIN in the namespace the mount lands in.
+# Every desktop has it to give; a Docker container has it only when started
+# with --cap-add SYS_ADMIN (the bounding set caps even setuid root), so the
+# image's run line used to ask for it - and Docker's seccomp profile opens
+# unshare/mount to a container only with that same capability, which is why
+# run_game.sh's own namespace failed beside the mount, not after it.
+#
+# A user namespace is the other way to own a mount. A process in one it made
+# holds every capability THERE, may mount FUSE in a mount namespace it owns,
+# and that is all it may do: nothing outside it changes. So a card run in a
+# container without SYS_ADMIN re-executes itself as
+#
+#   unshare --user --map-current-user --keep-caps --mount --propagation slave
+#
+# and everything under it - cardmount.sh's fuse2fs (which mounts directly,
+# with no fusermount, when it has the capability), the video host reading
+# clips off the mount, run_game.sh's inner `unshare -r -m -p -f` binding it
+# into the chroot, teardown's fusermount -u - shares the one mount namespace
+# the card is in, exactly as they share the host's on a desktop. The uid
+# stays the user's own (--map-current-user), so no `id -u = 0` branch in the
+# rig flips; --keep-caps carries the namespace's capabilities across the exec
+# as ambient ones; slave propagation lets mounts made on the host later (a
+# /data share) still reach the run. Measured in the image with only
+# --device /dev/fuse and the image's seccomp profile: Venom Pro boots.
+#
+# Asked only of a CARD run (a folder needs no mount), not as root (root is
+# what a privileged container or WSL's -u root gives, and it mounts as
+# always), and once (PAD_CARD_NS marks the re-executed copy). A container
+# where the namespace is refused too - Docker's default seccomp profile, or a
+# host that restricts user namespaces - is told what to add instead of
+# failing later at "fuse2fs did not mount". 0 = carry on here, 1 = refuse.
+#
+# ROOT WITHOUT SYS_ADMIN (PAD-871's save states, in that same container): a
+# Start with Save states ticked is this script as root through sudo, and
+# root without the capability cannot mount the card either - the whole Start
+# failed, not just its save states, which need SYS_ADMIN anyway (criu). Such
+# a run goes back to the user sudo came from, without PAD_PIVOT, and as that
+# user takes the namespace above: the game runs, with no Save or Load
+# buttons, exactly as when the save-state check withdraws them.
+pad_no_sys_admin() {
+    local bnd
+    bnd=$(awk '/^CapBnd:/ {print $2}' /proc/self/status 2>/dev/null)
+    [ -n "$bnd" ] || return 1
+    # CAP_SYS_ADMIN is bit 21: with it the setuid fusermount3 mounts as always.
+    (( (16#$bnd >> 21) & 1 )) && return 1
+    return 0
+}
+pad_card_ns_needed() {
+    [ -n "${PAD_CARD:-}" ] || return 1
+    [ "${PAD_CARD_NS:-}" = 1 ] && return 1
+    [ "$(id -u)" = 0 ] && return 1
+    pad_no_sys_admin
+}
+pad_card_root_handback() {         # -> the user a root card run goes back to
+    [ -n "${PAD_CARD:-}" ] || return 1
+    [ "${PAD_CARD_NS:-}" = 1 ] && return 1
+    [ "$(id -u)" = 0 ] || return 1
+    pad_no_sys_admin || return 1
+    local u=${PAD_USER:-${SUDO_USER:-}}
+    [ -n "$u" ] && [ "$u" != root ] || return 1
+    [ "$(id -u "$u" 2>/dev/null)" ] && [ "$(id -u "$u")" != 0 ] || return 1
+    echo "$u"
+}
+pad_card_ns() {                    # <script> [args...]  -> execs, or returns 0/1
+    local u
+    if u=$(pad_card_root_handback); then
+        echo "[card] no SYS_ADMIN here: root cannot mount the card, so this run goes on"
+        echo "[card]   as $u, without save states (they need --cap-add SYS_ADMIN)"
+        exec setpriv --reuid="$u" --regid="$(id -g "$u")" --init-groups \
+            env -u PAD_PIVOT HOME="$(getent passwd "$u" | cut -d: -f6)" \
+            USER="$u" LOGNAME="$u" bash "$@"
+    fi
+    pad_card_ns_needed || return 0
+    local ns=(unshare --user --map-current-user --keep-caps --mount --propagation slave)
+    if "${ns[@]}" true 2>/dev/null; then
+        echo "[card] no SYS_ADMIN here: this run mounts the card in its own user namespace"
+        export PAD_CARD_NS=1
+        exec "${ns[@]}" bash "$@"
+    fi
+    echo "[card] This container cannot mount a card: it has no SYS_ADMIN, and it may" >&2
+    echo "[card]   not make a user namespace either. Start it with the image's seccomp" >&2
+    echo "[card]   profile (--security-opt seccomp=pad-seccomp.json, see docs/guide/docker.md)," >&2
+    echo "[card]   or with --cap-add SYS_ADMIN. A host with AppArmor also needs" >&2
+    echo "[card]   --security-opt apparmor=unconfined." >&2
+    return 1
+}
+
 # Is the emulated GUEST running? Ask about BOTH process shapes, because the
 # qemu interpreter's name is a PLATFORM detail, not a fact about the guest:
 # WSL registers qemu under binfmt as `arm-binfmt-P` and that path appears on
@@ -560,9 +690,22 @@ pad_is_wsl() {
 # interpreter names stay because arm-binfmt also matches the chroot's busybox
 # sh in the second or two before ./game execs, and qemu-arm covers a container
 # whose binfmt rewrites argv with its own interpreter path.
+#
+# THE INTERPRETER HAS TO BE THE PROGRAM, NOT A WORD ON THE LINE (PAD-1223).
+# The bare `-f 'arm-binfmt|qemu-arm'` matched ANY command line naming qemu -
+# and a PAD_PIVOT boot runs `cp -f /usr/bin/qemu-arm-static $R/.padqemu/game`
+# a moment before the guest exists. On the first start after WSL comes up the
+# page cache is cold, that copy outlives a 0.25 s poll, watch.sh's start wait
+# took it for the game, and its poll loop then found nothing in the gap before
+# /.padqemu/game exec'd: "the game exited", run stopped, the game coming up a
+# second later with nobody left to show it (Batman 66 in VPX, first launch
+# only). So the name must be argv0 - the interpreter's own path, which is how
+# both binfmt (`/usr/libexec/qemu-binfmt/arm-binfmt-P ./game ...`, measured)
+# and an explicit qemu put it; a cp, ldd or file ON qemu has its own argv0.
+PAD_GUEST_INTERP_RE='^[^ ]*(arm-binfmt|qemu-arm)[^ /]*( |$)'
 pad_guest_up() {
     [ -n "$(pad_pids -x game)" ] && return 0
-    [ -n "$(pad_pids -f 'arm-binfmt|qemu-arm')" ]
+    [ -n "$(pad_pids -f "$PAD_GUEST_INTERP_RE")" ]
 }
 
 # ---- THE GAME'S SPEED (PAD-484), FOR THE SHELL HALF OF THE HARNESS --------
@@ -718,6 +861,45 @@ pad_criu_runs() {
     local c
     c=$(pad_criu) || return 1
     "$c" --version >/dev/null 2>&1
+}
+
+#: ...AND ONE THAT IS ALLOWED TO FREEZE AND THAW HERE, which is the question
+#: under that one (PAD-871). `criu check` is not it: in a Docker container on
+#: a plain Linux host, with every right but CAP_SYS_TIME, it said "Looks
+#: good." and the thaw then died at "Unable to set a monotonic clock offset".
+#: So a throwaway sleep is frozen and thawed for real; it costs well under a
+#: second. ROOT ONLY (criu is). Prints criu's last words when it fails.
+pad_criu_roundtrip() {
+    local c d p rc=1
+    c=$(pad_criu) || return 1
+    d=$(mktemp -d) || return 1
+    # its own session and no terminal: the shape criu dumps without options.
+    # EVERY inherited descriptor closed, not only 0-2: under `wsl -e` the
+    # shell holds a terminal on fd 7, and criu refuses to dump a program
+    # with a terminal it did not start ("Found dangling tty").
+    (
+        for _fd in /proc/$BASHPID/fd/*; do
+            _fd=${_fd##*/}
+            [ "$_fd" -gt 2 ] 2>/dev/null && eval "exec $_fd>&-"
+        done
+        exec setsid sleep 60
+    ) </dev/null >/dev/null 2>&1 &
+    p=$!
+    if "$c" dump -t "$p" -D "$d" >"$d/dump.log" 2>&1; then
+        wait "$p" 2>/dev/null           # the dump killed it; free its pid
+        if "$c" restore -D "$d" -d --pidfile "$d/pid" >"$d/restore.log" 2>&1
+        then
+            rc=0
+            kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null
+        else
+            grep -h 'Error' "$d/restore.log" | tail -n 2
+        fi
+    else
+        grep -h 'Error' "$d/dump.log" | tail -n 2
+        kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
+    fi
+    rm -rf "$d"
+    return $rc
 }
 
 # THE OTHER HALF OF A PIVOT, AND THE HALF NOBODY CHECKED: the program that
@@ -1027,8 +1209,9 @@ pad_glguest_hash() { pad_src_hash "${1:-$RIG}" $PAD_GLGUEST_SRCS; }
 # day and the staged build died on `No such file` after the digest had
 # said the selector was current). input_fast.c is on it because every
 # platform's SRCS reads the FAST Neuron now (PAD-342), and the BOF hooks
+# and the DP / Spooky launchers (padselect_spk.sh, padselect_proc.sh: PAD-980)
 # because the Makefile installs them by name.
-PAD_SELECT_SRCS="codeselect/codeselect.c codeselect/conf.c codeselect/conf.h codeselect/colour.c codeselect/colour.h codeselect/settings.c codeselect/settings.h codeselect/theme.c codeselect/theme.h codeselect/themes.json codeselect/gen_themes.py codeselect/gfx.c codeselect/gfx.h codeselect/egl_stern.c codeselect/egl_stern.h codeselect/input.c codeselect/input.h codeselect/input_hw.c codeselect/input_padsw.c codeselect/input_jjpio.c codeselect/input_fast.c codeselect/egl_x11.c codeselect/stubs_jjp.c codeselect/audio_pulse.c codeselect/jjp_glibc.h codeselect/padselect.sh codeselect/padselect_bof.sh codeselect/pad_install_bof.sh codeselect/log.c codeselect/log.h codeselect/art.c codeselect/art.h codeselect/audio.c codeselect/audio.h codeselect/audio_fifo.c codeselect/audio_alsa.c codeselect/codec.c codeselect/codec.h codeselect/nvm.c codeselect/nvm.h codeselect/Makefile codeselect/select.sh codeselect/materialize.py codeselect/images.conf.example codeselect/third_party/stb_truetype.h codeselect/third_party/stb_image.h"
+PAD_SELECT_SRCS="codeselect/codeselect.c codeselect/conf.c codeselect/conf.h codeselect/colour.c codeselect/colour.h codeselect/settings.c codeselect/settings.h codeselect/testpics.c codeselect/testpics.h codeselect/video.c codeselect/video.h codeselect/theme.c codeselect/theme.h codeselect/themes.json codeselect/gen_themes.py codeselect/gfx.c codeselect/gfx.h codeselect/egl_stern.c codeselect/egl_stern.h codeselect/input.c codeselect/input.h codeselect/input_hw.c codeselect/input_padsw.c codeselect/input_jjpio.c codeselect/input_fast.c codeselect/input_pipe.c codeselect/egl_x11.c codeselect/stubs_jjp.c codeselect/audio_pulse.c codeselect/jjp_glibc.h codeselect/padselect.sh codeselect/padselect_bof.sh codeselect/padselect_dp.sh codeselect/padselect_spk.sh codeselect/padselect_s3.sh codeselect/padselect_proc.sh codeselect/pad_install_bof.sh codeselect/log.c codeselect/log.h codeselect/art.c codeselect/art.h codeselect/audio.c codeselect/audio.h codeselect/audio_fifo.c codeselect/audio_alsa.c codeselect/codec.c codeselect/codec.h codeselect/nvm.c codeselect/nvm.h codeselect/scores.c codeselect/scores.h codeselect/padmenu.c codeselect/padmenu_proc.py codeselect/Makefile codeselect/select.sh codeselect/materialize.py codeselect/images.conf.example codeselect/third_party/stb_truetype.h codeselect/third_party/stb_image.h"
 export PAD_SELECT_SRCS
 
 #: The installed selector, and what it was built from - stamped beside it,
@@ -1334,6 +1517,37 @@ pad_window_line() {
     printf '%s\n' "$head"
 }
 
+# ★ WAIT FOR THE RENDERER TO GET PAST ITS GRAPHICS DRIVER (PAD-854).
+#
+#     pad_gl_wait_started HOSTLOG TENTHS ALIVE-CMD [ARGS...]
+#
+# padglhost creates its ring FIRST, then opens and maps its window, and only
+# THEN asks Mesa for an EGL display - so the ring appearing says nothing about
+# whether the driver will come up. watch.sh used to wait for the ring and
+# 0.3 s more, and called a renderer still alive then "started". On a WSL VM
+# whose GPU the host refused (the PAD-497 shape: "Dropped Escape call",
+# "failed to create dri2 screen", "eglInitialize failed") d3d12 took a second
+# or two to give up, so the renderer died AFTER that check: the software
+# retry never ran, the guest was launched beside a dead renderer, and the run
+# ended a second later as "THE RENDERER STOPPED ON ITS OWN". A user's Star
+# Wars Pro start, twice in a row, 2026-10-29.
+#
+# "[padglhost] ready" is printed after eglInitialize, the config, the context
+# and the screen framebuffer, so it is the line that means the driver is up.
+# Returns 0 on that line, 1 the moment ALIVE-CMD says the renderer is gone,
+# and 0 after TENTHS tenths of a second with neither - a slow renderer that is
+# still alive is the caller's own liveness check to judge, as it always was.
+pad_gl_wait_started() {
+    local log=${1:-} n=${2:-0} i
+    shift 2 || return 0
+    for ((i = 0; i < n; i++)); do
+        grep -aq '^\[padglhost\] ready' "$log" 2>/dev/null && return 0
+        "$@" || return 1
+        sleep 0.1
+    done
+    return 0
+}
+
 # ★ WHY THERE IS NO WINDOW (PAD-127). padglhost's two headless lines are two
 # different problems, and only one of them is worth a second attempt:
 #
@@ -1403,8 +1617,12 @@ pad_headless_reason() {
 # NOTHING INSIDE LINUX CAN REPAIR IT: only a VM restart re-lays that overlay.
 # So the verdict is a WORD, computed here where a test can drive it, and
 # watch.sh both says what it means and carries on in software.
+#
+# THE SECOND ARGUMENT IS pad_gpu_refusal_mark's answer from BEFORE the attempt
+# (PAD-497, below). Given, a kernel refusal that arrived since is the verdict
+# gpulost; left out, the kernel is not asked.
 pad_renderer_verdict() {
-    local log=${1:-}
+    local log=${1:-} mark=${2-}
     [ -n "$log" ] && [ -r "$log" ] || { echo unknown; return 0; }
     # The loader aborts before main() of anything it was asked to load, so its
     # own name is the only reliable marker; the assertion text has changed
@@ -1421,7 +1639,70 @@ pad_renderer_verdict() {
     if grep -aq 'open ring:' "$log" 2>/dev/null; then
         echo ring; return 0
     fi
+    if [ -n "${2+x}" ] && pad_gpu_refused_since "$mark"; then
+        echo gpulost; return 0
+    fi
     echo unknown
+}
+
+# ★ WSL'S OWN GPU DRIVER SAID NO (PAD-497).
+#
+# THE FAULT, reported 2026-10-09 by David with a screen recording of the King
+# Kong mode: "Emulator video playback is very stuttery here". The renderer had
+# drawn every run on the RTX 5090 up to Oct 7; that evening every start died on
+#
+#     libEGL warning: egl: failed to create dri2 screen
+#     eglInitialize failed
+#
+# and went on in software, and the kernel said why each time:
+#
+#     misc dxg: dxgk: dxgvmb_send_create_process: create_process failed -75
+#
+# /dev/dxg is how a WSL process reaches the Windows GPU, and the dxg driver
+# asks Windows to register every new GPU process. Windows said no. That
+# morning it had reinstalled the NVIDIA driver (System log, UserPnp 20003 for
+# nvlddmkm, 09:36) under a VM that had been up 186 hours, and a VM keeps the
+# GPU connection it started with (microsoft/WSL#41701 has the same kernel line,
+# same card, while the GPU is reset under a running VM). As with the stale
+# library above, nothing inside Linux repairs it; a VM restart does.
+#
+# THE RENDERER'S OWN LOG CANNOT TELL THIS FROM OTHER EGL FAILURES - Mesa prints
+# the same two lines for an X server it cannot share memory with - so the
+# evidence is the kernel's, and it has to be NEW: a refusal stays in the ring
+# buffer for hours and says nothing about this attempt. watch.sh takes the
+# mark below before it starts the renderer and the verdict compares.
+#
+# THE MARK IS "<count>|<last line>": the last line carries the kernel's
+# timestamp, so a new refusal changes it even when the ring buffer is full and
+# old ones are falling off the far end (WSL's relay floods it - David's held
+# only four hours). The count is for a kernel that prints no timestamps.
+#
+# Root only on Ubuntu, which restricts dmesg: unreadable is an empty mark
+# before and after, which is no evidence, never a verdict. PAD_KMSG_FILE
+# stands in for the kernel log in the tests.
+pad_kmsg() {
+    if [ -n "${PAD_KMSG_FILE:-}" ]; then
+        cat "$PAD_KMSG_FILE" 2>/dev/null
+    else
+        dmesg 2>/dev/null
+    fi
+}
+
+pad_gpu_refusal_mark() {
+    local k
+    k=$(pad_kmsg | grep -a 'dxgk:.*create_process failed')
+    [ -n "$k" ] || { echo "0|"; return 0; }
+    printf '%s|%s\n' "$(printf '%s\n' "$k" | wc -l | tr -d ' ')" \
+        "$(printf '%s\n' "$k" | tail -1)"
+}
+
+# 0 when the kernel has refused a GPU process since <mark> was taken.
+pad_gpu_refused_since() {   # <mark>
+    local was=${1:-0|} now
+    now=$(pad_gpu_refusal_mark)
+    [ "${now#*|}" != "" ] || return 1
+    [ "${now#*|}" != "${was#*|}" ] && return 0
+    [ "${now%%|*}" -gt "${was%%|*}" ] 2>/dev/null
 }
 
 # WHAT TO DO ABOUT IT, in the user's words rather than the loader's. Kept
@@ -1453,6 +1734,20 @@ pad_renderer_advice() {
             echo "[watch]   guest filesystem is not there rather than anything"
             echo "[watch]   about graphics. Pick a card image and start again"
             echo "[watch]   and it is built for you." ;;
+        gpulost)
+            echo "[watch]   WSL HAS LOST THE GRAPHICS CARD: its kernel refused"
+            echo "[watch]   the renderer just now ('dxgk: ... create_process"
+            echo "[watch]   failed' in dmesg). Windows does that to a WSL that"
+            echo "[watch]   keeps running while its graphics driver is updated"
+            echo "[watch]   or reset; a session that has been up for days is"
+            echo "[watch]   the one that gets caught (its age is printed"
+            echo "[watch]   further up this log)."
+            echo "[watch]   The game is drawn in software until then, and its"
+            echo "[watch]   videos stutter."
+            echo "[watch]   THE CURE IS A VM RESTART: Stop, then 'Restart"
+            echo "[watch]   WSL...' on the Emulate tab - or 'wsl --shutdown' in"
+            echo "[watch]   a Windows terminal - and start again. If the"
+            echo "[watch]   next run says this too, restart Windows." ;;
     esac
 }
 
@@ -1520,7 +1815,7 @@ pad_display_repair() {
 pad_export_win() {
     PAD_ROOT_WSL=$ROOT
     export PAD_ROOT_WSL
-    WSLENV="${WSLENV:+$WSLENV:}PAD_ROOT/p:PAD_TABLES/p:PAD_WSL_DISTRO:PAD_ROOT_WSL"
+    WSLENV="${WSLENV:+$WSLENV:}PAD_ROOT/p:PAD_TABLES/p:PAD_LOGDIR/p:PAD_WSL_DISTRO:PAD_ROOT_WSL"
     # The slot and the label cross too: the playfield window titles itself
     # with them, keys its saved position by slot, and hands PAD_SLOT back to
     # every helper it runs in WSL so a switch press lands in ITS slot's rings.
@@ -1851,4 +2146,30 @@ pad_sounddevice_hint() {
     echo "this PC has no Windows Python. Install one from python.org"
     echo "(tick \"Add python.exe to PATH\"), then in a Windows terminal:"
     echo "python -m pip install --user sounddevice"
+}
+
+# ---- AND STOPPING THAT PLAYER ---------------------------------------------
+#
+# The sound player is a native Windows process reached through interop, so a
+# pkill in here reaches only its WSL-side stub, and killing the stub leaves the
+# Windows process running: the same asymmetry the playfield has (watch.sh's
+# teardown, measured 2026-08-05). So this asks Windows. It matches on the
+# SCRIPT and on THIS SLOT'S PORT, never on the image name: killing every
+# python.exe would take out whatever else the user runs, and another rig's
+# player is on another port. `Name -like 'py*'` keeps the query from matching
+# the powershell.exe running it, whose own command line carries both strings
+# (observed killing the invoking WSL session outright). Bounded, because it is
+# an interop exec (see pad_bounded), at 30 s rather than 10 because a busy
+# PC's PowerShell can take several seconds just to start. playaudio.sh's EXIT
+# trap and watch.sh's teardown both call it (PAD-510).
+pad_win_stop_player() {           # [port]
+    local port=${1:-${PAD_AUDIO_PORT:-45997}} t=
+    command -v timeout >/dev/null 2>&1 && t="timeout 30"
+    $t /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile \
+        -Command "Get-CimInstance Win32_Process |
+                  Where-Object { \$_.Name -like 'py*' -and
+                                 \$_.CommandLine -like '*padplay.py*' -and
+                                 \$_.CommandLine -like '* $port *' } |
+                  ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" \
+        >/dev/null 2>&1 || true
 }

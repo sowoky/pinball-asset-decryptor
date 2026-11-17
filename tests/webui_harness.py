@@ -53,6 +53,12 @@ class WebHarness:
         self.ctx.loop.call(lambda: None, timeout=timeout)
 
 
+from pinball_decryptor.core import name_memory as _name_memory  # noqa: E402
+
+# the real store, so web_app can tell a test's own audio_names.json from it
+_REAL_AUDIO_NAMES = _name_memory.AUDIO_NAMES_FILE
+
+
 @contextlib.contextmanager
 def web_app(tmp_path, mfr=None, era=None, settings=None):
     from pinball_decryptor.core import session_log
@@ -71,6 +77,13 @@ def web_app(tmp_path, mfr=None, era=None, settings=None):
     old_app_settings = app_module.SETTINGS_FILE
     config.SETTINGS_FILE = str(settings_file)
     app_module.SETTINGS_FILE = str(settings_file)
+    # the Audio Properties name / Type memory lives beside the settings: a
+    # test's renames must not land in the real audio_names.json (a test that
+    # already pointed it at its own file keeps that one and reads it back)
+    from pinball_decryptor.core import name_memory
+    old_audio_names = name_memory.AUDIO_NAMES_FILE
+    if old_audio_names == _REAL_AUDIO_NAMES:
+        name_memory.AUDIO_NAMES_FILE = str(cfg / "audio_names.json")
     old_log_dir = session_log.LOG_DIR_OVERRIDE
     session_log.LOG_DIR_OVERRIDE = str(tmp_path / "logs")
     # a per-project log mirror left on by an earlier test must not leak in
@@ -88,6 +101,12 @@ def web_app(tmp_path, mfr=None, era=None, settings=None):
         os.environ[k] = "1"
     old_messagebox = app_module.messagebox
     old_filedialog = app_module.filedialog
+    # Restart to update's splash is a real window on the desktop (a
+    # PowerShell/WPF process, PAD-1036): never from a test.  A test that
+    # wants to see it asked for patches start_splash inside the with.
+    splash_module = app_module.update_splash
+    old_start_splash = splash_module.start_splash
+    splash_module.start_splash = lambda version, **kw: (False, "test run")
 
     # Tk tests in the same process leave destroyed Tk interpreters in
     # garbage cycles.  If the collector finds them on the UI loop's thread,
@@ -132,9 +151,11 @@ def web_app(tmp_path, mfr=None, era=None, settings=None):
         ctx.bus.close()
         config.SETTINGS_FILE = old_settings
         app_module.SETTINGS_FILE = old_app_settings
+        name_memory.AUDIO_NAMES_FILE = old_audio_names
         compat.uninstall()
         app_module.messagebox = old_messagebox
         app_module.filedialog = old_filedialog
+        splash_module.start_splash = old_start_splash
         session_log.LOG_DIR_OVERRIDE = old_log_dir
         session_log._project_dir = old_project_dir
         for k, v in old_env.items():

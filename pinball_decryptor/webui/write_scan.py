@@ -16,7 +16,7 @@ import os
 import re
 
 from ..core.checksums import (NON_ASSET_DIRS, TRACKING_SIDECARS,
-                              is_other_extract)
+                              is_other_extract, md5_file)
 from ..core.staged_originals import ORIG_DIR
 
 #: Write-tab status strings for pending on-screen-text edits (main_window.py).
@@ -146,39 +146,114 @@ def walk_changes(assets_path, saved, *, hide_imported_cache, current,
         if after is None or after != before:
             hashcache.save(assets_path, hcache)
 
-    changed = []
-    for root_dir, dirs, files in os.walk(assets_path):
-        dirs[:] = [d for d in dirs
-                   if d != ORIG_DIR
-                   and not is_other_extract(os.path.join(root_dir, d))
-                   and not (root_dir == assets_path
-                            and d in NON_ASSET_DIRS)]
-        for name in files:
+    # 1. the walk: every baseline file with its size+mtime, from the folder
+    #    listings (on Windows a listing carries the stats, so no stat per
+    #    file), in os.walk's order; the ones the cache answers need no read
+    todo = []                         # [rel, ext, full, size, mtime_ns, md5]
+    for rel_dir, entries in _listings(assets_path):
+        for entry in entries:
             if not current():
                 return None
+            name = entry.name
             if (name.startswith(".")
                     or name == "fl_decrypted.dat"
                     or name.endswith(".img")
                     or name in TRACKING_SIDECARS):
                 continue
-            full = os.path.join(root_dir, name)
-            rel = os.path.relpath(full, assets_path).replace("\\", "/")
+            rel = rel_dir + name
             if rel not in saved:
                 continue
             if hide_imported_cache and rel.startswith("pck/.godot/imported/"):
                 continue
-            digest = hashcache.md5_for(full, rel, hcache)
-            if digest is None or digest == saved[rel]:
+            try:
+                st = entry.stat()
+            except OSError:
+                continue
+            ent = hcache.get(rel)
+            known = (ent[2] if ent and ent[0] == st.st_size
+                     and ent[1] == st.st_mtime_ns else None)
+            todo.append([rel, os.path.splitext(name)[1].lstrip(".") or "?",
+                         entry.path, st.st_size, st.st_mtime_ns, known])
+
+    # 2. the files the cache could not answer are hashed on a few threads
+    #    (MD5 runs outside the GIL: one core hashed 1.8 GB in 2.6 s, PAD-610)
+    def _hash(item):
+        if not current():
+            return False
+        try:
+            return md5_file(item[2])
+        except OSError:
+            return None
+
+    misses = [item for item in todo if item[5] is None]
+    results = iter(())
+    pool = None
+    if misses:
+        from concurrent.futures import ThreadPoolExecutor
+        pool = ThreadPoolExecutor(max_workers=min(HASH_THREADS, len(misses)))
+        results = pool.map(_hash, misses)
+
+    # 3. in walk order: what differs from the baseline
+    changed = []
+    try:
+        for item in todo:
+            digest = item[5]
+            if digest is None:
+                digest = next(results)
+                if digest is False:                     # superseded
+                    _save()
+                    return None
+                if digest is None:
+                    continue
+                hcache[item[0]] = [item[3], item[4], digest]
+            if digest == saved[item[0]]:
                 continue
             if not current():
                 _save()
                 return None
-            ext = os.path.splitext(name)[1].lstrip(".") or "?"
-            changed.append((rel, ext))
+            changed.append((item[0], item[1]))
             if on_found is not None:
                 on_found(len(changed))
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
     _save()
     return changed
+
+
+#: how many files a change walk hashes at once
+HASH_THREADS = 4
+
+
+def _listings(assets_path):
+    """``(rel_dir, file_entries)`` for every folder of a project the change
+    walk reads, top-down in os.walk's order, with the folders it never reads
+    (the staged originals, another extract inside this one, the project's
+    own non-asset folders at the top) left out.  ``rel_dir`` is ``""`` or
+    ``"a/b/"``."""
+    stack = [(assets_path, "")]
+    while stack:
+        path, rel_dir = stack.pop()
+        files, dirs = [], []
+        try:
+            with os.scandir(path) as it:
+                for entry in it:
+                    try:
+                        is_dir = entry.is_dir()
+                    except OSError:
+                        is_dir = False
+                    (dirs if is_dir else files).append(entry)
+        except OSError:
+            continue
+        yield rel_dir, files
+        sub = []
+        for entry in dirs:
+            name = entry.name
+            if (name == ORIG_DIR or (not rel_dir and name in NON_ASSET_DIRS)
+                    or entry.is_symlink() or is_other_extract(entry.path)):
+                continue
+            sub.append((entry.path, rel_dir + name + "/"))
+        stack.extend(reversed(sub))
 
 
 # ----------------------------------------------------------------------
@@ -256,7 +331,7 @@ def pending_rows(window, mfr, assets_path, *, grow_on, direct):
             for text, (src, dst) in per_text.items():
                 rows.append(("%s  —  %s → %s" % (text, text_colors.to_hex(src),
                                                   text_colors.to_hex(dst)),
-                             "text", "Pending (text colour)", "pending"))
+                             "text", "Pending (text color)", "pending"))
         try:
             from ..plugins.stern import text_layout
             relaid = text_layout.load(assets_path)
@@ -281,7 +356,28 @@ def pending_rows(window, mfr, assets_path, *, grow_on, direct):
     rows.extend(own_clip_rows(mfr, assets_path, direct=direct))
     rows.extend(colour_rows(mfr, assets_path))
     rows.extend(chosen_files_rows(mfr, assets_path))
+    rows.extend(score_colour_rows(mfr, assets_path))
     return rows
+
+
+#: PAD-507: Godzilla's score panel colours, words of the game program
+PENDING_SCORE_COLOURS = "Pending (score colors)"
+
+
+def score_colour_rows(mfr, assets_path):
+    """PAD-507: the score panel colours the project changes (made in the game program's
+    code, so a scene's colour never reaches them), as one pending row."""
+    if not assets_path or mfr is None or getattr(mfr, "key", "") != "stern":
+        return []
+    try:
+        from ..plugins.stern import score_colours
+        if not score_colours.pending(assets_path):
+            return []
+        colours = score_colours.wanted(assets_path)
+    except Exception:                                   # noqa: BLE001
+        return []
+    return [("score panel colors  —  %s" % score_colours.describe(colours),
+             "program", PENDING_SCORE_COLOURS, "pending")]
 
 
 def variant_rows(mfr, assets_path):
@@ -556,6 +652,12 @@ def fingerprint(window, assets_path, epoch, grow_on):
     try:
         from ..plugins.stern import stock_modes
         parts.append(stock_modes.fingerprint(assets_path))
+    except Exception:                                   # noqa: BLE001
+        parts.append(None)
+    try:
+        # PAD-507: the score panel colours
+        from ..plugins.stern import score_colours
+        parts.append(sorted(score_colours.picks(assets_path).items()))
     except Exception:                                   # noqa: BLE001
         parts.append(None)
     return repr(parts)

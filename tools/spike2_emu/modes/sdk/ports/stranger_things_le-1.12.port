@@ -175,6 +175,22 @@ site surface_find     0x004c5750 0xe92d4070 0xe24dd008
 site surface_set_video 0x004bcfe4 0xe5d03238 0xe92d4ff0
 site surface_play     0x004ba784 0xe5d03238 0xe92d43f0
 site surface_stop     0x004ba288 0xe5d03238 0xe92d40f0
+# PAD-725: the surface's own seek, length and position (PAD-530's, from Bond 1.06): a mode's clip the game's own
+# clip took the surface from comes back where it would be by then. Placed by the James Bond LE 1.06 recipe at
+# its distances from surface_play (+0x1bc / -0x1274 / -0x360: the older player), each proven by its call: the
+# player's virtual seek (+0x20), duration (+0x28) and position (+0x24), whose entries call gst_element_seek /
+# query_duration / query_position.
+site surface_seek     0x004ba940 0xe92d43f0 0xe1a07003
+site surface_duration 0x004b9510 0xe5d03238 0xe92d40f0
+site surface_position 0x004ba424 0xe5d03238 0xe92d40f0
+# PAD-725: the game's reel (a clip of its own kept in step with a song): its tick waits while a clip of
+# ours has the bank's surface. Found by what it calls (surface_position, surface_seek, surface_play) and
+# its prologue (push; mov r4, r0; ldr r0, [r0, #0x1c]; cmp r0, #0; popeq).
+site reel_tick       0x003df540 0xe92d47f0 0xe1a04000
+# PAD-725: the backdrop on the bank's surface, as Bond's (PAD-521): a mode's loop plays there again whenever it
+# is idle, and a clip the game loops there gets one pass before the loop takes it back. Emulator-proven on the
+# newest build of every title with a clip v2 bank, 2026-10-25.
+value backdrop_surface 1
 value surface_playing       2
 value scene_player_scene    0x10
 
@@ -400,3 +416,135 @@ value block_ret_19          0
 value block_ret_20          0
 value block_ret_21          0
 value block_ret_22          0
+
+# ---- PAD-615: the game's Challenge list (MODE_SDK.md "A mode in the game's Challenge list"; challenge_lines.py):
+# each challenge's own start on the ball's start event, run in a Player Challenge game with its pick. A mode that holds
+# one starts instead of it; the game ends the challenge game at the first ball's end either way.
+value challenge_on_flag   16
+# Demogorgon: its handler starts 0x5ef8c
+site  challenge_go_0    0x0005f228 0xe92d4008 0xeb086c87
+value challenge_flag_0  139
+text  challenge_name_0  Demogorgon
+# Send It Back: its handler starts 0x12e0c4
+site  challenge_go_1    0x0012e31c 0xe92d4008 0xeb05304a
+value challenge_flag_1  140
+text  challenge_name_1  Send It Back
+# Light the Fire: its handler starts 0x1395c8
+site  challenge_go_2    0x0013981c 0xe92d4008 0xeb05030a
+value challenge_flag_2  141
+text  challenge_name_2  Light the Fire
+# Final Showdown: its handler starts 0x1984f0
+site  challenge_go_3    0x00198728 0xe92d4008 0xeb038747
+value challenge_flag_3  142
+text  challenge_name_3  Final Showdown
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+site  challenge_balls     0x0027ee84 0xe92d4030 0xe1a05000
+site  challenge_balls_2   0x0041fb3c 0xe92d4038 0xe1a04000
+site  challenge_extra_ball 0x001ccbe4 0xe3063018 0xe3403077
+site  challenge_menu      0x00092578 0xe1a07000 0xe3170080
+site  challenge_menu_pick 0x00092748 0xe2433001 0xe3530005
+value challenge_menu_list_at   532
+value challenge_menu_count_at  28
+value challenge_menu_cap       7
+value challenge_menu_entry     12
+value challenge_menu_kind      2
+value challenge_menu_slot      0
+value challenge_menu_caption   1901
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x0042841c 0xe3032456 0xe3402082
+# PAD-640: the game's end-of-game high scores (a mode's challenge game keeps the mode's own) and each challenge's champion category
+site  challenge_scores       0x003f63a8 0xe92d4ff0 0xe24dd0c4
+site  challenge_score_entry  0x003f58dc 0xe1a03000 0xe30a038c
+# DEMOGORGON CHALLENGE CHAMPION
+value challenge_scores_cat_0  9
+# SEND IT BACK CHALLENGE CHAMPION
+value challenge_scores_cat_1  10
+# LIGHT THE FIRE CHALLENGE CHAMPION
+value challenge_scores_cat_2  11
+# CHALLENGE CHAMPION
+value challenge_scores_cat_3  12
+# PAD-660: the attract mode's last challenge champion page; a mode's challenge champion is shown after it, in the same page
+site  challenge_page        0x0019d4d8 0xe92d4ff0 0xe3a0000c
+site  challenge_page_text   0x00233330 0xe92d4008 0xe3003d6c
+site  challenge_page_yield  0x00378f78 0xe30d3cf8 0xe340307b
+value challenge_page_cat    12
+value challenge_page_title  3483
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x00424408 0xe92d4010 0xe3024e94
+value ball_launch_flag       11
+value ball_launch_wait_flag  12
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x003f63a8 0xe92d4ff0 0xe24dd0c4
+
+# PAD-710: the game's own books of its modes (mode_framework.py, from this build's audit and flag names): a
+# mode of ours in one's place counts its STARTED audit and PLAYED flag, and when completed its COMPLETED ones
+site  audit_add              0x003ad298 0xe92d43f0 0xe2505000
+value place_audit_started_0        188
+value place_flag_played_0          111
+value place_audit_started_1        189
+value place_audit_started_2        190
+value place_audit_started_3        191
+value place_audit_started_4        192
+value place_audit_started_5        196
+value place_audit_started_6        250
+value place_audit_started_7        252
+value place_audit_started_8        255
+value place_audit_started_9        255
+value place_audit_started_10       359
+value place_audit_started_11       285
+value place_audit_completed_11     287
+value place_audit_started_12       288
+value place_audit_completed_12     290
+value place_audit_started_13       291
+value place_audit_completed_13     293
+value place_audit_started_14       294
+value place_audit_completed_14     296
+value place_audit_started_15       297
+value place_audit_completed_15     299
+value place_audit_started_16       300
+value place_audit_completed_16     302
+value place_audit_started_17       303
+value place_audit_completed_17     305
+value place_audit_started_18       306
+value place_audit_completed_18     308
+value place_audit_started_19       309
+value place_audit_completed_19     311
+value place_audit_started_20       312
+value place_audit_completed_20     314
+value place_audit_started_21       315
+value place_audit_completed_21     317
+value place_audit_started_22       318
+value place_audit_completed_22     320
+
+# PAD-747: the game's other modes it keeps books of (mode_framework.done_lines): a mode of ours may start once
+# some of them are completed - each one's COMPLETED audit (through audit_add) or COMPLETED flag
+text  done_name_0                  Story Mode
+value done_audit_0                 322
+text  done_name_1                  Total Isolation Multiball
+value done_flag_1                  59
+text  done_name_2                  Total Isolation 2 Multiball
+value done_flag_2                  65
+text  done_name_3                  Season One Wizard Mode Multiball
+value done_flag_3                  71
+text  done_name_4                  Season Two Wizard Mode Multiball
+value done_flag_4                  77
+text  done_name_5                  Cant Stop This Multiball
+value done_flag_5                  98
+text  done_name_6                  Demogorgon Challenge
+value done_flag_6                  105
+text  done_name_7                  Wizard Mode Multiball
+value done_flag_7                  108
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x004f02ec 0xe5d13000 0xe3530008
+data sw_listen             0x00775d78
+data sw_boards             0x00776494
+site coil_used             0x00202eec 0xe92d43f8 0xe3048f00

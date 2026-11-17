@@ -260,6 +260,30 @@ def badge_panel(panel, font, label):
     return _pad4(np.asarray(im))
 
 
+#: PAD-733: the badge's number box (the timer badge's ``_Num`` text at (68.6, 295.4), its box 18..98 x -2..67.2), where
+#: the READY picture goes
+READY_X, READY_Y, READY_W, READY_H = 86.6, 293.4, 80, 69
+
+
+def badge_ready(font, words):
+    """PAD-733 (David: "Ideally the HUD indicator would show which shot to hit in small text where the number was"):
+    ``words`` (the shot that starts the mode) in white in the game's lettering, one or two lines fitted to the badge's
+    number box, on clear - the progress panel shows it in place of the 0."""
+    from PIL import Image
+    w = words.upper().split()
+    lines = [" ".join(w)] if len(w) == 1 else [" ".join(w[:len(w) // 2 + len(w) % 2]), " ".join(w[len(w) // 2 + len(w) % 2:])]
+    rows = [_pil(font.render(ln, "GameFont_Primary", 41)) for ln in lines]
+    total_h = sum(r.height for r in rows) + 4 * (len(rows) - 1)
+    s = min(1.0, (READY_W - 4) / max(r.width for r in rows), (READY_H - 6) / total_h)
+    im = Image.new("RGBA", (READY_W, READY_H), (0, 0, 0, 0))
+    y = (READY_H - total_h * s) / 2
+    for r in rows:
+        rr = r.resize((max(1, int(r.width * s)), max(1, int(r.height * s))), Image.LANCZOS)
+        im.alpha_composite(rr, (int((READY_W - rr.width) / 2), int(y)))
+        y += rr.height + 4 * s
+    return _pad4(np.asarray(im))
+
+
 def badge_disc(disc, icon):
     """The stock glowing disc with its silhouette replaced by ``icon`` (an L array, 255 = ink)."""
     a = disc.astype(np.float32).copy()
@@ -296,7 +320,7 @@ def _done(im, size=44):
 
 def icon(kind):
     """A 44x44 silhouette (L array) for a badge disc: bolt, ghidorah, oxygen, maser, xilien, anguirus,
-    radiation, or a letter."""
+    radiation, rage, crystal, snowflake, rose, claw, or a letter. A card's own picture: :func:`icon_picture`."""
     im, d, n = _canvas()
     c = n / 2
     if kind == "radiation":
@@ -388,6 +412,31 @@ def icon(kind):
         d.rectangle((0, 0, 0, 0), fill=0)
         d.text((c - 30, c - 50), str(kind)[:1], fill=255, font=ImageFont.load_default())
     return _done(im)
+
+
+def icon_picture(path):
+    """A 44x44 silhouette (L array) from a mode's own picture (PAD-690: mode_assets.BADGE_ICON_FILE in its folder):
+    its alpha where it has one, else its brightness, fitted into the square on its longer side."""
+    from PIL import Image
+    im = Image.open(path)
+    im = im.getchannel("A") if "A" in im.getbands() else im.convert("L")
+    w, h = im.size
+    k = 44.0 / max(w, h)
+    im = im.resize((max(1, int(round(w * k))), max(1, int(round(h * k)))), Image.LANCZOS)
+    out = Image.new("L", (44, 44), 0)
+    out.paste(im, ((44 - im.width) // 2, (44 - im.height) // 2))
+    return np.asarray(out)
+
+
+def badge_icon(spec, timer):
+    """A badge's icon: the mode's own picture (``icon_file``), else the drawn icon unique_icons picked, else the
+    one its timer names."""
+    if spec.get("icon_file"):
+        try:
+            return icon_picture(spec["icon_file"])
+        except (OSError, ValueError) as e:
+            raise HudError("%s cannot be read as a badge icon: %s" % (spec["icon_file"], e))
+    return icon(spec.get("badge_icon") or timer.get("icon") or "xilien")
 
 
 def gauge_pips(kind, n, colours):
@@ -624,9 +673,9 @@ def _bitmap_node(p, ids, name, rgba, x, y, textures):
                    [(1, p.poly["bitmap"], SW.FLAG | po, SW.bitmap_body(p.symbol["bitmap"], w, h, tex))])
 
 
-def _group_node(p, ids, name, kids, x=0.0, y=0.0):
+def _group_node(p, ids, name, kids, x=0.0, y=0.0, scale=1.0):
     pn, po = ids.take(2)
-    return SW.node(SW.FLAG | pn, name, 1, [(1, 1)], [(1, SW.matrix(tx=x, ty=y))],
+    return SW.node(SW.FLAG | pn, name, 1, [(1, 1)], [(1, SW.matrix(sx=scale, sy=scale, tx=x, ty=y))],
                    [(1, p.poly["sprite"], SW.FLAG | po, SW.sprite_body(p.symbol["sprite"], kids))])
 
 
@@ -661,7 +710,7 @@ def hud_group(p, ids, slug, spec, fonts, art, textures):
     timer = spec.get("timer")
     if timer:
         panel = badge_panel(art["panel"], art["font"], timer.get("label") or title)
-        disc = badge_disc(art["disc"], icon(timer.get("icon") or "xilien"))
+        disc = badge_disc(art["disc"], badge_icon(spec, timer))
         tk = [_bitmap_node(p, ids, names["Timer"] + "_Panel", panel, -21.0, 267.0, textures),
               _bitmap_node(p, ids, names["Timer"] + "_Icon", disc, 0.0, 281.8, textures),
               _text_node(p, ids, names["Timer_Num"], "00", (p.font[0], p.font[1]), 68.6, 295.4,
@@ -726,11 +775,95 @@ def bar_gauge(p, ids, g, gauge, sec, textures):
     return gk
 
 
+#: PAD-680: the pack's progress panel - a column of badges at the right edge under the stock rage meter, each the
+#: badge a mode's timer wears (its panel lettered with its label, its icon disc) with the shots it still needs as the
+#: number (David: "make it an image like we do for when the mode timer is running and it just countdowns the shots
+#: needed, with a logo for King Kong or something on it ... that way we can show a handful of them at the same
+#: time"). Each slot holds every mode's badge, hidden; the kit shows one and writes the slot's number
+#: (intricate_kit.h, kit_prog_tick). PAD-690: PROGRESS_SLOTS slots (fewer with fewer modes), the badges scaled so
+#: the column fills PROGRESS_Y to PROGRESS_BOTTOM, right-aligned at the glass's edge; the newest progress on top,
+#: the oldest dropping off (David, on 13 slots at a third of a badge: "way too tiny ... make them large so they are
+#: more legible" - one column of 7). The panel is down during the game's battles, as before.
+PROGRESS_GROUP = "PadMode_Progress"
+PROGRESS_SLOTS = 7                   # the kit's KIT_PROG_SLOTS (16) is the most it looks for; it uses those there are
+PROGRESS_Y, PROGRESS_BOTTOM, PROGRESS_DY = 90.0, 596.0, TIMER2_DY     # under the rage meter, over PLAYER 1..
+PROGRESS_RIGHT = GLASS_W - 4.0
+
+
+def progress_layout(n, panel_w):
+    """(scale, x, [y per slot]) of ``n`` slot groups: a badge PROGRESS_DY tall at scale 1 (its panel ``panel_w``
+    wide, at x -21 and y 267 in its group), as large as fits, never larger than the timer's own."""
+    n = max(1, n)
+    s = min(1.0, (PROGRESS_BOTTOM - PROGRESS_Y) / (n * PROGRESS_DY))
+    x = PROGRESS_RIGHT - s * (panel_w - 21.0)
+    return s, x, [PROGRESS_Y - 267.0 * s + PROGRESS_DY * s * k for k in range(n)]
+
+
+def progress_group(p, ids, huds, art, textures):
+    """The Sprite group ``PadMode_Progress`` (bytes): a slot group ``_S<k>`` per mode (PROGRESS_SLOTS at most), each
+    with a badge group ``_S<k>_<slug>`` (panel + icon, and PAD-733 ``_Ready``: the shot that starts it, when the
+    spec names one - shown at 0 in the number's place) a mode and the slot's number text ``_S<k>_Num``. A badge's
+    geometry is the timer badge's (hud_group): the panel at (-21, 267), the icon at (0, 281.8), the number at
+    (68.6, 295.4) in its group; the slot scales it (progress_layout)."""
+    badges = {}
+    for slug, spec in huds:
+        spec = spec or {}
+        timer = spec.get("timer") or spec.get("badge") or {}          # PAD-690: a mode with no timer names its badge
+        title = spec.get("title") or spec.get("name") or slug.upper()
+        ready = spec.get("ready")                                     # PAD-733: the shot that starts it, at 0
+        badges[slug] = (badge_panel(art["panel"], art["font"], timer.get("label") or title),
+                        badge_disc(art["disc"], badge_icon(spec, timer)),
+                        badge_ready(art["font"], ready) if ready else None)
+    n = min(len(badges), PROGRESS_SLOTS)
+    scale, x, ys = progress_layout(n, art["panel"].shape[1])
+    slots = []
+    for k in range(n):
+        sk = "%s_S%d" % (PROGRESS_GROUP, k + 1)
+        kids = [_group_node(p, ids, "%s_%s" % (sk, slug), [
+                    _bitmap_node(p, ids, "%s_%s_Panel" % (sk, slug), panel, -21.0, 267.0, textures),
+                    _bitmap_node(p, ids, "%s_%s_Icon" % (sk, slug), disc, 0.0, 281.8, textures)]
+                    # a group around the picture, as a gauge's pips are: the game finds a group by its path, not a
+                    # Bitmap (v33 on the rig: a bare picture was never found, never hidden, and showed at 7)
+                    + ([_group_node(p, ids, "%s_%s_Ready" % (sk, slug), [
+                        _bitmap_node(p, ids, "%s_%s_ReadyArt" % (sk, slug), ready, READY_X, READY_Y, textures)])]
+                       if ready is not None else []))
+                for slug, (panel, disc, ready) in badges.items()]
+        kids.append(_text_node(p, ids, sk + "_Num", "00", (p.font[0], p.font[1]), 68.6, 295.4,
+                               (18.0, -2.0, 98.0, 67.2), tail=tuple(p.text_tail)))
+        slots.append(_group_node(p, ids, sk, kids, x, ys[k], scale))
+    return _group_node(p, ids, PROGRESS_GROUP, slots)
+
+
+#: PAD-690: the drawn icons, in the order a mode with none (or one another mode of the card took first) is given
+#: the next free one
+ICONS = ("xilien", "radiation", "bolt", "ghidorah", "oxygen", "maser", "anguirus", "rage", "crystal", "snowflake",
+         "rose", "claw")
+
+
+def unique_icons(huds):
+    """``huds`` with no two modes' badges alike (David, PAD-690: "make sure that each one has a unique icon
+    too"): a mode with its own picture (``icon_file``) wears it; one naming a drawn icon keeps it unless an earlier
+    mode has it; one naming none, or a taken one, gets the next free drawn icon (when one is left). The pick goes in
+    the spec's ``badge_icon``, which the running timer's badge and the progress panel's both wear."""
+    used, out = set(), []
+    for slug, spec in huds:
+        spec = dict(spec or {})
+        if not spec.get("icon_file"):
+            want = (spec.get("timer") or spec.get("badge") or {}).get("icon")
+            if not want or want in used:
+                want = next((k for k in ICONS if k not in used), want or "xilien")
+            used.add(want)
+            spec["badge_icon"] = want
+        out.append((slug, spec))
+    return out
+
+
 def build_huds(p, data, huds, font_scene):
     """(library entry, [group bytes], {slug: hud_names}) for ``huds`` = [(slug, spec)] in the profiled
     scene ``data`` (``p`` its profile, rebased when ``data`` has grown): the game font carried from
-    ``font_scene`` (the bytes of :data:`GAME_FONT_SCENE`) and one HUD group per mode. Called by
-    :func:`scene_write.add_screens`, which splices them in with the screens and clips in one pass."""
+    ``font_scene`` (the bytes of :data:`GAME_FONT_SCENE`), one HUD group per mode and (PAD-680) the pack's
+    progress panel. Called by :func:`scene_write.add_screens`, which splices them in with the screens and
+    clips in one pass."""
     if not p.scene_id.startswith("32e6ae28"):
         raise HudError("a mode's HUD goes in Godzilla's slide-outs scene 32e6ae28, not %s" % p.label)
     base = p.first_free_id + FONT_BASE_GAP
@@ -742,12 +875,15 @@ def build_huds(p, data, huds, font_scene):
     art = {"panel": panel, "disc": disc, "font": GameFont(font_scene)}
     ids = _Ids(base + 0x800)
     textures, groups, names = {}, [], {}
+    huds = unique_icons(huds)
     for slug, spec in huds:
         name = hud_names(slug)["group"]
         if SW.string(name) in data:
             raise HudError("the HUD scene already has %s" % name)
         groups.append(hud_group(p, ids, slug, spec or {}, fonts, art, textures))
         names[slug] = hud_names(slug)
+    if huds and SW.string(PROGRESS_GROUP) not in data:
+        groups.append(progress_group(p, ids, huds, art, textures))
     # No byte search for the ids (a screen's seven are checked that way): two thousand FLAG|id words
     # meet the textures' random bytes. The profile's first_free_id is above every id the file uses,
     # and ours start FONT_BASE_GAP past it, clear of the screens' (7 each) and a graft's.

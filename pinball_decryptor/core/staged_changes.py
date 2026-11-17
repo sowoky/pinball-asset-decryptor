@@ -24,8 +24,11 @@ here.)
 import json
 import marshal
 import os
+import re
 import threading
 import time
+
+from .atomic_file import write_text_atomic
 
 # Sidecar written at the root of the assets folder.  Dotfile so the
 # audio/video/image slot scanners (which skip dot-entries) ignore it — same
@@ -198,9 +201,7 @@ def save(assets_dir, payload):
     path = _cache_path(assets_dir)
     now = time.time_ns()
     try:
-        with open(os.path.join(assets_dir, SIDE_CAR), "w",
-                  encoding="utf-8") as f:
-            f.write(text)
+        write_text_atomic(os.path.join(assets_dir, SIDE_CAR), text)
         st = os.stat(path)
     except OSError:
         with _CACHE_LOCK:
@@ -288,3 +289,261 @@ def same_stem_sibling(path):
                 and os.path.isfile(os.path.join(folder, name))):
             return name
     return None
+
+
+#: PAD-494: a Stern project's music modes (``plugins.stern.sound_modes``):
+#: ``{"names": [...], "slots": {rel: {"2": file}}, "levels": {rel: {"2": dB}}}``
+#: and (PAD-565) its sounds in turn, ``"turns": {rel: [file 2, file 3, ...]}``,
+#: (PAD-638) the slots of them that play at random, ``"random": [rel, ...]``,
+#: and each such file's own loudness, ``"turn_levels": {rel: {"2": dB}}``
+SOUND_MODES_KEY = "sound_modes"
+#: PAD-565: the mod routes carry a slot's file k in turn as one more of its
+#: files, under this mode key + k ("t2"), so it travels wherever its slot's
+#: music mode files do; :func:`merge_sound_modes` puts it back in ``turns``
+#: (PAD-638: its loudness rides ``levels`` under the same key)
+TURN_KEY = "t"
+
+
+#: PAD-638: music mode m's own file k in turn is carried under "m<m>t<k>"
+#: ("m2t3"), its loudness under the same key in ``levels``, and the modes of a
+#: slot whose own files play at random in ``"mode_random": {rel: ["2"]}``
+_MODE_TURN_RE = re.compile(r"^m(\d+)t(\d+)$")
+
+
+def _mode_turn_k(m):
+    """``(mode, k)`` for a carried key "m2t3", else None."""
+    hit = _MODE_TURN_RE.match(str(m))
+    return (int(hit.group(1)), int(hit.group(2))) if hit else None
+
+
+def _turn_k(m):
+    """File k in turn for a carried mode key ("t2" -> 2), else None."""
+    m = str(m)
+    if m.startswith(TURN_KEY) and m[len(TURN_KEY):].isdigit():
+        return int(m[len(TURN_KEY):])
+    return None
+
+
+def sound_modes_of(data):
+    """The music modes record in sidecar *data* as the mod routes carry it:
+    ``{"names", "slots", "levels"}`` with every slot's files (and PAD-638
+    ``"random"``, the slots whose files in turn play at random), or ``None`` when
+    there are none.  A record saved before mode files had a loudness of their
+    own (no ``"levels"``) gave each one its slot's ``audio_levels`` offset, so
+    those come out as the files' own levels: carried anywhere, they build the
+    same."""
+    raw = (data or {}).get(SOUND_MODES_KEY)
+    if not isinstance(raw, dict):
+        return None
+    slots = {}
+    for rel, files in (raw.get("slots") or {}).items():
+        if isinstance(rel, str) and isinstance(files, dict):
+            keep = {str(m): f for m, f in files.items()
+                    if isinstance(f, str) and f.strip()}
+            if keep:
+                slots[rel] = keep
+    names = raw.get("names")
+    names = ([n if isinstance(n, str) else "" for n in names]
+             if isinstance(names, list) else [])
+    turns = {}
+    for rel, files in (raw.get("turns") or {}).items():
+        if isinstance(rel, str) and isinstance(files, list):
+            keep = {"%s%d" % (TURN_KEY, k): f for k, f in enumerate(
+                [f for f in files if isinstance(f, str) and f.strip()], 2)}
+            if keep:
+                turns[rel] = keep
+    # PAD-641: the flipper buttons' sounds in attract belong to no slot: they go as they are
+    attract = [f for f in (raw.get("attract") or []) if isinstance(f, str) and f.strip()] \
+        if isinstance(raw.get("attract"), list) else []
+    # PAD-945: the sounds on the shots of the game's modes belong to no slot either
+    shots = [dict(r) for r in (raw.get("shots") or []) if isinstance(r, dict)
+             and isinstance(r.get("file"), str) and r["file"].strip()] \
+        if isinstance(raw.get("shots"), list) else []
+    if not slots and not any(names) and not turns and not attract and not shots:
+        return None
+    levels = raw.get("levels")
+    if isinstance(levels, dict):
+        levels = {rel: {str(m): db for m, db in v.items() if str(m) in slots[rel]}
+                  for rel, v in levels.items()
+                  if rel in slots and isinstance(v, dict)}
+    else:
+        own = (data or {}).get("audio_levels") or {}
+        levels = {rel: {m: own[rel] for m in files}
+                  for rel, files in slots.items() if own.get(rel)}
+    # PAD-638: a file in turn's own loudness, under its carried key ("t2")
+    for rel, v in ((raw.get("turn_levels") or {}).items()
+                   if isinstance(raw.get("turn_levels"), dict) else ()):
+        if rel in turns and isinstance(v, dict):
+            for k, db in v.items():
+                key = "%s%s" % (TURN_KEY, k)
+                if key in turns[rel] and db:
+                    levels.setdefault(rel, {})[key] = db
+    # PAD-638: a music mode's own files in turn, and their loudness, under "m<m>t<k>"
+    mturns, mrandom = {}, {}
+    mt = raw.get("mode_turns") if isinstance(raw.get("mode_turns"), dict) else {}
+    ml = raw.get("mode_turn_levels") if isinstance(raw.get("mode_turn_levels"), dict) else {}
+    for rel, by in mt.items():
+        if not isinstance(rel, str) or rel not in slots or not isinstance(by, dict):
+            continue
+        for m, files in by.items():
+            if str(m) not in slots[rel] or not isinstance(files, list):
+                continue
+            for k, f in enumerate([f for f in files if isinstance(f, str) and f.strip()], 2):
+                key = "m%st%d" % (m, k)
+                mturns.setdefault(rel, {})[key] = f
+                db = ((ml.get(rel) or {}).get(str(m)) or {}).get(str(k)) \
+                    if isinstance(ml.get(rel), dict) else None
+                if db:
+                    levels.setdefault(rel, {})[key] = db
+        ms = (raw.get("mode_random") or {}).get(rel) \
+            if isinstance(raw.get("mode_random"), dict) else None
+        keep = sorted(str(m) for m in (ms or ()) if any(
+            _mode_turn_k(k)[0] == int(m) for k in mturns.get(rel, {})))
+        if keep:
+            mrandom[rel] = keep
+    for rel, files in turns.items():
+        slots.setdefault(rel, {}).update(files)
+    for rel, files in mturns.items():
+        slots.setdefault(rel, {}).update(files)
+    out = {"names": names, "slots": slots,
+           "levels": {rel: v for rel, v in levels.items() if v}}
+    rnd = sorted(rel for rel in (raw.get("random") or ())
+                 if isinstance(rel, str) and rel in turns)
+    if rnd:
+        out["random"] = rnd
+    if mrandom:
+        out["mode_random"] = mrandom
+    if attract:
+        out["attract"] = attract
+        if raw.get("attract_gap"):
+            out["attract_gap"] = raw["attract_gap"]      # PAD-641 round 2
+    if shots:
+        out["shots"] = shots
+    return out
+
+
+def merge_sound_modes(data, rec):
+    """Merge a carried music modes record *rec* (``{"names", "slots",
+    "levels"}``, files as local paths) into *data*, a project's staged changes.
+    A slot's file for a mode the record names wins, with its level; the
+    project's own names win where it has them (the user named its modes);
+    everything else here is left alone.  Returns how many slots it gave files.
+    The record here becomes the kind with levels of their own, its older
+    files' levels carried from their slots first (see
+    :func:`sound_modes_of`)."""
+    here = sound_modes_of(data) or {
+        "names": [], "slots": {}, "levels": {}}
+    slots = {rel: dict(v) for rel, v in here["slots"].items()}
+    random = set(here.get("random") or ())
+    mrandom = {rel: set(ms) for rel, ms in (here.get("mode_random") or {}).items()}
+    # PAD-565: a slot the record gives files in turn takes the record's, in its order (PAD-638:
+    # and its order, at random or not)
+    for rel, by_mode in (rec.get("slots") or {}).items():
+        if isinstance(by_mode, dict) and any(_turn_k(m) is not None for m in by_mode):
+            if rel in slots:
+                slots[rel] = {m: f for m, f in slots[rel].items() if _turn_k(m) is None}
+            if rel in (rec.get("random") or ()):
+                random.add(rel)
+            else:
+                random.discard(rel)
+        # PAD-638: a mode the record gives files in turn of its own takes the record's
+        given = {_mode_turn_k(m)[0] for m in (by_mode if isinstance(by_mode, dict) else ())
+                 if _mode_turn_k(m)}
+        if given:
+            if rel in slots:
+                slots[rel] = {m: f for m, f in slots[rel].items()
+                              if not (_mode_turn_k(m) and _mode_turn_k(m)[0] in given)}
+            ms = mrandom.setdefault(rel, set())
+            for g in given:
+                if str(g) in ((rec.get("mode_random") or {}).get(rel) or ()):
+                    ms.add(str(g))
+                else:
+                    ms.discard(str(g))
+    levels = {rel: dict(v) for rel, v in here["levels"].items()}
+    n = 0
+    for rel, by_mode in (rec.get("slots") or {}).items():
+        if not isinstance(by_mode, dict) or not by_mode:
+            continue
+        got = slots.setdefault(rel, {})
+        lv = levels.setdefault(rel, {})
+        for m, path in by_mode.items():
+            got[str(m)] = path
+            db = (rec.get("levels") or {}).get(rel, {}).get(str(m))
+            if db:
+                lv[str(m)] = db
+            else:
+                lv.pop(str(m), None)
+        n += 1
+    names = list(here["names"])
+    for i, name in enumerate(rec.get("names") or []):
+        if i >= len(names):
+            names.append(name)
+        elif not str(names[i] or "").strip():
+            names[i] = name
+    # PAD-641: the record's flipper sounds in attract, when it has any, in place of these
+    attract, gap = list(here.get("attract") or []), here.get("attract_gap")
+    if rec.get("attract"):
+        attract = [f for f in rec["attract"] if isinstance(f, str) and f.strip()]
+        gap = rec.get("attract_gap")
+        n += 1
+    # PAD-945: the record's sounds on the shots of the game's modes, when it has any, in place of these
+    shots = list(here.get("shots") or [])
+    if rec.get("shots"):
+        shots = [dict(r) for r in rec["shots"] if isinstance(r, dict)]
+        n += 1
+    if not n and names == here["names"]:
+        return 0
+    turns, turn_levels = {}, {}
+    for rel, by_mode in slots.items():
+        got = sorted((_turn_k(m), f) for m, f in by_mode.items() if _turn_k(m) is not None)
+        if got:
+            turns[rel] = [f for _k, f in got]
+            # PAD-638: each file's own loudness, by where it now stands in the list
+            tl = {str(i): (levels.get(rel) or {}).get("%s%d" % (TURN_KEY, k))
+                  for i, (k, _f) in enumerate(got, 2)}
+            tl = {i: db for i, db in tl.items() if db}
+            if tl:
+                turn_levels[rel] = tl
+    # PAD-638: a music mode's own files in turn, for a mode the slot still has a file for
+    mode_turns, mode_levels = {}, {}
+    for rel, by_mode in slots.items():
+        got = sorted((_mode_turn_k(m), f) for m, f in by_mode.items() if _mode_turn_k(m))
+        for (m, k), f in got:
+            if str(m) in by_mode:
+                mode_turns.setdefault(rel, {}).setdefault(str(m), []).append((k, f))
+        for m, kf in (mode_turns.get(rel) or {}).items():
+            for i, (k, _f) in enumerate(kf, 2):
+                db = (levels.get(rel) or {}).get("m%st%d" % (m, k))
+                if db:
+                    mode_levels.setdefault(rel, {}).setdefault(m, {})[str(i)] = db
+    mode_turns = {rel: {m: [f for _k, f in kf] for m, kf in by.items()}
+                  for rel, by in mode_turns.items()}
+    slots = {rel: {m: f for m, f in v.items() if _turn_k(m) is None and not _mode_turn_k(m)}
+             for rel, v in slots.items()}
+    levels = {rel: {m: db for m, db in v.items() if m in slots.get(rel, {})}
+              for rel, v in levels.items()}
+    out = {"names": names, "slots": {rel: v for rel, v in slots.items() if v},
+           "levels": {rel: v for rel, v in levels.items() if v}}
+    if turns:
+        out["turns"] = turns
+        if random & set(turns):
+            out["random"] = sorted(random & set(turns))
+        if turn_levels:
+            out["turn_levels"] = turn_levels
+    if mode_turns:
+        out["mode_turns"] = mode_turns
+        mr = {rel: sorted(m for m in ms if m in mode_turns.get(rel, {}))
+              for rel, ms in mrandom.items()}
+        mr = {rel: ms for rel, ms in mr.items() if ms}
+        if mr:
+            out["mode_random"] = mr
+        if mode_levels:
+            out["mode_turn_levels"] = mode_levels
+    if attract:
+        out["attract"] = attract
+        if gap:
+            out["attract_gap"] = gap
+    if shots:
+        out["shots"] = shots
+    data[SOUND_MODES_KEY] = out
+    return n

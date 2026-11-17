@@ -1,5 +1,7 @@
-"""Item 152: the INTRICATE example modes (tools/spike2_emu/modes/sdk/examples/), MELTDOWN (hud-layers), and the
-five Lyman Sheats modes (PAD-379: GODZILLA ANGRY, SPACEGODZILLA, KIRYU, BIOLLANTE, DESTOROYAH).
+"""Item 152: the INTRICATE example modes, MELTDOWN (hud-layers), and the five Lyman Sheats modes (PAD-379: GODZILLA
+ANGRY, SPACEGODZILLA, KIRYU, BIOLLANTE, DESTOROYAH). PAD-691: written for Godzilla, so not in the SDK or the app any
+more; kept as test material in tests/mode_examples/c/ and built here beside the SDK's kit (examples/intricate_kit.h),
+as the app puts a code mode's kit beside its C, so they go on proving the kit, the runtime and the desk harness.
 
 Three layers, each skipping cleanly where its tools are missing:
 
@@ -24,7 +26,21 @@ import sys
 import pytest
 
 SDK = pathlib.Path(__file__).resolve().parents[1] / "tools" / "spike2_emu" / "modes" / "sdk"
-EX = SDK / "examples"
+KIT_DIR = SDK / "examples"                      # the kit, the desk harness and their README
+CSRC = pathlib.Path(__file__).resolve().parent / "mode_examples" / "c"
+
+
+def _stage():
+    """The modes' C and recipes with the SDK's kit beside them (their #include "intricate_kit.h"), in a folder of
+    this run's own."""
+    import tempfile
+    d = pathlib.Path(tempfile.mkdtemp(prefix="pad691-intricate-"))
+    for f in list(CSRC.glob("*.c")) + list(CSRC.glob("*.json")) + [KIT_DIR / "intricate_kit.h"]:
+        shutil.copyfile(str(f), str(d / f.name))
+    return d
+
+
+EX = _stage()
 MODES = ["ghidorah_heads", "oxygen_destroyer", "maser_barrage", "final_wars", "anguirus_assist", "meltdown",
          "godzilla_angry", "spacegodzilla", "kiryu", "biollante", "destoroyah"]
 NAMES = {"ghidorah_heads": "KING GHIDORAH", "oxygen_destroyer": "OXYGEN DESTROYER",
@@ -112,17 +128,8 @@ def test_no_em_or_en_dash_in_what_a_player_or_a_reader_sees():
     for f in MODES:
         for s in _strings(_src(f)):
             assert "\u2014" not in s and "\u2013" not in s, (f, s)
-    readme = (EX / "README.md").read_text(encoding="utf-8")
+    readme = (KIT_DIR / "README.md").read_text(encoding="utf-8")
     assert "\u2014" not in readme and "\u2013" not in readme
-
-
-def test_the_readme_has_a_rules_sheet_for_every_mode():
-    readme = (EX / "README.md").read_text(encoding="utf-8")
-    for slug in MODES:
-        assert "`%s.c`" % slug in readme, slug
-        assert NAMES[slug] in readme, slug
-    for word in ("How to start it", "How it ends", "How often"):
-        assert word in readme
 
 
 # ---- the ARM build ---------------------------------------------------------------------------------
@@ -177,7 +184,7 @@ def _harness_source():
     fake scene (one mode's HUD asks for about 42 nodes: the group, 4 texts, the badge, 9 counter texts, the
     gauge and 12 pips' two pictures) and the Premium port's Left spinner (0x200), which OXYGEN DESTROYER
     starts on. A harness without them shows up here rather than as a mode that silently shows nothing."""
-    src = (EX / "desk_harness.c").read_text(encoding="utf-8")
+    src = (KIT_DIR / "desk_harness.c").read_text(encoding="utf-8")
     cap = re.search(r"static struct fake_node nodes\[(\d+)\];", src)
     assert cap and int(cap.group(1)) >= len(MODES) * 42, "desk_harness.c: the fake scene cannot hold every HUD"
     assert '{ "Left spinner", 0x200ull }' in src
@@ -346,6 +353,28 @@ def test_ghidorah_waits_for_the_games_own_battle_and_runs_once_a_ball(harness):
     assert has(out, g, "not counted - it already ran this ball")
     assert has(out, g, "start 2 this game")
     assert has(out, g, "not counted - it already ran twice this game")
+
+
+def test_the_progress_panel_lists_every_modes_latest_note_newest_first(harness):
+    """PAD-680: the pack's progress panel (PadMode_Progress) - a line a mode, the newest note's at the top, the
+    words a note's big line and its leading number; a mode that starts loses its line and takes the panel down."""
+    out = play(harness, "shot", "Powerline left", "secs", 2, "shot", "Maser target", "secs", 2,
+               "shot", "Left ramp", "secs", 2, "shot", "Maser target", "secs", 2, "shot", "Maser target", "secs", 2)
+    def slot(seg, slug):                 # the slot the mode's badge was last shown in within a stretch of the run
+        hits = re.findall(r"PadMode_Progress_S(\d)_%s 1" % slug, seg)
+        return hits[-1] if hits else None
+    masers = [m.start() for m in re.finditer(r">> shot Maser target", out)]
+    a = out[out.index(">> shot Powerline left"):masers[0]]
+    b = out[masers[0]:out.index(">> shot Left ramp")]
+    c = out[out.index(">> shot Left ramp"):masers[1]]
+    d = out[masers[1]:masers[2]]
+    assert slot(a, "ghidorah_heads") == "1"
+    assert slot(b, "maser_barrage") == "1" and slot(b, "ghidorah_heads") == "2"
+    assert slot(c, "biollante") in ("1", "2") and int(slot(c, "ghidorah_heads")) >= 3   # others note on a ramp too
+    assert slot(d, "maser_barrage") == "1"                                           # its badge moves up with its note
+    assert re.search(r"WORDS PadMode_Progress_S\d_Num: 5$", c, re.M)   # a code mode's number leads its big line
+    after = out[out.index("[MASER BARRAGE] START"):]
+    assert "SHOW PadMode_Progress 0" in after and re.search(r"PadMode_Progress_S\d_maser_barrage 0", after)
 
 
 def test_ghidorah_counts_the_powerlines_on_its_hud_until_it_starts(harness):
@@ -643,15 +672,14 @@ def test_a_note_is_not_shown_while_the_games_mode_has_the_middle(harness):
     assert not [ms for ms, w in hud(out, "ghidorah_heads", "Award") if t0 <= ms < t1 and w == "POWERLINES 1 OF 3"]
 
 
-def test_a_note_up_when_the_games_mode_begins_waits_off_the_glass(harness):
-    """a note already up when one of the game's modes begins: its words are blanked (the HUD says why)"""
+def test_a_note_up_when_the_games_mode_begins_stays_on_the_glass(harness):
+    """PAD-680: a note already up when one of the game's modes begins stays up for its time (PAD-390 blanked it)"""
     out = play(harness, "shot", "Powerline left", "secs", 0.5, "battle", 1, "secs", 1)
     t = _at(out, ">> battle 1")
     assert [ms for ms, w in hud(out, "ghidorah_heads", "Award") if ms < t and w == "POWERLINES 1 OF 3"]
-    assert has(out, "KING GHIDORAH",
-               "hud ghidorah_heads: its note waits while the game's mode has the middle of the screen")
+    assert not has(out, "KING GHIDORAH", "its note waits")
     blank = [ms for ms, w in hud(out, "ghidorah_heads", "Award") if ms >= t and w.strip() == ""]
-    assert blank and blank[0] <= t + 100
+    assert not [b for b in blank if b < t + 900]                        # its 1.5 s run on through the battle
 
 
 def test_the_final_wars_note_waits_for_another_modes_total_to_go(harness):
@@ -785,6 +813,28 @@ def test_a_swap_is_picked_by_its_cue_and_an_untagged_one_still_reads(harness, tm
     assert re.search(r"SWAP %d p\d+ \d+ %s$" % (lit, _key(0x11)), out, re.M), out[-2000:]
     assert not re.search(r"SWAP %d p\d+ \d+ %s$" % (lit, _key(0xbad)), out, re.M)
     assert re.search(r"SWAP %d p\d+ \d+ %s$" % (lost, _key(0x22)), out, re.M)
+
+
+def test_a_call_in_a_sound_bank_points_its_carrier_at_the_banks_sid_for_that_play(harness, tmp_path):
+    """PAD-595: ``sid <request> <sound id> call:<cue>``: the call's carrier is pointed at the bank's
+    sound id (pm_sound_sid) before it plays and its own list put back once the call is over; a
+    swap line is not needed for it."""
+    name, bed, calls = ASSETS["meltdown"]
+    lit, lost = calls["lit"], calls["critical"]
+    lines = ["name   %s" % name, "music  125 %d" % 0x10000,                  # a bed in the bank too
+             "sid    %d %d call:heat" % (lit, 0x10005),                       # another cue's, same request
+             "sid    %d %d call:lit" % (lit, 0x10001),
+             "sid    %d %d" % (lost, 0x10002),                                # untagged: its one sound
+             "call   lit %d 1500 4" % lit, "call   critical %d 1500 4" % lost]
+    out = _swaps_run(harness, tmp_path / "sids", lines)
+    assert _at(out, "SID 125 65536") is not None, out[-2000:]
+    t_lit = _at(out, "SID %d %d" % (lit, 0x10001))
+    assert t_lit is not None and not re.search(r"SID %d %d$" % (lit, 0x10005), out, re.M), out[-2000:]
+    assert _at(out, "SOUND %d" % lit) is not None and _at(out, "SOUND %d" % lit) >= t_lit
+    back = _at(out, "SID %d 0" % lit)
+    assert back is not None and back > t_lit + 1500          # its own list back once the call is over
+    assert re.search(r"SID %d %d$" % (lost, 0x10002), out, re.M)
+    assert "played (sound id %d, its own in a sound bank)" % 0x10001 in out
 
 
 def test_ghidorah_plays_its_music_clip_and_calls_and_gives_the_music_back(harness, dump):
@@ -976,7 +1026,12 @@ def test_start_plays_the_intro_then_asks_for_the_loop_behind_the_hud(harness, du
     over = _at(out, "[%s] %s" % (mode, "the total was shown" if slug == "anguirus_assist" else "END"))
     assert _at(out, "CLIP " + _clip(slug, ending)) == over                    # the ending, full screen
     if "loop" in cues:
-        assert _at(out, "BACKDROP OFF") == over                               # the city again
+        # PAD-658: the loop stays behind the ending the mode holds the screen for (on the live city the game's map
+        # labels were under the TOTAL), then the city again; an ending that holds nothing gives it back at once
+        # (these flows stop a second into the C's 10 s ending)
+        kept, off = _at(out, "BACKDROP KEPT behind"), _at(out, "BACKDROP OFF")
+        assert kept == over or off == over, (kept, off, over)
+        assert off is None or off >= over
 
 
 @pytest.mark.parametrize("slug", MODES)
@@ -1766,10 +1821,10 @@ def test_godzilla_angry_every_switch_fills_the_rage_meter_and_level_five_lights_
     # PAD-416: ONE meter to the mode, its percent beside it (100, 225, 375 and 550 of 750 hits at the levels' ends),
     # never a level's n/5; then ANGRY! full, notes in the award line
     for pct in ("13%", "30%", "50%", "73%"):
-        assert hud_said(out, s, "Gauge_Label", pct) and hud_said(out, s, "Award", "RAGE " + pct), pct
+        assert hud_said(out, s, "Gauge_Label", pct) and hud_said(out, s, "Title", "RAGE " + pct), pct
     assert not hud_said(out, s, "Gauge_Label", "RAGE 1/5")
-    assert hud_said(out, s, "Gauge_Label", "ANGRY!") and hud_said(out, s, "Award", "GODZILLA IS ANGRY!")
-    assert hud_said(out, s, "AwardSub", "SHOOT THE BUILDING")
+    assert hud_said(out, s, "Gauge_Label", "ANGRY!") and hud_said(out, s, "Title", "GODZILLA IS ANGRY!")
+    assert hud_said(out, s, "Line", "SHOOT THE BUILDING")
     # the BUILDING pulses red once the light show of GODZILLA IS ANGRY is over
     pulse = _at(out, "[GODZILLA ANGRY] lights: shot 0x400000 ff0a00 pulse 700")
     assert pulse is not None and pulse > _at(out, "[GODZILLA ANGRY] show angry: over")
@@ -1779,8 +1834,8 @@ def test_godzilla_angry_the_meter_counts_a_quarter_at_a_time_on_the_award_line(h
     s = "godzilla_angry"
     out = play(harness, "secs", 1, *(["raw", "0x1", "ms", 20] * 51), "secs", 3)
     assert has(out, GA, "rage 1: 25 of 100 switch hits (player 1)") and has(out, GA, "rage 1: 50 of 100")
-    assert hud_said(out, s, "Award", "725 MORE TO GODZILLA ANGRY") and hud_said(out, s, "Award", "700 MORE TO GODZILLA ANGRY")
-    assert hud_said(out, s, "AwardSub", "GODZILLA IS GETTING ANGRY")
+    assert hud_said(out, s, "Title", "725 MORE TO GODZILLA ANGRY") and hud_said(out, s, "Title", "700 MORE TO GODZILLA ANGRY")
+    assert hud_said(out, s, "Line", "GODZILLA IS GETTING ANGRY")
     # PAD-416: the bar fills a slice at a time toward the MODE: 40 slices for its 750 hits
     on = re.findall(r"SHOW PadMode_godzilla_angry_Hud\.PadMode_godzilla_angry_Hud_Gauge\.PadMode_godzilla_angry_Hud_G(\d+)_On 1",
                     out)

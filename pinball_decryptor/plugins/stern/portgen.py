@@ -37,7 +37,15 @@ import numpy as np
 #: 3: four one-place rodata tables (Godzilla's Ebirah stage awards and lamp table, the tank path and
 #: spot list) are carried like layered_displays
 #: 4: the Insider Connected score gate (agent_header + agent_begin), which every port must carry
-REVISION = 4
+#: 5: the switch drain on every port that has one, shots or not: the flipper buttons' sounds in attract (PAD-645)
+#: 6: every mode's `rule` line from the build's own program, when the reference names its rules (PAD-699)
+#: 7: a battle pick counts as the battle (battle_stop / battle_started / battle_clock / roster_resume /
+#: roster_cursor, PAD-706), and the battles' offsets are a title's values, left out of another title's draft
+#: 8: the build's own game modes kept in a derived port (they were dropped as unplaced), and the game's mode framework
+#: read off an older build that reads the player up inline (data mode_player_at), PAD-714
+#: 9: the attract mode's page table (PAD-782, portattract.py)
+#: 10: the cabinet's expression lights (`cablamp` lines, PAD-1040) off the target's own tables
+REVISION = 10
 RECIPE_FORMAT = 1
 
 CORE_SITES = ("tick", "shot_dispatch", "ball_end", "score_add")
@@ -57,7 +65,24 @@ TITLE_VALUES = ("light_owner", "light_lts", "award_screen_type", "magnet_shot", 
                 # Video grafted into its HUD, and Deadpool's video layer - the title's, never a framework
                 # offset (a derived port of another title had Deadpool's stride 5 and a grafted bank's hide)
                 "countdown_first", "countdown_step", "countdown_stride", "clip_surface_hide",
-                "clip_layer_priority", "layer_video_at")
+                "clip_layer_priority", "layer_video_at",
+                # PAD-706: Godzilla's battles (CBattle's fields, the cities rule's vector, the selection screen's
+                # cursor): a battle's bookkeeping, never a framework offset
+                "battle_stopped_at", "battle_reason_at", "battle_starts_at", "battle_clock_at", "battle_wins_at",
+                "battle_flags_at", "battle_no_city_flag", "battle_total_at", "battle_own_stop_slots",
+                "roster_city_battle_vec_at", "roster_cursor_at", "roster_city_beaten_vec_at", "battle_beaten_slots",
+                # PAD-707: the selection screen's own sounds, timer, keys and clocks, which the runtime drives for the
+                # new monsters on it
+                "roster_left_sound", "roster_right_sound", "roster_pick_sound", "roster_select_ms",
+                "roster_screen_left", "roster_screen_right", "roster_screen_timer", "roster_screen_busy",
+                "roster_screen_bump_by",
+                # PAD-733: the city screen's rematch line, a numbered line of the title's own text table (another
+                # title's table has another line there)
+                "roster_rematch_line",
+                # PAD-714: the START and "active?" slots of the title's own mode classes' vtables (Godzilla's cmode
+                # 8 / 14, the crule titles' 33-41 / 39-49): another title's called another virtual (Foo Fighters 1.03
+                # was derived with 38 / 44, its own 41 / 49); a derived port reads its START slot off its own program
+                "stock_slot_start", "stock_slot_active")
 #: values that are a shot mask, not an address, however large: copied within a title
 SHOT_VALUES = ("magnet_shot",)
 MIN_N, MAX_N = 8, 48
@@ -856,10 +881,32 @@ def parse_port(text):
 
 
 #: PAD-363: the lines game_mode_blocks.py writes from a build's OWN program (each of its modes' start, object and
-#: name, the ones checked by default): never carried from a reference, and never part of what a recipe depends on
+#: name, the ones checked by default): never carried from a reference, and never part of what a recipe depends on.
+#: PAD-615: so are portchallenge.py's (the game's Challenge list), read off each build's own code; PAD-710: and
+#: mode_framework.py's (the game's own mode framework)
 _GENERATED = re.compile(r"^(?:site block_start_\d+|data block_obj_\d+|text block_name_\d+|text block_default|"
+                        r"rule \d+|"   # PAD-699: every mode's vtable pointer, from the build's own program
                         r"value block_default|value block_ret_\d+|"
-                        r"site block_rule_\d+|text block_rule_name_\d+|value block_rule_(?:lo|hi)_\d+)\b")   # PAD-398
+                        r"site block_rule_\d+|text block_rule_name_\d+|value block_rule_(?:lo|hi|gate)_\d+|"   # PAD-398 (PAD-1026: gate)
+                        r"site challenge_go_\d+|value challenge_flag_\d+|text challenge_name_\d+|"   # PAD-615:
+                        r"value challenge_on_flag|site challenge_menu(?:_pick)?|value challenge_menu_\w+|value challenge_name_msg_\d+|"
+                        r"data game_play_modes|value game_play_mode_at|value challenge_mode_\w+|"
+                        r"site challenge_balls(?:_2)?|site challenge_extra_ball|"   # portchallenge.py (PAD-619: + the balls-per-game getters, the extra-ball test)
+                        r"site challenge_end_ball|"   # PAD-630
+                        r"site coop_(?:player_change|add_player|first_ball|panel_lit|panel_up(?:_\d)?|panel_name(?:_\d|_user)?|icon_draw|up_call)|data coop_players?|"   # PAD-1017 (PAD-1043: + the panel; PAD-1046: + first_ball; PAD-1202: + up_call; PAD-1267: + panel_name; PAD-1315: + panel_name_user, icon_draw): portcoop.py
+                        r"site challenge_score(?:s|_entry|s_gate)|value challenge_scores_cat(?:_\d+)?|"   # PAD-640 (PAD-663: + the gate)
+                        r"site game_scores|"   # PAD-641 round 2
+                        r"value challenge_scores_gate_(?:id|cat_at|entry_at)|data challenge_scores_(?:table|count)|"
+                        r"value challenge_record_(?:check_at|score_at|score_size)|value challenge_page_title_max|"   # PAD-663: the records' layout
+                        r"site challenge_page(?:_text|_yield)?|value challenge_page_(?:cat|title)|site challenge_pages_\d+|site challenge_list_page|"   # PAD-660
+                        r"site ball_launch|value ball_launch_(?:wait_)?flag|site challenge_plain_\d+|"   # PAD-643
+                        r"site mode_(?:player|started)|data mode_(?:manager|player_at)|"   # PAD-710, PAD-714
+                        r"value mode_(?:slot_stop|stopped_at|reason_at|starts_at|wins_at|id_at|slot_stopped_get|slot_stopped_set)|"   # PAD-716: JP
+                        r"site audit_add|value place_(?:audit_started|audit_completed|flag_played|flag_completed)_\d+|"
+                        r"site place_start_\d+|"   # PAD-715
+                        r"value challenge_place_\d+|"
+                        r"data attract_table|value attract_(?:entry_size|page_at|count)|site attract_sleep|"
+                        r"data attract_video|site attract_video_\w+|text attract_video_clip|site attract_show)\b")   # PAD-782
 
 
 def generated(key, rest):
@@ -1261,6 +1308,19 @@ class Target:
 
 
 # ---- lamps -------------------------------------------------------------------------------------
+def cabinet_draft(target):
+    """PAD-1040: the target's `cablamp` lines (its blades and speaker lights), read off its own tables; [] when it
+    has none or its tables are not read here."""
+    from . import lampmap
+    b = getattr(target, "b", None)
+    if not b:                           # a stand-in target (a test's): no program to read
+        return []
+    try:
+        return lampmap.cabinet_lines(lampmap.Elf(b, getattr(target, "path", "the game program")))
+    except SystemExit:
+        return []
+
+
 def lamp_draft(rest, target, other_title, report, cache):
     """One `lamp` line for the target (item mode-leds), placed by the insert's name in the target's own
     tables (lampmap), with the target's own shot tie where its shot table was read; or a comment."""
@@ -1511,6 +1571,8 @@ def apply_recipe(recipe, port_text, target, game=None, version=None, port_name=N
             report["event copied"] += 1
         elif key == "lamp":
             out.append(lamp_draft(rest, tgt, title_of(target_game) != title_of(ref_game), report, lamp_cache))
+        elif key == "cablamp":
+            continue                    # PAD-1040: the reference's light ids; the target's own are read below
         elif (key in ("shot", "callout", "text", "switch") or (key == "value" and parts and parts[0] in TITLE_VALUES)) \
                 and title_of(target_game) != title_of(ref_game):
             # shot bits, switch ids, sound ids, rule ids and example names belong to the reference TITLE
@@ -1527,18 +1589,152 @@ def apply_recipe(recipe, port_text, target, game=None, version=None, port_name=N
         else:
             out.append("%s %s" % (key, rest))
     _score_pair(out, placed, tgt, hows)
-    out += block_section(tgt)
+    cab = cabinet_draft(tgt)            # PAD-1040: the cabinet's expression lights, off the target's own tables
+    if cab:
+        out += [""] + cab
+        report["cabinet lights placed"] += sum(1 for c in cab if c.startswith("cablamp "))
+    stock_rules = any(k == "rule" for k, _r in entries)
+    if stock_rules:
+        _stock_slots(out, tgt)
+    # PAD-714: a title whose scanner finds no START slot (Jurassic Park LE, Rush) names it in its own ports
+    slot = next((int(r.split()[1]) for k, r in entries if k == "value" and re.match(r"stock_slot_start\s+\d+\s*$",
+                                                                                    r.split("#", 1)[0])), None)
+    same = title_of(target_game or "") == title_of(ref_game or "")
+    blocks = block_section(tgt, stock_rules=stock_rules, start_slot=own_start_slot(tgt, target_game, slot if same else None))
+    out += blocks or own_plain_starts(tgt, target_game, port_text if same else None)
+    if not blocks:
+        out += own_gate_rules(tgt)                           # PAD-1026: Bond's gadget countdowns
     sites = {n for k, n in placed if k == "site"}
     data = {n for k, n in placed if k == "data"}
     return Draft(out, report, core_missing(sites, data), placed, hows)
 
 
-def block_section(tgt):
-    """PAD-363: the game's own modes a mode may keep from starting, read from THIS build's program
-    (game_mode_blocks.py): [] when it has no C++ rule manager, or its modes cannot be read."""
+def _stock_slots(out, tgt):
+    """PAD-699: the shot handler's slot (and the mask getter's, three on) are THIS build's, read off its code
+    (game_mode_blocks.stock_shot_slot), never the reference's: Godzilla Pro 1.16 was drafted from Premium/LE and
+    carried its 42 / 45 where its own vtables have 41 / 44. A build where the slot cannot be read keeps the
+    copied lines."""
     try:
         from . import game_mode_blocks as B
-        modes = B.read_modes(tgt.b)
+        slot = B.stock_shot_slot(tgt.b)
+    except Exception:                                        # noqa: BLE001 - a plain-C title, an odd build
+        slot = None
+    if slot is None:
+        return
+    for i, line in enumerate(out):
+        for name, v in (("stock_slot_shot", slot), ("stock_slot_mask", slot + 3)):
+            if re.match(r"value\s+%s\s" % name, line):
+                out[i] = "value %-21s %d   # PAD-699: read off this build's shot entry (v[15])" % (name, v)
+
+
+def build_start_slot(tgt, game):
+    """PAD-714: the build's own START slot: the scanner's, else :func:`own_start_slot`'s (a shipped port of the same
+    title's, where this build's starts count as the framework's START does); None on a plain-C title or when neither
+    holds."""
+    try:
+        from . import stock_scan as S
+        from . import stock_scan_cpp as C
+        prog = S.Program(tgt.b)
+        model = S.class_model(prog)
+        if not C.family(model):
+            return None
+        slot = C.read(prog, model).engine.get("start_slot")
+        return slot if slot is not None else own_start_slot(tgt, game)
+    except Exception:                                        # noqa: BLE001 - an odd build
+        return None
+
+
+def own_plain_starts(tgt, game, ref_text=None):
+    """PAD-714: a plain-C build's own game modes (`site block_start_<i>` / `text block_name_<i>`), which the start
+    finder (sdk/cstarts) wrote only into the shipped ports of the builds on hand: the same title's port's modes, each
+    found on this build by the function that counts its STARTED audit (mode_framework.plain_starts) - *ref_text* (the
+    reference, when it is the same title), else the same title's shipped ports, newest first; the first that places
+    any. [] on a C++ title (block_section reads its own) or when none does."""
+    cache = tgt.__dict__.setdefault("_own_plain_starts", {})
+    key = (game, ref_text)
+    if key in cache:
+        return cache[key]
+    out = []
+    try:
+        import os
+        from . import mode_framework as MF
+        texts = [ref_text] if ref_text else []
+        from .port_derive import shipped_ports_dir
+        names = [n for n in os.listdir(shipped_ports_dir()) if n.endswith(".port") and game
+                 and title_of(n.rsplit("-", 1)[0]) == title_of(game)]
+        for name in sorted(names, key=lambda n: (n.rsplit("-", 1)[0] != game, _version_key(n))):
+            with open(os.path.join(shipped_ports_dir(), name), encoding="utf-8") as f:
+                texts.append(f.read())
+        for text in texts:
+            out = MF.plain_start_lines(tgt.b, text)
+            if out:
+                out = [""] + out
+                break
+    except Exception:                                        # noqa: BLE001 - an odd build
+        out = []
+    cache[key] = out
+    return out
+
+
+def own_gate_rules(tgt):
+    """PAD-1026: a plain-C build's rules that ask one check before they count (James Bond's gadget countdowns,
+    game_mode_blocks.read_gate_rules), read from THIS program: [] on any other title or an odd build."""
+    try:
+        from . import game_mode_blocks as B
+        lines = B.gate_rule_lines(B.read_gate_rules(tgt.b))
+    except Exception:                                        # noqa: BLE001 - an odd build
+        lines = []
+    return [""] + lines if lines else []
+
+
+def _version_key(name):
+    """A shipped port's file name, sorted newest first: (-major, -minor, ...)."""
+    v = name[:-len(".port")].rsplit("-", 1)[-1]
+    return tuple(-int(x) for x in re.findall(r"\d+", v))
+
+
+def own_start_slot(tgt, game, hint=None):
+    """PAD-714: the START slot for a build whose scanner finds none (Jurassic Park LE, Rush): *hint* (the same title's
+    reference's), else one a shipped port of the same title names (`value stock_slot_start`) - taken only where this
+    build's mode STARTs at that slot count the player's starts as the framework's START does (mode_framework.find), so
+    a slot another version moved is never used. None when the scanner finds one (it is used) or no slot holds."""
+    cache = tgt.__dict__.setdefault("_own_start_slot", {})
+    key = (game, hint)
+    if key in cache:
+        return cache[key]
+    out = None
+    try:
+        import os
+        from . import mode_framework as MF
+        from . import stock_scan as S
+        from . import stock_scan_cpp as C
+        prog = S.Program(tgt.b)
+        model = S.class_model(prog)
+        if C.family(model) and C.read(prog, model).engine.get("start_slot") is None:
+            slots = [hint] if hint is not None else []
+            from .port_derive import shipped_ports_dir
+            for name in sorted(os.listdir(shipped_ports_dir()), reverse=True):
+                if name.endswith(".port") and game and title_of(name.rsplit("-", 1)[0]) == title_of(game):
+                    with open(os.path.join(shipped_ports_dir(), name), encoding="utf-8") as f:
+                        m = re.search(r"^value\s+stock_slot_start\s+(\d+)", f.read(), re.M)
+                    if m and int(m.group(1)) not in slots:
+                        slots.append(int(m.group(1)))
+            out = next((s for s in slots if "mode_starts_at" in MF.find(prog, s)), None)
+    except Exception:                                        # noqa: BLE001 - a plain-C title, an odd build
+        out = None
+    cache[key] = out
+    return out
+
+
+def block_section(tgt, stock_rules=False, start_slot=None):
+    """PAD-363: the game's own modes a mode may keep from starting, read from THIS build's program
+    (game_mode_blocks.py): [] when it has no C++ rule manager, or its modes cannot be read. PAD-699:
+    *stock_rules* (the reference port names its game's rules: Godzilla) adds every mode's `rule` line
+    from THIS program, for the counts-as / instead-of rows (a reference's own vtables are never carried).
+    PAD-714: *start_slot*, the same title's reference's START slot, for a build whose scanner finds none."""
+    try:
+        from . import game_mode_blocks as B
+        modes = B.read_modes(tgt.b, start_slot)
     except Exception:                                        # noqa: BLE001 - a plain-C title, an odd build
         return []
     if not any(m.blockable for m in modes):
@@ -1547,7 +1743,8 @@ def block_section(tgt):
         rules = B.read_rules(tgt.b)                          # PAD-398: the game's rules, from THIS program
     except Exception:                                        # noqa: BLE001
         rules = []
-    return [""] + B.port_lines(modes) + ([""] + B.rule_lines(rules) if rules else [])
+    return ([""] + B.port_lines(modes) + ([""] + B.rule_lines(rules) if rules else [])
+            + ([""] + B.stock_rule_lines(modes) if stock_rules else []))
 
 
 def _score_pair(out, placed, tgt, hows):
@@ -1601,8 +1798,10 @@ def draft(ref_elf, port_text, target, game=None, version=None, port_name=None, t
 
 # ---- checking a port against its program (port_words.py) ----------------------------------------
 #: sites the runtime hooks (it moves their first two instructions into a trampoline)
-HOOKED_SITES = frozenset(HOOKED) | {"roster_start", "clip_play", "display_effect_start", "display_priority_now",
-                                     "layered_priority", "layered_waiter"}
+HOOKED_SITES = frozenset(HOOKED) | {"roster_start", "roster_resume", "roster_cursor", "clip_play", "display_effect_start", "display_priority_now",
+                                     "layered_priority", "layered_waiter",
+                                     "sound_resolve",      # PAD-494: wrapped (music modes)
+                                     "roster_portrait_step"}   # PAD-733: wrapped (the selection screen's portrait)
 
 
 def is_hooked_site(name):

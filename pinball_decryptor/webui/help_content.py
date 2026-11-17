@@ -31,9 +31,13 @@ HELP_CONTENT = {
                  "text": "a new card image, then flash it"}]},
         ]),
         ("Pick the card",
-         "**Browse…** to a card image or update file. Or use **From SD card / SSD** "
-         "(where available) to read a card in a reader; on Windows that needs "
-         "Administrator."),
+         "**Browse…** to a card image or update file, or drop the file from your "
+         "desktop or a folder on the path or on **Browse…**. Or use **From SD card / "
+         "SSD** (where available) to read a card in a reader; on Windows that needs "
+         "Administrator.\n\n"
+         "The app's **Browse…**, **Choose…** and **Add…** buttons take a dropped "
+         "file or folder the same way (so does the path box beside one), and so does a row on the Images, Video and Audio "
+         "tabs."),
         ("Is it the right card?",
          "For a Stern Spike 2 card, the page shows what the machine shows as it starts: "
          "the game's loading screen, or a multi-boot card's menu with the default game "
@@ -72,8 +76,8 @@ HELP_CONTENT = {
          "copied: plug cards in one by one to sort a stack. Needs Administrator on "
          "Windows; the line says when it's missing."),
         ("Detection",
-         "The recognised game and firmware version show in the title bar.\n\n"
-         "- **Not recognised** usually means the wrong kind of file, or a copy still "
+         "The recognized game and firmware version show in the title bar.\n\n"
+         "- **Not recognized** usually means the wrong kind of file, or a copy still "
          "in progress.\n"
          "- A file from another manufacturer gets a one-click switch."),
         ("Save card as image",
@@ -124,7 +128,7 @@ HELP_CONTENT = {
             "and Write tell what you changed.\n"
             "- Into an **archived** project, your edits are set aside and put back "
             "over the fresh extract.\n"
-            "- After an extract, **Extract** stays grey until the card, folder or an "
+            "- After an extract, **Extract** stays gray until the card, folder or an "
             "option changes, so a second click can't redo it.",
         ]),
         ("\"The source image has changed\"",
@@ -143,6 +147,8 @@ HELP_CONTENT = {
                 {"icon": "write", "title": "Build",
                  "text": "on the **Write** tab; there is no separate stage step"}]},
             "- Almost any audio file works: mp3, wav, ogg, flac, m4a and more.\n"
+            "- Drop a sound file from your desktop or a folder on a row to make it "
+            "that row's replacement.\n"
             "- Any sample rate or bit depth (16, 24 or 32-bit, float or integer). "
             "Length, rate and volume are fitted for you when you build.",
         ]),
@@ -157,18 +163,149 @@ HELP_CONTENT = {
             {"cards": [
                 {"icon": "gear", "tone": "info", "title": "Whole build",
                  "text": "**Replacement loudness** in Advanced Audio Options: match "
-                         "(default) or full scale, plus a ±12 dB offset. Moves every "
-                         "replacement together."},
+                         "(default) or full scale (on SAM and Spike 1: keep each "
+                         "replacement's own level), plus a ±12 dB offset. Moves "
+                         "every replacement together."},
                 {"icon": "wave", "tone": "ok", "title": "One clip",
                  "text": "**Loudness for this clip**, beside the Replacement preview. "
                          "Stacks on the build-wide offset; the Level column shows "
-                         "which clips you levelled."}]},
+                         "which clips you leveled."}]},
             "- **Apply to all shown** puts the same offset on every row the list "
             "shows: set Type to Music first to move only the songs (Stern mixes its "
             "music quietly, under the callouts).\n"
             "- Boosts are soft-limited, never clipped. The build log says which "
             "setting built the card.",
         ]),
+        ("Music modes",
+         "Spike 2, the latest version of each game (not James Bond 007 Premium/LE, James Bond 60th or Star Wars Premium/LE, whose game programs cannot grow). One card can carry more "
+         "than one set of sounds, and the machine's service menu picks the set: **Music "
+         "Mode** under Adjustments > Machine Settings > Custom Code (on a game whose "
+         "Adjustments have Standard Adjustments: at the end of that list).\n\n"
+         "- Right-click a sound > **Music modes** > **Mode 2 (Custom A): choose a "
+         "sound…** (modes 2 to 4 are offered; **Add a music mode…** adds more, up to "
+         "8). Mode 1 is the sound as it plays now: its replacement, or the stock one.\n"
+         "- In a mode a sound has no file for, it plays its mode 1 sound. One file can "
+         "go in several modes; it takes the sound bank's room once.\n"
+         "- **Name the music modes…** names them on the machine: the Music Mode "
+         "setting's help line reads like \"1 = Standard, 2 = Orchestral\" (with many "
+         "modes or long names it shortens them to fit). The machine offers modes up to "
+         "the highest one any sound has a file for.\n"
+         "- A mode's file plays at its own full length, like a replacement (on a "
+         "direct-SD write, a file longer than the sound it stands in for is cut to "
+         "that length). Either way it is matched to that sound's loudness.\n"
+         "- Some songs play in parts: a short opening the Sound Test names (\"SE GZ MX "
+         "TUNE 16\") and then a longer piece of music with no name of its own, often "
+         "looped. A file for the opening part plays in place of the whole song, once "
+         "or looped as the song was, and also where the game plays that song without "
+         "its opening (\"SE GZ MX TUNE 16 NO INTRO\"); its length is the whole song's, "
+         "and it matches the song's longest part's loudness.\n"
+         "- Each music mode's file has a loudness of its own: **Music modes** > **Loudness of "
+         "mode 2's sound…**, or play it there and use the box beside the Replacement "
+         "preview, which then reads **Mode 2's loudness**. The loudness set "
+         "on the sound itself is its own replacement's: it never reaches its mode "
+         "files, and on a sound with no replacement the stock sound stays as it is.\n"
+         "- Needs an image build, not a direct SD write. The files go into extra sound "
+         "banks of their own beside the sound bank (image-sc01.bin and on): the game "
+         "holds the main bank in memory all the time and an extra bank only while it "
+         "plays, so the music modes leave the game the most room. A file with files of "
+         "its own One after another or At random stays in the main bank while it has "
+         "room. A file "
+         "for a sound the game plays together with other sounds (a song with an intro, "
+         "or a medley) takes a copy of those sounds into its extra bank. A file for a "
+         "sound the game does not play through its sound list stays in the main bank "
+         "and is left out when that is full; the log names it."),
+        ("Play in turn",
+         "Stern Spike 2, the latest version of each game. A "
+         "sound can play more than one file: each time the game plays it, the next one "
+         "plays, and after the last it starts again.\n\n"
+         "- Right-click a sound > **Play in turn** > **Add sounds to play in turn…** "
+         "(up to 15 more; pick several files at once and they go in by name). Sound 1 is "
+         "the sound as it plays now: its replacement, or the stock one. The row shows how "
+         "many it plays in turn.\n"
+         "- **At random** in the same menu plays one of them at random each time "
+         "instead, never the same one twice in a row: several songs for one "
+         "multiball, like a jukebox. **One after another** goes back to taking turns.\n"
+         "- **Play sound 2 (…)** previews one; **Take off sound 2 (…)** drops it.\n"
+         "- Each file plays for as long as the sound it stands in for: a longer one is "
+         "cut to that length, and it is matched to that sound's loudness.\n"
+         "- **Loudness of sound 2 (…)…** gives one file a loudness of its own, from "
+         "-12 to +12 dB (0 keeps it matched). While **Play sound 2** has it in the "
+         "Replacement player, the loudness box there is that file's too. Sound 1's is "
+         "the sound's own loudness box. **Loudness of all N sounds…** sets every one of "
+         "them at once (its replacement included); each can still be changed on its own "
+         "after.\n"
+         "- Which one plays first after the machine is switched on is not fixed; every "
+         "play after that is the next in turn.\n"
+         "- In a music mode a sound has a file of its own for, that file plays every time, "
+         "unless that mode's file has sounds in turn of its own: on a sound with music mode "
+         "files, the menu has a part for each mode (headed **Mode 2 (…)**), with "
+         "its own One after another / At random and loudness. Picking several files for a "
+         "mode under **Music modes** makes the first its file and the others its sounds in "
+         "turn. Its own sound's part plays in "
+         "every mode the sound has no file for. A mode's sounds play as long as its file.\n"
+         "- Needs an image build, not a direct SD write. Each file takes room in the "
+         "sound bank, and in extra sound banks beside it once that is full, or always "
+         "on a card with music modes."),
+        ("Jukebox",
+         "The Beatles 1.29. **Jukebox**, beside **Find originals…**, gives the five song "
+         "modes songs of your own: each time a song mode starts, the game plays one of them, "
+         "drawn at random, with its own intro video. No setting and no choosing: every start "
+         "throws the dice.\n\n"
+         "- **Add songs…** picks one or more audio files (up to 256 in all, every pool's together), and their intro videos "
+         "with them: a video goes with the song of the same name (**Hey Jude.mp4** is the "
+         "intro of **Hey Jude.wav**). A video with no song of its name is left out; a song "
+         "with no video is added without one. Two files of one name (**Hey Jude.wav** and "
+         "**Hey Jude.mp3**) ask which one. A song already in the jukebox takes the old one's "
+         "place, keeping its place in the list and how often it comes up, and you are told.\n"
+         "- **Pools**: the buttons at the top pick which of the game's music the list is "
+         "for. **Song modes** are the five song modes, **Special modes** the two multiballs "
+         "(each opens with its own intro video), **Background music** the two background "
+         "songs (no intro video). Each music plays only its own pool's songs, and a pool "
+         "with no songs keeps the game's own. **Add songs…** adds to the pool shown; a song "
+         "wanted in two pools is added to each, and once it has played in one pool it is not "
+         "picked in another in the same game.\n"
+         "- **Clear all…** takes every song of the pool shown out, after asking, to start over.\n"
+         "- **…** on a song: **Choose an intro video…** gives it the video its song mode "
+         "opens with, the song's name in it. A song without one opens with its song mode's "
+         "own intro.\n"
+         "- The video button beside an intro video's name (or **Watch the intro video** "
+         "under **…**) plays it in a window of its own, with its sound. A video the app "
+         "cannot play as it is (an .avi, .wmv, .mpg...) plays from a preview copy it makes "
+         "first.\n"
+         "- **How often**: a Common song comes up three times as often as a Rare one, a "
+         "Normal one twice as often.\n"
+         "- A song never comes back within five song modes, so none plays twice in a game.\n"
+         "- Any song can come up in any of the five song modes. A song plays to its end, and "
+         "again from the start if the mode lasts longer; the mode's end stops it.\n"
+         "- The rest of a song mode's screens (its level clips, its Champion name) stay as "
+         "they are: make them the same for every song on the Video and Text tabs.\n"
+         "- An extract of a card built with a jukebox brings it back.\n"
+         "- In the Audio list, the game's own music a pool plays songs in place of (Drive My "
+         "Car, Taxman...) says **Jukebox: 1 of N songs at random**. Its **Play** under "
+         "Replacement plays one of that pool's songs, drawn as the game draws them; after "
+         "**Stop**, or once it has played to its end, the next **Play** draws another.\n"
+         "- Drag the window's title bar to move it and its bottom-right corner to resize it. "
+         "It opens where you left it; a double-click on the title bar puts it back.\n"
+         "- Needs an image build, not a direct SD write."),
+        ("Sounds on shots",
+         "Stern Spike 2. While one of the game's modes runs, a hit on a shot you pick "
+         "plays a sound you pick: one of the game's own sounds (one it never plays, say) or a "
+         "file of yours.\n\n"
+         "- Right-click a sound > **Play on a shot in one of the game's modes…** opens the "
+         "window with that sound, or **Sounds on shots** at the top of the tab. Pick the mode "
+         "(the game's own name for it), the shot (the game's own switch name) and the sound, "
+         "then **Add**. Up to 32.\n"
+         "- **By the color of its light:** beside the shot, pick **lit** (any color) or a color "
+         "(**lit blue**, **lit red**...): the sound plays only when the shot's light showed it at the "
+         "hit, so a mode whose lit shots change color with each level plays a sound per level. A "
+         "color sound wins over a lit one, which wins over an any-time one. Offered on the shots "
+         "whose light the app can read.\n"
+         "- The sound plays whole, beside the game's own sounds, and only while that mode runs. "
+         "A hit while it still plays adds no other one, so a spinner does not stack them.\n"
+         "- On a game whose modes the app cannot tell running, the button says why.\n"
+         "- An extract of a card built with them brings them back, and **Save the music modes "
+         "to a file…** carries them to another project of the same game.\n"
+         "- Needs an image build, not a direct SD write."),
         ("Replace from folder",
          "**Replace from folder…**, beside the project folder, picks a whole folder "
          "of your files at once: each file goes to the slot with its name.\n\n"
@@ -236,6 +373,9 @@ HELP_CONTENT = {
         ("Listening",
          "Two players side by side: **Original (stock)** and **Replacement (your "
          "file)**. Starting one pauses the other; ■ on either silences both.\n\n"
+         "- **Previous** and **Next**, either side of each Play, play the row above "
+         "or below, following your sort, search and filters. Under Replacement "
+         "they play a row's replacement where it has one, its original where not.\n"
          "- **Play sequentially** plays down the list on its own, following your "
          "sort, search and Type filter. It stops at the end, on ■, on a click on "
          "another row, or when you open a replacement picker. The playing row is "
@@ -254,6 +394,10 @@ HELP_CONTENT = {
          "| Type: Callouts | Speech (needs Auto-name call-outs to have run) |\n"
          "| Show: Changed | Slots you replaced or that differ from the extract |\n"
          "| Show: Unchanged | Only what you haven't touched yet |\n\n"
+         "On Stern games the **Requests** column counts the game code's sound "
+         "requests that play each sound (hover it for their numbers and Sound Test "
+         "names); **None** marks a sound no request plays. Untick **Show unused** "
+         "to leave those out of the list.\n\n"
          "**Export CSV** saves the whole table (every slot, not just the filtered "
          "view) for a spreadsheet."),
         ("Where is this on the card?",
@@ -268,40 +412,104 @@ HELP_CONTENT = {
          "- Blank puts the stock name back.\n"
          "- On Stern games with a Sound Test menu, the dialog suggests the menu's "
          "names (also saved in sound_test_names.csv). Play a number on the "
-         "machine's Sound Test menu, then type that number to find its entry."),
-        ("Blip-free callouts (Advanced Audio Options)",
-         "Removes a tiny scrap of the original sound from every replacement. "
-         "Optional; works on real machines.\n\n"
-         "- Without it, the machine needs a few bytes of each original sound at "
-         "boot, so about 6 ms of the original plays twice inside every "
-         "replacement. A tester listening for it could not hear it.\n"
-         "- With it, those bytes are kept in the game program instead, and your "
-         "audio plays all the way through.\n"
+         "machine's Sound Test menu, then type that number to find its entry.\n\n"
+         "Fixing many at once: correct the text column of the project's "
+         "callouts.csv (by hand or in a spreadsheet), save it, then **More > "
+         "Rename from callouts.csv…** renames every sound to its corrected text. "
+         "Characters a file name can't hold become _, and the names are "
+         "remembered like a rename in Properties.\n\n"
+         "The other way round: a rename in Properties also updates that "
+         "sound's row in callouts.csv, and **More > Update callouts.csv from "
+         "the names…** writes every sound's name as it is now into the CSV "
+         "(adding rows for named sounds it doesn't list), so your names are "
+         "kept there too.\n\n"
+         "Comments: the Comment box in Properties (any sound, F2 or "
+         "right-click) takes a note of your own, such as who says it, the mode "
+         "it belongs to or what plays it. It is kept in the comment column of "
+         "the project's callouts.csv, follows the sound through renames and "
+         "Auto-name, shows in a Comment column once a sound has one, is found "
+         "by the Search box, and goes out with Export CSV. Tick or untick "
+         "**Show comments** in the toolbar to show or hide that column.\n\n"
+         "Commenting many at once: fill in the comment column of callouts.csv "
+         "(by hand, in a spreadsheet or with another tool; a header of "
+         "comment, comments or notes all work), save it, then **More > Update "
+         "comments from callouts.csv…** brings every comment in and says how "
+         "many came in, changed or went. Only the comments change: names and "
+         "types stay as they are."),
+        ("Blip-free callouts (always on)",
+         "Every replaced sound plays your audio all the way through, with no "
+         "scrap of the original inside it. There is nothing to switch on.\n\n"
+         "- The machine needs a few bytes of each original sound at boot. The "
+         "build keeps those bytes in the game program, so the card can carry "
+         "only your audio.\n"
          "- It makes the game program slightly bigger, so it needs the card "
          "built as an image (the Linux filesystem driver, as full-size videos "
-         "do). A Direct-SD write skips it."),
-        ("Longer replacements (Advanced Audio Options)",
-         "Lets a Spike 2 replacement be longer than the sound it replaces. "
-         "Optional; confirmed on a real machine (no loop, correct cut-off).\n\n"
-         "- Off, a longer clip is trimmed to the original's length.\n"
-         "- On, your clip is added at the end of the sound bank and the game is "
+         "do). A Direct-SD write can't do that, so about 6 ms of the original "
+         "plays twice inside each replacement there.\n"
+         "- Write Complete says which one your card got.\n"
+         "- To get rid of the scrap on a card built before, just build it "
+         "again: every replaced sound is redone from your files."),
+        ("Longer and shorter replacements (always on)",
+         "On Spike 2, each replacement plays at its own length, longer or shorter "
+         "than the sound it replaces. There is nothing to switch on. Confirmed on a "
+         "real machine (no loop, correct cut-off).\n\n"
+         "- Your clip is added at the end of the sound bank and the game is "
          "pointed at it; every other sound is untouched. The preview shows the "
          "whole clip with a green line where the original ended.\n"
+         "- A clip at least 0.1 s shorter than the original also gets its own "
+         "length, so the game stops playing it where your audio ends instead of "
+         "holding it through silence: the next callout comes sooner, and a song "
+         "loops or moves on sooner.\n"
          "- It needs the card built as an image (the Linux filesystem driver). "
-         "A Direct-SD write trims as before.\n\n"
-         "### Two size limits\n"
+         "A Direct-SD write fits each clip to the original's length (longer is "
+         "trimmed, shorter padded with silence).\n\n"
+         "### How much fits\n"
          "1. **The 2 GB bank.** The game can open a sound bank only up to about "
          "2 GB, and each lengthened sound adds its whole length on top (on "
-         "Godzilla 1.16, room for about 45 minutes of stereo). Anything over is "
-         "trimmed and named in the log.\n"
+         "Godzilla 1.16, room for about 45 minutes of stereo). Past that, the "
+         "lengthened sounds go into **extra sound banks** of their own beside it "
+         "(image-sc01.bin and on, the way Stern's music titles keep their songs), "
+         "so the 2 GB does not trim them, songs the game plays in parts (an intro, "
+         "the song, an outro) included. A few sounds stay in the main bank and are "
+         "trimmed there when it is full (for example one the game never plays through "
+         "its sound list, or one that shares its sound ids with a music mode's file "
+         "kept in the main bank); the log names them.\n"
          "2. **The games partition.** Lengthened sounds share it with full-size "
          "videos, and a stock 8 GB card may have only a few hundred MB free. When "
          "room runs short, longer sounds are trimmed to fit it; songs marked "
          "**Keep this song whole if the bank fills up** are kept whole first. The "
          "log names each one and the SD card size that would keep them whole.\n\n"
          "> SD card size on the Write tab (Windows and Linux) builds for a bigger "
-         "card and gives the games partition more room, but it does not raise the "
-         "2 GB limit."),
+         "card and gives the games partition more room."),
+        ("How much audio fits", [
+            "The limits for longer sounds, music modes and sounds in turn or at random "
+            "(Stern Spike 2).",
+            "| What | Limit |\n"
+            "|---|---|\n"
+            "| Music modes | 8, the card's own sounds as mode 1 |\n"
+            "| In turn or at random | 16 files a sound, its own included |\n"
+            "| In a music mode | 15 more for each mode's file |\n"
+            "| One sound | about 20 minutes of stereo |\n"
+            "| Number of sounds | unlimited |",
+            "### How long each one plays\n"
+            "- A replacement, a music mode's file, a flipper sound and a sound on a shot "
+            "play whole.\n"
+            "- Files in turn or at random under the card's own sound are cut to the length "
+            "of the game's sound.\n"
+            "- In a music mode they are cut to that mode's first file: put the longest first.\n"
+            "- The log names each one it cut.",
+            "### The machine's memory\n"
+            "The machine holds the main sound file all the time, and beside it each sound bank "
+            "it is playing from, up to 8 at once. Together they must stay under about 2,180 MB "
+            "(on Godzilla 1.16, about 50 minutes of stereo beside the main file).\n\n"
+            "- Songs under about 4 minutes share banks; a longer one gets a bank of its own. "
+            "The 8 longest songs are what count.\n"
+            "- Replacing one of the game's own songs gives its room back.\n"
+            "- **Machine memory** beside the slot count shows the total before you build "
+            "(hover it); Write refuses a card that will not fit.",
+            {"note": "Many songs of a few minutes fit far more easily than a few very long ones. "
+                     "Cut silence from the ends: it takes room like music does."},
+        ]),
         ("Save and load settings",
          "**More > Save settings to a file…** keeps this tab's picks, ticks and "
          "options in one small file. **Load settings from a file…** puts them back, "
@@ -321,11 +529,15 @@ HELP_CONTENT = {
                 {"icon": "write", "title": "Build",
                  "text": "on the **Write** tab: picks apply then"}]},
             "- No stage step: the assets folder is the one Extract made and Write reads.\n"
+            "- Drop a video file from your desktop or a folder on a row to make it "
+            "that row's replacement.\n"
             "- The log says at once whether a pick \"already matches this slot\" (copied "
             "in, no re-encode) or \"will be re-encoded to match this slot\". "
             "Transparency is kept where the original has it.\n"
             "- Picks are stored in the project folder, not the card: they survive "
-            "closing the app or pointing Extract at another card image.",
+            "closing the app or pointing Extract at another card image.\n"
+            "- **Full screen:** the button at the right of a player's bar, or a "
+            "double-click on the picture, fills the window with it; Esc comes back.",
         ]),
         ("Replace from a folder", [
             "**Replace from folder…**, beside the project folder, picks each file in a "
@@ -424,7 +636,7 @@ HELP_CONTENT = {
          "Convert measures your file against it, so a clip cut to the machine's real "
          "spec still reads As-is."),
         ("Random clips",
-         "Spike 2, Godzilla Pro and Premium/LE 1.16. Right-click > **Random clips** > "
+         "Spike 2, the latest version of each game. Right-click > **Random clips** > "
          "**Add clips to play at random…** gives a slot more clips than its own: each "
          "time the game plays it, one is picked at random, never the same twice in a "
          "row, and the slot's own clip is one of them.\n\n"
@@ -435,13 +647,29 @@ HELP_CONTENT = {
          "- Needs an image build, not a direct SD write."),
         ("Clip length",
          "Right-click > **This clip's length**: follow the **Trim / pad** box (default), "
-         "match the stock clip, keep your file's full length, or type seconds.\n\n"
+         "match the stock clip, loop your file to it, speed your file to it, keep your "
+         "file's full length, or type seconds.\n\n"
          "- A clip with its own length shows it after the **Length** cell.\n"
+         "- **Vs stock** shows how much longer (+) or shorter (−) your file runs than "
+         "the stock clip and the speed change that would make it run exactly as long, "
+         "like −0.25 s • 2.5% slower. Click its header to sort by it.\n"
+         "- **Speed my file to the stock clip's length** slows a shorter file down (or "
+         "speeds a longer one up) to fill it, with no frozen last frame and no cut; the "
+         "sound keeps its pitch. The Replacement player plays it at that speed.\n"
          "- Trim / pad always measures against the stock clip, even on a replaced "
          "slot.\n"
          "- Clips under a second (a sixth of one Batman card's 6331, down to one-frame "
          "stills) show milliseconds, like 0:00.033, not an empty-looking 0:00. The "
          "preview shows their first frame."),
+        ("Compare report",
+         "More > **Export compare report (CSV)…** saves a row for every replacement, "
+         "every random clip and every mode's row of a shared clip, beside the game's "
+         "own clip it plays in place of.\n\n"
+         "- Both lengths in seconds to two decimals, the difference, and the length it "
+         "will have on the card after Write (the stock length when Trim / pad applies, "
+         "your own when the clip goes on as-is).\n"
+         "- Resolution, frame rate, frames, codec, audio and file size of each, and a "
+         "note when Write cuts, pads, scales or changes the frame rate."),
         ("Size limits", [
             "How big a replacement may be depends on the game.",
             {"cards": [
@@ -487,7 +715,7 @@ HELP_CONTENT = {
                 {"icon": "search", "title": "Find", "text": "minutes the first time"},
                 {"icon": "check", "title": "Use",
                  "text": "untick any, then **Use these files at best quality**"}]},
-            "- Colour is told from black-and-white, and of several copies the best wins.\n"
+            "- Color is told from black-and-white, and of several copies the best wins.\n"
             "- Check amber rows. \"already on the card untouched\" means a rebuild from "
             "that file won't improve the clip.",
         ]),
@@ -533,6 +761,9 @@ HELP_CONTENT = {
             "Select several rows (Ctrl-click, Shift-click) with the **Colors** bar open "
             "and a profile you pick goes to every one of them that is not locked, each "
             "attached.",
+            "To keep a copy on your PC, right-click a row (or several) and pick **Save "
+            "this clip with its color profile…**: the clips are saved to a folder you choose with "
+            "their color profile baked in.",
             "### Preview colors\n"
             "Switches above the players show the clips as the machine will (preview "
             "only; no re-encode), drawn the same way Scenes draws a picture, color ranges "
@@ -583,9 +814,30 @@ HELP_CONTENT = {
             "shows it; a replacement there changes nothing.",
             "**Sounds with a clip** (Spike 2): under the panes, the sounds the game plays "
             "with the clip, read from its program: kept with the clip, asked for right after "
-            "it, or named after it. Each is named by its file in the project's audio folder "
-            "once the card is extracted with this version. A sound the game picks at random, "
+            "it, or named after it. Each is named by its file in the project's audio folder; "
+            "its play button plays it there, and its name shows it on the **Audio** tab. A "
+            "clip with none of those lists the sounds that may be its (named like it, or "
+            "asked for in the same part of the program). A sound the game picks at random, "
             "or a clip's own audio track, is not listed.",
+            "**A clip's song** (Jersey Jack and others): a song clip carries no sound of its "
+            "own; the game plays the song from a separate file. Above the players the Video tab "
+            "names that file on one line (hover **Song:** for how it was matched): a sound in the "
+            "project named after the same song, both at least "
+            "30 seconds long and about as long as each other. Tick **Play it with the clip** "
+            "and it plays along with either player, following its pause, seek and stop, so the "
+            "clip looks and sounds the way the machine shows it.",
+            "**When it plays** (Spike 2): what the emulator saw the game do with each clip. "
+            "Play a game on the **Emulate** tab and the playfield window's **CLIPS** list "
+            "names each clip as it plays, with the switch made just before it (**after "
+            "RIGHT RAMP**) and **loops** when the game starts it again each time it ends. "
+            "The Video tab keeps what was seen for the project, so a battle's clips can be "
+            "told apart by their shots. The words the game draws over a clip are on the "
+            "game's screen while it plays.",
+            "The same column also says what the card's game program shows about a clip, with "
+            "no emulator run: **In turn with 2 others** (the game plays a set of clips one "
+            "after the other, each time the moment comes), **1 of 6** (one of a set it picks "
+            "from as it plays) and **loops** (it asks for the clip as a loop). Which shot "
+            "starts a clip is only known from the emulator.",
         ]),
         ("Save and load settings",
          "**More > Save settings to a file…** keeps this tab's picks, ticks and options; "
@@ -599,13 +851,23 @@ HELP_CONTENT = {
             "### Select and move\n"
             "- Click it in the preview or under **Layers**. Ctrl-click (Cmd on a Mac) "
             "adds or removes; Shift-click in Layers takes a range.\n"
+            "- After a click in **Layers** or **Contents**, Up and Down pick the row "
+            "above or below (Shift+Up/Down in Layers takes a range).\n"
             "- Drag to move, drag a corner to resize, arrows to nudge (Shift: 10 px).\n"
+            "- **Snap** under the preview: **Snap to grid** (pick the **Grid size**) and "
+            "**Snap to other parts** pull what you drag onto the grid, or onto the edges and "
+            "middles of the other pictures, lines of text and the screen, a pink line showing "
+            "where. **Snap with** picks the point that snaps: **Auto** (any edge or the middle) "
+            "or one of nine (Top left to Bottom right). Hold **Alt** while dragging to place it "
+            "freely.\n"
+            "- A resize keeps the layer's X and Y (its top-left stays put); **Resize from** "
+            "under **Keep its shape** switches it to **Middle** to grow and shrink from the center.\n"
             "- Drag a row in **Layers** above or below another to re-order it; drop an "
             "added layer on a group's row to move it into that group. The game's own "
             "layers stay in their group.\n"
             "- **Ctrl+Z** undo, **Ctrl+Y** or **Ctrl+Shift+Z** redo.",
             "### The panel\n"
-            "- Position, size (**W px / H px**), **Turn °** (clockwise; 90° buttons), "
+            "- Position, size (**W px / H px**), **Turn °** (clockwise; 90° buttons; your own turn, on top of any turn the game gives it, which the panel names under it), "
             "tint and opacity, hide, and layer order (later draws on top).\n"
             "- A picture shows its size and scale; **Draw 1:1** draws it pixel for pixel.\n"
             "- Text: a corner or **W px / H px** resizes its box and the words wrap inside "
@@ -613,42 +875,76 @@ HELP_CONTENT = {
             "- Text: **Font controls** opens the **Font** bar on the right edge: "
             "the line's font and **Size** (the sizes the scene was made at draw sharpest), "
             "**Italic**, **Slant** and letter **Width**, letter and line **Spacing**, "
-            "**Across** (Left / Centre / Right) and **Up/down** "
+            "**Across** (Left / Center / Right) and **Up/down** "
             "(Top / Middle / Bottom) in its box, wrapping, shrink to fit and line breaks, "
             "**Fit box to text**, and **Add** / **Remove** a drop shadow, in "
             "the preview and in the game. **Font as shipped** puts the font and style back. "
+            "Its **Color** gives the line a color of its own: a wheel, **Brightness**, an "
+            "exact color, and **Save a copy...** / **Load...** with your **Saved** colors. "
+            "The line is drawn in exactly that color and the color profile no longer "
+            "changes it; **Default** puts the game's color (and the profile) back. "
+            "A score panel line the game paints as it plays shows the game's colors there "
+            "instead. "
             "Lines the "
             "game fills in itself on Godzilla's mode screens (a battle's title and "
             "instructions) always sit in the middle of their box and shrink to fit it; the "
             "preview shows them that way.\n"
             "- Text: most text is a font "
-            "with baked-in colours, so **Tint** recolours it.\n"
+            "with baked-in colors, so **Tint** recolours it.\n"
             "- Text the **game fills in** as it plays (a jackpot or award title, a "
-            "battle's name) has a teal dotted outline and a gear on its Layers row; the "
+            "battle's name) has a gear on its Layers row and a teal dotted outline when "
+            "you hover or pick it; the "
             "words on the card are a stand-in for the game's own line. Hover the gear to "
             "see which line (or which mode) fills it; its **T** finds that line on the "
             "Text tab, where the words are changed. The box's size, place and font set "
             "here hold for whatever the game puts in it.\n"
+            "- A line the **game paints** in its own colors (the score panel) has a violet "
+            "brush on its Layers row and a violet dash-dot outline when you hover or pick "
+            "it. The Selected panel's **Filled in by the game** and **Painted by the game** "
+            "bars light up for the line you pick and say \"Not this one\" otherwise; "
+            "controls that don't apply to it are grayed. Until the project's card has been "
+            "read for the boxes the game program names, the Filled-in marks are guesses and "
+            "the bar says so: **Re-read from card** there reads them.\n"
+            "- A project extracted from a card a Write had already changed says **From a "
+            "written card** (or **From a modified card**) beside Revert: As shipped and "
+            "Reset go back to that card, so pictures and text that Write added stay. Layers "
+            "it hid can be put back with their red stop sign.\n"
             "- **Picture…** and **Text…** add new items.",
             "### Moment and switchable parts\n"
             "- **Moment** picks the point in the timeline; Play runs it, Stop goes back.\n"
             "- **Switchable parts** previews each look the game's code picks between "
             "(which monster Battle Select shows). Preview only.\n"
-            "- A greyed layer isn't drawn at this moment: click it to show and edit it. "
+            "- A layer drawn in only some of a part's looks names them on its Layers row "
+            "(the Planet X map's icons: Loop, Select, Destroyed, each in the same place). "
+            "Select it and **Show this look** switches the part to that look.\n"
+            "- A grayed layer isn't drawn at this moment: click it to show and edit it. "
             "Edits hold at every moment.",
+            "### Animating a picture you added\n"
+            "Select a picture you added and use its **Animation** box:\n"
+            "- **Shows**: all the time, **between frames** (with a fade in and out, in the "
+            "scene's own frames), or **like a layer of the game**: it comes on and fades "
+            "exactly as that layer does. To put a picture in place of a line of words, "
+            "pick that line, then hide the line with its red stop sign.\n"
+            "- **Pulse** fades it down and back up, over and over.\n"
+            "- **In turn**: more pictures shown one after the other in its place, a "
+            "flip-book.\n"
+            "- A pulse and pictures in turn keep going for as long as it shows, the scene "
+            "resting on its last frame included. Play shows it moving.",
             "### Eyes and hiding",
             {"cards": [
                 {"icon": "eye", "tone": "info", "title": "The eye",
                  "text": "Hides a layer **in the preview only**. **H** toggles the "
                          "selection; **Alt+click** an eye solos it."},
                 {"icon": "x", "tone": "warn", "title": "Hide in the game",
-                 "text": "The card mark at a row's end (or right-click). Write leaves it "
-                         "off the card; the row is struck through."},
+                 "text": "The mark at a row's end: a green tick is in the game, a red "
+                         "stop sign hidden (click to swap; with several rows selected, "
+                         "all of them). Write leaves a hidden one off the card; the row "
+                         "is struck through."},
                 {"icon": "trash", "tone": "err", "title": "Delete",
                  "text": "**Delete** (or right-click) asks first. A layer you added is "
                          "taken out; the game's own are hidden in both. **Undo** brings "
                          "it back."}]},
-            "- A new scene opens with eyes shut on layers hidden in the game; **Reset** "
+            "- A new scene opens with eyes shut on layers hidden in the game; **Revert** "
             "puts eyes back.\n"
             "- Selecting shows a layer even with its eye shut; it never changes an eye.\n"
             "- A crossed-out eye: off because its switchable part shows another look. The "
@@ -660,8 +956,9 @@ HELP_CONTENT = {
             "### Onto the card\n"
             "- Edits are listed on **Write**. Moves, resizes, tints, hides and order can "
             "go straight to an SD card; an added picture or text needs an image build.\n"
-            "- **Reset** puts a scene, or every scene, back to the last Write or as "
-            "shipped. **Export picture…** only makes a picture for you.\n"
+            "- **Revert** puts a scene, or every scene, back to the last Write or as "
+            "shipped: its layout, not its color profiles or replaced pictures (**Reset…** in the "
+            "project menu puts those back). **Export picture…** only makes a picture for you.\n"
             "- On a running Emulate (**Apply my replaced assets on top**), edits reach the "
             "game live: most screens at their next showing, ones loaded at start (score "
             "display, Battle Select) after a restart. Untick **Include my Scenes tab "
@@ -673,7 +970,10 @@ HELP_CONTENT = {
             "- Zoom: Ctrl (or Shift, or Cmd) + wheel, or the zoom buttons; middle-drag "
             "to pan.\n"
             "- Rows of W's or AAA are placeholders the game fills in, like high score "
-            "initials.",
+            "initials.\n"
+            "- Godzilla's score panel: select a score line for four color swatches, picked "
+            "as the machine shows them (**Revert** puts the game's back). The game program "
+            "paints them, so Write adds a program step.",
         ]),
         ("Save and load scene edits", [
             "**Save / load edits**, at the head of the Scenes page, saves edits and the "
@@ -684,17 +984,24 @@ HELP_CONTENT = {
                          "words."},
                 {"icon": "save", "tone": "ok", "title": "The whole look",
                  "text": "**Every scene with pictures, text and color profiles:** scenes, "
-                         "every replaced picture, Text edits, profiles and overlay. Not "
-                         "sounds, videos or the machine screen."}]},
+                         "every replaced picture, Text edits, profiles (the game's own "
+                         "pictures and lines too) and overlay. Not sounds, videos or the "
+                         "machine screen."}]},
             "### Loading\n"
             "- Scenes match by path, so an LE file loads on the Pro. Missing scenes and "
             "unplaceable or too-long text are left out and named; clashing picture names "
             "are renamed.\n"
+            "- Every load writes a report to the project's **logs** folder: each scene "
+            "loaded, kept as yours, not on this card, or starting out otherwise here "
+            "(moved, resized, hidden or colored differently), and anything left out.\n"
             "- Pictures go into **Shared pictures**. Nothing is deleted or overwritten.\n"
+            "- A file with the game's own pictures or lines colored unlocks them here, so "
+            "they show.\n"
             "- When the file would change something you edited yourself (a scene, a "
-            "picture, a line of text, the overlay), it lists each one beside the file's "
+            "picture, a line of text, the overlay, color profiles), it lists each one "
+            "beside the file's "
             "and asks: **Cancel**, **Skip conflicts** (load only the rest), **Replace "
-            "all**, tick the ones to replace and **Replace ticked only**, or **Reset my "
+            "all**, tick the ones to replace and **Replace ticked only**, or **Revert my "
             "scenes, then load** (every scene back as the game shipped it, then the whole "
             "file). Before any of "
             "yours is replaced it saves them to a file in the project's **Backups** "
@@ -715,6 +1022,8 @@ HELP_CONTENT = {
                 {"icon": "write", "title": "Build",
                  "text": "on the Write tab: there is no separate stage step"}]},
             "- The folder is the one **Extract** made, the same one Write reads.\n"
+            "- Drop an image file from your desktop or a folder on a row to make it "
+            "that row's replacement.\n"
             "- Keep the original's resolution for the best result.",
         ]),
         ("Where pictures come from",
@@ -739,7 +1048,7 @@ HELP_CONTENT = {
                 {"icon": "check", "tone": "ok", "title": "Fits",
                  "text": "Drops straight in."},
                 {"icon": "minus", "tone": "warn", "title": "Too big",
-                 "text": "Re-compressed with fewer colours until it fits."},
+                 "text": "Re-compressed with fewer colors until it fits."},
                 {"icon": "x", "tone": "err", "title": "Still too big",
                  "text": "Skipped: the slot is left unchanged. Use a simpler picture."}]},
             "Font and sprite atlases in scenes are the exception: they are re-encoded "
@@ -750,11 +1059,12 @@ HELP_CONTENT = {
          "font) can keep its own size, e.g. a longer name banner.\n\n"
          "- Tick **Keep this picture's own size** under the preview, or its box in "
          "the **Keep size** column.\n"
-         "- The build grows the scene to fit it. The game draws it from the same "
-         "top-left corner, so a wider picture reaches further right.\n"
+         "- It shows in the original's place and size, fitted and centered, with "
+         "the extra pixels for where the scene zooms in. Make it bigger or smaller "
+         "on the **Scenes** tab.\n"
          "- Needs an image build, not a direct SD write.\n"
-         "- A few pictures can't change size (full-screen backgrounds, for one): the "
-         "build fits those to the original size and the log names each.\n"
+         "- A few pictures can't change size (font atlases, for one): the build "
+         "fits those to the original size and the log names each.\n"
          "- Tested in the PC emulator; no machine has run one yet."),
         ("Color column (Spike 2)", [
             "Every row has a Color mark saying whether a color profile goes into "
@@ -778,7 +1088,10 @@ HELP_CONTENT = {
             "others.\n"
             "- Tick **Unlock extracted images** under Advanced to give the game's own "
             "pictures a palette too. Detaching one, or locking again, puts the "
-            "original back.",
+            "original back.\n"
+            "- To keep a copy on your PC, right-click a row (or several) and pick "
+            "**Save this picture with its color profile…** (or **More**): the pictures are saved "
+            "to a folder you choose with their color profile baked in.",
         ]),
         ("Replace from folder", [
             "**Replace from folder…**, beside the project folder, gives each file in "
@@ -807,7 +1120,7 @@ HELP_CONTENT = {
             "disk with no pick left. Files inside an extract are copies off a card and "
             "are never offered.\n"
             "- Where the folder has the same picture twice, the biggest best copy is "
-            "used. A colour picture is never taken for its black-and-white twin.\n"
+            "used. A color picture is never taken for its black-and-white twin.\n"
             "- Each row shows the copy and the file found side by side. Glance down "
             "them: a look-alike (the next frame of an animation, the same letter "
             "from another font) can stand in when the real file isn't in the folder. "
@@ -820,6 +1133,11 @@ HELP_CONTENT = {
             "- **Some:** select rows (Shift-click a range, Ctrl-click one more) and "
             "right-click. Sort by Replacement to bring your picks together.\n"
             "- **All:** **Clear replacements…** in the More menu (the ⋯ button at the top).\n"
+            "- **The same picture again:** **Clear replacements identical to the "
+            "original…** in the same menu compares each pick with the game's own "
+            "picture, pixel for pixel, and clears the ones that are the same picture "
+            "(a file saved again counts), color correction on or not. It says how "
+            "many before it clears.\n"
             "- **One animation:** its scene group's right-click menu.\n"
             "- **One slot:** right-click it to drop a pick not built yet, or revert a "
             "file already changed.\n\n"
@@ -851,7 +1169,7 @@ HELP_CONTENT = {
                          "put back in its exact box."},
                 {"icon": "text", "tone": "info", "title": "A desktop font",
                  "text": "**Fonts…** > **Import font file…** fits a TTF or OTF: every "
-                         "letter fits its box, on the baseline, ink colour matched."}]},
+                         "letter fits its box, on the baseline, ink color matched."}]},
             "### The Fonts window\n"
             "- Type your own text to see it in the real letters and the game's "
             "spacing, pending edits included.\n"
@@ -868,7 +1186,7 @@ HELP_CONTENT = {
             "asks first, and Revert font undoes it in one go.\n"
             "- **Behind** puts the preview on something other than black.\n"
             "- **Color** repaints the letters on Apply, no font file needed. The scene "
-            "multiplies it (the line under the controls names the scene colours): a "
+            "multiplies it (the line under the controls names the scene colors): a "
             "font a scene tints black stays black.\n"
             "- Fonts under 30px are marked \"tiny\": a desktop font rarely survives "
             "that small.",
@@ -896,10 +1214,10 @@ HELP_CONTENT = {
          "scene draws it. The preview follows each change.\n\n"
          "| Item | What it does |\n"
          "|---|---|\n"
-         "| Text colour… | the line's real colour (the font is white so the scene "
+         "| Text color… | the line's real color (the font is white so the scene "
          "can tint it) |\n"
          "| Move… | shifts the line's box by the pixels you type |\n"
-         "| Alignment | Left, Centre or Right |\n"
+         "| Alignment | Left, Center or Right |\n"
          "| Font size… | a percentage of this scene's size; shrinking is lossless, "
          "past the master art it blurs |\n"
          "| Blank this font | in this scene, or everywhere (one atlas serves every "
@@ -941,9 +1259,11 @@ HELP_CONTENT = {
                 {"icon": "gear", "tone": "info", "title": "Game-program text",
                  "text": "Drawn by the game code itself: titles, battle names, award "
                          "lines. The Scene column reads **game program**."}]},
-            {"note": "A scene's line is often a placeholder the code writes over. If a "
-                     "line still shows the old words on the machine after you changed "
-                     "every scene copy, edit its game-program row.", "kind": "tip"},
+            {"note": "A scene's line is often a placeholder the code writes over. Where "
+                     "the app can tell the game writes a line itself, that scene line is "
+                     "locked (Apply to every scene and Replace everywhere skip it): "
+                     "edit its game-program row instead. If a line still shows the old "
+                     "words on the machine, do the same.", "kind": "tip"},
         ]),
         ("Length limits", [
             "The **Max** column is each line's budget in bytes (letters). A row reading "
@@ -1005,7 +1325,7 @@ HELP_CONTENT = {
          "everywhere that exact line appears (many lines repeat once per scene)."),
         ("Seeing the line in its scene",
          "**Show in Scenes…** (also on the right-click menu) opens the Scenes tab on "
-         "the scene that draws the line, with the line picked out: its font, colour "
+         "the scene that draws the line, with the line picked out: its font, color "
          "and the art behind it.\n\n"
          "- Your edits show there before anything is written (the Contents row says "
          "\"(not built yet)\"), so you can check a longer line fits its box.\n"
@@ -1042,16 +1362,38 @@ HELP_CONTENT = {
             "shades and level, the color strength and the shadow lift. **No change** "
             "leaves the colors alone. There are three profiles:",
             {"cards": [
-                {"icon": "sun", "tone": "info", "title": "Whole screen overlay",
-                 "text": "Spike 2: the game draws everything through it, its own art "
-                         "too. Other machines: the replaced files are corrected when "
-                         "staged."},
                 {"icon": "image", "tone": "ok", "title": "Individual files",
-                 "text": "Spike 2: baked into only the replaced files it is attached to."},
+                 "text": "Spike 2: baked into only the replaced files it is attached to. "
+                         "Other machines: the one profile, corrects the replaced files "
+                         "when staged."},
                 {"icon": "eye", "tone": "warn", "title": "Machine screen",
                  "text": "Spike 2, preview only: what your machine's screen does. "
-                         "Never on the card."}]},
+                         "Never on the card."},
+                {"icon": "sun", "tone": "info", "title": "Whole screen overlay",
+                 "text": "Spike 2, under Specialized: the game draws everything "
+                         "through it, its own art too."}]},
+            "On Spike 2 the tab opens on **Adjust individual files**. The whole "
+            "screen overlay is specialized, so it has its own button at the right, "
+            "shown only on machines that can draw one.",
         ]),
+        ("Machine screen box",
+         "Every mode has a **Machine screen** box above the preview.\n\n"
+         "- Ticked, every preview shows ALL files through the Machine screen, after "
+         "their own color profiles: Scenes, the Images tab, the Video tab's players, "
+         "and this tab's preview, whose right side then says **On the machine**.\n"
+         "- It is the same switch as Machine screen under Preview colors on those "
+         "tabs, all at once.\n"
+         "- Only the previews change. Nothing is written to the card."),
+        ("Make your own profile",
+         "The **Make your own profile** card, under Adjust:\n\n"
+         "1. **Download test card...** saves the test card as a PNG. Put it in a "
+         "scene, build, show it on your machine and photograph the screen.\n"
+         "2. **Download AI template...** saves a profile file whose notes explain "
+         "every number, the order they are applied in, their limits and the test "
+         "card's exact colors. Hand it to an AI with the photo and the test card, "
+         "or fill it in yourself.\n"
+         "3. **Load a profile file...** puts the finished file onto the profile on "
+         "show, the same as **Load...**."),
         ("Starting points and preview",
          "Pick a starting point, then fine-tune it.\n\n"
          "- **Recommended** is the usual start. **Black and white** suits the "
@@ -1090,8 +1432,9 @@ HELP_CONTENT = {
          "gets it as its own (and is attached if it was not).\n\n"
          "- **Same as the other files** drops it: the file then gets the individual "
          "files profile, the one this tab shows.\n"
-         "- **Apply to all profiled images…** / **videos…** (Images and Video "
-         "only) gives every file there with a profile attached the shown file's "
+         "- **Apply to all profiled images…** / **videos…** (Images and Video, "
+         "and a picture in Scenes) gives every file there with a profile "
+         "attached the shown file's "
          "profile. Files with none attached are left as they are.\n"
          "- **Apply to all images…** / **videos…** gives it to every file there "
          "that is not locked (each replaced one, and the game's own once "
@@ -1119,7 +1462,15 @@ HELP_CONTENT = {
          "text…** (and **All text…** under Which files) give the shown profile to "
          "every line in every scene. Lines already corrected through their font "
          "are left out, and the question says how many. One Undo puts them all "
-         "back."),
+         "back.\n"
+         "- A profile bends the colors a line already has, so it cannot make white "
+         "letters red: white is already full red, and only turning green and blue "
+         "down tints it. To pick a line's color outright, use **Color** in the "
+         "Scenes **Font** bar. A line with a color of its own is drawn in exactly "
+         "it and the profile leaves it alone; the Colors bar's **Font text color** "
+         "row shows it (or **Default**). **Apply to all lines of text…** under "
+         "it gives that color (or Default) to every unlocked line in every scene, "
+         "as one Undo step."),
         ("Machine screen (Spike 2, preview only)",
          "Not a correction but your machine's screen itself. It is never written to "
          "the card, and Revert all leaves it alone.\n\n"
@@ -1128,7 +1479,7 @@ HELP_CONTENT = {
          "- Until you set one, it is the **Recommended** screen, tuned on a real "
          "Spike 2.\n"
          "- Extra controls: **Color ranges** (one band of hues: hue, width, soft "
-         "edge, hue shift, saturation, brightness; greys protected) and **Curves** "
+         "edge, hue shift, saturation, brightness; grays protected) and **Curves** "
          "(RGB, Red, Green, Blue; drag or type the points).\n"
          "- Every control has a number box and a reset. Save a copy keeps them; "
          "loaded as an overlay or files profile, they are left out."),
@@ -1146,9 +1497,10 @@ HELP_CONTENT = {
             "own colors.\n"
             "- Pictures, videos and test cards go through the Machine screen. Lines "
             "of text don't: they keep their own color and get only the overlay.\n"
-            "- The gear menu's **Files with no color profile attached skip the "
-            "Machine screen** lets red-palette files skip it, to compare them with "
-            "the game's art. They still get the overlay.\n"
+            "- **Files with no color profile attached skip the Machine screen**, "
+            "on the Color profile tab's Machine screen mode, lets red-palette "
+            "files skip it, to compare them with the game's art. They still get "
+            "the overlay.\n"
             "- Click a name to open that profile. Only the preview changes, never "
             "the card.",
         ]),
@@ -1170,10 +1522,246 @@ HELP_CONTENT = {
          "- Drag the bar's left edge to resize it (double-click puts it back). Each "
          "tab remembers whether its bar was open."),
     ],
-    # The Modes tab's own tips are in PREVIEW_HELP: a copy of the app without a
-    # preview code shows none of them (sections_for).  The key stays so every
-    # notebook tab has an entry.
+    # The Modes tab's own tips are in PREVIEW_HELP, read through sections_for;
+    # the mode maker is in every copy since PAD-763 (core/preview.RELEASED).
+    # The key stays so every notebook tab has an entry.
     "Modes": [],
+    # PAD-1382: the game's service menu with the app's rows in it
+    "Service Menu": [
+        ("What it's for", [
+            "The settings the app adds to the game's own **service menu** (Music Mode, Edition, Co-op Play, Handicap), "
+            "as this card will show them at the machine. They all go on a page of their own, **Custom Code**: "
+            "Service menu > Adjustments > Machine Settings > Custom Code. The tab draws that page as the machine "
+            "does, with the way there and the Machine Settings list where it sits.",
+            "Click a row to see its help and its Current and Default values, as the machine shows them.",
+            "A game with the older dot-matrix menu (Aerosmith, Venom, TMNT and others) has no pages to add to: there "
+            "the app's settings are the last rows of Adjustments > Standard Adjustments, shown one adjustment at a "
+            "time as that menu does.",
+            "The menu is read from the card the project was made from. When that card has been moved or deleted, any "
+            "card of the same game and version will do: the project's own Write output, a card the app has been "
+            "pointed at, or the copy kept from the last time it was read. The tab says which card it read.",
+        ]),
+        ("The app's settings", [
+            "Tick Co-op Play or Handicap to put its row on the card (untick to leave it off). Music Mode is set on the "
+            "Audio tab, Edition on the Write tab. Values are the operator's: they are set at the machine, and **+** "
+            "and **-** here only show what each one looks like. Nothing changes on the card until you Write it.",
+            "The arrows put them in **your order**: their order on the page, and their numbers on More Settings when "
+            "they share. Each one's value is kept by name, so reordering never loses one.",
+        ]),
+        ("More settings than the game has room for", [
+            "A game has only a few spare rows for the app's settings (three on Godzilla). When a card has more "
+            "settings than that, they share two rows: **More Settings** picks one, and the row under it becomes that "
+            "setting. The card keeps each setting's value in a file of its own, so it stays set after the machine is "
+            "switched off.",
+        ]),
+        ("The game's other pages", [
+            "Below, **The game's other pages** shows the rest of the menu, read-only: nothing on them is changed.",
+        ]),
+        ("The real menu", [
+            "**Show the real menu from the emulator** boots the game in the emulator - hidden and muted, with this "
+            "project's edits, as the Emulate tab runs it - walks its service menu to the page and row picked above, "
+            "and shows the picture the game itself draws. It takes a minute or more (longer the first time a card is "
+            "used) and needs the emulator stopped, so it is off until ticked. **Read the real menu** reads it again "
+            "after a change.",
+        ]),
+    ],
+    "Play Options": [
+        ("What it's for", lambda: _play_options_intro()),
+        ("Handicap per player", [
+            "**Handicap per player** lets each player of a game pick a handicap from "
+            "**-3** (hardest) to **+3** (easiest), so players of different skill can play one game. Tick "
+            "it, then Write. On the machine:\n\n"
+            "1. Start a game and add players as usual.\n"
+            "2. At each player's first ball the top of the screen shows **P1 HANDICAP 0** (P2 for "
+            "player 2, and so on). The **left flipper button** makes it harder, the **right** easier. "
+            "It starts at what that player had in the last game, or at 0 for everyone after a game "
+            "reset with Start and the left flipper button.\n"
+            "3. Plunge: the ball's first score takes the handicap, and it holds for that player until "
+            "the game ends.\n\n"
+            "- **0** is the game's own settings, as the operator set them.\n"
+            "- A level reads the game's own settings easier or harder for that player only: a longer or "
+            "shorter ball save, and the game's difficulty settings (how hard its modes and multiballs "
+            "are to light) a step at a time, more of them at each level. On Godzilla: +1 lights battles "
+            "easier with a longer ball save, +2 adds an easier heat ray and Building Multiball, +3 easier "
+            "tanks, bridge, powerline and jets as well; -1 to -3 the same the other way, and -3 has no "
+            "ball save.\n"
+            "- **Levels…**, under the tick, shows them as a table: a row for each of the game's own "
+            "difficulty settings (the ball save, how hard each mode, multiball and qualifier is, the "
+            "ball save timers) and a column for each level. Each cell says what the app does there "
+            "(app: easier 2); change it to the game's own value, or to any value that setting offers in "
+            "the service menu. **Defaults** puts the app's choices back.\n"
+            "- The machine's settings are never changed: the game reads the player's level while they "
+            "are up.\n"
+            "- The service menu gets a **HANDICAP** row (Adjustments > Machine Settings > Custom Code, "
+            "or at the end of Standard Adjustments), Off to start with: set it to **On** to play with "
+            "handicaps. Off: no player is asked and the game plays as it always has. When a card has more "
+            "settings of the app's than the game has spare rows, they share two: pick HANDICAP's number on "
+            "**MORE SETTINGS** and the row under it becomes HANDICAP (the card keeps each one's value). A "
+            "game that cannot give even those has handicaps always on.\n"
+            "- Like the operator's own settings, handicaps keep the card on Insider Connected. With "
+            "modes or co-op play on the same card, the scores stay on the machine as those always do.\n"
+            "- In a co-op game each teammate picks one at their first ball.",
+        ]),
+        ("Prolonged Competition", [
+            "**Prolonged Competition** adds the start menu entry Venom and Dungeons & "
+            "Dragons have to any other game whose start menu the app knows. Tick it, then Write:\n\n"
+            "- Hold both flipper buttons in attract to open **CHOOSE YOUR MODE OF PLAY**. The last entry "
+            "reads **COMPETITION / UNTIL POWERED OFF**: pick it with Start and that game and every game "
+            "after it is a Competition game (all randomness removed), exactly as the game's own "
+            "COMPETITION entry makes one game.\n"
+            "- It lasts until the machine is switched off. To end it sooner, pick the same entry again: "
+            "it now reads **STANDARD / ENDS PROLONGED COMPETITION**.\n"
+            "- The machine's settings are never changed.\n"
+            "- On its own it keeps the card on Insider Connected, as the game's own Competition does. With "
+            "modes or co-op play on the same card, the scores stay on the machine as those always do.",
+        ]),
+        ("Score feed", [
+            "**Score feed** has the machine send each game's final scores to a server of "
+            "your own on your network: for a high-score board on a TV, a league sheet, a home automation "
+            "hub. Tick it, type your server's address, then Write:\n\n"
+            "- After every game the machine posts one JSON message to the address: the game, how many "
+            "played, each player's final score, and for each player who was logged in to Insider "
+            "Connected their account's id (the same id every game, so your server can put a name to it). "
+            "A game reset with Start held down mid-game is not sent.\n"
+            "- The address is plain **http://**, your server's **IP address** (like "
+            "`http://192.168.1.50:8080/scores`), as the machine looks no names up and does not do https. "
+            "Your server answers with any 2xx status.\n"
+            "- When the server is off, the machine tries three times, 10 seconds apart, then lets that game "
+            "go. The game itself never waits for it.\n"
+            "- Nothing goes to Stern, and no score is changed. On its own it keeps the card on Insider "
+            "Connected; with modes on the same card, the scores stay off Insider Connected as they always "
+            "do, and still come to your server.\n\n"
+            "A message looks like "
+            "`{\"source\":\"PAD score feed\",\"game\":\"Godzilla Premium/LE 1.16\",\"players\":2,"
+            "\"scores\":[123456780,98765430],\"insider\":[\"3f2a9c1e-...\",null],...}`:\n\n"
+            "| Field | What it holds |\n"
+            "|---|---|\n"
+            "| `game` | the game and its version, as the app names the card |\n"
+            "| `port` | the same, in the app's own short form |\n"
+            "| `game_number` | the games sent since the machine was switched on: 1, 2, 3... |\n"
+            "| `time` | the machine's clock, in Unix seconds (null when it was never set) |\n"
+            "| `players` | how many played |\n"
+            "| `scores` | each player's final score, player 1 first |\n"
+            "| `insider` | each player's Insider Connected account id, null for a player not logged in |\n\n"
+            "**What your server receives (API contract)**, on the Score feed card once it is ticked, shows the "
+            "whole request as the machine sends it to your address, the body laid out, every field with its type, "
+            "and what your server should answer.",
+        ]),
+        ("Inactivity pauses timers", [
+            "**Inactivity pauses timers** shows on Guardians of the Galaxy (Pro and "
+            "LE, 1.15). Its operator menu has the setting **ALLOW INACTIVITY TO PAUSE TIMERS** like every "
+            "Spike 2 game, but the game ignores it. Tick it, then Write, and the card makes it work as "
+            "on Stern's other games:\n\n"
+            "- While the setting is on (it is by default), the missions' clocks and the hurry-ups wait "
+            "when nobody has scored for 6 seconds: a ball held on a flipper, a ball stuck. They run on "
+            "at the next score.\n"
+            "- A mission's clock on this game is its song. The song keeps playing while the clock waits, "
+            "and if a long wait outlasts the song, the clock counts down the rest by itself.\n"
+            "- Turn the setting off in the operator menu and the clocks never wait, as before.\n"
+            "- On its own, it keeps the card's scores on Insider Connected. With modes or co-op play on "
+            "the same card, the scores stay on the machine as those always do.",
+        ]),
+    ],
+    "Attract": [
+        ("What it's for",
+         "Stern Spike 2. Put your own photos, clips and text cards between the screens the game shows in "
+         "attract mode, each for as long as you like. The page lists the game's own attract screens in "
+         "order (the last scores, PRESS START, the high scores and champions, the tutorial clips, the logos), "
+         "read off the game's program, with yours between them.\n\n"
+         "- **Add** on a game screen: photos (several at once make a slideshow), a clip or a text card, "
+         "after or before it.\n"
+         "- Drag an item, or use its arrows, to move it between the game's screens.\n"
+         "- **seconds**: how long it stays up. A clip at 0 plays to its end.\n"
+         "- A screen marked **at times** shows only now and then (after a game, or with one of the game's "
+         "settings on); your items next to it show every time round.\n"
+         "- Photos and clips are made into the game's clip format when the card is built, with your color "
+         "profile, and carried in mod packs and Move Your Mods like your other files.\n"
+         "- Your item gives way to the game: a flipper button moves on to the next screen and Start begins "
+         "a game at once.\n"
+         "- **Run in emulator** starts the emulator with this project's changes.\n"
+         "- Needs an image build, not a direct SD write."),
+        ("Insider Connected",
+         "A card with attract items of your own keeps its scores off Insider Connected: they stay on the "
+         "machine. The page and the Write log say so."),
+        ("Which games",
+         "Aerosmith, The Beatles, Foo Fighters, Godzilla, Guardians of the Galaxy, James Bond 007, Jaws, "
+         "John Wick, Jurassic Park (Home Edition), King Kong, Led Zeppelin, The Mandalorian, Star Wars, "
+         "Stranger Things (LE), Teenage Mutant Ninja Turtles and Uncanny X-Men. On the other Spike 2 games "
+         "the page says why not yet."),
+        ("Attract flipper sounds",
+         "Stern Spike 2, every game and version. Most games play a sound or a callout when "
+         "a flipper button is pressed in attract mode, with no game being played; James "
+         "Bond 007 plays none. "
+         "**Flipper sounds** on the **Attract** page gives the flipper "
+         "buttons sounds of your own there.\n\n"
+         "- **Add a sound…** (up to 16). Each press of either flipper button plays the "
+         "next one, and after the last it starts again.\n"
+         "- **Play sound 2 (…)** previews one; **Take off sound 2 (…)** drops it.\n"
+         "- A press while one is still playing does not start another.\n"
+         "- **Time between sounds** spaces them out: any time, or at most one every 10 "
+         "seconds up to one every 5 minutes; a press before then plays nothing.\n"
+         "- They do not play while the game takes the initials for a high score.\n"
+         "- They ride one of the game's own sounds, so each plays for at most that "
+         "sound's length (about 2 seconds on Star Wars, almost 15 on James Bond 007 LE, "
+         "45 on Jaws); a longer file is cut to it, and the log says so.\n"
+         "- The game's own sound at the press does not play over yours.\n"
+         "- Not on TMNT 1.58 (Pro or LE) or Venom LE 1.06 yet; the menu says why.\n"
+         "- Needs an image build, not a direct SD write."),
+    ],
+    # PAD-1040: the cabinet's expression light shows
+    "Expression Lights": [
+        ("What it's for",
+         "Stern Spike 2. Light shows of your own for the cabinet's expression lights: the blades down the "
+         "cabinet's sides and the speaker lights in the backbox. Each show goes with a song: the game starts it "
+         "whenever it plays that song and keeps it in step with where the song is (held when the song is held, from the "
+         "start again when it starts again), so a song you replaced gets lights that follow it "
+         "instead of the old song's.\n\n"
+         "- **New show**: blank, or from a ready-made one (rock pulse, rainbow, fire, level meter, sweeps, slow "
+         "fade).\n"
+         "- **Plays with**: the song. A song you replaced on the Audio page plays here as you replaced it.\n"
+         "- The middle of the page is this game's cabinet, read off its card, playing the show with its song: "
+         "**Play**, **Stop**, and the slider to go to any moment.\n"
+         "- Two lanes of steps, the blades and the speaker lights, over the song's waveform. Press a step to set "
+         "its pattern, how long it lasts, its two colors, its pace and how it blends in. **+** adds a step; "
+         "**Split at the playhead** cuts the step under the playhead in two, to start a new one on a beat.\n"
+         "- A lane with no steps leaves those lights to the game. After the last step the game's own lights "
+         "come back, unless **Start again when its steps are over** is ticked.\n"
+         "- **Run in emulator** starts the emulator with this project's changes: play a game and watch the "
+         "cabinet's lights in the playfield window.\n"
+         "- Needs an image build, not a direct SD write."),
+        # PAD-1063
+        ("The game's own shows",
+         "Led Zeppelin and Rush have an expression light show of their own for each of their songs, two in fact: "
+         "the game plays the **Original** one, or the **Remix** with the operator's EXPRESSION LIGHTS MODE set to "
+         "REMIX SHOWS (ALL SHOWS picks either). They are listed under **The game's own**, below your shows.\n\n"
+         "- Press one to watch it on the cabinet with its song, Original or Remix, as the machine plays it.\n"
+         "- **Make it a show of mine** makes a show of your own that starts as that one: a step of the game's show "
+         "on each lane, for the same song. Change its song to put the game's show with a song you replaced, cut "
+         "it with **Split at the playhead**, start a step later into the game's show (**Starts at**), or mix "
+         "steps of the game's show with patterns of your own.\n"
+         "- A step's pattern **The game's own show** picks any of the game's shows (**Song**, **Show**, **Starts "
+         "at**). The card plays it from the game's own program, so nothing of the game's is copied onto the "
+         "card.\n"
+         "- The game dims its own shows with its brightness settings (90% as shipped); a show of yours plays "
+         "them at their full brightness, like its other patterns.\n"
+         "- The other games keep no shows of their own the app can read: their cabinet lights are lit by the "
+         "game as it goes."),
+        ("Make it from the song",
+         "**Make it from the song** listens to the song and makes the show for you: it finds the beat and the "
+         "bars, and the song's quiet, building and loud parts. Every step starts on a bar line, every pattern "
+         "moves in time with the beat (pulses, chases, strobes, side to side), a loud part that hits after a "
+         "quiet one opens with a white flash, and the lights fade up at the start and out at the end. Pick a "
+         "style: **Punchy (rock)**, **Smooth** or **Colorful (party)**. It replaces the show's steps; change "
+         "any of them after."),
+        ("Insider Connected",
+         "The shows change only the cabinet's lights, not the game or its scores: a card that carries only "
+         "these shows stays on Insider Connected."),
+        ("Which games",
+         "Blades and speaker lights: Led Zeppelin, Rush, Foo Fighters LE, John Wick, King Kong and Metallica. "
+         "Speaker lights: Batman 66, Deadpool, Dungeons & Dragons, Elvira's House of Horrors, Foo Fighters Pro, "
+         "Godzilla, James Bond 007, Jaws, Jurassic Park, Star Wars, Uncanny X-Men and Venom. On the other games "
+         "the page says why not."),
+    ],
     "Write": [
         ("What a build does",
          "**Build** copies the untouched original and puts in every file that differs "
@@ -1204,8 +1792,9 @@ HELP_CONTENT = {
          "the card stays as it was.\n\n"
          "- The image is then that size: it needs an SD card at least that big, and "
          "flashes slower.\n"
-         "- Only room: the game still can't open a sound bank over about 2 GB, and "
-         "nothing fitted to its slot gets bigger.\n"
+         "- Only room: nothing fitted to its slot gets bigger. Lengthened sounds past "
+         "the 2 GB the game can open in one sound bank go into extra banks of their "
+         "own.\n"
          "- Only bigger sizes are offered, and one smaller: see below. Multi-boot cards "
          "are sized on the Multi-boot tab. Not on macOS yet. A direct write and Port + "
          "build keep each card's own size.\n\n"
@@ -1235,6 +1824,24 @@ HELP_CONTENT = {
          "- The machine only writes to the games partition to install a code update, "
          "so a card made this small may not have the room for one.\n"
          "- Not on macOS yet, and not for a multi-boot card or a direct write.\n\n"
+         "### Editions\n"
+         "For one card that holds several editions of the same game, say a Standard "
+         "and a 70th Anniversary look, picked in the game's own menu. Spike 2, the "
+         "latest version of each game (not James Bond 007 Premium/LE, James Bond 60th or Star Wars Premium/LE, whose game programs cannot grow), image builds.\n\n"
+         "1. Each edition is its own project from the same card. Press **Name the "
+         "editions...** and give every project the same names in the same order: "
+         "Standard, 70th Anniversary.\n"
+         "2. Write each one. Its card gets **EDITION** in the operator menu "
+         "(Adjustments > Machine Settings > Custom Code, its help line naming the editions; "
+         "on a game whose Adjustments have Standard Adjustments, the last row of that list).\n"
+         "3. On the Multi-boot tab, add the images in that order, edition 1 first, "
+         "and tick **No menu: boot the edition the game's EDITION setting names** "
+         "in Menu settings.\n\n"
+         "- The card shows no menu. A change to EDITION takes effect at the next "
+         "power-up.\n"
+         "- The editions share the machine's settings and high scores, so every "
+         "edition has to carry the same settings: if one has music modes, give them "
+         "all music modes.\n\n"
          "### When it won't fit\n"
          "Before anything is written to the card image, a build adds up what goes on "
          "the games partition.\n\n"
@@ -1266,8 +1873,8 @@ HELP_CONTENT = {
          "- Click a column header to sort; again to flip; a third time for the scan's "
          "order.\n"
          "- **Export CSV** saves the rows, to compare two projects in a spreadsheet.\n"
-         "- **Revert all changes…** puts every changed asset back to its extract "
-         "original (not on any card)."),
+         "- **Revert all changes…** opens the project menu's **Reset…** with everything "
+         "ticked: the whole project back as extracted (not on any card)."),
         ("Build / flash an SD card", [
             "On Stern Spike 2 and CGC, **Build / flash SD card…** does both; tick "
             "either part, or both. Other machines have a plain **Build**.",
@@ -1277,8 +1884,27 @@ HELP_CONTENT = {
                  "text": "it, or any saved image, onto an SD card"},
                 {"icon": "play", "title": "Test", "text": "on the machine"}]},
             "- Flashing needs Administrator, and refuses an image too big for the card.\n"
+            "- **Keep the SD card's settings, audits and high scores** (Stern Spike "
+            "2) reads the card's data partition first and puts it back after the "
+            "image, so the machine starts where it left off.\n"
             "- The dialog remembers your last ticks per manufacturer.",
             {"note": "Flashing **erases the whole card**.", "kind": "warn"},
+        ]),
+        ("Code mods (CGC)", [
+            "A CGC machine runs Debian 7 with glibc 2.13. A library or program "
+            "built on a newer Linux won't load there; preloaded at power-up, the "
+            "machine boot-loops.",
+            "- Put C files in the project's **pad_mods** folder: "
+            "`pad_mods/lib/hook.c` is built into `lib/hook.so` in the game folder. "
+            "A folder named `<name>.so` inside it builds all its `.c` files into "
+            "one library.\n"
+            "- The build is linked against the machine's own libraries from the "
+            "card being written, so a function the machine lacks stops the build "
+            "with its name instead of reaching the card. The sources never ship.\n"
+            "- Every program or library going onto the card, built here or dropped "
+            "in by hand, is checked first: it must be 32-bit ARM (hard-float) and "
+            "need nothing newer than the machine's libraries have. If it fails, "
+            "the build stops and nothing is written.",
         ]),
         ("Direct write", [
             {"note": "**Write to SD card / SSD** (where available) changes the card "
@@ -1309,6 +1935,51 @@ HELP_CONTENT = {
             "disk is checked to be this install before a byte is written.",
         ]),
     ],
+    # PAD-1279 (DragonRR): the test card, a tab of its own
+    "Test Card": [
+        ("What a test card is",
+         "A small card that boots any Stern Spike 2 machine straight into a "
+         "**TEST CARD** menu, with no game, so a color profile, a picture, a clip or "
+         "a sound can be judged on the machine without building and burning a "
+         "whole game. It is under 1 GB plus your videos and builds in seconds.\n\n"
+         "The menu: **DEFAULT PAD TEST CARD** (the test card, gray and color ramps, "
+         "sharpness lines, full white and full black: always on the card), "
+         "**IMAGES**, **VIDEOS**, **SCENES**, **SOUNDS**, and **COLOR CORRECTION**. "
+         "An entry with nothing on it does nothing."),
+        ("Putting things on it",
+         "Tick **Test** on a row of the Images, Video or Audio tab, or on a scene "
+         "in the Scenes tab's list. A ticked picture or clip goes on with its color "
+         "profile, as the project would put it on the machine; a scene goes on as "
+         "its resting frame (the frame the Scenes preview opens on), with its edits "
+         "and the project's color profile. A scene is drawn when you tick it, and "
+         "again when you build while its project is open.\n\n"
+         "**Add files…** on the Test card tab adds pictures, videos and sounds from "
+         "your PC. They go as they are, with no color profile.\n\n"
+         "The list is yours, not a project's: things from several games can go on "
+         "one card, up to 64. Rename an entry to change its name on the machine; "
+         "the arrows change its place in its list."),
+        ("Building it",
+         "**Pick a Spike 2 card image…**: any Stern Spike 2 card image. The test "
+         "card takes only its boot and system partitions; nothing of its game "
+         "goes on. Then **Build test card…** and write the file to an SD card like "
+         "any card image.\n\n"
+         "- A video plays whole, at its own frame rate up to 60 frames a second and "
+         "in full color, fitted down to the screen, up to five minutes; its sound "
+         "plays with it.\n"
+         "- A picture is kept pixel for pixel, only fitted down when it is bigger "
+         "than the screen."),
+        ("On the machine",
+         "Flippers move between the entries, **START** opens one, **ACTION** goes "
+         "back. In a list, START shows the one picked full screen; the flippers "
+         "then step to the previous and the next, and START switches the color "
+         "correction on and off (on a sound, it plays it again). The caption hides "
+         "itself after a few seconds; any button brings it back.\n\n"
+         "A video's caption shows the frame rate the machine really reaches beside "
+         "the one the video was made at.\n\n"
+         "**COLOR CORRECTION** changes brightness, contrast, saturation and each "
+         "color's shades live, with the test card on the screen. Once it looks "
+         "right, put the same numbers in the Color profile tab."),
+    ],
     "Mod Pack": [
         ("What it's for", [
             "A mod pack is a small zip of only your changed files, to share. It works "
@@ -1337,28 +2008,40 @@ HELP_CONTENT = {
          "[Transfer mods](#transfer-mods).\n"
          "- Staged Defaults, high-score defaults and your image group and scene names "
          "come along, ready for the next Build.\n"
+         "- Music modes come along too: the pack holds their files, and Import puts "
+         "them in the project's **Music mode files** folder.\n"
          "- Files swapped on the Partitions tab (like SternLogo.png) can't be applied: "
          "Import puts them in the project's **card_files** folder for one right-click "
          "**Replace** there."),
         ("Port + build", [
-            "**Port + build onto card image(s)…** does it all for one or more **stock** "
-            "card images: a new firmware, the other model (Pro, Premium, LE), or several.",
+            "Pick the new **stock card image** (the .raw straight from the manufacturer, "
+            "no extracting by hand) and press **Port + build**: a new firmware, the "
+            "other model (Pro, Premium, LE), or several cards at once.",
             {"flow": [
                 {"icon": "extract", "title": "Extract", "text": "each card"},
                 {"icon": "copy", "title": "Transfer", "text": "your mods onto it"},
                 {"icon": "write", "title": "Build", "text": "its modded image"}]},
-            "Extracts are kept for next time. Audio slots that now hold a different "
-            "sound are skipped; the log names everything skipped.",
+            "- **What's new in this version?** extracts the card and lists the videos, "
+            "sounds, pictures and text it **adds**, changes and drops against your "
+            "project's version, so you know what may need a replacement of your own. "
+            "It also says whether your modes can run on the new game program. The full "
+            "list is saved beside the builds.\n"
+            "- Each card is extracted once and kept: a What's new and the Port + build "
+            "after it share that extract.\n"
+            "- Audio slots that now hold a different sound are skipped; the log names "
+            "everything skipped.",
         ]),
         ("Transfer mods",
-         "**Transfer mods from another extract** (where available) carries your edits "
+         "**Advanced** (folded under Port + build) does the same move one step at a "
+         "time. **Transfer mods from another extract** (where available) carries your edits "
          "onto a newer firmware's extract, or the other model's.\n\n"
          "| Field | What it is |\n"
          "|---|---|\n"
          "| 1: your old extract | Where your mods come **from**. Always needed. |\n"
          "| 3: a clean twin | Optional: a stock extract of the same old version, so "
          "factory changes aren't taken for yours, and audio and text can move too. |\n\n"
-         "- Audio is matched by content, so renumbered slots don't matter.\n"
+         "- Audio is matched by content, so renumbered slots don't matter. A sound's "
+         "music modes go where it goes.\n"
          "- The log shows the plan before you confirm, and why anything can't move; "
          "unmatched text is listed in full in **unmatched-text.txt**.\n"
          "- Running it again **replaces** the last run; your own re-pointing is kept.\n"
@@ -1421,7 +2104,9 @@ HELP_CONTENT = {
             "The Card Image is the master image set on the Extract tab.",
             {"note": "**Fresh cards only.** A machine uses these on a fresh flash or "
                      "after a factory reset. A machine already set up keeps its own "
-                     "settings: Stern stores them on the board, not the card.",
+                     "settings: Stern keeps them in the card's data partition, "
+                     "apart from the game program, and a card made from Stern's "
+                     "download has none.",
              "kind": "warn"},
         ]),
         ("Edit and build", [
@@ -1440,6 +2125,10 @@ HELP_CONTENT = {
             "two ELECTRIC MAGIC champions default to 2,000,000 under a stated minimum of "
             "5,000,000. The row counts as unchanged until you edit it, and an edit is "
             "pulled into the range (the game rejects anything else).\n"
+            "- Click a row's **Range** to change its **Lowest** and **Highest** value; "
+            "a changed range shows as 'a - b (card c - d)' and is built in beside the "
+            "default. A default outside a narrowed range moves into it. Not offered for "
+            "on/off settings, PAD's own choice lists or Master Volume.\n"
             "- Hover a setting's name to see if the machine edits it outside Adjustments.",
         ]),
         ("Presets",
@@ -1491,6 +2180,57 @@ HELP_CONTENT = {
                      "value set to something the game never expected is on you.",
              "kind": "warn"},
         ]),
+        ("Coin door (Home Editions)", [
+            "Jurassic Park The Pin and Star Wars Home Edition ship without a coin door. "
+            "Their game ignores the door's interlock switch, though the cabinet board "
+            "still has its input. The **Coin door** box appears on those cards only.",
+            "- Tick **This machine has a coin door fitted** and the next Build makes the "
+            "game use the door as a Pro does: opening it puts up **48V DISABLED / CLOSE "
+            "COIN DOOR** until it is shut.\n"
+            "- The service buttons work with the door open or shut, as before.\n"
+            "- The game's own **COIN DOOR BALL SAVER** setting works then too (off as "
+            "shipped, as on a Pro): with it on, opening the door during a ball saves "
+            "that ball. **COIN DOOR DISABLE TILT** has nothing to act on, as these "
+            "machines have no tilt switch.\n"
+            "- Staged with the project and carried by mod packs. A card that has its "
+            "coin door already is left as it is.",
+            {"note": "Only with a door and its interlock switch fitted. With nothing on "
+                     "that input the game reads the door as open all the time and keeps "
+                     "the message up.", "kind": "warn"},
+        ]),
+        ("Final wizard (ends the game)", [
+            "On Godzilla, James Bond 007, Jaws, John Wick, Jurassic Park and Elvira's House "
+            "of Horrors, playing the final wizard ends the player's game: every ball they "
+            "have left ends the moment it starts. No setting of the game's changes that. "
+            "The **Final wizard** box appears on those cards only.",
+            "- Tick **The final wizard does not end the game** and the next Build changes "
+            "the game so the player goes on to their remaining balls after it.\n"
+            "- It changes the game itself (same card size), so it works on a machine that "
+            "is already set up.\n"
+            "- The other Player Challenge games end as they always have.\n"
+            "- Staged with the project and carried by mod packs.",
+            {"note": "A Player Challenge game that is the final wizard itself plays on after "
+                     "it as well."},
+        ]),
+        ("Make the game treat the topper as installed", [
+            "Some games lock a feature behind the topper accessory being fitted. Venom only "
+            "offers the Ghost Rider host on the character-select screen when a topper is "
+            "detected; Jaws hides the The Shark Is Broken challenge and John Wick hides "
+            "the Tick Tock Mr. Wick challenge from the mode-of-play menu. The **Topper** "
+            "box appears only on the games checked to work this way, and names the "
+            "feature it frees.",
+            "- Tick **Make the game treat the topper as installed** and the next Build "
+            "makes the game read the topper as fitted, so the feature is available on a "
+            "cabinet that has none.\n"
+            "- It changes the game itself (same card size), so it works on a machine that "
+            "is already set up.\n"
+            "- A cabinet without the topper drives nothing extra and raises no node-board "
+            "error (the topper is an optional board).\n"
+            "- Staged with the project and carried by mod packs.",
+            {"note": "The box is shown only where flipping this gate was confirmed to free "
+                     "the feature. A game whose topper content is unlocked another way "
+                     "(an in-play unlock, say) does not get the box."},
+        ]),
         ("Show hidden settings on the machine", [
             "**Show hidden settings in the machine's menu…** moves where the Feature "
             "Adjustments page stops, so the machine lists and edits the Debug settings "
@@ -1540,8 +2280,9 @@ HELP_CONTENT = {
          "emulator already in it. Your own distro is not touched, and a PC with WSL "
          "but no distro can still run a game.\n"
          "- A one-time download of about 414 MB. Start never does it: use **Fix "
-         "setup**, or **Update emulator Linux…** on the Stern Spike 2 Emulate tab "
-         "(shown there when the installed one is older than this app).\n"
+         "setup**, **Install** on the Visual Pinball tab's PAD runtime row, or "
+         "**Update emulator Linux…** on the Stern Spike 2 Emulate tab (shown there "
+         "when the installed one is older than this app).\n"
          "- Once installed, everything the app sends to Linux runs there: the "
          "emulators, extract and write, the disk tools and the card builder.\n"
          "- Set `PAD_RUNTIME=0` to use the PC's default distro instead."),
@@ -1611,7 +2352,10 @@ HELP_CONTENT = {
             "- Without it the game stops at once with \"Sentinel key not found\", as a "
             "real machine does.\n"
             "- A key is per title: one game's key will not start another.\n"
-            "- Plug it into this PC before **Start**; the app hands it to the emulator.",
+            "- Plug it into this PC before **Start**; the app hands it to the emulator.\n"
+            "- Key on another PC? Pick **On another PC** in the Security key card, enter "
+            "the key server and bus ID, and **Test**: **Start** borrows it over the "
+            "network and **Stop** hands it back.",
         ]),
         ("Getting started", [
             {"flow": [
@@ -1763,7 +2507,7 @@ HELP_CONTENT = {
         ("Playing", [
             "The virtual playfield opens beside the game, as on the Stern Emulate tab: "
             "switches and lights on the playfield picture where there is one, lit in "
-            "the game's colours. A green dot is a switch the game sees made.",
+            "the game's colors. A green dot is a switch the game sees made.",
             {"flow": [
                 {"icon": "play", "title": "Start", "text": "serves a ball to the shooter lane"},
                 {"icon": "up", "title": "Plunge", "text": "puts it into play"},
@@ -2030,8 +2774,10 @@ HELP_CONTENT = {
          "still runs; only save slots do nothing (\"The emulator runs on this PC. "
          "Save states do not yet.\"). No Ubuntu publishes criu, so the button builds "
          "it from source and says how long first. If only these cannot be had, your "
-         "Linux is left alone and save states stay off. Linux desktops are never "
-         "asked for them.\n"
+         "Linux is left alone and save states stay off. A Linux desktop is asked "
+         "for them only when the app can run the emulator as root without a "
+         "password (it runs as root, or your sudo asks none), because only then "
+         "are save states on there.\n"
          "- **Multi-boot cards need:** make, which builds a multi-boot card's boot "
          "menu. Every desktop is asked for it.\n\n"
          "### On Linux and macOS\n"
@@ -2111,6 +2857,9 @@ HELP_CONTENT = {
             "- **Assets folder** beside it is the Write tab's, shown read only.\n"
             "- **Include my Scenes tab edits** and **Stock colors: leave out my color "
             "profile** appear under it when they apply; hover them for what they do.\n"
+            "- **Leave out of this run** ticks skip chosen kinds of edit (replaced sounds, "
+            "videos or pictures, music modes, random clips, modes) for a quicker Start; a "
+            "Write build always carries everything, and the ticks clear when the app restarts.\n"
             "- **Show it through the machine's screen** draws the game through your "
             "Machine screen (Color profile tab), so this PC shows the colors the "
             "machine's own screen will. It sits next to Boot selector and Topper and "
@@ -2169,8 +2918,11 @@ HELP_CONTENT = {
          "| Game running | Up. It does not guess between attract, the menu and a game |\n\n"
          "- **What it costs:** about 15% of one CPU core waiting, about a third of a "
          "core running, plus 1–2 GB of memory, shown live in the status line.\n"
-         "- **Two-hour cap:** it stops by itself, so a forgotten window cannot run all "
-         "night."),
+         "- **No time limit:** it runs until you press Stop emulator or close its "
+         "window.\n"
+         "- **Restart game**, beside Stop emulator, boots the game again, as "
+         "switching the machine off and on does: the game window goes back to the "
+         "boot screen and the virtual playfield stays open."),
         ("Sound and video",
          "- **Volume** and **Mute** set the emulator's own sound, live, and are "
          "remembered. They are not the game's volume (the coin door's -/+), which "
@@ -2188,6 +2940,11 @@ HELP_CONTENT = {
             "A second window beside the game draws the machine's playfield, every "
             "insert lit live and every switch clickable: click one and the game reacts "
             "as if the ball rolled over it.",
+            "- **The picture** is the game's own playfield drawing, read from your "
+            "card. It shows as an **X-ray** (light lines on dark) so the lit inserts "
+            "stand out; the **X-ray / Drawing** switch "
+            "in its top corner shows the drawing as the game ships it instead, and the "
+            "window remembers your pick.\n"
             "- **Down the right:** the keyboard reference (a row lights when the game "
             "sees that switch), the coin-door buttons (click and hold **BACK**, **-**, "
             "**+**, **SELECT** for the operator menu), a coin door open/close button "
@@ -2195,15 +2952,69 @@ HELP_CONTENT = {
             "position clickable.\n"
             "- A click on a VUK, scoop or eject drops a ball in: it stays there until "
             "the game kicks it out, as on the machine. Click it again to take it out.\n"
+            "- **Down the left:** the cabinet's own lighting, live: the topper, the "
+            "speaker lights (a ring, like the lights round the speakers), the "
+            "expression lighting blades (a column a side) and a UV lighting kit, on "
+            "the games that have them. They are there from the start, dark until the "
+            "game lights them: many games leave the topper and speakers off in "
+            "attract. Games "
+            "with no playfield drawing show them the same way in the LED grid, and "
+            "show the SHAKER MOTOR panel too. "
+            "Untick **Expression lights** in the side panel's CABINET LIGHTS box to "
+            "hide the blades and speaker lights; the window remembers it.\n"
+            "- **Insert colors:** an RGB insert is drawn in the color the game "
+            "gives it. A single-color insert can only be told how bright to be, and "
+            "on the machine it glows in its own color, which the game files don't "
+            "name, so it is drawn white. Give each its color in the side panel's "
+            "INSERT COLORS box (hover a row to see which insert it is); the window "
+            "keeps them for that game. The **Real LEDs / All RGB** switch at the top "
+            "left of the picture shows the inserts as the machine has them (Real "
+            "LEDs) or as if every insert were RGB (All RGB).\n"
             "- The keyboard works with this window focused too.\n"
             "- It builds itself from the title, so every Spike 2 game gets one. The "
             "switches appear a minute or so into a run, once the game lists them.\n"
             "- **Pause** (or F9), in either window or on the bottom bar, freezes the "
             "whole game, video and sound too. **Resume** carries on from that frame. "
-            "The bar also has Volume and Mute.",
+            "The bar also has **Restart game** (as on the Emulate tab), Volume and "
+            "Mute.\n"
+            "- **SAVE STATES** in the side panel saves the game into a slot and loads "
+            "it back. What the last ball press or action did shows in the **BALLS** "
+            "section.",
+        ]),
+        ("Sound and video log", [
+            "**Open** beside it under **Windows the emulator opens** shows every sound "
+            "and clip the game starts, in order, as it starts them, in a window of its "
+            "own you can put anywhere.",
+            "- Each row has the time, **Sound** or **Clip**, its name and the sound's "
+            "request number or the switch made just before the clip, and its **Length** "
+            "(the recording that played; a clip's from its frames). Hover a name for "
+            "the rest: a sound's Audio tab files, a clip's Video tab row.\n"
+            "- **▶** plays a sound in the log itself; while it plays the button is **■**, "
+            "and that, **Stop** in the bar or Esc stops it. **Open** (or a double-click) "
+            "shows the row on the Audio or Video tab, selected and playing.\n"
+            "- Many sounds are one of several recordings the game picks between (a "
+            "spinner's in turn, a call's at random). The row names the one that played, "
+            "says which of how many (`2 of 4`), and plays and opens that one. A project "
+            "extracted before the log could tell them apart shows the first: extract the "
+            "card again to see which one played.\n"
+            "- A song in parts (a short opening, then the song) plays its next part when "
+            "the one before ends, with no request of its own. Each part gets a row of its "
+            "own as it starts, under the song (`↳`, `part 2 of 3`), with its file and length.\n"
+            "- Untick **Sounds** or **Clips**, or type in the filter, to see only some. "
+            "**Follow** keeps the newest row in view; scrolling up to look turns it off.\n"
+            "- The list stays after Stop, even after the app is closed, until the next "
+            "Start.\n"
+            "- Sounds are named from the project's record of the game's sound requests. "
+            "A project extracted before that record existed lists them by number: "
+            "extract the card again to name them. A song from a music bank has no "
+            "Audio tab file and shows as **Unnamed sound**.\n"
+            "- It is read by the virtual playfield window, so it fills while that "
+            "window is open. Not on a Mac, where the playfield runs inside the "
+            "container.",
         ]),
         ("Save states", [
-            "**Save state** on the playfield window (Windows) checkpoints the whole "
+            "**Save state** on the playfield window (Windows, Mac, and Linux when the app "
+            "may run the emulator as root without a password) checkpoints the whole "
             "running game into a slot; **Load state** brings that exact moment back, "
             "mid-game too, even in a later session.",
             "- Every game has its own **ten slots**; one game's saves never load into, "
@@ -2217,8 +3028,11 @@ HELP_CONTENT = {
             "already on screen keeps its saved look until the game redraws it.\n"
             "- They need busybox-static and criu in WSL. Without them every title runs; "
             "only slots do nothing, and the tab says so before Start. **Set up "
-            "emulator…** gets both.",
-            {"note": "Each slot takes about 50–150 MB of the WSL disk, and a save briefly "
+            "emulator…** gets both.\n"
+            "- On a Mac the emulator's container brings them. Docker Desktop cannot "
+            "freeze a running game, so there a run starts without save states and the "
+            "log says why; colima, which **Set up emulator…** installs, can.",
+            {"note": "Each slot takes about 50–150 MB of the emulator's disk, and a save briefly "
                      "needs about 1.5 GB free. Saving freezes the game and its sound for "
                      "a few seconds. A slot only loads on the same app build, game and "
                      "firmware it was saved on: after an update older slots are refused "
@@ -2231,13 +3045,32 @@ HELP_CONTENT = {
          "that spot is still on screen. A window left on an unplugged second monitor "
          "comes back out of reach.\n"
          "- Works on every platform, with or without a game running."),
+        ("Game display",
+         "Where the game window goes, on Windows: pick a **Monitor** and how it "
+         "sits there.\n\n"
+         "- **Where I leave it:** the game window opens where you last dragged it, "
+         "with its frame, as it always has.\n"
+         "- **Full screen:** the game's picture fills the monitor you pick. Made for "
+         "a second screen or a cabinet's own LCD.\n"
+         "- **Window:** a window of the **Width** and **Height** you give, its top "
+         "left corner **X** and **Y** pixels from the top left of that monitor "
+         "(1360 x 768, the machine's own screen, to start).\n"
+         "- **Borderless** takes away the title bar and frame. A new choice starts "
+         "borderless.\n"
+         "- Every change is saved at once and applies to a running game within half "
+         "a second: no restart. Monitor 1 is the main one, the rest left to right. "
+         "If the chosen monitor is unplugged, the game goes on the main one until it "
+         "is back.\n"
+         "- The Visual Pinball tab's window layouts set this too, for the game's "
+         "screen in a cabinet."),
         ("Black game window",
          "On Windows the usual cause is a WSL that logs in as **root**: the renderer "
          "cannot reach WSLg's shared memory and draws nothing, while sound, switches "
          "and the playfield all work.\n\n"
-         "- **Check setup…** names it. The cure is on the WSL side: give the distro an "
-         "ordinary user, make it the default, restart WSL. The rig will not guess a "
-         "user for you.\n"
+         "- **Check setup…** names it. **Install emulator Linux…** fixes it: the "
+         "emulator gets its own Linux with an ordinary user, and your own WSL distro "
+         "is not changed. Or give your distro an ordinary user, make it the default "
+         "and restart WSL. The rig will not guess a user for you.\n"
          "- The log's \"picture:\" lines say whether there is a picture (only when "
          "that changes). \"STILL BLACK\" while video frames go in means the game is "
          "drawing black, so **Restart WSL…** is not the cure.\n"
@@ -2250,7 +3083,7 @@ HELP_CONTENT = {
             "on in software (a few percent slower) and says so in the log, and this "
             "puts the graphics card back.",
             {"note": "It closes **everything** running in WSL, not just the emulator, so "
-                     "it asks first and is greyed out while a run is up: stop the game "
+                     "it asks first and is grayed out while a run is up: stop the game "
                      "first. Nothing on disk is lost.", "kind": "warn"},
             "- A Stop that cannot finish offers the same restart by itself.\n"
             "- Afterwards the tab checks the PC again (the ARM handler only survives on "
@@ -2332,14 +3165,15 @@ HELP_CONTENT = {
                 {"icon": "extract", "title": "Card B", "text": "then the same"}]},
             "Use it when the report says WHAT changed and you want both versions' files "
             "side by side (and to see which sounds changed). Each sub-folder is named "
-            "after its card file. Cancelling, or saying no to an overwrite, stops the "
+            "after its card file. Canceling, or saying no to an overwrite, stops the "
             "pair there; card B is not left queued.",
         ]),
         ("Adjustments and high scores",
          "Both game programs are read the same way the Defaults tab reads them: "
          "settings added or removed, defaults that changed, and high-score places "
          "whose initials, name or score changed. These are the cards' built-in "
-         "defaults; a machine's live settings and scores are in its own memory."),
+         "defaults; a machine's live settings and scores are in the card's data "
+         "partition, apart from the game program."),
     ],
     "Multi-boot": [
         ("What it does", [
@@ -2356,6 +3190,13 @@ HELP_CONTENT = {
                 {"icon": "multiboot", "title": "Power up",
                  "text": "flippers choose, START boots"}]},
             "- The countdown boots the remembered choice by itself.\n"
+            "- **Back to the menu without switching off:** during a game, hold **BACK** "
+            "on the coin door (**EXIT** on Barrels of Fun and on Rick and Morty and Alice "
+            "Cooper) for 3 seconds and the machine restarts into the menu: Stern Spike 2 "
+            "and Spike 3, Barrels of Fun and Spooky. **Hold BACK** in Menu settings sets "
+            "how long (0 = off). On The Big Lebowski, **Version Select** in its service "
+            "menu does it. On Jersey Jack, press **Escape** on a USB keyboard plugged into "
+            "the computer in the backbox.\n"
             "- The **first image is the primary**: the card boots from its files, and "
             "the machine falls back to it if the menu ever fails.\n"
             "- Up to **16 images** on a Stern card. From five on, the menu scrolls "
@@ -2447,7 +3288,7 @@ HELP_CONTENT = {
          "2. The card's pictures and sounds are copied out beside them.\n"
          "3. The rows point at those files, and the card now works like one you "
          "built.\n\n"
-         "It only reads the card. It is greyed when every image is already on this "
+         "It only reads the card. It is grayed when every image is already on this "
          "PC, and for a card read as its menu only (read the whole card)."),
         ("The images table",
          "One row per image, in menu order, each with its own title, subtitle, "
@@ -2492,13 +3333,72 @@ HELP_CONTENT = {
          "until rebuilt.\n\n"
          "On the machine, **Settings > Color correction** tunes each game's color "
          "with no computer: Start from (As built, Recommended, No change, Black and "
-         "white), middle shades and color level per channel, color strength and "
-         "darkest shades, with a test card corrected live. Then **Save for this "
+         "white), brightness, contrast and saturation, then middle shades and color "
+         "level per channel and darkest shades, with a test card corrected live. "
+         "Then **Save for this "
          "game** or **Save for every game**.\n\n"
+         "**Settings > Test pictures** shows test patterns full screen, pixel for "
+         "pixel: the test card, a gray ramp with the darkest and lightest steps, "
+         "color ramps, one-pixel lines and checks, full white and full black. The "
+         "flippers step through them; START draws them through each game's color "
+         "correction in turn, or none. **See it on the test pictures** in Color "
+         "correction shows them with the numbers you are changing, before you "
+         "save. The caption hides itself after a few seconds so the screen can be "
+         "photographed whole. Your own pictures, videos, scenes and sounds go on "
+         "a card of their own: the **Test card** tab.\n\n"
          "- The new values reach the game at its next start. The game files on the "
          "card are never written; on any failure the game runs as built.\n"
          "- No countdown runs inside Settings, and two idle minutes leave it "
-         "without saving."),
+         "without saving (ten on the test pictures)."),
+        ("Editions: no menu",
+         "**No menu: boot the edition the game's EDITION setting names** (Menu "
+         "settings; Stern) is for a card whose images are all editions of one game, "
+         "each written with the same edition names on its Write tab (Editions). "
+         "Add them edition 1 first.\n\n"
+         "On the machine there is no menu. The operator sets **EDITION** in the "
+         "game's menu (Adjustments > Machine Settings > Custom Code, or the last row of "
+         "Standard Adjustments) and the edition it names boots "
+         "at the next power-up. No setting yet means edition 1.\n\n"
+         "- The build refuses an image without EDITION, another game or version, "
+         "other edition names, or settings captioned differently: the editions "
+         "share one settings store.\n"
+         "- No random card and no image with its own settings on such a card.\n"
+         "- Untick it to give the card its menu back."),
+        ("Settings, audits and high scores", [
+            "A Stern Spike 2 machine keeps its settings, audits and high scores on "
+            "the SD card, in the card's data partition, apart from the game "
+            "program. A multi-boot card takes that partition from the **first "
+            "image**.",
+            {"cards": [
+                {"icon": "sd", "tone": "ok", "title": "Keep what the machine has",
+                 "text": "Read your current SD card into a .raw (**From SD card…**, "
+                         "whole card) and make it the first image."},
+                {"icon": "download", "tone": "warn", "title": "A fresh download",
+                 "text": "Stern's image has none: the machine starts from factory "
+                         "settings and runs its Guided Setup."}]},
+            "- Every image of the same game shares them, across code versions, as a "
+            "Stern update keeps them.\n"
+            "- **Keep its own settings and audits on the machine** and **Keep its "
+            "own high scores on the machine** (✎ on an image) are two choices: "
+            "an image can keep its own settings and still play into the high-score "
+            "table it shares with the other images of the game, or the other way "
+            "round. A card can mix them, say an original with everything of its "
+            "own and two variants with their own settings and one table between "
+            "them.\n"
+            "- **Share with** under each tick puts the image in the same settings, "
+            "or the same high-score table, as other images you pick: say two "
+            "Original images on one table and four Heisei images on another, two "
+            "of them on one set of settings too. Images are the same game when "
+            "they run the same title (every Godzilla build, stock or modded, is "
+            "Godzilla); images of different games never share.\n"
+            "- An image starts from a copy of the shared settings, or of the "
+            "shared table, so reset its high scores once in the service menu "
+            "when it gets a table of its own.\n"
+            "- Flashing the whole card writes the image's copy over the machine's, "
+            "unless you tick **Keep the SD card's settings, audits and high "
+            "scores** in the flash dialog. When only the menu changed, **Only the "
+            "boot menu** is quicker and keeps them too.",
+        ]),
         ("Sounds",
          "Every sound row (the menu's move and confirm, an image's music and "
          "confirm) has a **▶ Play** beside **Browse…**, played through the "
@@ -2555,6 +3455,8 @@ HELP_CONTENT = {
             "already flashed. Otherwise the whole card is written, which a new SD "
             "card needs. Tick it yourself if your SD card already holds that "
             "image; it checks first.\n"
+            "- **Keep the SD card's settings, audits and high scores** writes the "
+            "whole card but puts the machine's own back on it.\n"
             "- Every run first makes sure the menu program is built, before any "
             "media. If a step refuses, the tab shows the Log line, naming the step.",
             {"note": "Nothing is written to an SD card until you pick it in the "
@@ -2591,6 +3493,11 @@ HELP_CONTENT = {
          "- The first card you write builds a Linux container, reused after that. "
          "On Apple silicon it runs emulated, so that first time takes a few minutes.\n"
          "- No password is asked for.\n"
+         "- Colima, which **Set up emulator…** installs, shares your home folder "
+         "and your disks (/Volumes). A Colima set up before that sees only your "
+         "home folder, so images on another disk would look empty to the tools: "
+         "before anything is written, the app asks to restart Colima sharing them, "
+         "and Colima keeps that for next time.\n"
          "- Without Docker Desktop, or with it not running, the Log says which and "
          "nothing is written. Reading a card, the preview and the size strip work "
          "without it.\n"
@@ -2608,6 +3515,9 @@ HELP_CONTENT = {
             "- At power-up: flippers choose, START or **Action** boots, the volume "
             "buttons set the menu's level. A maintenance reboot boots the same image "
             "again without the menu.\n"
+            "- **Back to the menu without switching off:** plug a USB keyboard into the "
+            "computer in the backbox and press **Escape** during a game. The machine "
+            "restarts into the menu.\n"
             "- The dialog's **Onto:** row can install straight onto the game's SSD "
             "in a dock. Its **Write:** choice can then replace only the boot menu, "
             "or only one image (from its own ISO), keeping settings and scores.\n"
@@ -2646,6 +3556,42 @@ HELP_CONTENT = {
             {"note": "Installing any normal update afterwards takes the menu away "
                      "again.", "kind": "warn"},
         ]),
+        ("Spooky Pinball (one update file)", [
+            "Pick **Spooky Pinball** and the tab takes a game's stock update plus up "
+            "to eight more builds of the same game (Halloween and Ultraman are one "
+            "machine, so those two can share one). **Build update…** writes ONE "
+            "update of the game's own kind, under the stock update's own name, into "
+            "the folder you choose.",
+            {"flow": [
+                {"icon": "file", "title": "Build update…", "text": "one update file"},
+                {"icon": "upload", "title": "USB stick",
+                 "text": "install it like any update of the game"},
+                {"icon": "multiboot", "title": "Next power-up",
+                 "text": "the menu shows before the game"}]},
+            "- Flippers choose, START boots, and the countdown boots the build "
+            "chosen last.\n"
+            "- The first row is the stock build. It travels whole, and the machine "
+            "falls back to it if anything goes wrong. Every other build carries only "
+            "the files it changes.\n"
+            "- Settings and scores follow you from build to build. **Halloween** "
+            "and **Ultraman** on one machine each keep their own settings and "
+            "scores.\n"
+            "- **Beetlejuice** installs an update that is not Spooky's own only in "
+            "its developer mode, as with any Beetlejuice mod.\n"
+            "- **Alice Cooper's Nightmare Castle** restarts once by itself after the "
+            "install; the menu shows from then on.\n"
+            "- **Texas Chainsaw Massacre** has about 6 GB free, room for about two "
+            "builds. The size strip shows what the update needs.\n\n"
+            "| Game | Supported |\n"
+            "|---|---|\n"
+            "| Beetlejuice, Scooby-Doo, Evil Dead, Texas Chainsaw Massacre, Looney "
+            "Tunes, Halloween, Ultraman, Rick and Morty, Alice Cooper's Nightmare "
+            "Castle | Yes |\n"
+            "| America's Most Haunted, Rob Zombie, Domino's, Jetsons | No (the game "
+            "board holds one game, and only the game can read the flippers) |",
+            {"note": "Installing any normal update afterwards takes the menu away "
+                     "again.", "kind": "warn"},
+        ]),
     ],
 }
 
@@ -2674,7 +3620,8 @@ _IMAGE_INFO_SECTIONS = [
     ("Adjustments and high scores",
      "**Adjustments** is how many operator settings the firmware has; **High scores** "
      "how many places its board keeps (top four, Grand Champion, every champion). The "
-     "machine's current settings and scores live in its own memory, not on the card; "
+     "machine's current settings and scores live in the card's data partition, not in "
+     "the game program; "
      "the Defaults tab sets what a freshly flashed machine starts from."),
 ]
 
@@ -2729,8 +3676,11 @@ def modes_games_rows(ports=None):
         if any("button" in n.lower() for n, _m in p.shots):
             also.append("buttons")
         also += [w for k, w in (("magnet", "magnet"), ("scoop", "scoop"), ("coils", "mechanisms"),
-                                ("shield", "shield"), ("shaker", "shaker"), ("shows", "light shows"), ("wizard", "mini-wizards"))
-                 if p.can(k)]                                       # PAD-381: what a mode may hold; PAD-392
+                                ("shield", "shield"), ("building", "building"), ("shaker", "shaker"),
+                                ("shows", "light shows"), ("wizard", "mini-wizards"), ("roster", "battle slot"),
+                                ("challenge", "challenges"), ("place", "game mode places"),
+                                ("done", "starts on game modes completed"))
+                 if p.can(k)]                     # PAD-381: what a mode may hold; PAD-392; PAD-615; PAD-710; PAD-747
         if p.stack_note and p.can("stack"):
             also.append("waits for multiballs only")
         if not p.can("stack"):
@@ -2740,7 +3690,7 @@ def modes_games_rows(ports=None):
         if not p.proven:
             also.append("never run")
         rows.append((p.label, media, yes if p.can("countdown") else "no",
-                     yes if p.can("ball_save") else "not yet", lights, ", ".join(also)))
+                     yes if p.can("ball_save") else "no", lights, ", ".join(also)))   # PAD-589: no "not yet"
     return rows
 
 
@@ -2762,15 +3712,26 @@ def _modes_which_games():
                            "modes work on all of them; the columns are what differs.",
             "table": {"head": list(MODES_GAMES_HEAD), "rows": [list(r) for r in rows]},
             "after": "- **Countdown no:** the game's voice never says a number on its own.\n"
-                     "- **Ball save not yet:** found in the game, not yet seen working.\n"
                      "- **Lights:** *shots* lights just the scoring shots' inserts; *all* "
-                     "holds every insert in the mode's colour.\n"
+                     "holds every insert in the mode's color.\n"
                      "- **HUD:** counters, a timer and a gauge at the screen's edges.\n"
                      "- **Buttons:** the flipper and Action buttons count as shots.\n"
                      "- **Magnet, scoop, mechanisms:** what a mode may hold for a moment: the "
                      "magnet, a ball in the scoop, the Mechagodzilla magnet and the bridge.\n"
+                     "- **Shield:** a mode may turn the shield targets toward the player while it runs.\n"
+                     "- **Building:** a mode may move the building to one of the game's own floors.\n"
+                     "- **Shaker:** a mode may shake the cabinet (when the machine has a shaker fitted).\n"
+                     "- **Battle slot:** a mode may take one of the game's battles' places on its selection "
+                     "screen.\n"
                      "- **Light shows:** the game's own light shows, which a mode can play as it "
                      "starts or ends.\n"
+                     "- **Your own light shows:** the Light shows view draws the mode's own named "
+                     "shows step by step (spirals, ripples, bounces, fades and more), previewed on "
+                     "the playfield picture, for the mode's blocks to run. Most inserts on most "
+                     "games are single-color: a show only sets how bright they are, and each glows "
+                     "in its own color. **Real LEDs** previews that (give each insert its color "
+                     "under Insert colors; white = not set); **All RGB** paints every insert in the "
+                     "show's colors.\n"
                      "- **Never waits:** a mode can't be set to wait for the game's modes.\n\n"
                      "> **Not listed?** Pick the card anyway: the app works out its hooks. "
                      "Press Check this game (about two minutes) before trusting them. "
@@ -2821,38 +3782,207 @@ PREVIEW_HELP = {
                     {"icon": "defaults", "tone": "warn", "title": "The game's modes",
                      "text": "**Numbers only.** Timers and awards, not how they play."},
                     {"icon": "lock", "tone": "err", "title": "Everything else",
-                     "text": "**Off limits.** Progression, settings, high scores, Insider Connected, and coils but a few Godzilla mechanisms."}]},
+                     "text": "**Off limits.** Progression, settings, high scores, Insider Connected, and the game's coils but the mechanisms a mode may hold. Spare switches and outputs you add are yours."}]},
                 _limits("Quick answers"),
             ]),
             ("Which games", _modes_which_games),
+            ("Co-op play", [
+                "**Co-op play**, under the list, lets 2 to 4 players play one game as a team on a "
+                "Spike 2 game that has no co-op of its own (the latest version of each game; TMNT, "
+                "Venom, The Mandalorian, Dungeons & Dragons, Jaws, Jurassic Park, King Kong and "
+                "James Bond 60th keep theirs, so the tick is grayed out on them with the reason beside it). "
+                "Tick it, then Write. On the machine:\n\n"
+                "1. Hold both flipper buttons in attract to open the start menu, step to **CO-OP PLAY** "
+                "and press **Start**. The top of the screen says **START ADDS PLAYERS**: each Start in the "
+                "first ball adds a teammate, up to 4.\n"
+                "2. Or start a game as usual and hold the **right flipper button** while pressing **Start** to "
+                "add a teammate, once for each. A plain Start adds a competing player as always.\n\n"
+                "- The team shares one score and all of the game's progress. Every teammate has a "
+                "score panel, and every panel shows the team's score.\n"
+                "- Teammates take turns ball by ball: every teammate plays ball 1, then ball 2, and "
+                "so on. The top of the screen says whose turn it is (PLAYER 2  BALL 1).\n"
+                "- A teammate who earns an extra ball shoots it. The match at the game's end is "
+                "drawn once, for the team.\n"
+                "- Each team size has its own high score board (2-PLAYER CO-OP, 3-PLAYER CO-OP, "
+                "4-PLAYER CO-OP), shown with the game's champions in attract. A team's score never "
+                "goes on the game's own boards.\n"
+                "- Like a card with modes, a card with co-op play keeps its scores and achievements "
+                "off Insider Connected: they stay on the machine.\n\n"
+                "**Awards…**, under the tick, picks the awards shown after each co-op game: who of the "
+                "team scored the most points, used the most ball saves, had the longest ball, started "
+                "the most modes, and any count the game keeps itself (on Godzilla, the jet fighters "
+                "destroyed). Each is a champion page in attract, in the game's own look: the award's "
+                "name, PLAYER 2, the count. A tie names every teammate in it (PLAYERS 1+3). They stay "
+                "in attract until the next game starts. Untick an award to leave it out, or type new "
+                "words for its name; Defaults puts the game's back. With characters (below), each award "
+                "is also shown at the game's end on the winner's character card: their picture and name, "
+                "the award, PLAYER 2 and the count, a few seconds each over the bonus's own background "
+                "video, before the match.\n\n"
+                "**Characters…**, beside it, gives the team characters to pick from. Each teammate picks "
+                "one at the start of their first ball: the machine shows the character's picture, its "
+                "name and what it does, the flippers move to the next one (one another teammate has is "
+                "skipped), the Action button takes it, and when the time to pick runs out the one shown is "
+                "taken. While the ball waits in the shooter lane the pick has the flippers and the Action "
+                "button to itself: the game's own language select (PLAYER LANGUAGE SELECT in its "
+                "adjustments) gets the flippers, and the Action button launches, only once the character "
+                "is taken. So: Action picks, the flippers choose the language, then the plunger or Action "
+                "launches. Each player's first ball only comes to the shooter lane once they have picked, so "
+                "neither the Action press that picks nor the game's timed plunger can launch it early. The seconds left count down on the machine, and every flipper press starts them again from the top (so a player can read each character as long as they like; the time only runs out when the flippers are left alone), and the one taken stays on the glass a "
+                "moment saying PICKED. A player on their own gets the pick too: hold the **right flipper button** "
+                "while pressing Start to begin the game (with CO-OP PLAY on, when it is in the service menu). The "
+                "right flipper held through that Start belongs to the pick, so it does not change the game's "
+                "language; let go of it and walk the characters as usual. The machine's top line also says how "
+                "to take one (ACTION PICKS). The "
+                "score then goes on the game's own boards, and a Start in ball 1 still adds a teammate. "
+                "**Time to pick** sets how long (30 seconds unless you change it, or "
+                "no time limit). RANDOM picks one nobody has. The box under a character's name takes a smaller "
+                "sub header for its cards, as typed (Godzilla vs Biollante (1989)). **Picture…** gives a "
+                "character a picture of your own "
+                "(without one it gets a panel with its name), **Pictures from folder…** takes a whole "
+                "set at once, and the dialog previews what the machine shows. **Look…** sets the pick screen's "
+                "look: the title across the top, a color for each of its words (the title, the count, the "
+                "name, the sub header, the ability badge and its words, what it does, how to choose), the "
+                "frame and the panel, and a **Background…** picture of your own behind every pick card and "
+                "award card, darkened as much as you like so the words stay easy to read; **Default look** "
+                "puts the game's set's look back. The color well on a character's row gives its cards a "
+                "frame color of their own, and **Video…** puts a video of your own in its picture's frame: "
+                "it plays over and over while the pick is on that character (on a game the app cannot play "
+                "it on yet, the dialog says so and the picture shows). **Intro video…** opens each co-op and "
+                "team game with a video of your own, full screen and with its own sound (the video's own "
+                "sound track), in place of the game's own start film; pressing both flipper buttons together "
+                "skips it. On Godzilla it plays in the game's own intro screen, so when the game's PLAYER "
+                "LANGUAGE SELECT is on its language bar shows over the video and a flipper press changes the "
+                "language while it plays. When the intro ends (or is skipped) the character pick opens at "
+                "once, and the first ball comes to the shooter lane only after a character is taken with the "
+                "Action button (then the handicap pick, when handicaps are on). Start adds players while the "
+                "intro plays, as at any other moment before the first ball. It needs no characters: "
+                "without them the ball comes as the intro ends. At a co-op game's end the award cards show "
+                "over the game's End of Ball Bonus loop, with the team's final score in large letters along "
+                "the bottom and the score panels, the power-up meter and the credits line off the screen; "
+                "**Awards video…** plays a video of your own there instead (looped, silent). "
+                "**Awards music…** plays a music track of your own while the cards show (the game's own "
+                "sounds faded under it, faded out at the end). **When picked…** on a character gives it a "
+                "short clip (a video, or a "
+                "picture such as a movie poster, shown 3 seconds or as long as its sound, up to 10) that plays "
+                "full screen once a teammate picks it, and a sound (a roar of that era) played at the pick; "
+                "a video with no sound of its own here plays its own. Both flipper buttons cut the clip short. "
+                "**Show each teammate's character on their End of Ball Bonus** puts the character of the "
+                "teammate whose ball ended in the bottom-right corner of the screen: "
+                "its picture (or its video, playing) in a big lit frame with its name across the bottom of it. **Powers…** on a character opens "
+                "its list of powers, the things the game does differently while its teammate is up, grouped "
+                "with a tick each: make any character you like from them. On every game: a longer ball save "
+                "and a ball save on two quick presses of the Action button. On Godzilla: the Oxygen Destroyer "
+                "timer doubled, every multiball's ball save doubled, the ball save after an added ball (Anguirus's "
+                "included) doubled, a ball added with two quick Action presses in regular play, a battle shot "
+                "spotted with two quick Action presses once in each battle they start, easier battles, 10 seconds "
+                "more on every battle, every battle on the selection screen open (tier 2 included), the heat ray "
+                "one spin from ready at the pick and charging in half the spins, a train lit at each of their "
+                "balls, the building's damage two steps a shot, Mechagodzilla's spins and shield hits counting "
+                "twice, pop bumper hits counting twice toward Saucer Attack, an easier bridge, double power-ups, "
+                "rampage letters counting twice, the Destruction Jackpot never below 2X and lit at each of their "
+                "balls, an ally lit at each of their balls, Rodan's timer doubled, Hedorah started at each of "
+                "their turns, the Maser cannon and Magna Grab lit the whole time they are up, powerline hits "
+                "counting double, 4 jets or 4 tanks destroyed at the pick, tanks or jets counting two at a time, "
+                "an extra ball as their ball 3 (or ball 1) begins, and any of the game's own lasting power-ups "
+                "owned from the pick: LOOP VALUE 2X, RODAN TIMER +15 SECONDS, RAGE COMBO +3 SECONDS, the "
+                "Destruction Jackpot, super spinner, Magna Grab, saucer, skill shot, rampage, jet fighter, "
+                "battle timer and multiball jackpot perks. Only the powers the game can have are offered; one a "
+                "character has that this game lacks is left off its card, and the dialog says so. The badge on "
+                "its cards reads its powers' words (or a set ability's name when the list is exactly one of "
+                "those), or a **header** of your own typed under the list; **Start from…** puts one of the set "
+                "abilities' powers on a character to begin with. A character has room for a lot but not "
+                "everything at once (the runtime keeps 24 setting parts, 6 one-shot features and a few of each "
+                "other kind): the dialog refuses a power past that and says which kind is full. "
+                "On Godzilla, **Load Godzilla's set** puts in DoomWalrus666's eleven characters, each "
+                "named after a Godzilla film's suit (SHODAIGOJI, Godzilla (1954) ... FINALGOJI, Godzilla: Final "
+                "Wars (2004)) with its powers; rename and recompose them as you like.\n\n"
+                "**Save…**, beside them, keeps every co-op setting of the project in one zip: co-op on, "
+                "the service menu switch, the awards, the characters with their abilities and time to "
+                "pick, and each character's picture (save a .json instead to leave the pictures out). "
+                "**Load…** puts a saved file into any project in place of its co-op settings, and also "
+                "takes a characters file of the kind Load Godzilla's set reads.",
+                "**Switch it on and off in the service menu**, under the tick, gives the game's own "
+                "menu a **CO-OP PLAY** row instead (Adjustments > Machine Settings > Custom Code, or "
+                "at the end of Standard Adjustments), 0 to start with. It says how co-op and the team games "
+                "play; which one is picked at the machine, on the game's start menu. When a card has more "
+                "settings of the app's than the game has spare rows, they share two: pick CO-OP PLAY's number "
+                "on **MORE SETTINGS** and the row under it becomes CO-OP PLAY (the card keeps each one's "
+                "value):\n\n"
+                "- **1 (Classic):** each player still picks a character at their first ball, and its card says "
+                "**NO SPECIAL ABILITY**, but none of them changes the game.\n"
+                "- **2 (Enhanced):** the characters' abilities hold, as described above.\n"
+                "- At **1** or **2**, hold both flipper buttons in attract to open the start menu. Besides the "
+                "game's own entries it offers these, each below (**ENHANCED STANDARD** at 2 only):\n"
+                "- **CO-OP PLAY:** step to it and press **Start**; each Start in the first ball then adds a "
+                "teammate (or teammates join with the right flipper button held, as above).\n"
+                "- **TEAM PLAY 2 VS 2:** players 1 and 3 play against players 2 and 4, picked the way Stern's "
+                "own team games are: step to it and press **Start** once. The game starts with all four players, "
+                "and the top of the screen says so: **4 PLAYERS ADDED**, **TEAM 1: P1 AND P3**, **TEAM 2: P2 AND P4**. "
+                "Each team has one score and its own "
+                "progress, and the teams take turns: player 1, player 2, player 3, player 4, then the next "
+                "ball. The top of the screen says whose turn it is (**TEAM 1 P3** while player 3 is up), the first two "
+                "score panels are team 1's and team 2's, and the higher team score goes on a **TEAM PLAY** "
+                "board of its own. Characters work as in co-op: each player picks one at their first ball, "
+                "no two the same. Without the credits for four, "
+                "the team game starts with as many players as the credits allow, and each later Start in the first "
+                "ball adds the next player.\n"
+                "- **TEAM PLAY 2 VS 1:** the same team game for three players: players 1 and 3 against player 2, "
+                "who plays both of team 2's turns each ball so both teams get the same number of balls. One Start "
+                "adds all three (**3 PLAYERS ADDED**, **TEAM 1: P1 AND P3**, **TEAM 2: P2**); another Start adds no "
+                "one, and the higher team score goes on a **TEAM 2V1** board of its own.\n"
+                "- **TEAM PLAY 3 VS 1:** the team game for four players: players 1, 3 and 4 against player 2, "
+                "who plays all three of team 2's turns each ball (player 1, player 2, player 3, player 2, player 4, "
+                "player 2). One Start adds all four (**4 PLAYERS ADDED**, **TEAM 1: P1, P3, P4**, **TEAM 2: P2**), "
+                "and the higher team score goes on a **TEAM 3V1** board of its own.\n"
+                "- **ENHANCED STANDARD** (at 2 only): the game's own normal game of competing players, with "
+                "characters. Step to it and press **Start**; each Start in the first ball adds a player, as it "
+                "always does. Every player has their own score and their own progress, nothing shared, and the "
+                "scores go on the game's own high score boards. Each player picks a character at their first ball "
+                "(no two the same), and its ability holds while that player is up.\n"
+                "- A plain **Start** is still a normal one-player game. At 1 or 2 most Insider Connected features "
+                "are off: the card's scores, high scores and achievements stay on the machine.\n"
+                "- **0 (Off):** the game plays and reports to Insider Connected as it always has, on a card "
+                "with no modes. A card that also carries modes keeps its scores off Insider Connected "
+                "either way.",
+            ]),
             ("Making a mode", [
-                "**New**, over the list, makes a blank mode or one from an example "
-                "(KAIJU RUSH is the one that has run on a real machine). A project "
-                "with no mode yet offers the same on the page. Then:\n\n"
+                "**New mode**, over the list, asks how you want to build it, with a "
+                "tile for each way that says what it asks of you and what it can do:\n\n"
+                "- **Blocks** (recommended): rules snapped together, no code.\n"
+                "- **C** (best with an AI agent): the Mode SDK, for anything a mode can do.\n"
+                "- **Form** (a playground): boxes to fill in, nothing more.\n\n"
+                "A project with no mode yet shows the same tiles on the page. The Form "
+                "makes a blank mode or one from the example, TARGET RUSH, on the card's own "
+                "shots. For a form mode, then:\n\n"
                 "1. **Name it.**\n"
-                "2. **Starts on:** the shot that starts it and how many times. It can "
-                "also ask for up to three more shots in the same ball, in any order or "
+                "2. **Starts on:** the shot that starts it and how many times (up to "
+                "999); the two *or* lists add up to two more shots whose hits count "
+                "together with it. It can also ask for up to three more shots in the same ball, in any order or "
                 "in order (any other shot starts the sequence over). *Only after* "
-                "holds it until another mode has run this ball or game.\n"
+                "holds it until another mode has run this ball or game. On Godzilla it can "
+                "instead start when the player picks one of the game's battles on the battle "
+                "selection screen: your mode runs in that battle's place. Or it can start once the player "
+                "has completed a number of the game's own modes in one game (tick which ones count): a "
+                "mini-wizard after four of them, a bigger wizard after all of them.\n"
                 "3. **Runs for:** how long it runs.\n"
                 "4. **Points per shot:** which shots score and what the first one "
                 "pays. A minus number takes that much away on each hit.\n"
                 "5. **Ends on** (if you like): a pick of shots, or any shot that "
                 "does not score, ends it sooner.\n\n"
                 "### Everything else is optional\n"
-                "- **Screen:** a panel in your colours or a picture of your own, "
+                "- **Screen:** a panel in your colors or a picture of your own, "
                 "showing what each shot paid and the total.\n"
                 "- **Clip:** a title card or a video of your own, full screen when "
                 "the mode starts or ends.\n"
                 "- **Sound:** the countdown, the sound when time is up, and sounds of "
                 "its own when it starts, on a scoring shot and underneath.\n"
-                "- **Lights:** a colour sweep, or the scoring shots lit on the playfield.\n"
+                "- **Lights:** a color sweep, or the scoring shots lit on the playfield.\n"
                 "- **Rules:** how often it can start, whether it runs during the "
                 "game's own modes, and an event that starts or ends it.",
                 {"note": "Every change saves itself in the project's modes folder about "
                          "half a second after you stop typing. The line at the bottom of "
                          "the form says whether the mode can be built, and a section this "
-                         "game can't do is greyed, with the reason."},
+                         "game can't do is grayed, with the reason."},
             ]),
             ("Try it", [
                 "**Try it** builds this project's modes exactly as Write puts them on "
@@ -2869,12 +3999,12 @@ PREVIEW_HELP = {
                 "Try it is used as it is.\n"
                 "- **End mode** ends whichever of this project's modes is running. The "
                 "run is the Emulate tab's, and its Stop stops it.\n"
-                "- An edit made while the game runs reaches it within a second; a new "
-                "sound or clip reaches it at the next Try it.\n"
+                "- An edit made while the game runs reaches it within a second; a screen "
+                "turned on or off, a new sound or a new clip reaches it at the next Try it.\n"
                 "- A refusal is shown beside Try it and on the Emulate tab, with the reason.",
             ]),
             ("Several modes",
-             "- A card holds as many modes as you make. The count is under New, with "
+             "- A card holds as many modes as you make. The count is under the tab's name, with "
              "modes made of blocks and modes written in C counted apart.\n"
              "- **One runs at a time.** A mode whose shots come up while another is "
              "running does not start then, but its next starting shot after that one "
@@ -2882,7 +4012,7 @@ PREVIEW_HELP = {
              "- A card carries one end sound of a mode's own: the first mode that has "
              "one. The Sound section says whose."),
             ("Modes made of blocks", [
-                "**New > Mode from blocks…** makes a small working mode on this card's "
+                "**New mode > Blocks** makes a small working mode on this card's "
                 "shots, built from blocks instead of the form or C.",
                 {"cards": [
                     {"icon": "flag", "tone": "info", "title": "When",
@@ -2900,37 +4030,61 @@ PREVIEW_HELP = {
                 "the script picked last. A stack's own + adds one too.\n"
                 "- A variable holds a number for each player, and goes back to 0 each "
                 "ball, each time the mode starts, or each game.\n"
-                "- Every change saves itself; the line at the top says what is left to fix.",
+                "- Every change saves itself; the line at the top says what is left to fix.\n"
+                "- **Blocks**, **Rule cards**, **Story**, **Playfield**, **Shot table**, "
+                "**Timeline**, **Node graph** and **Script** are views of the same mode: "
+                "switch between them at any time, and nothing is converted. **Undo** takes "
+                "back a change made in any of them.\n"
+                "- **Rule cards** write each rule as When … Then, with a choice in every "
+                "blank. **Story** shows the mode's life: what it does while it waits, what "
+                "starts it, what it does while it runs and what ends it; drag a shot's rule "
+                "to another box to change when it works.\n"
+                "- **Playfield** is the game's own playfield, read from your card, with the "
+                "shots the mode lights in their colors. Press a shot to see and change what "
+                "it does. The ◎ beside any shot's list opens the same picture, to pick the "
+                "shot on it.\n"
+                "- **Shot table** has a row for every shot, so the ones that do nothing yet "
+                "show. **Timeline** lays the mode's clock out left to right, and **Node "
+                "graph** wires every rule to the variables and timers it shares.\n"
+                "- **Script** is the same mode as text, to type: what you type becomes the "
+                "blocks as soon as it reads, and a mistake is marked on its line until it "
+                "is put right. It is read, never run.",
                 {"note": "The app turns the blocks into a mode in C, which Try it and "
                          "Write build like any other. **C it makes** shows it, and "
-                         "**Edit as C…** keeps that C and puts the blocks away, for "
-                         "carrying on in C."},
+                         "**Edit as C (one way)…** keeps that C and puts the blocks away, for "
+                         "carrying on in C. It is a one-way step: C can't be turned back "
+                         "into blocks, so press **Duplicate** first to keep a blocks copy."},
             ]),
             ("Modes written in C", [
                 "For what the form can't do.\n\n"
-                "- **New > Mode in C > Blank mode in C…** copies the Mode SDK's "
-                "template into this project's modes folder and opens it. **Open "
-                "MODE_SDK.md** opens the SDK's guide.\n"
+                "- **New mode > C**, named, copies the Mode SDK's template into this "
+                "project's modes folder and opens it. **Make it and copy for an agent** "
+                "does the same, then copies what to tell an AI agent: the mode's file, "
+                "the SDK's guide to read first, and what you said the mode should do. "
+                "**Open MODE_SDK.md** opens the SDK's guide.\n"
                 "- The folder's name is the mode's trigger name (its test triggers are "
                 "*folder*.start and .stop), so keep it to letters, digits and _.\n"
                 "- An **assets.json** beside the code names a clip, a picture, music "
                 "and calls of the mode's own, and Try it and Write compile the mode in "
                 "with them. The Code modes line lists each one.\n"
                 "- **Start mode now** starts the open code mode through its .start "
-                "trigger, once a Try it has built it into the running game.",
-                {"note": "On a Godzilla title, New > Mode in C adds six examples written "
-                         "in C, among them the MELTDOWN multiball, lit by ten Magna "
-                         "captive-ball hits. Each plays its clips full screen behind a HUD "
-                         "of its own. Their clips, music and calls are cut from your own "
-                         "copy of the films: until they are, the example's page says which "
-                         "films it needs, with **Choose your films folder…**."},
+                "trigger, once a Try it has built it into the running game.\n"
+                "- The Code page edits the C in the app, its words colored and its lines "
+                "numbered: **Save** (or Ctrl+S) writes it. **Open … in my editor** opens it "
+                "in your computer's editor instead; **Read again** picks up a change made "
+                "there.",
             ]),
             ("The game's own modes",
              "They are listed under yours. Pick one to see its page.\n\n"
+             "- **How it works** says what starts the mode, and lists the clips and the "
+             "sounds and callouts its own code plays, each sound with a Play button. It "
+             "is read-only.\n"
              "- **Timers and awards:** type a new value and press Set. Stock puts that "
              "number back to the game's own.\n"
              "- **Shots:** on a game whose port allows it, a shot that counts as one of "
-             "its own, and a rewrite of its shots in C.\n"
+             "its own, or one that takes its place (**instead of**: the mode's own shot "
+             "no longer counts, and its light moves to yours), and a rewrite of its shots "
+             "in C.\n"
              "- **All timers and awards…**, under the list, shows every number in one "
              "table, and **All to stock** there puts every one back.\n"
              "- A timer that is an operator setting is the same number the Defaults tab "
@@ -2947,7 +4101,7 @@ PREVIEW_HELP = {
                     {"icon": "fit", "title": "Frame", "text": "keep its letterbox, or fill the frame"}]},
                 "The mode keeps only the cut (clip.mp4, end.wav, art.png), never the "
                 "video. A title that can't use a clip, a picture or a sound of the "
-                "mode's own greys that button, with the reason.",
+                "mode's own grays that button, with the reason.",
             ]),
             ("Copy and share",
              "- **Copy to…**, under the list, copies every mode here into another "
@@ -2984,6 +4138,19 @@ PREVIEW_HELP = {
              "older card gives back what it holds, and says what did not come back. "
              "**Save a card image's modes to a file…** makes the same .zip without "
              "loading it."),
+            ("The rules sheet",
+             "**Rules sheet…**, under the list, makes the printable sheet for the cabinet "
+             "from the mode files, so it is never out of date: one row per mode (its name "
+             "as the game shows it, how it starts with what the 1st / 2nd / 3rd start "
+             "take, its stages a line each, and whether it cashes out), the rules every "
+             "mode shares under it, and the game and version from the project above it. "
+             "A mode made of blocks is played through by the app to word it; a form mode "
+             "says its fields; a mode in C says its clock, and the rest is yours to write. "
+             "Click a mode to put your own words in any field: yours win, and an empty "
+             "field gives the app's back. Untick a mode to leave it off, and move it up "
+             "or down. **Save as PDF…** lays it out on one Letter or A4 page when it "
+             "fits; **Save as HTML…** saves the same sheet as a web page; **Print…** "
+             "prints it, on the paper chosen beside it."),
             ("Five things people ask for", _limits("Examples")),
             ("Why your mode always gives way", _limits("Why your mode always gives way")),
             ("Sizes", _limits("Sizes")),
@@ -2995,41 +4162,228 @@ PREVIEW_HELP = {
                 "to Insider Connected and see its message of the day, but the machine "
                 "sends it no game, no scores, no high scores and no achievements: the "
                 "mode runtime holds those reports back, and the game logs each as a "
-                "failed message and plays on.\n\n"
+                "failed message and plays on. The game is not given the list of "
+                "Insider achievements either, so it awards none on the machine.\n\n"
                 "The page says so under the title. A title whose port cannot do this "
                 "(one worked out before the gate existed) cannot carry modes until its "
                 "port is worked out again.",
             ]),
-            ("A preview feature", [
-                "The mode maker is a preview: it is in every copy of the app, switched "
-                "off, and a personal code from the app's author switches it on.",
-                {"flow": [
-                    {"icon": "gear", "title": "Settings", "text": "the gear, top right"},
-                    {"icon": "star", "title": "Preview features…", "text": "paste your code"},
-                    {"icon": "check", "title": "Unlock", "text": "the Modes tab appears"}]},
-                "- The window says whose code it is and the last day it works. After "
-                "that day the Modes tab is gone again at the next start.\n"
-                "- Your modes stay in the project's modes folder either way.\n\n"
-                "### Asking for more",
+            ("Asking for more", [
                 _limits("Asking for more"),
             ]),
         ],
-        "Write": [
-            ("Preview features",
-             "A project can hold modes made with the mode maker, a preview feature "
-             "(Settings > Preview features). A copy of the app where it is not "
-             "switched on builds everything else in the project exactly as usual, "
-             "leaves the modes and any changes to the game's own modes off the "
-             "card, and says so in the log."),
+    },
+    # PAD-802: the Visual Pinball tab; in every copy since PAD-1136
+    # (core/preview.RELEASED), read through sections_for like the Modes tips
+    "vpx": {
+        "Visual Pinball": [
+            ("What it's for",
+             "Play a Visual Pinball table with the real Stern game behind it. The game "
+             "from your own card image runs in the emulator; the table is its playfield. "
+             "The game serves the balls, fires the flippers, slings and pops, lights the "
+             "table, keeps score, plays its sounds and shows its own screen in a window "
+             "of its own."),
+            ("Getting started", [
+                {"flow": [
+                    {"icon": "check", "title": "Setup",
+                     "text": "the PAD runtime, Visual Pinball, the controller: each row installs its own"},
+                    {"icon": "sd", "title": "Cards",
+                     "text": "the folder with your SD card images"},
+                    {"icon": "upload", "title": "Patch",
+                     "text": "the table you downloaded from its author"},
+                    {"icon": "play", "title": "Play",
+                     "text": "the game boots by itself; a window shows how far it is"}]},
+                "- The app ships no tables. The Tables list names each one it knows and "
+                "who made it; download it from there.\n"
+                "- **Card images** also says what each card costs the emulator's disk: a "
+                "Spike 2 game's first start copies its card image into the card cache "
+                "(only what the card uses, not the blank half of the image), and every "
+                "later start reads the copy, 36 s to attract. Each row's card says whether "
+                "it is in the cache, how much the copy takes, or that there is no room for "
+                "it (the game then reads the image where it lies, a slow start of about "
+                "2.5 minutes). Untick **Copy a card image into the cache** on a PC with no "
+                "room to give; **Cache…** lists and deletes cached cards.\n"
+                "- **Choose folder...** on the Tables card names the folder your patched "
+                "tables live in; unset, it is Visual Pinball's tables folder.\n"
+                "- **Patch...** on a table not patched yet asks for your download of it and "
+                "writes a copy named \"(PAD)\" into your tables folder. Your download stays "
+                "as it was.\n"
+                "- **Patch again** on a patched table runs the patch once more on the "
+                "download it was made from, without asking while that file is still there. "
+                "A row patched before a fix says what patching again mends.\n"
+                "- **Patch a folder...** patches every table in a folder of downloads at "
+                "once; zips in it are counted, unpack them first.\n"
+                "- **Setup** shows one line of marks once all of it is ready; **Details** "
+                "opens its rows to change a folder.\n"
+                "- A backglass (.directb2s) named like the table, beside it or already in "
+                "your tables folder, is copied to match the \"(PAD)\" name.\n"
+                "- **Machine** at the top lists every machine's tables, whatever manufacturer "
+                "is picked; choose one machine to see only its rows.\n"
+                "- A title plays the newest build of its card in the card folder.\n"
+                "- **Windows**: each window opens where you last moved it. A layout button "
+                "(Side by side, Centred) sets them out that way once; drag them anywhere "
+                "after that.\n"
+                "- The playfield and the game's screen work the same way: drag to move, "
+                "grab within 16 pixels of an edge to resize (the pointer shows the arrow), "
+                "double-click to fill the screen and again to go back. The playfield keeps "
+                "the table's proportions.",
+            ]),
+            ("For table authors",
+             "The game sees a table only through its own switches, coils and lights, so a "
+             "table of a Stern game is complete when every one of them has its object. "
+             "**Checklist...** opens the checklist for the game chosen: every playfield "
+             "switch (its id and number, what kind of part it is, where it sits on the "
+             "game's own drawing, and what a table does for one of its kind), every coil "
+             "(which ones the node boards fire themselves from their switch, which the game "
+             "fires and the table must act on) and every insert (its lamp number, RGB or not), "
+             "with the cabinet switches the kit already presses set apart.\n"
+             "- **Check a table...** asks for a .vpx and marks, against the app's map for it, "
+             "every part the table leaves out: switches with no object, coils nothing fires, "
+             "inserts no light shows, and the places the map marks GUESS. A table the app has "
+             "no map for gets a starter map beside the checklist, every part of the machine "
+             "listed under a TODO key to rename to the table's object.\n"
+             "- The picture at the head of a patched table's row is its own playfield, read "
+             "from your (PAD) copy (the app ships no picture of any table); hover over it "
+             "for the large one. A table whose playfield is baked into its 3D parts shows "
+             "its backglass instead (the tooltip says so); one with no picture the app "
+             "reads shows an empty outline.\n"
+             "- **Coverage** on a table's row is how much of the game the app's map for it "
+             "wires (switches, coils and inserts the table owes, less what the map leaves "
+             "out); click it for that table's checklist, checked against the download it "
+             "was patched from.\n"
+             "- The games listed are the ones that have run on this PC: the checklist is read "
+             "from the game's own tables, which the emulator writes on a title's first run. "
+             "Play a game once and it appears.\n"
+             "- **Only what is missing** narrows the sheet to the NO rows. **Export CSV...** "
+             "and **Save Markdown...** write it out; **Save starter map...** appears for a "
+             "table the app has no map for."),
+            ("Playing",
+             "| Key | Does |\n"
+             "|---|---|\n"
+             "| 1 | Start |\n"
+             "| 5 | coin (add coins until the game's screen shows a credit) |\n"
+             "| Left and right Shift | flippers |\n"
+             "| Enter | the plunger: hold to pull it back, let go to shoot (on Godzilla, the launch button) |\n"
+             "| Left Alt | the machine's Action button, which also launches the ball (Visual Pinball's lockbar key) |\n"
+             "| Esc | leave; the game stops with the table |\n\n"
+             "The first time, the game's screen may take the keyboard: click the "
+             "playfield once and play on."),
+            ("If it does not start",
+             "- **Check again** says what is missing.\n"
+             "- \"WSL is not installed on this PC\": the emulator runs in WSL. Click "
+             "**Install Missing** above the tabs, restart Windows when it asks, then Play.\n"
+             "- \"no rig slot free\": a game is already running, on the Emulate tab or "
+             "from a table closed without Esc. Stop it on the Emulate tab.\n"
+             "- The table loads and nothing happens: `%TEMP%\\padcontroller.log` says what "
+             "the controller did, and `%TEMP%\\padvpx-<title>.log` is the game's boot log."),
         ],
     },
 }
 
 
-def sections_for(tab_name):
+def _play_options_intro():
+    """The Play Options tab's opening section. The tab rides the game's modes
+    capability, not the mode maker's switch, so it names the Modes tab (and
+    its co-op play) only while the mode maker is on: a copy where it is a
+    preview again, switched off, shows nothing of it."""
+    from ..core import preview
+    text = ("Options for how the game itself plays and what it reports, without making a mode: a handicap for "
+            "each player, Prolonged Competition, a score feed to a server of your own, and inactivity pausing the "
+            "timers on a game that ignores its own setting. Tick what you want, then Write the card.\n\n"
+            "**Insider Connected keeps working.** Nothing here changes a score, so ")
+    if not preview.enabled("modes"):
+        return [text + "players keep Insider Connected as before: scores, high scores and achievements."]
+    return [text + "on a card with these and none of your modes or co-op play, players keep Insider Connected "
+            "as before: scores, high scores and achievements. Your own modes and co-op play (on the Modes tab) "
+            "are what keep a card's scores on the machine."]
+
+
+def _jjp_modes_games():
+    """The JJP titles that can run custom modes, read off their port reports now."""
+    from ..plugins.jjp import custom_modes as CM
+    names = [t["name"] for t in CM.titles() if t["can_run"]]
+    return ("Every game whose code the app has read and found able to run them: "
+            + ", ".join(names) + ". The others are listed greyed, with why.") if names else ""
+
+
+#: PAD-1350: the Modes tab on a Jersey Jack game (webui/modes_jjp.py) - a different editor
+#: from Stern's mode maker, so its own tips
+JJP_MODES_HELP = [
+    ("What it's for", [
+        "Make modes of your own for a Jersey Jack game. A mode runs inside the "
+        "game's own code: a switch of the game's or one of its own events starts it, "
+        "the game's mode timer "
+        "times it, its shots score through the game's scoring, it lights the game's "
+        "lamps and draws its panel in the game's fonts. The game's own modes go on as "
+        "they were. While yours runs it holds off the game's own mode and multiball "
+        "starts, and pauses for the few it cannot hold; **When a game mode runs** can "
+        "make it pause, end or carry on instead.",
+    ]),
+    ("Which games", lambda: _jjp_modes_games()),
+    ("Making a mode", [
+        "Pick the game at the top right. Your modes are on the left; **New mode** "
+        "starts one from picks that suit the game. Every switch, lamp, lamp group, "
+        "sound and font is picked from the game's own list, so nothing can be "
+        "misspelt. A game takes 24 modes.\n\n"
+        "- **Started by**: the switch (or switches) that start it; **Hits to start** "
+        "how many hits that takes.\n"
+        "- **Starts**: what else starts it, from the game's own events: **Starts on a "
+        "game event** (a ball starting, the first or last ball, a ball saved, an extra "
+        "ball, a multiball ending; the picker lists what the game has), **Starts after a "
+        "game mode ends** (one of the game's modes, or any), **Starts at a score** (once "
+        "a game for each player), or **Starts on a combo**: switches hit in that order, "
+        "each within **Combo seconds** of the last. Any of them, or the start switch, "
+        "starts it. **Hits to start** counts these too (2 with a game mode: after that "
+        "mode ends twice); **Start count resets every** ball or game says when that count "
+        "starts over. **Starts at most once a** ball or game keeps it from starting again "
+        "sooner. A mode needs a start switch or one of these.\n"
+        "- **Scoring shots**, **Points a shot**, **Seconds**, **Shots to complete** and "
+        "**Completion bonus**: how it plays.\n"
+        "- **Sounds**, **Lamps** and **Screen**: what it plays, lights and shows. "
+        "Leave one empty for the game's default.\n\n"
+        "**Every mode of this game** holds defaults for all of them (the fonts, the "
+        "colours, where the panel sits).",
+    ]),
+    ("Hearing the sounds", [
+        "Extract the game once (the Extract tab) and point **Hear sounds from** at "
+        "that folder: every sound the game's list names and the folder holds gets a "
+        "**Hear** button, in the list and beside the picked one.",
+    ]),
+    ("The check", [
+        "Every change is checked the way the build checks it: a name the game does "
+        "not have, a number that is not one, a mode with nothing to start it. The "
+        "Build button waits until the check finds nothing.",
+    ]),
+    ("Putting it on the machine", [
+        "**Write to USB stick** is the everyday way: it writes a hotfix folder to a "
+        "FAT32 USB stick, and the game's own USB update screen installs your modes "
+        "from it with no reinstall; scores, audits and settings are kept. At the "
+        "machine: service menu, Software Update > USB Update, stick in; hold the left "
+        "flipper button and press Plus, Minus, Plus, Minus; ENTER, ENTER; the game "
+        "reboots with the modes. The card shows these steps. The same card writes a "
+        "stick that turns the modes off, back on, or takes them out.",
+        "The first stick for a game builds the mode runtime from its stock install "
+        "ISO (pick it under Build) in the app's Linux as administrator: seconds, or "
+        "about 20 minutes the first time that ISO's game partition is unpacked. "
+        "After that every stick for that ISO is written in seconds.",
+        "A stick that already carries another hot fix is never written over.",
+        "**Build** writes the game's stock install ISO again with your modes in it "
+        "(it runs in the app's Linux as administrator, a few minutes). Install that "
+        "ISO the way the stock one installs. To turn the modes off on the machine "
+        "without reinstalling, create the file /jjpe/perm/padmodes.off; delete it to "
+        "turn them back on.",
+    ]),
+]
+
+
+def sections_for(tab_name, mfr=None):
     """The (title, body) sections the "?" window shows for *tab_name*: the
     tab's own, plus those of every preview feature switched on in this run
-    (:data:`PREVIEW_HELP`).  Never raises."""
+    (:data:`PREVIEW_HELP`).  The Modes tab on a JJP game (*mfr* with
+    ``jjp_modes``) is the JJP editor, with tips of its own.  Never raises."""
+    caps = getattr(mfr, "capabilities", None)
+    if tab_name == "Modes" and getattr(caps, "jjp_modes", False) and not getattr(caps, "modes", False):
+        return _render_sections(JJP_MODES_HELP)
     out = list(HELP_CONTENT.get(tab_name) or [])
     try:
         from ..core import preview
@@ -3038,6 +4392,10 @@ def sections_for(tab_name):
                 out += list(tabs.get(tab_name) or [])
     except Exception:                                   # noqa: BLE001
         pass
+    return _render_sections(out)
+
+
+def _render_sections(out):
     # a body that is a function is read now, at render time (a tip that lists
     # what the app has at the moment); one that fails is left out, not a crash
     sections = []
@@ -3054,10 +4412,19 @@ def sections_for(tab_name):
 # Appended to every tab's sections — app-wide behaviours users ask about.
 GENERAL_CONTENT = [
     ("The ⚙ settings menu",
-     "The gear at the top right holds the app-wide controls:\n\n"
-     "- light / dark theme\n"
-     "- **Check for updates**, and **Check automatically**: at startup only, hourly, "
-     "every 6 hours or daily\n"
+     "The gear at the top right holds the app-wide controls. Every choice and "
+     "on/off switch is in a submenu (▸):\n\n"
+     "- **Appearance** (dark, light or the system's), **Language** and **Zoom**\n"
+     "- **Updates**: Check for updates now, and check automatically at startup "
+     "only, hourly, every 6 hours or daily\n"
+     "- **Save automatically**: every 1, 5 (the default), 15 or 30 minutes, or never. "
+     "Changes to files are saved the moment you make them; this saves the rest of "
+     "the project (the Multi-boot list, the Emulate card, the Extract options, the "
+     "Write file name), which otherwise waits until PAD closes\n"
+     "- **Logs**: the log history, this project's log, and whether the log "
+     "shows previous sessions\n"
+     "- **AI agents**: let an AI agent (one that supports MCP) use PAD for you, "
+     "and the lines to connect it\n"
      "- disk-space management, and clearing the downloaded voice models\n"
      "- the prerequisite tools: status, re-check, install\n"
      "- **View disclaimer…**, the first-launch disclaimer again"),
@@ -3073,6 +4440,20 @@ GENERAL_CONTENT = [
      "**Install / repair prerequisites…** entry. All green means every check passed, not "
      "that nothing is left: ffplay (for the audio Preview) is checked by none, and "
      "re-running the installer brings the full ffmpeg that has it."),
+    ("Reset… (start a project over)",
+     "**Reset…** at the bottom of the project menu (the project name at the top) puts parts of the project back the way "
+     "they were extracted. Tick what goes, or **Everything**:\n\n"
+     "- **Scenes edits**: every scene as shipped, and the score panel's colors\n"
+     "- **Color profiles**: the project's and every file's or line's own, switches off\n"
+     "- **Replaced images**, **Replaced videos**, **Replaced sounds**: the picks and "
+     "the files they changed\n"
+     "- **Text edits** and the text colors picked on Text\n"
+     "- **Fonts**: every letter back from the game's own font pictures\n"
+     "- **Modes**: every mode made in the project (its folder under modes) and every "
+     "change to the game's own modes\n\n"
+     "It cannot be undone, and works on the whole project only: one scene goes back "
+     "with **Revert** on the Scenes tab. Your own files picked from elsewhere stay "
+     "where they are; nothing on a card changes until the next Write."),
     ("Recent paths",
      "Every file or folder box remembers recent paths per manufacturer: open its "
      "dropdown to reuse one."),
@@ -3090,6 +4471,25 @@ GENERAL_CONTENT = [
      "3. Press **Relink**: every slot is re-pointed at once, matched by file name, "
      "so a new drive letter or a re-sorted library still works.\n\n"
      "Nothing is copied, and nothing is written until you press Relink."),
+    ("All your files in one folder",
+     "**Project ▾ > Export replacement files…** copies every video, sound and picture "
+     "the project uses (each slot's file, random clips, music mode files, attract "
+     "photos and clips) into one folder, sorted into **Video**, **Audio** and "
+     "**Images**. Each copy is named after the game's file it replaces, then its own "
+     "(\"GZ_Intro - my intro.mp4\"), so you can tell what it is for. Two different "
+     "files with one name are both kept (\"GZ_Intro - my intro (2).mp4\"); "
+     "a file several slots use is copied once, and exporting again copies only what "
+     "is new.\n\n"
+     "With **Use the copies in this project** on, the project builds from that folder "
+     "from then on. Beside the files goes **replacements.json**: every slot's file, "
+     "the random clips, the music modes, loudness and loop settings, color profiles, "
+     "the Text tab's edits and text colors, and the Defaults. The Scenes edits go in "
+     "**Scenes.zip**, the modes you made in **Modes.zip**, and every file of the "
+     "extract changed in place (the Fonts window's letters, a file a mod pack brought) "
+     "under **Changed files**.\n\n"
+     "To rebuild on a fresh extract, open it and pick that file with **Project ▾ > "
+     "Import replacements…**. The files are found wherever the folder is by then, "
+     "so it can move to another drive or PC with them."),
     ("The log",
      "The progress dots and log at the bottom follow every job. Right-click the log "
      "to copy text for a bug report."),

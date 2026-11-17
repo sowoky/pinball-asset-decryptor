@@ -4,6 +4,7 @@ import secrets
 import threading
 
 from .dialogs import Dialogs
+from .drops import DropBox
 from .loop import UiLoop
 from .rpc import Registry
 from .state import EventBus, Store
@@ -20,14 +21,30 @@ class Context:
         self.host = None         # the desktop host (window chrome, pickers)
         self.app = None          # the App (run logic, app.py)
         self.window = None       # the WebWindow (what the run logic drives)
+        self.start_geometry = None   # the window's saved place (host.build)
         self._clients = 0
         self._clients_lock = threading.Lock()
         self.on_clients_changed = None
+        # set once a page has asked for its state: the native window's page
+        # reached the app (the host's blank-window watch, PAD-748)
+        self.page_seen = threading.Event()
+        # files dropped on the window, by full path (drops.py, PAD-838)
+        self.drops = DropBox()
 
     # -- read by the HTTP server ----------------------------------------
     def state_snapshot(self):
         """The page's starting point: the event number and the state as of
         that number (events after it are replayed on top)."""
+        if not self.page_seen.is_set():
+            # the first page of this run is up: a Restart to update's
+            # splash, if this is the version it waited for, is done
+            # (core/update_splash, PAD-1036); a FindWindow when there is none
+            try:
+                from ..core import update_splash
+                update_splash.dismiss()
+            except Exception:                           # noqa: BLE001
+                pass
+        self.page_seen.set()
         window = self.window
         seq = self.bus.last_seq
         state = self.store.snapshot()

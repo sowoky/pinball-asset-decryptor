@@ -111,9 +111,16 @@ class CardImage:
     itself in a reader — opened sector-aligned through ``RawDeviceFile``, see
     :func:`formats.open_card`), or an already-open, seekable binary object; an
     object is not closed by :meth:`close`.  Use as a context manager.
+
+    *logical* (PAD-749) also lists the partitions inside an extended one,
+    numbered on from 5 as Linux numbers them: a Spike 2 machine keeps its own
+    logs (the game's ``/log``, the mode runtime's ``mode.log``) on sda6, its
+    ``/dump``.  Off by default: the callers that scan every partition of a
+    card (Compare, Image Info, the firmware finders) look at the game's files.
     """
 
-    def __init__(self, source):
+    def __init__(self, source, logical=False):
+        self._logical = logical
         if hasattr(source, "read") and hasattr(source, "seek"):
             self._f = source
             self._owns = False
@@ -147,7 +154,10 @@ class CardImage:
         self._f.seek(0)
         mbr = self._f.read(512)
         parts = []
-        for index, ptype, lba, sectors in formats.parse_mbr_partitions_bytes(mbr):
+        entries = list(formats.parse_mbr_partitions_bytes(mbr))
+        if self._logical and any(t in _EXTENDED_TYPES for _i, t, _l, _s in entries):
+            entries += [e for e in formats.parse_all_partitions_file(self._f) if e[0] >= 4]
+        for index, ptype, lba, sectors in entries:
             offset, size = lba * 512, sectors * 512
             if ptype == _EXT_TYPE:
                 # Confirm it really is ext (and cache the reader) so the tab can
@@ -168,9 +178,9 @@ class CardImage:
         return parts
 
     def partitions(self):
-        """The card's primary partitions (logical partitions inside an extended
-        one aren't enumerated — the Spike 2 rootfs and data partitions are both
-        primary)."""
+        """The card's primary partitions, and with ``logical`` the ones inside
+        an extended partition after them (the Spike 2 rootfs and data
+        partitions are both primary)."""
         return list(self._parts)
 
     def _reader(self, part_index):
@@ -577,12 +587,13 @@ class CardImage:
         if not found_any:
             raise FileNotFoundError("game firmware not found on this card")
         raise ValueError("no game firmware on this card exposes an adjustment "
-                         "table (%s)" % (last_err or "unrecognised build"))
+                         "table (%s)" % (last_err or "unrecognized build"))
 
     def write_adjustment_defaults(self, part_index, path, table, overrides,
                                   high_scores=None, name_overrides=None,
                                   menu_last_id=None, menu_plan=None,
-                                  log=None):
+                                  log=None, ranges=None, coin_door=False,
+                                  final_wizard=False, topper=False):
         """Patch the game ELF's compiled defaults and write it back in place
         (exact-size, extent-mapped) with the ``.sidx`` record refreshed.
 
@@ -598,12 +609,29 @@ class CardImage:
         refreshed — once.  *log* is an optional ``log(text, level)`` for the
         notes only this layer can write.
 
+        *ranges* is ``{AD_name: (min, max)}``: the menu's lowest and highest
+        value for those settings (PAD-750), patched beside their defaults.
+
+        *coin_door* gives a Home Edition its coin door (PAD-755,
+        :mod:`.coin_door`): the interlock switch linked to its handler.  A
+        build that has one already, or can't be read, is left alone and said
+        so through *log*.
+
+        *final_wizard* stops the final wizard from ending the game (PAD-786,
+        :mod:`.final_wizard`): the player's balls after it are played.  A build
+        whose final wizard is not one the app knows is left alone and said so.
+
+        *topper* unlocks the topper-only features without the topper (PAD-1010,
+        :mod:`.topper`): the gate that waits for the topper accessory reports it
+        present.  A build with no topper-gated feature the app can unlock is
+        left alone and said so.
+
         Returns ``(n_settings, sidx_refreshed)``, where n_settings counts every
         adjustment and high-score slot changed (the menu page is one edit to
         the firmware's code, not a setting, and isn't counted).
         """
-        new = table.patched_bytes(overrides)
-        n = len(overrides)
+        new = table.patched_bytes(overrides, ranges=ranges)
+        n = len(set(overrides) | set(ranges or {}))
         new = self._with_master_volume(table, new, overrides, log)
         if name_overrides and high_scores is not None:
             # Re-bind to the already-patched bytes: the adjustment patch only
@@ -619,8 +647,76 @@ class CardImage:
             # re-reading the page out of the result.
             from .menu_visibility import widened_bytes
             new = widened_bytes(table, new, int(menu_last_id), plan=menu_plan)
+        if coin_door:
+            new = self._with_coin_door(table, new, log)
+        if final_wizard:
+            new = self._with_final_wizard(new, log)
+        if topper:
+            title = path.strip("/").split("/")[0]
+            new = self._with_topper(new, title, log)
         _n, refreshed = self.replace_file_bytes(part_index, path, new)
         return n, refreshed
+
+    @staticmethod
+    def _with_coin_door(table, elf, log=None):
+        """*elf* with its coin door's interlock linked (see :mod:`.coin_door`),
+        or unchanged with a note when this build has nothing to fit."""
+        from . import coin_door
+        p = coin_door.plan(elf, table)
+        if p and p["state"] == coin_door.MISSING:
+            out = coin_door.patched_bytes(elf, p)
+            if log:
+                log("Coin door: the game now uses the coin door's interlock "
+                    "switch. Opening the door puts up the game's 48V "
+                    "DISABLED / CLOSE COIN DOOR message, as on a Pro.",
+                    "info")
+            return out
+        if log:
+            if p and p["state"] == coin_door.FITTED:
+                log("Coin door: this game already uses its coin door; "
+                    "nothing to change.", "info")
+            else:
+                log("Coin door: this build's switch tables couldn't be read "
+                    "with certainty, so its coin door was left as it ships.",
+                    "warning")
+        return elf
+
+    @staticmethod
+    def _with_final_wizard(elf, log=None):
+        """*elf* with its final wizard no longer ending the game (see
+        :mod:`.final_wizard`), or unchanged with a note when this build's isn't
+        one the app knows."""
+        from . import final_wizard
+        p = final_wizard.plan(elf)
+        if p:
+            out = final_wizard.patched_bytes(elf, p)
+            if log:
+                log("Final wizard: once a player has played the final wizard, "
+                    "the game no longer ends their game; their remaining balls "
+                    "are played.", "info")
+            return out
+        if log:
+            log("Final wizard: this build's final wizard is not one this app "
+                "can change, so it still ends the game as it ships.", "warning")
+        return elf
+
+    @staticmethod
+    def _with_topper(elf, title, log=None):
+        """*elf* with the topper-gated feature unlocked (see :mod:`.topper`), or
+        unchanged with a note when *title* is not a game this app unlocks (so a
+        mod pack carrying the choice onto another title leaves it alone)."""
+        from . import topper
+        p = topper.plan(elf, title)
+        if p:
+            out = topper.patched_bytes(elf, p)
+            if log:
+                log("Topper: %s is now available without the topper accessory "
+                    "fitted." % p["feature"], "info")
+            return out
+        if log:
+            log("Topper: this game has no topper feature this app can unlock, "
+                "so it was left as it ships.", "warning")
+        return elf
 
     @staticmethod
     def _with_master_volume(table, elf, overrides, log=None):

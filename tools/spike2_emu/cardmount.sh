@@ -22,6 +22,9 @@
 #   * fusermount3 is setuid, so an unprivileged user may create a FUSE mount -
 #     and FUSE is one of the few filesystem types the kernel permits inside a
 #     user namespace, which is where run_game.sh does its work.
+#   * where even setuid cannot mount (a container without SYS_ADMIN), the run
+#     has already moved into a user namespace of its own and fuse2fs mounts
+#     there directly - padpath.sh pad_card_ns (PAD-872).
 #
 # The partition is mounted `ro`. Nothing here can write to a card image, which
 # is the right guarantee to have when the images are the only copies.
@@ -36,7 +39,52 @@ SELF=$(cd "$(dirname "$0")" && pwd)
 . "$SELF/padpath.sh"
 PREFIX=$PAD_HOME/local
 CARDS=$PAD_CARDS          # per rig slot (padpath.sh): a slot unmounts only its own
-CACHE=$PAD_HOME/cardcache
+# THE SHARED CARD STORE (PAD-651): when /mnt/wsl/cards is mounted (cardstore.ps1: one ext4 disk file on the NVMe,
+# attached to the WSL VM by name, so EVERY distro sees it), the cache lives there - one cache for the sessions'
+# Ubuntu, the app's runtime and the app's data disk, sized for the newest build of every title. Without it (a
+# machine without the store, a reboot before the logon task ran) the cache is $PAD_HOME/cardcache as it always was.
+# PAD_CARD_CACHE_DIR names another.
+if [ -n "${PAD_CARD_CACHE_DIR:-}" ]; then
+    CACHE=$PAD_CARD_CACHE_DIR
+elif [ -d /mnt/wsl/cards/cardcache ] && mountpoint -q /mnt/wsl/cards 2>/dev/null; then
+    CACHE=/mnt/wsl/cards/cardcache
+else
+    CACHE=$PAD_HOME/cardcache
+fi
+# THE LIBRARY STAYS (PAD-727). The store was filled with the newest build of every title on 2026-10-20 and the
+# eviction below was plain least-recently-booted, so four days of older versions and custom builds booted on purpose
+# pushed 37 newest builds out of it - and the next 53-build sweep copied them off D: again (PAD-723). An entry whose
+# image sits directly in the library folder and still has the stamp it was copied with is now never evicted, not by
+# the copier making room and not by the app's 30-day clean-up (--cache-list says which). A newer build replacing
+# it, or the image moving to `older versions`, makes it an ordinary entry again. PAD_CARD_LIBRARY names another
+# folder; a machine without that folder pins nothing and the cache works as it always did.
+#
+# THE LIBRARY LIVES ON THE STORE, ONCE (PAD-966). David: "I want to be storing ONE copy of a disk image since they
+# are so large". With the store mounted, the library is /mnt/wsl/cards/library: precache.sh takes every card from
+# the INTAKE folder (D:\Pinball\images\Stern\spike2, where downloads land) into it once, compact (used blocks only,
+# same name, same mtime), and a card there boots where it lies (on_cache_disk) - no cache entry, no copy. The raw in
+# the intake folder is then redundant: a boot of it, by whatever path names it (the app's picker, an old sweep list,
+# the Write tab), is served from the library file (library_copy), so nothing is copied twice. Not on the hard disk
+# D: itself, measured: five rigs share its 95 random reads a second and a 330 GB sweep is 39+ minutes of its time,
+# against nothing from the NVMe. Without the store, or before the first intake, the library is the intake folder as
+# before and the cache does the work.
+STORE_LIBRARY=/mnt/wsl/cards/library
+INTAKE=${PAD_CARD_INTAKE:-/mnt/d/Pinball/images/Stern/spike2}
+if [ -n "${PAD_CARD_LIBRARY:-}" ]; then
+    LIBRARY=$PAD_CARD_LIBRARY
+elif [ "$CACHE" = /mnt/wsl/cards/cardcache ] && [ -d "$STORE_LIBRARY" ]; then
+    LIBRARY=$STORE_LIBRARY
+else
+    LIBRARY=$INTAKE
+fi
+# The space the copier leaves free. On a distro's own disk that space is the distro's (cardstage.sh asks 30 GB);
+# the store holds nothing but the cache, so it keeps only a margin - with the library pinned in it, that margin is
+# the difference between an older version cached and one booted where it lies.
+if [ "$CACHE" = /mnt/wsl/cards/cardcache ]; then
+    CACHE_KEEP_GB=${PAD_STORE_KEEP_FREE_GB:-2}
+else
+    CACHE_KEEP_GB=${PAD_CACHE_KEEP_FREE_GB:-8}
+fi
 FUSE2FS="$PREFIX/usr/bin/fuse2fs"
 # Both library directories, because the packages unpacked into $PREFIX put
 # their libraries in /lib up to 24.04 and in /usr/lib from 26.04 (PAD-437).
@@ -120,6 +168,18 @@ copier_alive() {   # <pidf> <copy>
         && grep -qsa -- "$2" "/proc/$pid/cmdline"
 }
 
+# Is this cache entry the library's? Its .src names the image it was copied from; the entry is pinned when that
+# image is a file directly in $LIBRARY (by either spelling: the repo's images/ is a junction to the same folder) and
+# still has the entry's stamp.
+cache_pinned() {   # <label>
+    local s img lib
+    s=$(cat "$CACHE/$1.src" 2>/dev/null) || return 1
+    img=${s% * *}
+    lib=$(readlink -f "$LIBRARY" 2>/dev/null) && [ -n "$lib" ] && [ -d "$lib" ] || return 1
+    [ "$(readlink -f "$(dirname "$img")" 2>/dev/null)" = "$lib" ] || return 1
+    cache_valid "$img" "$CACHE/$1.raw" "$CACHE/$1.src"
+}
+
 # Any OTHER label's copier live right now? One copier at a time, MACHINE-WIDE:
 # the card images live on one spinning disk (repo images/ is a JUNCTION to
 # D:\Pinball\images - same files, two spellings), and two concurrent dd
@@ -151,12 +211,74 @@ label_mounted() {   # <label>
     return 1
 }
 
+# Is the cached copy in use ANYWHERE (PAD-739)? label_mounted sees only THIS rig slot's mounts ($CARDS is per slot),
+# so a card booted in rig 2 read as free to a delete from the Emulate tab (slot 0). Every reader of a copy - the
+# fuse2fs that mounts it, a live copier - has the copy's path as one whole argument, so /proc answers for every slot.
+# Read in-shell (read -d ''), never by a grep whose own argv would carry the path and match itself. One pass lists
+# every argument naming a file in the cache; --cache-list takes it once (CACHE_READERS) rather than once a card.
+cache_readers() {
+    local f a
+    for f in /proc/[0-9]*/cmdline; do
+        while IFS= read -r -d '' a; do
+            case $a in "$CACHE"/*) printf '%s\n' "$a" ;; esac
+        done < "$f" 2>/dev/null
+    done
+}
+cache_in_use() {   # <label>
+    local c="$CACHE/$1.raw" r
+    label_mounted "$1" && return 0
+    r=${CACHE_READERS-$(cache_readers)}
+    case $'\n'"$r"$'\n' in *$'\n'"$c"$'\n'*|*$'\n'"$c.partial"$'\n'*) return 0 ;; esac
+    return 1
+}
+
+# Where the entry's image stands (PAD-739), for the Cache window and the clean-ups:
+#   ok           the image is there with the entry's stamp - the copy is what a boot of it uses
+#   changed      the image is there but rebuilt or replaced since (or the entry has no stamp): never used again
+#   gone         its folder is there but the file is not (deleted or renamed): never used again unless it comes back
+#   unreachable  its folder is not there either (a drive not attached, a share offline): may be used again
+cache_source_state() {   # <label>
+    local s img
+    s=$(cat "$CACHE/$1.src" 2>/dev/null) || { echo changed; return; }
+    img=${s% * *}
+    # A stamp naming a file in the cache itself is the copy stamped against ITSELF (on_cache_disk below says how
+    # that happened): no image anyone boots carries that identity, so the entry is dead however present the file is.
+    case $(readlink -f "$img" 2>/dev/null) in "$(readlink -f "$CACHE" 2>/dev/null)"/*) echo changed; return ;; esac
+    if [ -f "$img" ]; then
+        cache_valid "$img" "$CACHE/$1.raw" "$CACHE/$1.src" && echo ok || echo changed
+    elif [ -d "$(dirname "$img")" ]; then
+        echo gone
+    else
+        echo unreachable
+    fi
+}
+
+# THE CACHE'S OWN SIZE LIMIT (PAD-739). cache_make_room evicted only when `df` said the disk was nearly full - and on
+# a distro's own disk `df` reports the VIRTUAL size of its ext4.vhdx (1 TB by default), not the Windows drive behind
+# it. So on a machine without the store nothing was ever evicted: a user's ~/cardcache reached 150 GB over a month of
+# custom Godzilla builds, the distro disk 226 GB on C:. A limit on what the cache itself holds is the bound df cannot
+# give. `cardmount.sh --cache-limit N` saves it beside the cache (.limit_gb, 0 = none); without one it is 64 GB on a
+# distro disk (PAD_CACHE_MAX_GB) and none on the store, which is its own sized disk holding nothing else.
+cache_limit_gb() {
+    local v
+    v=$(tr -dc 0-9 2>/dev/null < "$CACHE/.limit_gb")
+    if [ -n "$v" ]; then echo $((10#$v)); return; fi
+    if [ "$CACHE" = /mnt/wsl/cards/cardcache ]; then echo 0; else echo "${PAD_CACHE_MAX_GB:-64}"; fi
+}
+cache_used_kb() {
+    local u
+    u=$(du -ck "$CACHE"/*.raw "$CACHE"/*.raw.partial 2>/dev/null | tail -1 | cut -f1)
+    echo "${u:-0}"
+}
+
 # ITEM 77: never start a copy the disk cannot hold - the cache was measured
 # at 125 GB real (half the WSL disk) with 29 GB free and NOTHING pruning it.
 # Frees space by evicting the least-recently-BOOTED entries first (the .boot
 # sidecar; a missing one falls back to the copy's own mtime, which makes
 # never-booted strays and pre-item-77 entries the first to go). Never evicts
-# the label being copied, a mounted label, or one whose copier is live.
+# the label being copied, a mounted label, one whose copier is live, or the
+# library's (cache_pinned, PAD-727); an entry whose image is gone or changed
+# can never be booted from again and goes before any other.
 # `need` is what the copy can really take: the image's ALLOCATED bytes when
 # its filesystem reports them (drvfs does, for NTFS), else its apparent size.
 # The copy is sparse (cardcopy.py, or `dd conv=sparse`), so it never lands bigger than what the
@@ -165,55 +287,342 @@ label_mounted() {   # <label>
 # more than the whole work disk, so merely PICKING it evicted every other
 # cached card and then ran off the original anyway. Returns 1 when even
 # eviction cannot make room; the boot then runs off the original and nothing
-# half-lands. PAD_CACHE_KEEP_FREE_GB (default 8) is the floor the rest of the
-# WSL disk keeps.
-cache_make_room() {   # <img> <own-copy-path>
-    local need keep free f vlabel vboot victim oldest size alloc
+# half-lands. CACHE_KEEP_GB is the floor the rest of the disk keeps
+# (PAD_CACHE_KEEP_FREE_GB, default 8, on a distro's disk; 2 on the store).
+# PAD-739: it also keeps the cache under its own size limit (cache_limit_gb), because on a distro's disk df is the
+# virtual disk's and never ran short; and a copy that never finished goes first of all.
+# PAD-816: AND THE WINDOWS DRIVE BEHIND IT. The same virtual-size df let a 14.7 GB copy start on a machine whose C:
+# had a few GB left: the vhdx could not grow, ext4 hit a failed write at 3.6 GB and remounted the WHOLE distro
+# read-only, and nothing in WSL worked again until a restart. The app names that drive (PAD_HOST_DRIVE, the drvfs
+# mount of the drive ext4.vhdx is on); its free space, plus what this call has evicted (freed blocks inside the vhdx
+# are reused before it grows - and if they were handed back to Windows instead, df of the drive shows them), is the
+# room a copy really has. PAD_HOST_KEEP_FREE_GB (4) stays free for Windows. Not on the store, whose disk is its own.
+host_free_kb() {
+    [ -n "${PAD_HOST_DRIVE:-}" ] && [ "$CACHE" != /mnt/wsl/cards/cardcache ] || return 1
+    df -k --output=avail "$PAD_HOST_DRIVE" 2>/dev/null | tail -1 | tr -d " " | grep -E '^[0-9]+$'
+}
+# What the copy can really take, in KB. THE COMPACT SIZE FIRST (PAD-964, David: "they are RAW SD card images with
+# a lot of blank space that we don't need to copy to cache"): cardcopy.py reads only what the card's filesystems
+# use (PAD-484) and the zeros inside that land as holes, so `cardcopy.py --size` - the bytes it will read, at most
+# what it writes - is what the copy costs: 6.6 GB of Batman's 7.9 GB image, 9.7 of Bond's 14.4, 6.1 of Foo
+# Fighters' 14.4. The room check used the image's whole size and refused Batman with "want 15 GB" on a disk that
+# had the room. When cardcopy cannot plan the image (not a card, bitmaps that do not add up: then it copies whole
+# partitions, or dd takes over) it is the image's ALLOCATED bytes when its filesystem reports them (drvfs does,
+# for NTFS), else its apparent size. One definition, because --cache-check answers "how much does this card need"
+# with the same number the copier's room check uses.
+cache_need_kb() {   # <img>
+    local size alloc used key memo
+    if [ "${PAD_CARD_COPY_USED:-1}" != 0 ] && command -v python3 >/dev/null 2>&1; then
+        # the plan reads the image's bitmaps through 9p, about a second a card: remembered beside the cache as
+        # <label>.need under the image's own identity (size+mtime, as the copy's stamp), so the Visual Pinball
+        # tab's check of a whole folder costs that once, not every opening
+        key=$(stamp_key "$(cache_stamp "$1")")
+        memo="$CACHE/$(card_label "$1").need"
+        used=$(cat "$memo" 2>/dev/null)                 # "<need_kb> <size> <mtime>"
+        if [ "${used#* }" = "$key" ] && used=${used%% *} && [ "$used" -gt 0 ] 2>/dev/null; then
+            echo "$used"
+            return
+        fi
+        if used=$(python3 "$SELF/cardcopy.py" --size "$1" 2>/dev/null) && [ "$used" -gt 0 ] 2>/dev/null; then
+            used=$(( used / 1024 ))
+            [ -d "$CACHE" ] && { echo "$used $key" > "$memo"; give_back "$memo"; } 2>/dev/null
+            echo "$used"
+            return
+        fi
+    fi
     size=$(stat -c %s "$1" 2>/dev/null || echo 0)
     alloc=$(( $(stat -c '%b * %B' "$1" 2>/dev/null || echo 0) ))
     if [ "$alloc" -gt 0 ] && [ "$alloc" -lt "$size" ]; then
-        need=$(( alloc / 1024 ))
+        echo $(( alloc / 1024 ))
     else
-        need=$(( size / 1024 ))
+        echo $(( size / 1024 ))
     fi
-    keep=$(( ${PAD_CACHE_KEEP_FREE_GB:-8} * 1048576 ))
+}
+
+# A DRY RUN OF THE ROOM RULE (PAD-964). With DRY=1 cache_make_room decides exactly as it would - the same floors,
+# the same victims in the same order - but deletes nothing and says nothing: the victims it would take are counted
+# in ROOM_EVICT_N / ROOM_EVICT_KB, the room it saw first in ROOM_FREE_KB, and ROOM_WHY names what was short when it
+# returns 1 (`disk`, or `host` for the Windows drive behind WSL). That is how a launch, and the Visual Pinball tab
+# before it, can say what a card will cost the disk BEFORE the copy starts, from the one rule rather than a guess.
+# (every read is ${DRY:-0}: the functions stand alone in the tests, with no top of file)
+room_say() { [ "${DRY:-0}" = 1 ] || echo "$@" >&2; }
+cache_make_room() {   # <img> <own-copy-path>
+    local need keep free f vlabel vboot victim oldest pinned limit used over why
+    local host0 hnow hroom hkeep evicted=0 hshort=0
+    need=$(cache_need_kb "$1")
+    keep=$(( CACHE_KEEP_GB * 1048576 ))
+    limit=$(( $(cache_limit_gb) * 1048576 ))
+    host0=$(host_free_kb) || host0=""
+    hkeep=$(( ${PAD_HOST_KEEP_FREE_GB:-4} * 1048576 ))
+    DRY_GONE=""; ROOM_WHY=""; ROOM_EVICT_N=0; ROOM_EVICT_KB=0; ROOM_FREE_KB=""
     while :; do
         free=$(df -k --output=avail "$CACHE" 2>/dev/null | tail -1 | tr -d " ")
         [ -n "$free" ] || return 0             # df unreadable: do not guess
-        [ $(( free - need )) -ge "$keep" ] && return 0
-        victim=""; oldest=0
-        for f in "$CACHE"/*.raw; do
+        # a dry run deletes nothing, so what it would have freed is counted in by hand
+        [ "${DRY:-0}" = 1 ] && free=$(( free + evicted ))
+        hshort=0
+        if [ -n "$host0" ]; then
+            hnow=$(host_free_kb) || hnow=$host0
+            hroom=$(( host0 + evicted ))
+            [ "$hnow" -gt "$hroom" ] && hroom=$hnow
+            # The Windows drive's own floor, carried into the ext4 terms the checks below use.
+            hroom=$(( hroom - hkeep + keep ))
+            if [ "$hroom" -lt "$free" ]; then free=$hroom; hshort=1; fi
+        fi
+        [ -n "$ROOM_FREE_KB" ] || ROOM_FREE_KB=$free
+        over=0
+        if [ "$limit" -gt 0 ]; then
+            used=$(cache_used_kb)
+            [ "${DRY:-0}" = 1 ] && used=$(( used - evicted ))
+            [ $(( used + need )) -gt "$limit" ] && over=1
+        fi
+        [ $(( free - need )) -ge "$keep" ] && [ "$over" = 0 ] && return 0
+        victim=""; oldest=0; pinned=0
+        # A copy that never finished (WSL shut down or the copier killed mid-copy) is a .partial with no .raw and no
+        # live copier: --cache-list never showed it and nothing took it, up to 15 GB each (PAD-739). First out.
+        for f in "$CACHE"/*.raw.partial; do
+            [ -e "$f" ] || break
+            vlabel=$(basename "$f" .raw.partial)
+            case " ${DRY_GONE:-} " in *" $vlabel "*) continue ;; esac
+            [ "$CACHE/$vlabel.raw" = "$2" ] && continue
+            [ -e "$CACHE/$vlabel.raw" ] && continue
+            cache_in_use "$vlabel" && continue
+            copier_alive "$CACHE/$vlabel.pid" "$CACHE/$vlabel.raw" && continue
+            victim="$vlabel"; oldest=0; why="a copy that never finished"
+            break
+        done
+        [ -n "$victim" ] || for f in "$CACHE"/*.raw; do
             [ -e "$f" ] || break
             [ "$f" = "$2" ] && continue
             vlabel=$(basename "$f" .raw)
-            label_mounted "$vlabel" && continue
+            case " ${DRY_GONE:-} " in *" $vlabel "*) continue ;; esac
+            cache_in_use "$vlabel" && continue
             copier_alive "$CACHE/$vlabel.pid" "$f" && continue
-            vboot=$(stat -c %Y "$CACHE/$vlabel.boot" 2>/dev/null \
-                    || stat -c %Y "$f" 2>/dev/null) || continue
+            if cache_pinned "$vlabel"; then pinned=$((pinned + 1)); continue; fi
+            case $(cache_source_state "$vlabel") in
+                changed|gone) vboot=0 ;;       # its image is gone or changed: dead weight, first out
+                # ok, or unreachable (a drive not attached: it may boot again once it is) - by its last boot
+                *) vboot=$(stat -c %Y "$CACHE/$vlabel.boot" 2>/dev/null \
+                           || stat -c %Y "$f" 2>/dev/null) || continue ;;
+            esac
             if [ -z "$victim" ] || [ "$vboot" -lt "$oldest" ]; then
                 victim="$vlabel"; oldest="$vboot"
             fi
         done
         if [ -z "$victim" ]; then
-            echo "[card] disk too full to cache ($(( free / 1048576 )) GB free, want $(( (need + keep) / 1048576 )) GB) and nothing evictable - running off the original" >&2
+            if [ $(( free - need )) -ge "$keep" ]; then
+                # only the limit is unmet, by cards in use or the library's: the disk has the room, so cache anyway
+                if [ "$over" = 1 ]; then
+                    room_say "[card] the cache is over its $(( limit / 1048576 )) GB limit and nothing else can go - in use, or the library's ($pinned)${1:+ - caching anyway}"
+                fi
+                return 0
+            fi
+            if [ "$hshort" = 1 ]; then
+                ROOM_WHY=host
+                room_say "[card] the Windows drive behind WSL ($PAD_HOST_DRIVE) is too full to cache this card ($(awk "BEGIN { printf \"%.1f\", $hnow / 1048576 }") GB free, want $(( (need + hkeep) / 1048576 )) GB) - running off the original. Free space there and the next boot caches it."
+                return 1
+            fi
+            ROOM_WHY=disk
+            room_say "[card] disk too full to cache ($(( free / 1048576 )) GB free, want $(( (need + keep) / 1048576 )) GB) and nothing evictable ($pinned library cards kept) - running off the original"
             return 1
         fi
-        echo "[card] evicting cached $victim (least recently booted) to make room" >&2
+        if [ -n "${why:-}" ]; then
+            :
+        elif [ "$oldest" = 0 ]; then
+            why="its image is gone or changed"
+        else
+            why="least recently booted"
+        fi
+        if [ "$over" = 1 ] && [ $(( free - need )) -ge "$keep" ]; then
+            room_say "[card] evicting cached $victim ($why) to keep the cache under its $(( limit / 1048576 )) GB limit"
+        else
+            room_say "[card] evicting cached $victim ($why) to make room"
+        fi
+        why=""
+        evicted=$(( evicted + $(du -ck "$CACHE/$victim.raw" "$CACHE/$victim.raw.partial" 2>/dev/null | tail -1 | cut -f1) ))
+        ROOM_EVICT_N=$(( ROOM_EVICT_N + 1 )); ROOM_EVICT_KB=$evicted
+        if [ "${DRY:-0}" = 1 ]; then
+            DRY_GONE="$DRY_GONE $victim"
+            continue
+        fi
         rm -f "$CACHE/$victim.raw" "$CACHE/$victim.raw.partial" \
               "$CACHE/$victim.src" "$CACHE/$victim.log" \
               "$CACHE/$victim.boot" "$CACHE/$victim.pid"
     done
 }
 
+# The cache label a card image gets: its file name up to `.Release` (or `.raw`), so one card at two paths and a
+# card beside its own build log share one copy. One definition for the mount below and --cache-check.
+card_label() {   # <img>
+    local l
+    l=$(basename "$1"); l=${l%%.Release*}; l=${l%%.raw}
+    echo "$l"
+}
+
+# WHAT A CARD WILL COST THE DISK (PAD-964), without copying or evicting anything: one tab-separated line
+#   check <TAB> state <TAB> need_kb <TAB> free_kb <TAB> keep_kb <TAB> evict_n <TAB> evict_kb <TAB> store|distro
+#         <TAB> host <TAB> label <TAB> image
+# state: off (PAD_CARD_CACHE=0: the game reads the image where it lies), cached (a valid copy is there), copying
+# (a copier is on it now), room (the copy fits as the cache stands), evict (it fits once evict_n older entries,
+# evict_kb in all, are taken - the copier's own order), full (nothing can make room: the boot runs off the original,
+# as cache_make_room's return 1 makes it). free_kb is the room the rule saw: the cache's disk, or the Windows drive
+# behind it when that is the smaller (then `host` names the drive); keep_kb the floor the copier leaves. The
+# `cache` line before them names the cache itself for the same reader.
+cache_check() {   # <img>
+    local img="$1" label copy stamp state host need=""
+    label=$(card_label "$img")
+    copy="$CACHE/$label.raw"; stamp="$CACHE/$label.src"
+    DRY_GONE=""; ROOM_WHY=""; ROOM_EVICT_N=0; ROOM_EVICT_KB=0; ROOM_FREE_KB=""
+    if [ "${PAD_CARD_CACHE:-1}" = 0 ]; then
+        state=off
+    elif on_cache_disk "$img" || library_copy "$img" >/dev/null; then
+        state=cached; need=0           # PAD-966: booted where it lies, or from its library copy - nothing to copy
+    elif cache_valid "$img" "$copy" "$stamp"; then
+        state=cached
+    elif copier_alive "$CACHE/$label.pid" "$copy"; then
+        state=copying
+    else
+        DRY=1
+        if cache_make_room "$img" "$copy"; then
+            if [ "$ROOM_EVICT_N" -gt 0 ]; then state=evict; else state=room; fi
+        else
+            state=full
+        fi
+        DRY=0
+    fi
+    host=""
+    [ "$ROOM_WHY" = host ] && host=${PAD_HOST_DRIVE:-}
+    [ -n "$ROOM_FREE_KB" ] || ROOM_FREE_KB=$(cache_disk_avail_kb)
+    printf 'check\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$state" "${need:-$(cache_need_kb "$img")}" "$ROOM_FREE_KB" \
+        $(( CACHE_KEEP_GB * 1048576 )) "$ROOM_EVICT_N" "$ROOM_EVICT_KB" "$(cache_kind)" "$host" "$label" "$img"
+}
+cache_kind() { if [ "$CACHE" = /mnt/wsl/cards/cardcache ]; then echo store; else echo distro; fi; }
+
+# AN IMAGE THAT ALREADY LIVES ON THE CACHE'S DISK IS BOOTED WHERE IT LIES (PAD-966): a copy of it would be the same
+# bytes on the same disk at the same speed. Two cases. A file inside the cache itself: ~/cardcache has been a symlink
+# to the store since 2026-10-20, and on 2026-10-29 thirty of the store's copies were booted AS cards by that path -
+# each was copied onto itself and re-stamped with its own size+mtime, so no library boot matched it again and 29
+# newest builds came off D: once more (cache_source_state reads such an entry as dead). And any file on the store's
+# disk (cache_kind store: a disk that holds nothing but cards), which is what lets a library live there ONCE, with no
+# copy: a card put under /mnt/wsl/cards/ boots from where it is. Not a distro's own disk: there the whole system
+# shares the device, and a scratch image under /var/tmp is better copied compact than mounted where a build may
+# still be rewriting it.
+on_cache_disk() {   # <img>
+    local r c
+    r=$(readlink -f "$1" 2>/dev/null) && c=$(readlink -f "$CACHE" 2>/dev/null) && [ -n "$r" ] || return 1
+    case $r in "$c"/*) return 0 ;; esac
+    [ "$(cache_kind)" = store ] || return 1
+    [ -e "$r" ] && [ "$(stat -c %d "$r" 2>/dev/null)" = "$(stat -c %d "$c" 2>/dev/null)" ]
+}
+
+# THE INTAKE RAW BOOTS FROM ITS LIBRARY COPY (PAD-966): prints the library file that holds this card - same name,
+# same size+mtime (precache.sh keeps the original's mtime) - when the library is the store's and the image is not
+# that file itself. A raw rebuilt under the same name gets a new identity and is taken in again.
+library_copy() {   # <img>
+    local lib
+    [ "$LIBRARY" = "$STORE_LIBRARY" ] || return 1
+    lib="$LIBRARY/$(basename "$1")"
+    [ -f "$lib" ] || return 1
+    [ "$(readlink -f "$1" 2>/dev/null)" = "$(readlink -f "$lib" 2>/dev/null)" ] && return 1
+    [ "$(stamp_key "$(cache_stamp "$1")")" = "$(stamp_key "$(cache_stamp "$lib")")" ] || return 1
+    echo "$lib"
+}
+
+# PRUNE THE CACHE TO WHAT A BOOT CAN USE (PAD-966). cache_make_room takes entries one at a time and only when a copy
+# needs the room, so a store nothing new is copied into keeps every dead copy for good: on 2026-11-03 David's 590 GB
+# store held 548 GB, of which 173 GB were the library's newest builds and the rest the 30 self-stamped copies above,
+# older versions, ticket scratch and superseded custom builds - while 29 newest builds had been pushed out and would
+# come off D: again. This takes, in one pass: an unfinished copy with no copier on it; an entry whose image state is
+# `changed` (a rebuilt image, or a stamp naming the copy itself); and every other entry that is not the library's and
+# was last booted (never booted: copied) more than KEEP days ago - KEEP 0 leaves the library alone in the cache.
+# Never one in use or being copied. With DRY=1 it says what it would take and takes nothing. Tab-separated:
+#   prune  <TAB> why <TAB> label <TAB> real_kb            taken (with DRY=1: would be)
+#   kept   <TAB> why <TAB> label <TAB> real_kb            why: pinned | in use | copying | booted N days ago
+#   pruned <TAB> taken_n <TAB> taken_kb <TAB> kept_n <TAB> kept_kb     the sum, last
+cache_prune() {   # <keep-days>
+    local keep=${1:-30} keep_s now f l why last kb st seen="" n=0 nkb=0 kn=0 kkb=0
+    keep_s=$(( keep * 86400 )); now=$(date +%s)
+    CACHE_READERS=$(cache_readers)
+    take() {   # <why> <label> <kb>
+        printf 'prune\t%s\t%s\t%s\n' "$1" "$2" "$3"
+        n=$((n + 1)); nkb=$((nkb + $3))
+        [ "${DRY:-0}" = 1 ] && return 0
+        rm -f "$CACHE/$2.raw" "$CACHE/$2.raw.partial" "$CACHE/$2.src" "$CACHE/$2.log" \
+              "$CACHE/$2.boot" "$CACHE/$2.pid" "$CACHE/$2.need" 2>/dev/null
+    }
+    hold() {   # <why> <label> <kb>
+        printf 'kept\t%s\t%s\t%s\n' "$1" "$2" "$3"
+        kn=$((kn + 1)); kkb=$((kkb + $3))
+    }
+    for f in "$CACHE"/*.raw; do
+        [ -e "$f" ] || break
+        l=$(basename "$f" .raw)
+        kb=$(du -k "$f" 2>/dev/null | cut -f1); kb=${kb:-0}
+        if copier_alive "$CACHE/$l.pid" "$f"; then hold copying "$l" "$kb"; continue; fi
+        if cache_in_use "$l"; then hold "in use" "$l" "$kb"; continue; fi
+        if cache_pinned "$l"; then hold pinned "$l" "$kb"; continue; fi
+        st=$(cache_source_state "$l")
+        if [ "$st" = changed ]; then take "dead: its image changed, or the stamp names the copy itself" "$l" "$kb"; continue; fi
+        last=$(stat -c %Y "$CACHE/$l.boot" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        if [ $(( now - last )) -ge "$keep_s" ]; then
+            if [ "$keep" = 0 ]; then why="not the library's ($st)"; else why="not booted in $keep days ($st)"; fi
+            take "$why" "$l" "$kb"
+        else
+            hold "booted $(( (now - last) / 86400 )) days ago" "$l" "$kb"
+        fi
+    done
+    # a copy that never finished with no copier on it, and sidecars whose card is gone (as --cache-list's leftovers)
+    for f in "$CACHE"/*.raw.partial "$CACHE"/*.src "$CACHE"/*.log "$CACHE"/*.boot "$CACHE"/*.pid "$CACHE"/*.need; do
+        [ -e "$f" ] || continue
+        case $f in *.raw.partial) l=$(basename "$f" .raw.partial) ;; *) l=$(basename "${f%.*}") ;; esac
+        [ -e "$CACHE/$l.raw" ] && continue
+        case " $seen " in *" $l "*) continue ;; esac
+        seen="$seen $l"
+        if copier_alive "$CACHE/$l.pid" "$CACHE/$l.raw" || cache_in_use "$l"; then hold copying "$l" 0; continue; fi
+        kb=$(du -ck "$CACHE/$l.raw.partial" 2>/dev/null | tail -1 | cut -f1)
+        take "unfinished copy" "$l" "${kb:-0}"
+    done
+    printf 'pruned\t%s\t%s\t%s\t%s\n' "$n" "$nkb" "$kn" "$kkb"
+}
+# df of the cache folder, or of the nearest folder above it that exists (a cache never made yet).
+cache_disk_df() {   # <df --output fields>
+    local d=$CACHE
+    while [ ! -d "$d" ] && [ "$d" != / ]; do d=$(dirname "$d"); done
+    df -k --output="$1" "$d" 2>/dev/null | tail -1
+}
+cache_disk_avail_kb() { cache_disk_df avail | tr -d " "; }
+
 # ITEM 74: wait for the detached copier, narrating progress so the minutes are
 # visible - one newline-terminated line every 2 s, because the GUI's drain
 # thread and the run log both read LINES (dd's own \r progress never surfaces
 # through either). The copier is never killed here: on a stall or a failure
 # the boot falls back to the 9p hybrid and the copy keeps going for next time.
+# THE COPY IS ON THE BOARD (PAD-649). David: "indicate on rig pills when card copies are ongoing and the
+# percentage of them". While a card is copied into the cache the board (pad_board_dir, beside the rigs' locks)
+# carries copy-<label>.json - {"label","card","who","slot","distro","state","done_mb","total_mb","pct","updated"}
+# - rewritten every 2 s by cache_wait below and removed at its end; cardstage.sh asks for a "queued" one
+# (--board-copy queued) while it waits for the machine's one copy lock. The triage dashboard and the Emulate tab
+# tie it to the rig whose lock says it waits for that card (rigbatch names the label there) and show "copying
+# Dungeons And Dragons LE 1.10 19%" on the pill. A record nobody has touched for 90 s is stale and ignored.
+copy_board_file() { echo "$(pad_board_dir)/copy-$1.json"; }
+copy_board_write() {   # <label> <img> <state> <done-bytes> <total-bytes>
+    local f d pct=0
+    f=$(copy_board_file "$1"); d=$(dirname "$f")
+    mkdir -p "$d" 2>/dev/null || return 0
+    [ "$5" -gt 0 ] 2>/dev/null && pct=$(( $4 * 100 / $5 ))
+    printf '{"label":"%s","card":"%s","who":"%s","slot":%s,"distro":"%s","state":"%s","done_mb":%s,"total_mb":%s,"pct":%s,"updated":%s}\n' \
+        "$1" "$(basename "$2")" "$(pad_label 2>/dev/null | tr -d '"\\' | cut -c1-40)" "${PAD_SLOT:-0}" \
+        "${WSL_DISTRO_NAME:-$(uname -n)}" "$3" $(( $4 / 1048576 )) $(( $5 / 1048576 )) "$pct" "$(date +%s)" \
+        > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" 2>/dev/null
+    return 0
+}
+copy_board_clear() { rm -f "$(copy_board_file "$1")" "$(copy_board_file "$1").tmp" 2>/dev/null; return 0; }
+
 # Returns 0 iff the cache is valid when the copier is done.
 cache_wait() {   # <img> <copy> <stamp> <pidf>
     local img="$1" copy="$2" stamp="$3" pidf="$4"
-    local total tmb done mb pct last=-1 still=0
+    local total tmb done mb pct last=-1 still=0 label
+    label=$(basename "$copy" .raw)
     total=$(stat -c %s "$img" 2>/dev/null) || return 1
     [ "$total" -gt 0 ] || return 1
     tmb=$(( total / 1048576 ))
@@ -227,10 +636,12 @@ cache_wait() {   # <img> <copy> <stamp> <pidf>
         done=$(stat -c %s "$copy.partial" 2>/dev/null || echo 0)
         mb=$(( done / 1048576 )); pct=$(( done * 100 / total ))
         echo "[card] copying $(basename "$img"): $mb / $tmb MB ($pct%)" >&2
+        copy_board_write "$label" "$img" copying "$done" "$total"
         if [ "$done" = "$last" ]; then
             still=$(( still + 1 ))
             if [ "$still" -ge 120 ]; then   # 240 s without a byte moving
                 echo "[card] copy stalled - booting from the original instead (copy continues)" >&2
+                copy_board_clear "$label"
                 return 1
             fi
         else
@@ -239,6 +650,7 @@ cache_wait() {   # <img> <copy> <stamp> <pidf>
         last=$done
         sleep 2
     done
+    copy_board_clear "$label"
     cache_valid "$img" "$copy" "$stamp"
 }
 
@@ -257,6 +669,15 @@ cache_pick() {
     local img="$1" label="$2" mode="${3:-sync}"
     local copy="$CACHE/$label.raw" stamp="$CACHE/$label.src"
     if [ "${PAD_CARD_CACHE:-1}" = 0 ]; then echo "$img"; return; fi
+    if on_cache_disk "$img"; then
+        echo "[card] $(basename "$img") lives on the card store already - booting it where it lies" >&2
+        echo "$img"; return
+    fi
+    local lib
+    if lib=$(library_copy "$img"); then
+        echo "[card] $(basename "$img") is in the card library - booting it from there" >&2
+        echo "$lib"; return
+    fi
     [ "${PAD_CARD_PRECOPY:-1}" = 0 ] && mode=async
     if cache_valid "$img" "$copy" "$stamp"; then
         echo "[card] using local cache $copy" >&2
@@ -552,14 +973,41 @@ title_dir() {
             [ -f "$s/game" ] && [ ! -L "$s" ] && { basename "$d"; return 0; }
         done
     done
+    # PAD-1279: a PAD TEST CARD's games partition holds no game, only its own
+    # test files under testcard/ - which the card's selector reads as
+    # /games/testcard, so that is the "title" a test card run binds.
+    [ "${PAD_TESTCARD:-}" = 1 ] && [ -d "$m/testcard" ] && [ ! -L "$m/testcard" ]         && { echo testcard; return 0; }
     return 1
+}
+
+# PAD-1279: a test card built with no files of its own has an EMPTY games
+# partition (only the DEFAULT PAD TEST CARD, which lives in the selector). Its
+# run still needs a title directory to bind, so it gets an empty one of the
+# rig's own, one component under its parent like every answer here.
+testcard_none() {
+    local d="$ROOT/dump/testcard_none/testcard"
+    mkdir -p "$d" || return 1
+    echo "[card] a PAD test card with no files of its own: an empty /games/testcard" >&2
+    echo "$d"
 }
 
 # ITEM 77: cache-manager queries. No image argument and no mount - these are
 # what the Emulate tab's Card cache dialog shells. Tab-separated so a label
 # or source path may carry spaces (the source is LAST for the same reason).
+if [ "${1:-}" = "--cache-dir" ]; then     # where the cache is (the shared store when mounted; PAD-651)
+    echo "$CACHE"; exit 0
+fi
 if [ "${1:-}" = "--cache-list" ]; then
     # entry <TAB> label <TAB> real_kb <TAB> apparent_kb <TAB> boot_epoch <TAB> source
+    # pinned <TAB> label   - after its entry when it is the library's (PAD-727): a line of its own, so a reader
+    #                        that knows only `entry` lines reads the same rows
+    # state <TAB> label <TAB> source-state <TAB> use <TAB> copied_epoch     (PAD-739, after its entry)
+    #                        source-state: cache_source_state; use: mounted|copying|- ; copied_epoch: the copy's
+    #                        own mtime, the last-used stand-in for a card never booted
+    # leftover <TAB> label <TAB> real_kb <TAB> mtime <TAB> use   (PAD-739) a copy that never finished, or sidecars
+    #                        whose card is gone: no .raw. use: copying|-
+    # limit <TAB> limit_gb <TAB> used_kb <TAB> dir <TAB> store|distro   (PAD-739)
+    CACHE_READERS=$(cache_readers)
     for f in "$CACHE"/*.raw; do
         [ -e "$f" ] || break
         l=$(basename "$f" .raw)
@@ -568,26 +1016,101 @@ if [ "${1:-}" = "--cache-list" ]; then
         b=$(stat -c %Y "$CACHE/$l.boot" 2>/dev/null || echo 0)
         s=$(cat "$CACHE/$l.src" 2>/dev/null); s=${s% * *}
         printf 'entry\t%s\t%s\t%s\t%s\t%s\n' "$l" "${rk:-0}" "$ak" "$b" "$s"
+        cache_pinned "$l" && printf 'pinned\t%s\n' "$l"
+        if copier_alive "$CACHE/$l.pid" "$f"; then u=copying
+        elif cache_in_use "$l"; then u=mounted
+        else u=-; fi
+        printf 'state\t%s\t%s\t%s\t%s\n' "$l" "$(cache_source_state "$l")" "$u" "$(stat -c %Y "$f" 2>/dev/null || echo 0)"
     done
+    for f in "$CACHE"/*.raw.partial "$CACHE"/*.src "$CACHE"/*.log "$CACHE"/*.boot "$CACHE"/*.pid; do
+        [ -e "$f" ] || continue
+        case $f in *.raw.partial) l=$(basename "$f" .raw.partial) ;; *) l=$(basename "${f%.*}") ;; esac
+        [ -e "$CACHE/$l.raw" ] && continue
+        case " ${seen:-} " in *" $l "*) continue ;; esac
+        seen="${seen:-} $l"
+        rk=$(du -ck "$CACHE/$l.raw.partial" "$CACHE/$l.src" "$CACHE/$l.log" "$CACHE/$l.boot" "$CACHE/$l.pid" \
+             2>/dev/null | tail -1 | cut -f1)
+        m=$(stat -c %Y "$CACHE/$l.raw.partial" "$CACHE/$l.log" "$CACHE/$l.src" "$CACHE/$l.boot" 2>/dev/null \
+            | sort -rn | head -1)
+        if copier_alive "$CACHE/$l.pid" "$CACHE/$l.raw" || cache_in_use "$l"; then u=copying; else u=-; fi
+        printf 'leftover\t%s\t%s\t%s\t%s\n' "$l" "${rk:-0}" "${m:-0}" "$u"
+    done
+    if [ "$CACHE" = /mnt/wsl/cards/cardcache ]; then k=store; else k=distro; fi
+    printf 'limit\t%s\t%s\t%s\t%s\n' "$(cache_limit_gb)" "$(cache_used_kb)" "$CACHE" "$k"
     df -k --output=avail,size "$CACHE" 2>/dev/null | tail -1 \
         | awk '{printf "disk\t%s\t%s\n", $1, $2}'
     exit 0
 fi
+if [ "${1:-}" = "--cache-prune" ]; then
+    # --cache-prune [--keep-days N] [--dry]   (PAD-966; cache_prune above): what cardstore.ps1 prune runs
+    shift; keep=30
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --keep-days) keep=${2:-}; shift 2 ;;
+            --dry) DRY=1; shift ;;
+            *) die "usage: cardmount.sh --cache-prune [--keep-days N] [--dry]" ;;
+        esac
+    done
+    case $keep in ''|*[!0-9]*) die "--keep-days is whole days (0 = the library only)" ;; esac
+    cache_prune "$keep"
+    exit 0
+fi
 if [ "${1:-}" = "--cache-drop" ]; then
     l="${2:-}"; [ -n "$l" ] || die "usage: cardmount.sh --cache-drop <label>"
+    case $l in */*|.|..) die "not a cache label: $l" ;; esac
     c="$CACHE/$l.raw"
-    label_mounted "$l" && die "$l is mounted - not dropping"
+    # cache_in_use and not label_mounted alone: a card mounted by another rig slot is in use too (PAD-739)
+    cache_in_use "$l" && die "$l is in use by a running emulator - not dropping"
     copier_alive "$CACHE/$l.pid" "$c" && die "$l is being copied - not dropping"
     rm -f "$c" "$c.partial" "$CACHE/$l.src" "$CACHE/$l.log" \
-          "$CACHE/$l.boot" "$CACHE/$l.pid"
+          "$CACHE/$l.boot" "$CACHE/$l.pid" 2>/dev/null
+    # Say so when a file stayed (a root-owned one in a sticky folder, a read-only disk): the window reports it
+    # rather than counting the space as freed (PAD-739).
+    for f in "$c" "$c.partial" "$CACHE/$l.src" "$CACHE/$l.log" "$CACHE/$l.boot" "$CACHE/$l.pid"; do
+        [ -e "$f" ] && die "could not delete $(basename "$f") (permission denied?)"
+    done
     echo "[card] dropped cached $l"
+    exit 0
+fi
+if [ "${1:-}" = "--cache-limit" ]; then
+    # --cache-limit            prints the limit in GB (0 = none)
+    # --cache-limit N|default  saves it (default: back to 64 GB on a distro disk, none on the store) and evicts
+    #                          to it now, by the copier's own rule: never a card in use, being copied or the library's
+    v="${2:-}"
+    if [ -z "$v" ]; then cache_limit_gb; exit 0; fi
+    mkdir -p "$CACHE" || die "no cache folder $CACHE"
+    case $v in
+        default) rm -f "$CACHE/.limit_gb" ;;
+        *[!0-9]*) die "usage: cardmount.sh --cache-limit [GB|default]" ;;
+        *) echo "$((10#$v))" > "$CACHE/.limit_gb" || die "could not save the limit in $CACHE" ;;
+    esac
+    give_back "$CACHE/.limit_gb" 2>/dev/null
+    echo "[card] cache limit $(cache_limit_gb) GB (0 = none)"
+    cache_make_room "" "" || true
     exit 0
 fi
 
 IMG=${1:-}
-[ -n "$IMG" ] || die "usage: cardmount.sh <card.raw> [--part N] [--umount|--precache|--cache-now] | --cache-list | --cache-drop <label>"
+[ -n "$IMG" ] || die "usage: cardmount.sh <card.raw> [--part N] [--umount|--precache|--cache-now|--cache-check [<card2.raw>...]] | --cache-list | --cache-drop <label> | --cache-limit [GB|default]"
 [ -f "$IMG" ] || die "no image at $IMG"
-LABEL=$(basename "$IMG"); LABEL=${LABEL%%.Release*}; LABEL=${LABEL%%.raw}
+
+# ★ A STERN SPIKE 3 CARD CANNOT BE MOUNTED - REFUSE IT BEFORE THE COPY (PAD-367).
+# Spike 3 (CM4 generation: Walking Dead Remastered, Star Wars 2025, Pokemon)
+# encrypts every data partition as LUKS2/AES-XTS with a key fused into the
+# machine's SoC, not written to the card - so fuse2fs refuses its "games"
+# partition as not-ext4, and there is nothing on the card to decrypt it with.
+# Checked here, before cache_pick, so a 60 GB copy is not made only to fail the
+# mount: this one guard covers the pick-time --precache, the sweep's
+# --cache-now and the Start-time mount alike. parts.py reads only the MBR and a
+# few partition magics; if it or python3 is missing the check is skipped and
+# the mount fails as before.
+if command -v python3 >/dev/null 2>&1 \
+   && S3=$(python3 "$SELF/parts.py" --spike3 "$IMG" 2>/dev/null) \
+   && [ "${S3#spike3: yes}" != "$S3" ]; then
+    die "$(basename "$IMG") is a Stern Spike 3 card (${S3#spike3: yes - }). Its partitions are encrypted (LUKS2) with a key kept in the machine, not on the card, so PAD cannot mount or emulate it."
+fi
+
+LABEL=$(card_label "$IMG")
 MNT="$CARDS/$LABEL"
 # ITEM 90: `--part N` mounts partition N (kernel numbering: p3 is the first
 # games partition, p7 the first appended one on a multi-image card) at its
@@ -629,6 +1152,36 @@ fi
 # path a boot would use: the copy, or the original when it could not be made.
 if [ "$MODE" = "--cache-now" ]; then
     PAD_CARD_CACHE=1 cache_pick "$IMG" "$LABEL" sync
+    exit 0
+fi
+# --board-copy queued|clear: the board's copy record for this card (PAD-649; the comment at copy_board_write).
+# "queued" says a copy is wanted and waits its turn for the machine's one copy lock (cardstage.sh); "clear"
+# removes the record. A card already in the cache gets no record either way.
+if [ "$MODE" = "--board-copy" ]; then
+    case "${3:-}" in
+        queued)
+            if ! cache_valid "$IMG" "$CACHE/$LABEL.raw" "$CACHE/$LABEL.src"; then
+                copy_board_write "$LABEL" "$IMG" queued 0 "$(stat -c %s "$IMG" 2>/dev/null || echo 0)"
+            fi ;;
+        clear) copy_board_clear "$LABEL" ;;
+        *) die "usage: cardmount.sh <card.raw> --board-copy queued|clear" ;;
+    esac
+    exit 0
+fi
+# --cache-check [<img2> ...]: what this card (and any more named after it) will cost the disk, one `check` line
+# each after a `cache` line, nothing copied or evicted (PAD-964; cache_check above). The Visual Pinball launch asks
+# it before watch.sh and the tab asks it for every card in the folder, in one call.
+#   cache <TAB> dir <TAB> store|distro <TAB> avail_kb <TAB> size_kb <TAB> limit_gb <TAB> used_kb
+if [ "$MODE" = "--cache-check" ]; then
+    CACHE_READERS=$(cache_readers)      # one pass over /proc for every card asked (as --cache-list takes it)
+    cache_disk_df avail,size | awk -v d="$CACHE" -v k="$(cache_kind)" -v l="$(cache_limit_gb)" -v u="$(cache_used_kb)" \
+        '{printf "cache\t%s\t%s\t%s\t%s\t%s\t%s\n", d, k, $1, $2, l, u}'
+    cache_check "$IMG"
+    shift 2
+    for img in "$@"; do
+        [ -f "$img" ] || { echo "[card] no image at $img" >&2; continue; }
+        cache_check "$img"
+    done
     exit 0
 fi
 if [ "$MODE" = "--precache" ]; then
@@ -677,7 +1230,10 @@ fi
 # mounted from, and the next mount picks the local copy up. Without this, a
 # card mounted before the cache feature ever ran would stay slow forever.
 if [ -d "$MNT" ] && mountpoint -q "$MNT" 2>/dev/null; then
-    T=$(title_dir "$MNT") || die "$MNT is mounted but holds no game"
+    if ! T=$(title_dir "$MNT"); then
+        [ "${PAD_TESTCARD:-}" = 1 ] && { testcard_none; exit $?; }
+        die "$MNT is mounted but holds no game"
+    fi
     # async: the mount in use stays on whatever it was mounted from, so the
     # copy only helps the NEXT mount - a rejoin must not block on it (item 74).
     cache_pick "$IMG" "$LABEL" async >/dev/null
@@ -711,6 +1267,8 @@ fi
 # syscall and nothing that could be acted on. pad_can_write names the owner and
 # the chown; the die below still ends the run, because an unmountable card is
 # the end of it.
+# A disk gone read-only under the cache copy (PAD-816) lands here first: name it, not the mount point.
+if pad_disk_readonly; then pad_disk_readonly_say card; die "cannot create $MNT"; fi
 pad_can_write "$MNT" card || die "cannot create $MNT"
 mkdir -p "$MNT" || die "cannot create $MNT"
 
@@ -741,6 +1299,7 @@ mountpoint -q "$MNT" 2>/dev/null || die "fuse2fs did not mount $(basename "$SRC"
 
 T=$(title_dir "$MNT") || {
     fusermount -u "$MNT" 2>/dev/null
+    [ "${PAD_TESTCARD:-}" = 1 ] && { testcard_none; exit $?; }
     die "mounted, but no directory in it holds a game ELF"
 }
 

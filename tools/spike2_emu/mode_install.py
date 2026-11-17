@@ -78,10 +78,31 @@ EXTRA_CFGS = tuple(("mode%d.cfg" % i, 0o100644) for i in range(1, 64))
 #: item 160: the "counts as" table of the game's own rules (sdk/MODE_SDK.md "Counts as"), the
 #: only other data file the runtime reads beside its mode files; placed when the install is
 #: given one (--file), taken off when it is not. PAD-446: clips.cfg, the clips that play one of
-#: several at random (sdk/pad_mode_runtime.c "clip variants") - on its own it is a whole install
-EXTRA_FILES = (("stock.cfg", 0o100644), ("clips.cfg", 0o100644))
+# several at random (sdk/pad_mode_runtime.c "clip variants") - on its own it is a whole install.
+#: PAD-494: sounds.cfg, the music modes (pad_mode_runtime.c "music modes") - a whole install too.
+#: PAD-537: picture.cfg, the picture settings (pad_mode_runtime.c "picture settings") - and so
+#: PAD-782: attract.cfg, the owner's attract items (pad_mode_runtime.c "attract items") - a whole install too.
+#: PAD-1017: coop.cfg, co-op play (pad_mode_runtime.c "co-op play") - a whole install too.
+#: PAD-1022: idle.cfg, inactivity pausing the game's timers (pad_mode_runtime.c) - a whole install too.
+#: PAD-1033: handicap.cfg, a handicap for each player (pad_mode_runtime.c) - a whole install too.
+#: PAD-1040: cabshow.cfg, the card's expression light shows (pad_mode_runtime.c "SONG SHOWS") - a whole install too.
+#: PAD-1041: comp.cfg, Prolonged Competition on the start menu (pad_mode_runtime.c) - a whole install too.
+#: PAD-1280: records.cfg, the owner's records on the game's high scores (pad_mode_runtime.c "records of the
+#: owner's own") - a whole install too.
+#: PAD-1204: scorefeed.cfg, each game's final scores posted to the owner's server (pad_mode_runtime.c "the score
+#: feed") - a whole install too.
+#: PAD-1382: settings.cfg, the settings sharing the MORE SETTINGS rows (pad_mode_runtime.c "more settings") - never
+#: alone: it comes with the cfg of a setting that shares them.
+EXTRA_FILES = (("stock.cfg", 0o100644), ("clips.cfg", 0o100644), ("sounds.cfg", 0o100644),
+               ("picture.cfg", 0o100644), ("attract.cfg", 0o100644), ("coop.cfg", 0o100644),
+               ("idle.cfg", 0o100644), ("handicap.cfg", 0o100644), ("cabshow.cfg", 0o100644),
+               ("comp.cfg", 0o100644), ("scorefeed.cfg", 0o100644),
+               ("records.cfg", 0o100644), ("settings.cfg", 0o100644))
 #: the extra file that is enough for an install without a mode (PAD-446)
 CLIPS_FILE = "clips.cfg"
+#: the extra files that are each enough for an install without a mode (PAD-446, PAD-494, PAD-537)
+STANDALONE_FILES = (CLIPS_FILE, "sounds.cfg", "picture.cfg", "attract.cfg", "coop.cfg", "idle.cfg", "handicap.cfg",
+                    "cabshow.cfg", "comp.cfg", "scorefeed.cfg", "records.cfg")
 #: PAD-432: the project's modes as the Modes tab saves them to a file (sources, pictures, clips and
 #: sounds), so another project can load them straight from this card. The runtime never reads it;
 #: placed when the install is given one (--bundle) and it fits, taken off when it is not
@@ -108,7 +129,7 @@ def _ref(card):
     return mk.fs_ref(card, off), off
 
 
-def _restore_monitor_attrs(st):
+def _restore_monitor_attrs(st, path=GAME_MONITOR):
     """The debugfs commands that put game_monitor's owner, mode and clocks back.
 
     THE FILE-TYPE BITS ARE THE TRAP. debugfs prints `Mode:  0755` - permission
@@ -128,7 +149,7 @@ def _restore_monitor_attrs(st):
     timestamp, so a card whose game_monitor carries new clocks is not "stock" in
     the only sense that can actually be checked.
     """
-    c = mk.dq(GAME_MONITOR)
+    c = mk.dq(path)
     mode = st.get("mode", 0o755) & 0o7777          # keep permission bits only...
     cmds = ["set_inode_field %s mode 0%o" % (c, stat.S_IFREG | mode),   # ...then say it is a FILE
             "set_inode_field %s uid %d" % (c, st.get("uid", 0)),
@@ -162,7 +183,7 @@ def inspect(card):
         for e in mk.debugfs_ls(ref, MODE_DIR):
             if e[4] not in (".", ".."):
                 out["files"][e[4]] = e[5]
-    mon = mk.debugfs_cat(ref, GAME_MONITOR)
+    mon = mk.debugfs_cat(ref, mk.p2_file(ref, GAME_MONITOR))
     out["hooked"] = modehook.has_hook(mon)
     return out
 
@@ -183,7 +204,8 @@ def install(card, so_path, cfg_path, port_path=None, workdir=None, extra_cfgs=()
     ``extras`` (item 160): the runtime's other data files by their own names, ``stock.cfg``
     and (PAD-446) ``clips.cfg`` (:data:`EXTRA_FILES`); one an earlier install left and this one
     does not bring is removed too. A ``clips.cfg`` is an install on its own: a card whose only
-    change of ours is which clip plays needs no mode file.
+    change of ours is which clip plays needs no mode file; so is (PAD-494) a ``sounds.cfg``, the
+    music modes, and (PAD-537) a ``picture.cfg``, the picture settings.
 
     ``bundle`` (PAD-432): the project's modes file (:data:`BUNDLE_FILE`), placed when p2 has room
     for it beside the rest; when it has not, the modes are installed without it and
@@ -201,8 +223,11 @@ def install(card, so_path, cfg_path, port_path=None, workdir=None, extra_cfgs=()
     if len(extra_cfgs) > len(EXTRA_CFGS):
         raise mk.Refused("a card holds at most %d mode files - nothing has been written"
                          % (1 + len(EXTRA_CFGS)))
-    if not cfg_path and not assets and CLIPS_FILE not in {os.path.basename(x) for x in extras}:
-        raise mk.Refused("no mode file, no code mode's assets and no clips.cfg - nothing has been written")
+    if not cfg_path and not assets and not set(STANDALONE_FILES) & {os.path.basename(x) for x in extras}:
+        raise mk.Refused("no mode file, no code mode's assets, no clips.cfg, no sounds.cfg, no "
+                         "picture.cfg, no attract.cfg, no coop.cfg, no idle.cfg, no handicap.cfg, no comp.cfg, no "
+                         "cabshow.cfg, no scorefeed.cfg and no records.cfg - "
+                         "nothing has been written")
     if extra_cfgs and not cfg_path:
         raise mk.Refused("slot files without a mode.cfg - nothing has been written")
     for a in assets:
@@ -222,8 +247,9 @@ def install(card, so_path, cfg_path, port_path=None, workdir=None, extra_cfgs=()
 
     # The script we are about to edit, and the hook, BEFORE anything is written:
     # a refusal here must cost nothing.
-    mon_before = mk.debugfs_cat(ref, GAME_MONITOR)
-    st = mk.debugfs_stat(ref, GAME_MONITOR)
+    mon_path = mk.p2_file(ref, GAME_MONITOR)          # past a link (PAD-742)
+    mon_before = mk.debugfs_cat(ref, mon_path)
+    st = mk.debugfs_stat(ref, mon_path)
     mon_after = modehook.hook_game_monitor(mon_before).encode("utf-8")
 
     txt = _clean(ref, card, "before the write")
@@ -276,9 +302,9 @@ def install(card, so_path, cfg_path, port_path=None, workdir=None, extra_cfgs=()
         # outlive the object it was measured for.
         cmds += ["rm " + mk.dq(MODE_DIR + "/" + n) for (n, _m) in ALL_FILES if n in present]
         cmds += ["rm " + mk.dq(MODE_DIR + "/" + n) for n in sorted(present) if n.endswith(ASSET_SUFFIX)]
-        cmds.append("rm " + mk.dq(GAME_MONITOR))
+        cmds.append("rm " + mk.dq(mon_path))
         cmds += ["write %s %s" % (mk.dq(p), mk.dq(MODE_DIR + "/" + n)) for (p, n, _m) in staged]
-        cmds.append("write %s %s" % (mk.dq(p_mon), mk.dq(GAME_MONITOR)))
+        cmds.append("write %s %s" % (mk.dq(p_mon), mk.dq(mon_path)))
         cmds += ["set_inode_field %s mode 040755" % mk.dq(MODE_DIR),
                  "set_inode_field %s uid 0" % mk.dq(MODE_DIR),
                  "set_inode_field %s gid 0" % mk.dq(MODE_DIR)]
@@ -286,7 +312,7 @@ def install(card, so_path, cfg_path, port_path=None, workdir=None, extra_cfgs=()
             c = mk.dq(MODE_DIR + "/" + n)
             cmds += ["set_inode_field %s mode 0%o" % (c, mode),
                      "set_inode_field %s uid 0" % c, "set_inode_field %s gid 0" % c]
-        cmds += _restore_monitor_attrs(st)
+        cmds += _restore_monitor_attrs(st, mon_path)
         mk.debugfs_write_script(ref, cmds)
     finally:
         import shutil
@@ -298,8 +324,8 @@ def install(card, so_path, cfg_path, port_path=None, workdir=None, extra_cfgs=()
     for name, _mode in files:
         if mk.debugfs_cat(ref, MODE_DIR + "/" + name) != payload[name]:
             raise mk.Refused("%s read back from p2 differs from what was written" % name)
-    if mk.debugfs_cat(ref, GAME_MONITOR) != mon_after:
-        raise mk.Refused("%s read back from p2 differs from what was written" % GAME_MONITOR)
+    if mk.debugfs_cat(ref, mon_path) != mon_after:
+        raise mk.Refused("%s read back from p2 differs from what was written" % mon_path)
     mk.write_p2_sidecar(card)
     return sorted(payload)
 
@@ -308,8 +334,9 @@ def remove(card, workdir=None):
     """Take the mode off and restore game_monitor - the exact inverse of install."""
     mk.need_tools("debugfs", "e2fsck")
     ref, _off = _ref(card)
-    mon_before = mk.debugfs_cat(ref, GAME_MONITOR)
-    st = mk.debugfs_stat(ref, GAME_MONITOR)
+    mon_path = mk.p2_file(ref, GAME_MONITOR)          # past a link (PAD-742)
+    mon_before = mk.debugfs_cat(ref, mon_path)
+    st = mk.debugfs_stat(ref, mon_path)
     mon_after = modehook.strip_hook(mon_before).encode("utf-8")
     _clean(ref, card, "before the removal")
 
@@ -325,13 +352,13 @@ def remove(card, workdir=None):
             p_mon = os.path.join(stage, "game_monitor")
             with open(p_mon, "wb") as f:
                 f.write(mon_after)
-            cmds.append("rm " + mk.dq(GAME_MONITOR))
-            cmds.append("write %s %s" % (mk.dq(p_mon), mk.dq(GAME_MONITOR)))
+            cmds.append("rm " + mk.dq(mon_path))
+            cmds.append("write %s %s" % (mk.dq(p_mon), mk.dq(mon_path)))
             # The SAME helper install uses - owner, mode with the S_IFREG bits put
             # back, and the clocks. Two copies of this drifted apart once already:
             # install was fixed and remove was not, which would have corrupted the
             # inode on the way out while the install half looked healthy.
-            cmds += _restore_monitor_attrs(st)
+            cmds += _restore_monitor_attrs(st, mon_path)
         if not cmds:
             return []
         mk.debugfs_write_script(ref, cmds)
@@ -342,9 +369,9 @@ def remove(card, workdir=None):
     _clean(ref, card, "after the removal")
     if mk.debugfs_exists(ref, MODE_DIR):
         raise mk.Refused("%s is still on p2 after the removal" % MODE_DIR)
-    back = mk.debugfs_cat(ref, GAME_MONITOR)
+    back = mk.debugfs_cat(ref, mon_path)
     if modehook.has_hook(back):
-        raise mk.Refused("%s still carries the mode hook after the removal" % GAME_MONITOR)
+        raise mk.Refused("%s still carries the mode hook after the removal" % mon_path)
     mk.write_p2_sidecar(card)
     return sorted(n for n in present if n in dict(ALL_FILES) or n.endswith(ASSET_SUFFIX))
 
@@ -364,7 +391,15 @@ def main(argv=None):
     p.add_argument("--file", action="append", default=[],
                    help="another data file the runtime reads beside its mode files, by its own "
                         "name: stock.cfg, the counts-as table of the game's own rules (item 160), "
-                        "or clips.cfg, the clips that play one of several at random (PAD-446)")
+                        "clips.cfg, the clips that play one of several at random (PAD-446), "
+                        "sounds.cfg, the music modes (PAD-494), picture.cfg, the picture "
+                        "settings (PAD-537), attract.cfg, the attract items (PAD-782), coop.cfg, "
+                        "co-op play (PAD-1017), idle.cfg, inactivity pausing the timers (PAD-1022), "
+                        "handicap.cfg, a handicap for each player (PAD-1033), cabshow.cfg, the card's "
+                        "expression light shows (PAD-1040), comp.cfg, Prolonged "
+                        "Competition on the start menu (PAD-1041), scorefeed.cfg, each game's final "
+                        "scores posted to the owner's server (PAD-1204), or records.cfg, the owner's "
+                        "records on the game's high scores (PAD-1280)")
     p.add_argument("--port", help="the SDK runtime's port file for this game (item 134)")
     p.add_argument("--bundle", help="the project's modes file (PAD-432), for another project to "
                                     "load them from this card; left off when p2 has no room")

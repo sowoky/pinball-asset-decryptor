@@ -4,6 +4,8 @@ guarantees that keep it invisible outside a dev tree with worktrees."""
 import json
 import os
 
+import pytest
+
 from pinball_decryptor import worktree_picker as wp
 
 
@@ -242,6 +244,28 @@ def test_shorten():
     assert wp._shorten(long).endswith("…")
 
 
+@pytest.fixture(autouse=True)
+def _not_a_ticket_launch(monkeypatch):
+    """pad-triage launches a ticket's app with PAD_TICKET set, and the
+    chooser then skips itself (PAD-754); a test session may carry that
+    variable too, so every test here starts without it."""
+    monkeypatch.delenv("PAD_TICKET", raising=False)
+    # nor may a test find the real pad-triage beside the checkout (PAD-1130)
+    monkeypatch.setenv(wp.ENV_TRIAGE_DIR, os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "no-such-pad-triage"))
+    monkeypatch.setattr(wp, "_TICKETS", {})
+
+
+def test_pick_noop_when_launched_for_a_ticket(monkeypatch):
+    """pad-triage's launch (PAD_TICKET=PAD-n, cwd the ticket's worktree):
+    nothing to choose, and no 20 s of git status over every worktree."""
+    monkeypatch.delenv(wp.ENV_PICKED, raising=False)
+    monkeypatch.setenv("PAD_TICKET", "PAD-754")
+    monkeypatch.setattr(wp, "discover_other_checkouts",
+                        lambda root: (_ for _ in ()).throw(AssertionError))
+    assert wp.dev_pick_checkout() is True
+
+
 def test_pick_noop_when_child(monkeypatch):
     monkeypatch.setenv(wp.ENV_PICKED, "1")
     # Discovery must not even run — a child re-asking is the recursion bug.
@@ -419,3 +443,118 @@ def test_choose_main_closed_window_is_null(monkeypatch, capsys):
                         types.SimpleNamespace(buffer=io.BytesIO(payload)))
     wp._choose_main()
     assert json.loads(capsys.readouterr().out.strip()) == {"choice": None}
+
+
+# ----------------------------------------------------------------------
+# pad-triage's ticket trees (PAD-1130)
+# ----------------------------------------------------------------------
+def _fake_triage(tmp_path, tickets):
+    """A pad-triage folder: work/repo, a ticket tree per (id, status,
+    title), and work/padtriage.db holding those tickets."""
+    import sqlite3
+    triage = tmp_path / "pad-triage"
+    (triage / "work" / "repo").mkdir(parents=True)
+    con = sqlite3.connect(str(triage / "work" / "padtriage.db"))
+    con.execute("CREATE TABLE tickets(id INTEGER PRIMARY KEY, status TEXT,"
+                " title TEXT, subject TEXT)")
+    trees = {}
+    for tid, status, title in tickets:
+        con.execute("INSERT INTO tickets VALUES (?, ?, ?, NULL)",
+                    (tid, status, title))
+        trees[tid] = _make_checkout(triage / "work" / "tickets",
+                                    "PAD-%d" % tid)
+    con.commit()
+    con.close()
+    return str(triage), trees
+
+
+def _porcelain(entries):
+    out = ""
+    for path, branch in entries:
+        out += "worktree %s\nHEAD 0\n" % path
+        out += ("branch refs/heads/%s\n\n" % branch) if branch \
+            else "detached\n\n"
+    return out
+
+
+def test_ticket_trees_open_ones_only(tmp_path, monkeypatch):
+    """The dev checkout has no worktrees of its own; pad-triage's clone
+    has a tree per ticket.  The open tickets' trees are offered, labelled
+    with their titles; a closed ticket's lingering tree, the clone itself
+    and its detached QA tree are not."""
+    root = _make_checkout(tmp_path, "pinball-asset-decryptor")
+    triage, trees = _fake_triage(tmp_path, [
+        (1128, "AWAITING_USER", "Jaws VPX: plunger"),
+        (1090, "NEEDS_ATTENTION", "Spike 3 emulator"),
+        (586, "REJECTED", "Feasibility: JJP modes"),
+        (12, "CLOSED", "old")])
+    monkeypatch.delenv(wp.ENV_TRIAGE_DIR)     # found as root's sibling
+    clone = os.path.join(triage, "work", "repo")
+    clone_list = _porcelain(
+        [(clone, "main"), (os.path.join(triage, "work", "qa"), None)]
+        + [(trees[t], "ticket/PAD-%d" % t) for t in (1128, 1090, 586, 12)])
+
+    def git(args, cwd, timeout=10):
+        if args[:2] == ["worktree", "list"]:
+            if os.path.normcase(cwd) == os.path.normcase(clone):
+                return clone_list
+            return _porcelain([(root, "main")])
+        return ""
+    monkeypatch.setattr(wp, "_git", git)
+    monkeypatch.setattr(wp, "touched_at", {trees[1128]: 300.0,
+                                           trees[1090]: 200.0}.get)
+
+    found = wp.discover_other_checkouts(root)
+    assert [b for _, b in found] == ["ticket/PAD-1128", "ticket/PAD-1090"]
+    assert wp._describe(*found[0]) == \
+        "PAD-1128  —  Jaws VPX: plunger  (awaiting user)"
+
+
+def test_ticket_tree_launch_sets_pad_ticket(tmp_path, monkeypatch):
+    """A picked ticket tree starts as pad-triage's Launch app starts it:
+    PAD_TICKET=PAD-n (the rig claim keys on it), no CLAUDECODE."""
+    tree = os.path.normpath(str(tmp_path / "PAD-7"))
+    monkeypatch.setattr(wp, "_TICKETS",
+                        {os.path.normcase(tree): ("PAD-7", "t", "WORKING")})
+    monkeypatch.setenv("CLAUDECODE", "1")
+    calls = []
+    monkeypatch.setattr(wp.subprocess, "Popen",
+                        lambda cmd, cwd, env: calls.append((cwd, env)))
+    wp._launch(tree)
+    cwd, env = calls[0]
+    assert cwd == tree
+    assert env["PAD_TICKET"] == "PAD-7" and env[wp.ENV_PICKED] == "1"
+    assert "CLAUDECODE" not in env
+
+
+def test_plain_worktree_launch_has_no_ticket(monkeypatch):
+    calls = []
+    monkeypatch.setattr(wp.subprocess, "Popen",
+                        lambda cmd, cwd, env: calls.append(env))
+    wp._launch("/wt/item-9")
+    assert "PAD_TICKET" not in calls[0]
+
+
+def test_unreadable_triage_db_shows_every_ticket_tree(tmp_path, monkeypatch):
+    root = _make_checkout(tmp_path, "pinball-asset-decryptor")
+    triage = tmp_path / "pad-triage"
+    (triage / "work" / "repo").mkdir(parents=True)
+    tree = _make_checkout(triage / "work" / "tickets", "PAD-5")
+    monkeypatch.setenv(wp.ENV_TRIAGE_DIR, str(triage))
+    monkeypatch.setattr(wp, "_git", lambda args, cwd, timeout=10:
+                        _porcelain([(tree, "ticket/PAD-5")]))
+    assert wp.discover_ticket_checkouts(root) == \
+        [(os.path.normpath(tree), "ticket/PAD-5")]
+    assert wp._describe(tree, "ticket/PAD-5").startswith("PAD-5")
+
+
+def test_no_pad_triage_no_ticket_trees(tmp_path):
+    root = _make_checkout(tmp_path, "pinball-asset-decryptor")
+    assert wp.discover_ticket_checkouts(root) == []
+
+
+def test_broken_ticket_discovery_never_bricks(monkeypatch):
+    monkeypatch.setattr(wp, "_git", lambda args, cwd, timeout=10: None)
+    monkeypatch.setattr(wp, "discover_ticket_checkouts",
+                        lambda root: 1 / 0)
+    assert wp.discover_other_checkouts("C:/anywhere") == []

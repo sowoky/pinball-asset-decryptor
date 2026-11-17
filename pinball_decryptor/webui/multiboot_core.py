@@ -184,6 +184,7 @@ tool runs overlap either: a build copies ~7 GB per image and the tab is
 busy until the run has said PASS or FAIL.
 """
 
+import ast
 import bisect
 import errno
 import hashlib
@@ -208,6 +209,7 @@ from ..core import config, runtime
 from . import compat
 from . import rig as _rig
 from . import multiboot_docker as _mac
+from . import multiboot_root as _root
 from .emulate_core import rig_dir, wsl_account, wsl_home
 from . import preview_audio
 from .preview_audio import PreviewAudio
@@ -217,7 +219,31 @@ from .theme import THEMES
 # ISO.  Every builder below takes its backend from the form (``platform``),
 # the panel from the manufacturer the app switched to, and the default is
 # Stern - so every argv the Stern tests pin is unchanged.
-from pinball_decryptor.webui.multiboot_backend import BOF, JJP, backend_for
+from pinball_decryptor.webui.multiboot_backend import BACKENDS, BOF, DP, JJP, S3, SPOOKY, backend_for
+
+
+def own_tool(be):
+    """Does *be*'s builder take the shared command line (``--primary`` /
+    ``--extra`` / ``--out`` / ``--selector-dir`` ...; plan / build / verify /
+    inject / media)?  Every update-file tool does, and the Spike 3 card's
+    (PAD-1263)."""
+    be = backend_for(be)
+    return bool(be.update_file or be.own_tool)
+
+
+def s3_key_args(be):
+    """``--keyfile <the user's padkeys.json>`` for a Spike 3 builder step
+    (PAD-1263): it runs as root in the Linux, where ``~/.pad`` is root's, so
+    the path the app keeps (spike3_key.find_keyfile) is handed over.  Only
+    the PATH travels; the key never leaves the file."""
+    if backend_for(be).key != "s3":
+        return []
+    try:
+        from pinball_decryptor.webui.spike3_key import find_keyfile
+        kf = find_keyfile()
+    except Exception:                                    # pragma: no cover
+        kf = None
+    return ["--keyfile", wsl(kf)] if kf else []
 
 #: Where the JJP builder keeps its scratch (a loop-mounted copy of root A, the
 #: re-imaged pieces): a Linux path, never beside the output on a Windows drive.
@@ -226,11 +252,14 @@ JJP_WORKDIR = "/var/tmp/pad_jjpmulti_work"
 # Pillow reads the preview's frames and the pictures the owner picks.  It
 # is a hard dependency of the app, but the guard keeps the module importable
 # if it is ever missing (the clips then stay still).
-try:
-    from PIL import Image
-    _HAVE_PIL = True
-except ImportError:                                     # pragma: no cover
-    _HAVE_PIL = False
+# PAD-797: Pillow loads on first use, not with this module (the
+# Multi-boot tab imports it at startup, on the UI loop).
+from importlib.util import find_spec as _find_spec
+
+from ..core.lazy_import import lazy_module
+
+_HAVE_PIL = _find_spec("PIL") is not None
+Image = lazy_module("PIL.Image")
 
 
 class TclError(Exception):
@@ -343,7 +372,22 @@ FOOTER_MAX = 199
 #: prefixes after resolving links; the repo's own images/ is a junction into
 #: it).  Both spellings, because the form holds Windows paths and the tool
 #: sees WSL ones.  tests/test_multiboot_tab.py pins this to the tool's list.
-LIBRARY_PREFIXES = ("D:/Pinball/images", "/mnt/d/Pinball/images")
+LIBRARY_PREFIXES = ("D:/Pinball/images", "/mnt/d/Pinball/images", "/mnt/wsl/cards/library")
+
+#: The library on the card store (PAD-966), as WSL spells it; from Windows it is
+#: ``\\wsl.localhost\<distro>\mnt\wsl\cards\library`` (or ``\\wsl$\...``),
+#: which :func:`under_library` reads back to this.
+STORE_LIBRARY = "/mnt/wsl/cards/library"
+
+
+def _wsl_share_path(n):
+    """``//wsl.localhost/<distro>/mnt/wsl/...`` (or ``//wsl$/...``), lower-cased
+    with forward slashes, -> the path inside the distro; None otherwise."""
+    for host in ("//wsl.localhost/", "//wsl$/"):
+        if n.startswith(host):
+            rest = n[len(host):].split("/", 1)
+            return "/" + rest[1] if len(rest) == 2 else "/"
+    return None
 
 #: images.conf v2 carries up to 16 images.
 #: WHAT THE PLAYER SCROLLS THROUGH: one per table row.  A row that carries
@@ -586,6 +630,12 @@ class ImageRow:
     #: image of that game.  A GROUP card's value is its members'.  The name is
     #: kept once given, so renaming the image never strands its scores.
     own_scores: str = ""
+    #: ITS HIGH SCORES APART FROM ITS SETTINGS (PAD-1194; images.conf
+    #: ``hiscores=<N>|<group>``): "" = they go with its settings (its own
+    #: store's table, or the shared one), :data:`SHARED_SCORES` = the title's
+    #: shared table although its settings are its own, any other name = a
+    #: table of its own (that name) although its settings are shared.
+    hiscores: str = ""
     #: THE CUSTOM MODES THIS IMAGE RUNS (PAD-226), as the tool says it
     #: ("2 mode files, 0 code modes"), "" = none.  Like the version, a fact
     #: read off the .raw (plan) or the card (inspect), never typed.
@@ -899,6 +949,9 @@ class MultibootForm:
     #: byte for byte what the tool made before the tick existed.
     compact: bool = False
     timeout: int = 15              # 0 = wait for START
+    # PAD-1309: seconds the coin door's BACK (EXIT on some machines) held in a game restarts
+    # the machine into the menu; 0 = off.  images.conf back_hold= (not on JJP / DP)
+    back_hold: int = 3
     #: The line across the top of the menu (C FB, PAD-135: "Can there be an
     #: option to change this text?").  '' is a real answer and means no line at
     #: all, so the field always names what the card will say - the selector's
@@ -923,6 +976,16 @@ class MultibootForm:
     #: menu").  On, the card ends the menu whenever an image's game can be
     #: adjusted (built with a color profile); off, the menu never shows it.
     settings_tile: bool = True
+    #: THE TEST PICTURES (PAD-1279): [(path, label)] - the owner's own
+    #: pictures, videos and sounds for the menu's Settings > Test pictures,
+    #: in order (selectmedia.py --test).  A Stern card's alone.
+    tests: list = field(default_factory=list)
+    #: EDITIONS, NO MENU (PAD-495; a tester: "user could switch between standard
+    #: color and 70th Anniversary settings" in the service menu).  On, every
+    #: image is an edition of one game, in order, and the game's own EDITION
+    #: setting picks the one that boots at the next power-up: the card shows no
+    #: menu.  Each edition's Write put EDITION in its operator menu.
+    editions: bool = False
     #: THE FIRST WORD OF THE COUNTDOWN LINE (same report: "have the option to
     #: change this text in case you want something like 'Launching' or
     #: 'Booting'").  '' is a real answer - the countdown is then "<title> in
@@ -1038,7 +1101,7 @@ def theme_about(name):
     """A built-in's one-line description; '' for the rest."""
     name = (name or "").strip().lower()
     if name == CUSTOM_THEME:
-        return ("Your own colours: start from the theme shown, then change "
+        return ("Your own colors: start from the theme shown, then change "
                 "any of them.")
     for t in (boot_themes() or {}).get("themes", []):
         if t["name"] == name:
@@ -1115,6 +1178,29 @@ def settings_args(form):
     if not backend_for(form).settings_tile:
         return []
     return ["--settings", "on" if form.settings_tile else "off"]
+
+
+#: PAD-495: the tick's hover text in Menu settings
+EDITIONS_TIP = (
+    "For a card whose images are all editions of one game (a Standard and a "
+    "70th Anniversary look, say): the card shows no menu, and the edition "
+    "the game's own EDITION setting names boots at the next power-up "
+    "(Adjustments > Machine Settings > Attract Mode on the machine, or the last row of "
+    "Standard Adjustments). Each edition's project "
+    "names the editions on its Write tab, the same names in the same order, "
+    "and its Write puts EDITION in the operator menu. Add the images here in "
+    "that order, edition 1 first. The build refuses an image without the "
+    "setting, another game or version, other names, or settings captioned "
+    "differently (the editions share one settings store).")
+
+
+def editions_args(form):
+    """``--editions`` / ``--no-editions`` (PAD-495) - always passed on a
+    platform that has it, on heading_args' rule: a tick taken off here has to
+    give the card its menu back."""
+    if not backend_for(form).editions:
+        return []
+    return ["--editions" if form.editions else "--no-editions"]
 
 
 def menu_text_args(form):
@@ -1361,6 +1447,11 @@ def under_library(path, resolve=True):
     callers that must not stat - see there.  The gates leave it True."""
     if not path:
         return False
+    # the store's library seen from Windows through WSL's own share (PAD-966): read from the text as typed, since
+    # abspath on any other platform would fold a share into the working directory
+    w = _wsl_share_path(path.strip().strip('"').replace("\\", "/").lower())
+    if w is not None and (w == STORE_LIBRARY or w.startswith(STORE_LIBRARY + "/")):
+        return True
     norm = _norm if resolve else _plain
     sep = "/" if resolve else os.sep
     n = norm(path)
@@ -1371,12 +1462,27 @@ def under_library(path, resolve=True):
     return False
 
 
-def default_output_path(primary, platform="stern"):
+def default_output_path(primary, platform="stern", project=""):
     """``<dir of primary>/multi/<primary basename>.multi.raw`` - and when the
     primary lives IN the library (David's stock cards do), the first folder
     above it that is not: ``D:/Pinball/images/Stern/spike2/x.raw`` ->
     ``D:/Pinball/multi/x.multi.raw``.  A default the tool would refuse is
-    no default.  A JJP install ISO ends ``.multi.iso`` the same way."""
+    no default.  A JJP install ISO ends ``.multi.iso`` the same way.
+
+    WITH A PROJECT OPEN the card is the PROJECT'S (PAD-1385):
+    ``<project>/multi/<project name>.multi.raw``.  Keyed on the primary, two
+    projects starting from the same stock card (a two-image Godzilla and a
+    three-image one) both defaulted to ``D:/Pinball/multi/godzilla_pro-...
+    .multi.raw`` and each build overwrote the other's card.  A BOF, Spooky or
+    DP output keeps the name its machine's updater needs (``output_name``);
+    only its folder moves into the project."""
+    be = backend_for(platform)
+    folder = os.path.normpath(project) if project else ""
+    pname = os.path.basename(folder.rstrip("/\\")) if folder else ""
+    if pname:
+        name = be.output_name(primary) if be.key in ("bof", "spooky", "dp") \
+            else be.output_name(pname + ".raw")
+        return os.path.join(os.path.abspath(folder), "multi", name)
     d = os.path.dirname(os.path.abspath(primary))
     while under_library(d):
         parent = os.path.dirname(d)
@@ -1781,6 +1887,8 @@ def validate_form(form, sources=True):
         errs.append(volume_range_error(form))
     if int(form.timeout) < 0:
         errs.append("The countdown cannot be negative (0 = wait for START).")
+    if not 0 <= int(form.back_hold) <= 60:
+        errs.append("Hold BACK to restart takes 0 to 60 seconds (0 = off).")
     head = (form.heading or "").strip()
     # A NEWLINE WOULD END THE KEY in images.conf and turn the rest of the line
     # into an unknown one, so it is refused here rather than half-written; the
@@ -1797,9 +1905,9 @@ def validate_form(form, sources=True):
         roles = theme_roles()
         for role, val in sorted((form.colors or {}).items()):
             if role not in roles:
-                errs.append("%r is not a colour the menu has." % role)
+                errs.append("%r is not a color the menu has." % role)
             elif not _COLOR_RE.match(str(val).strip()):
-                errs.append("The %s colour must be six hex digits (RRGGBB), "
+                errs.append("The %s color must be six hex digits (RRGGBB), "
                             "not %r." % (theme_label(role).lower(), val))
     if n and not 0 <= int(form.default) < n:
         errs.append("The default image must be one of 0..%d." % (n - 1))
@@ -2121,7 +2229,7 @@ def sound_as_rendered(platform, kind, value, recorded=None):
     sound read as stale against its manifest, so the strip said 'not
     rendered' for good and every highlight change rendered them again."""
     v = (value or "").strip().lower()
-    if backend_for(platform).key != "bof" or not v.startswith("auto"):
+    if not backend_for(platform).update_file or not v.startswith("auto"):
         return value
     fallback = "synth" if kind == "sound" else "none"
     return recorded if recorded in (value, fallback) else value
@@ -2256,18 +2364,187 @@ def group_media_args(form):
     return args
 
 
-#: THE EDIT DIALOG'S HIGH SCORES BOX (PAD-226).  The game keeps its settings,
-#: audits and high-score table in one store per GAME on the card's /data, which
-#: every image shares - so the tick is also the answer for settings and audits,
-#: and the note says so rather than letting a changed free-play setting surprise.
+#: THE EDIT DIALOG'S SETTINGS AND HIGH SCORES BOX (PAD-226, PAD-1194).  The
+#: game keeps its settings, audits and high-score table in one store per GAME
+#: on the card's /data, which every image of that game shares.  The first tick
+#: gives an image a store of its own (settings and audits); the second decides
+#: its high scores apart from that, since the selector can hand the score
+#: table alone from image to image (pb_lawww, Pinside: "Heisei - Original
+#: Sound (own settings, shared highscore)").  Both ticked is what one tick
+#: used to mean.
+SETTINGS_LABEL = "Keep its own settings and audits on the machine"
 SCORES_LABEL = "Keep its own high scores on the machine"
 SCORES_NOTE = (
-    "Tick this for an image whose custom modes change the scoring, so its "
-    "scores never mix with the stock game's. The machine then keeps this "
-    "image's high scores, settings and audits apart from the other images of "
-    "the same game; unticked images of that game share one table. The first "
-    "time it boots it starts from a copy of the shared settings and scores: "
-    "reset its high scores once in the service menu.")
+    "Unticked, this image shares with every other image of the same game "
+    "that leaves the box unticked. Tick high scores for an image whose custom "
+    "modes change the scoring, so its scores never mix with the stock "
+    "game's. Tick settings alone to give an image settings of its own (free "
+    "play, volume, difficulty) while its high scores stay in the shared "
+    "table. An image with its own settings starts from a copy of the shared "
+    "ones; one with its own high scores starts from a copy of the shared "
+    "table, so reset its high scores once in the service menu.")
+#: The group name of a title's shared high-score table (PAD-1194).
+SHARED_SCORES = "shared"
+#: PAD-1196: the 'Share with' choice 'No other image': a store or table
+#: this image holds alone - the name it has while no other image holds it,
+#: a new one when it leaves a group.  Never a name on the card (it does not
+#: pass SCORES_NAME_RE).
+NEW_GROUP = "+new"
+#: PAD-1196's 'Share with' label and note in the Edit dialog.
+SHARE_WITH_LABEL = "Share with:"
+SHARE_NOTE = (
+    "Share with puts this image in the same settings store, or the same "
+    "high-score table, as other images (pb_lawww: two Original images on "
+    "one table and four Heisei images on another). Images only share when "
+    "they are the same game: an image of another game named here keeps "
+    "its own.")
+
+
+def row_own_settings(row):
+    """PAD-1194: does this image keep settings and audits of its own?"""
+    return bool((row.own_scores or "").strip())
+
+
+def row_store(row):
+    """PAD-1196: the name of the settings store this image boots, "" = the
+    title's shared one.  Images given the same name share that store."""
+    return (row.own_scores or "").strip()
+
+
+def row_table(row):
+    """PAD-1196: the high-score table this image plays into, by name:
+    :data:`SHARED_SCORES` for the title's shared table, else the group
+    (its own store's name when its scores simply go with its settings).
+    Images given the same name share that table."""
+    h = (row.hiscores or "").strip()
+    if not h:
+        return row_store(row) or SHARED_SCORES
+    return h
+
+
+def row_own_hiscores(row):
+    """PAD-1194: does this image keep a high-score table of its own (alone
+    or with the images it shares a named table with)?"""
+    return row_table(row) != SHARED_SCORES
+
+
+def _share_name(row, kind):
+    """PAD-1196: the store ('settings') or own table ('scores') *row* is in
+    by name, "" when it shares the title's."""
+    if kind == "settings":
+        return row_store(row)
+    return row_table(row) if row_own_hiscores(row) else ""
+
+
+def set_row_scores(row, own_settings, own_hiscores, others, title="",
+                   settings_with="", scores_with=""):
+    """PAD-1194: the two ticks -> the row's ``own_scores`` (its store) and
+    ``hiscores`` (its table, when that is not simply its store's).  Names are
+    made from the title the first time and KEPT, so renaming the image never
+    strands what the machine holds; ``others`` are the rows whose names this
+    one must not take.
+
+    PAD-1196: ``settings_with`` / ``scores_with`` are the 'Share with'
+    choices: "" keeps the name the row has (a new one when it has none),
+    :data:`NEW_GROUP` one no other row holds (the one it has when nobody
+    else does), and any other name puts it in that store / table beside the
+    images that hold it.  Calling it again with the same choices changes
+    nothing, so the dialog can write through on every keystroke."""
+    others = list(others)
+    taken = {SHARED_SCORES}
+    for r in others:
+        taken.add((r.own_scores or "").strip())
+        taken.add((r.hiscores or "").strip())
+    taken.discard("")
+    base = title or row.title
+    had_table = _share_name(row, "scores")
+    old_store = row_store(row)
+
+    def held(name):
+        return any(name in (_share_name(r, "settings"), _share_name(r, "scores"))
+                   for r in others)
+
+    def fresh():
+        name = scores_name_for(base, taken)
+        taken.add(name)
+        return name
+
+    sw = (settings_with or "").strip()
+    if not own_settings:
+        row.own_scores = ""
+    elif sw == NEW_GROUP:
+        if not old_store or held(old_store):
+            row.own_scores = fresh()
+    elif sw and SCORES_NAME_RE.match(sw):
+        row.own_scores = sw
+    elif not old_store:
+        row.own_scores = fresh()
+    taken.add(row_store(row))
+    store = row_store(row) or SHARED_SCORES
+
+    tw = (scores_with or "").strip()
+    if not own_hiscores:
+        table = SHARED_SCORES
+    elif tw == NEW_GROUP:
+        if had_table and not held(had_table):
+            table = had_table
+        elif row_store(row) and not held(row_store(row)):
+            table = row_store(row)
+        else:
+            table = fresh()
+    elif tw and SCORES_NAME_RE.match(tw):
+        table = tw
+    elif had_table and had_table != old_store:
+        table = had_table           # a named table it already plays into
+    elif own_settings:
+        table = store
+    else:
+        table = fresh()
+    row.hiscores = "" if table == store else table
+
+
+def scores_split(row):
+    """PAD-1194: True when this image's high scores do not follow its
+    settings - the case that needs the selector to hand the table over."""
+    return row_table(row) != (row_store(row) or SHARED_SCORES)
+
+
+def share_choices(rows, row, kind):
+    """PAD-1196: the Edit dialog's 'Share with' options for *row* (``kind``
+    'settings' or 'scores') as ``[{value, label}]``: 'No other image'
+    (:data:`NEW_GROUP`), then each store or table other images hold, named
+    by those images.  The value is the name on the card."""
+    groups = {}
+    for i, r in enumerate(rows):
+        if r is row or (is_group(r) and r.keep):
+            continue
+        n = _share_name(r, kind)
+        if n:
+            groups.setdefault(n, []).append(
+                (r.title or "").strip() or "image %d" % i)
+    return ([{"value": NEW_GROUP, "label": "No other image"}]
+            + [{"value": n, "label": ", ".join(t)} for n, t in groups.items()])
+
+
+def share_choice_of(rows, row, kind):
+    """PAD-1196: the 'Share with' value the dialog opens on: the name of the
+    store / table *row* shares with another image, else 'No other image'."""
+    n = _share_name(row, kind)
+    if n and any(_share_name(r, kind) == n for r in rows if r is not row
+                 and not (is_group(r) and r.keep)):
+        return n
+    return NEW_GROUP
+
+
+def hiscores_from_card(im):
+    """PAD-1194: a card's ``hiscores`` group for an image (inspect / build.json)
+    -> the row's ``hiscores``: "" when it is just its store's table (or the
+    shared one for a sharing image), else what it says."""
+    group = (im.get("hiscores") or "").strip()
+    store = (im.get("own_scores") or "").strip()
+    if not group or group == store or (group == SHARED_SCORES and not store):
+        return ""
+    return group
 
 def modes_line(row):
     """The Edit dialog's line about the custom modes this image runs, or ""."""
@@ -2307,6 +2584,28 @@ def own_scores_args(form):
         name = (form.images[ri].own_scores or "").strip()
         names.append(name if SCORES_NAME_RE.match(name) else "")
     return ["--own-scores", ";".join(names)] if names else []
+
+
+def hiscores_args(form):
+    """``--hiscores`` (PAD-1194) - one high-score group per GAME, always
+    spelled out on a Stern card so a split taken off is taken off the card
+    too.  Only a card where some image's scores do not follow its settings
+    names any: then EVERY game gets a group (its own store's name, its own
+    table's, or the shared one), so the selector can carry each table from
+    the image that played last to the one that boots.  Otherwise all are ''
+    and the card is the one PAD-226 wrote.  JJP and BOF keep no such store."""
+    if backend_for(form).key != "stern":
+        return []
+    trees = list(form_trees(form))
+    split = any(scores_split(form.images[ri]) for _i, _p, ri, _mi in trees)
+    names = []
+    for _i, _path, ri, _mi in trees:
+        row = form.images[ri]
+        name = ""
+        if split:
+            name = row_table(row)
+        names.append(name if SCORES_NAME_RE.match(name) else "")
+    return ["--hiscores", ";".join(names)] if names else []
 
 
 def game_titles(form, platform="stern"):
@@ -2353,13 +2652,14 @@ def jjp_selector_dir(selector_dir):
 
 
 def platform_selector_dir(selector_dir, be):
-    """A non-Stern platform's menu program directory (JJP, BOF): what the
-    form names, unless that is empty or ANOTHER platform's default - a form
-    born on one platform and switched keeps a default that is no place for
-    this platform's binary."""
+    """A non-Stern platform's menu program directory (JJP, BOF, DP, Spooky):
+    what the form names, unless that is empty or ANOTHER platform's default - a
+    form born on one platform and switched keeps a default that is no place for
+    this platform's binary.  Every backend's default counts (the Big Lebowski's
+    was missing until PAD-980)."""
     sel = (selector_dir or "").strip().rstrip("/")
-    others = {DEFAULT_SELECTOR_DIR.rstrip("/"), JJP.selector_default.rstrip("/"),
-              BOF.selector_default.rstrip("/")}
+    others = {DEFAULT_SELECTOR_DIR.rstrip("/")} | {
+        b.selector_default.rstrip("/") for b in BACKENDS.values() if b.key != "stern"}
     if not sel or (sel in others and sel != be.selector_default.rstrip("/")):
         return be.selector_default
     return sel
@@ -2408,7 +2708,7 @@ def _bof_media_args(form, media_dir, visual_only=False):
     sounds.  The tool maps what a .fun cannot give: 'auto' pictures and music
     are none (they sit inside the packed program), an 'auto' sound is the
     synthetic one, and a random card's style is none (it is drawn from logos)."""
-    args = list(BOF.media_tool) + _media_image_args(form) + [
+    args = list(backend_for(form).media_tool) + _media_image_args(form) + [
         "--out", wsl(media_dir), "--cards", str(max(1, len(form.images)))] + group_media_args(form)
     if visual_only:
         args.append("--visual-only")
@@ -2430,6 +2730,49 @@ def _bof_media_args(form, media_dir, visual_only=False):
     return args
 
 
+#: the most test pictures a card carries (codeselect conf.h CONF_MAX_TESTS)
+TEST_MAX = 16
+TEST_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff",
+             ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
+             ".wav", ".mp3", ".ogg", ".flac", ".m4a", ".aac")
+
+
+def clean_tests(tests):
+    """[(path, label)] as the form keeps it: at most TEST_MAX, a path each,
+    the label on one line without a '|' (the conf's field separator) - an
+    empty label is the file's own name on the machine."""
+    out = []
+    for t in tests or []:
+        if isinstance(t, dict):
+            path, label = t.get("path") or t.get("source") or "", t.get("label") or ""
+        elif isinstance(t, (list, tuple)) and t:
+            path, label = t[0], (t[1] if len(t) > 1 else "")
+        else:
+            continue
+        path = str(path or "").strip()
+        if not path:
+            continue
+        label = " ".join(str(label or "").replace("|", "/").split())[:120]
+        out.append((path, label))
+    return out[:TEST_MAX]
+
+
+def test_args(form):
+    """``--test PATH[|LABEL]`` per test picture, in order (PAD-1279).
+
+    None any more on a multi-boot card (PAD-1279, DragonRR's second round: the test
+    pictures are the Test card tab's, a card of their own); its SETTINGS card keeps
+    the built-in patterns for Color correction."""
+    if not getattr(form, "keep_tests", False):
+        return []
+    if not backend_for(form).settings_tile:
+        return []
+    args = []
+    for path, label in clean_tests(form.tests):
+        args += ["--test", wsl(path) + ("|" + label if label else "")]
+    return args
+
+
 def prepare_args(form, media_dir, visual_only=False):
     """``selectmedia.py prepare``: the images (the tool pulls 'auto' art and
     clips off them), then ``--art/--anim/--music N=<value>`` for EVERY image
@@ -2441,7 +2784,7 @@ def prepare_args(form, media_dir, visual_only=False):
     goes to :func:`_jjp_media_args` (the same manifest out of the JJP tool)."""
     if backend_for(form).key == "jjp":
         return _jjp_media_args(form, media_dir, visual_only)
-    if backend_for(form).key == "bof":
+    if own_tool(form):
         return _bof_media_args(form, media_dir, visual_only)
     args = [SELECTMEDIA, "prepare"] + _media_image_args(form) + [
         "--out", wsl(media_dir),
@@ -2485,6 +2828,8 @@ def prepare_args(form, media_dir, visual_only=False):
         for i, _path, ri, mi in form_trees(form):
             args += ["--sound-confirm", "%d=%s"
                      % (i, confirm_spec(form.images[ri]) if mi is None else "none")]
+        # the menu's own picture never shows them: the preview leaves them out
+        args += test_args(form)
     args += ["--volume", str(int(form.volume))]
     return args
 
@@ -2499,10 +2844,14 @@ def plan_args(form):
     Writes nothing.  (``mkjjpmulti.py plan`` for a JJP form: the two ISOs'
     pieces and which USB stick they fit.)"""
     be = backend_for(form)
-    if be.key in ("jjp", "bof"):
-        args = [be.tool, "plan"] + _image_args(form) + group_roll_args(form)
+    if be.key == "jjp" or own_tool(be):
+        args = [be.tool, "plan"] + _image_args(form) + group_roll_args(form) + s3_key_args(be)
         if form.media_dir:
             args += ["--media-dir", wsl(form.media_dir)]
+        if be.key == "dp" and (form.out or "").strip():
+            # a Big Lebowski update's version IS its file name (TBL-v9.xxxx.zip):
+            # the plan names the version the build will write (PAD-853)
+            args += ["--out", wsl(form.out.strip().strip('"'))]
         return args
     return ([MKMULTICARD, "plan"] + _image_args(form) + group_roll_args(form)
             + ["--layout", "store" if form_compact(form) else "auto"] + cache_dir_args())
@@ -2547,7 +2896,7 @@ def _bof_build_args(form):
     a delta against it, the menu and the hook (PAD-342) - the BOF twin of
     :func:`build_args`.  No layout, no bypass, no machine volume, no scores:
     none of those exist on a Barrels of Fun machine."""
-    be = BOF
+    be = backend_for(form)          # BOF, or a Big Lebowski (PAD-853): one command line
     titles, subtitles = game_titles(form, be.key)
     # the random cards ride on _image_args (--group-over ...) as on a Stern
     # card, and --default names an IMAGE: a row that is a random card is named
@@ -2557,11 +2906,13 @@ def _bof_build_args(form):
         "--selector-dir", platform_selector_dir(form.selector_dir, be),
         "--titles", ";".join(titles),
         "--timeout", str(int(form.timeout)),
+        "--back-hold", str(int(form.back_hold)),
         "--default", str(row_first_image(form, int(form.default))),
         "--volume", str(int(form.volume)),
     ] + heading_args(form) + text_size_args(form) + menu_text_args(form) \
         + theme_args(form)
-    args += default_card_args(form)
+    args += default_card_args(form) + s3_key_args(be)
+    args += editions_args(form)          # PAD-1325: a Spike 3 card of editions
     if any(subtitles):
         args += ["--subtitles", ";".join(subtitles)]
     if form.media_dir:
@@ -2577,7 +2928,7 @@ def build_args(form):
     to :func:`_jjp_build_args`."""
     if backend_for(form).key == "jjp":
         return _jjp_build_args(form)
-    if backend_for(form).key == "bof":
+    if own_tool(form):
         return _bof_build_args(form)
     titles, subtitles = game_titles(form)
     args = [MKMULTICARD, "build"] + _image_args(form) + group_roll_args(form) + [
@@ -2586,6 +2937,7 @@ def build_args(form):
         "--layout", "store" if form_compact(form) else "auto",
         "--titles", ";".join(titles),
         "--timeout", str(int(form.timeout)),
+        "--back-hold", str(int(form.back_hold)),
         # --default names an IMAGE (so does the choice file, and so does the
         # menu's own memory); the tab's number is the highlighted ROW.  A row
         # that is a consuming group is named by its first member, and the
@@ -2604,7 +2956,9 @@ def build_args(form):
     if any(subtitles):
         args += ["--subtitles", ";".join(subtitles)]
     args += own_scores_args(form)
+    args += hiscores_args(form)
     args += settings_args(form)
+    args += editions_args(form)
     # ALWAYS: the validator bypass on every image (David, after the TMNT
     # proved it: "we don't need to make it optional. it should always be on").
     # Since item 98 it also ignores the saved grades at boot, so a GAME
@@ -2628,10 +2982,18 @@ def verify_args(form):
         # the deep check restores root A to scratch: the Linux side, as build
         return ([be.tool, "verify", "--iso", wsl(form.out.strip().strip('"'))]
                 + _image_args(form) + ["--workdir", JJP_WORKDIR + "_verify"])
-    if be.key == "bof":
-        # the update unpacked as the machine's updater will, every image
-        # rebuilt by the paddelta it carries and checked against its md5
-        return [be.tool, "verify", "--fun", wsl(form.out.strip().strip('"'))]
+    if be.key == "s3":
+        # a Spike 3 card (PAD-1263): its links, its menu against the installed
+        # one, and every games tree against the card it came from, file by file
+        return ([be.tool, "verify", be.card_flag, wsl(form.out.strip().strip('"'))]
+                + _image_args(form)
+                + ["--selector-dir", platform_selector_dir(form.selector_dir, be)]
+                + s3_key_args(be))
+    if own_tool(be):
+        # BOF: the update unpacked as the machine's updater will, every image
+        # rebuilt by the paddelta it carries and checked against its md5; a Big
+        # Lebowski zip: every member's CRC, the launcher, every card's build
+        return [be.tool, "verify", be.card_flag, wsl(form.out.strip().strip('"'))]
     args = [MKMULTICARD, "verify", "--card",
             wsl(form.out.strip().strip('"'))] + _image_args(form)
     if form.selector_dir:
@@ -2655,20 +3017,23 @@ def inject_args(form, card):
     record) - subtitles included, so clearing them clears them."""
     be = backend_for(form)
     titles, subtitles = game_titles(form, be.key)
-    if be.key == "bof":
+    if own_tool(be):
         # mkbofmulti.py inject --fun: the update unpacked, its menu rewritten,
-        # packed and encrypted again over the same file (PAD-342)
+        # packed and encrypted again over the same file (PAD-342); mkdpmulti.py
+        # inject --zip: the zip's menu rewritten, the builds copied across
         args = [be.tool, "inject",
-                "--fun", wsl(card.strip().strip('"')),
+                be.card_flag, wsl(card.strip().strip('"')),
                 "--selector-dir", platform_selector_dir(form.selector_dir, be),
                 "--titles", ";".join(titles),
                 "--subtitles", ";".join(subtitles),
                 "--timeout", str(int(form.timeout)),
+                "--back-hold", str(int(form.back_hold)),
                 "--default", str(row_first_image(form, int(form.default))),
                 "--volume", str(int(form.volume))]
-        args += default_card_args(form)
+        args += default_card_args(form) + s3_key_args(be)
         args += (heading_args(form) + text_size_args(form)
                  + menu_text_args(form) + theme_args(form))
+        args += editions_args(form)      # PAD-1325: a Spike 3 card of editions
         if form.media_dir:
             args += ["--media-dir", wsl(form.media_dir)]
         return args
@@ -2695,13 +3060,16 @@ def inject_args(form, card):
             "--titles", ";".join(titles),
             "--subtitles", ";".join(subtitles),
             "--timeout", str(int(form.timeout)),
+            "--back-hold", str(int(form.back_hold)),
             "--default", str(row_first_image(form, int(form.default))),
             "--volume", str(int(form.volume))]
     args += default_card_args(form)
     args += (heading_args(form) + text_size_args(form)
              + menu_text_args(form) + theme_args(form))
     args += own_scores_args(form)
+    args += hiscores_args(form)
     args += settings_args(form)
+    args += editions_args(form)
     if form.machine_volume:
         args.append("--machine-volume")
     if form.media_dir:
@@ -2723,6 +3091,7 @@ def update_args(form, card, dry_run=False, expect_bytes=None):
             "--titles", ";".join(titles),
             "--subtitles", ";".join(subtitles),
             "--timeout", str(int(form.timeout)),
+            "--back-hold", str(int(form.back_hold)),
             # an IMAGE, as build's is (the tab's number is the ROW)
             "--default", str(row_first_image(form, int(form.default))),
             "--volume", str(int(form.volume))]
@@ -2730,7 +3099,9 @@ def update_args(form, card, dry_run=False, expect_bytes=None):
     args += (heading_args(form) + text_size_args(form)
              + menu_text_args(form) + theme_args(form))
     args += own_scores_args(form)
+    args += hiscores_args(form)
     args += settings_args(form)
+    args += editions_args(form)
     if form.machine_volume:
         args.append("--machine-volume")
     args.append("--bypass-validation")      # always (see build_args)
@@ -2877,11 +3248,13 @@ def wsl_command(args, cwd=None, exe="python3"):
 def wsl_shell_root(line, home=None):
     """The argv that runs one shell line AS ROOT: ``wsl -u root`` carrying
     the desktop user's HOME (root's own is /root, where ``~/spike2root`` is
-    not - the shape the Emulate tab's checkpointable launch uses), ``sudo
-    -n`` on Linux (fails fast rather than waiting for a password a GUI
-    cannot type).  A SEPARATE function, never a flag: a wrong argument must
-    not be able to turn an ordinary run into a root one (_rig.rig_cmd_root's
-    rule)."""
+    not - the shape the Emulate tab's checkpointable launch uses).  On a
+    Linux desktop :func:`multiboot_root.linux_argv`: root, a password-free
+    sudo, sudo on the terminal the app was started from, or the run's one
+    pkexec root shell (PAD-1188: ``sudo -n`` alone failed every build from a
+    desktop launcher).  A SEPARATE function, never a flag: a wrong argument
+    must not be able to turn an ordinary run into a root one
+    (_rig.rig_cmd_root's rule)."""
     if sys.platform == "win32":
         head = runtime.wsl_head(root=True) + ["-e"]
         if home:
@@ -2893,7 +3266,7 @@ def wsl_shell_root(line, home=None):
         # ask for a password it could not have spent (PAD-192).  *home* is a
         # WSL concern and means nothing here.
         return _mac.exec_argv(line)
-    return ["sudo", "-n", "bash", "-lc", line]
+    return _root.linux_argv(line, home)
 
 
 def wsl_command_root(args, cwd=None, exe="python3", home=None):
@@ -2902,8 +3275,11 @@ def wsl_command_root(args, cwd=None, exe="python3", home=None):
     return wsl_shell_root(shell_line(args, cwd, exe), home)
 
 
-#: What sudo prints when it has nowhere to ask for a password.
-_SUDO_NEEDS_PASSWORD = "a password is required"
+#: What sudo prints when it has nowhere to ask for a password: classic
+#: sudo's two, and sudo-rs's (Ubuntu 25.10's default sudo, PAD-1188).
+_SUDO_NEEDS_PASSWORD = ("a password is required",
+                        "a terminal is required",
+                        "interactive authentication is required")
 
 def sudo_password_note(text):
     """One sentence for a root step that died for want of a password, or ""
@@ -2918,38 +3294,54 @@ def sudo_password_note(text):
     whose own user is root (:mod:`multiboot_docker`), so nothing on that
     platform shells out to sudo.
     """
-    if _SUDO_NEEDS_PASSWORD not in (text or ""):
+    if not any(m in (text or "") for m in _SUDO_NEEDS_PASSWORD):
         return ""
-    return ("This step needs administrator rights and could not get them: "
-            "the app asks with `sudo -n`, which never waits for a password. "
-            "Give this account passwordless sudo, or start the app from a "
-            "terminal where `sudo -v` has already been run.")
+    return ("This step needs administrator rights and sudo wanted a "
+            "password it had nowhere to ask for. Install polkit's pkexec "
+            "so the app can show your desktop's password prompt, or start "
+            "the app from a terminal.")
 
 
-#: What Docker prints when a step is run and no container of ours is up:
-#: none at all, or one Docker Desktop stopped when it quit (PAD-203).
-_NO_CONTAINER = ("No such container", "is not running")
+#: What Docker or Podman prints when a step is run and no container of ours
+#: is up: none at all, or one that stopped when the engine quit (PAD-203).
+#: Matched case-insensitively because Docker says "No such container" and
+#: Podman says "no such container".
+_NO_CONTAINER = ("no such container", "is not running")
+
+#: What a rig tool inside a running container prints when a preview or size
+#: check adds a card from a folder the container was not started with yet.
+_UNMOUNTED_HOST = ("no such file or directory", "does not exist",
+                   "no card image at /host/")
 
 
 def container_note(text):
-    """One sentence for a macOS step that ran before the container was up,
-    or "" when that is not what happened.
+    """One sentence for a macOS step that ran before the container was up
+    (or before a newly added folder was mounted into it), or "" when that
+    is not what happened.
 
-    A run that WRITES starts the container itself; the preview deliberately
-    does not (it redraws on every keystroke and must not build an image
-    behind the user), so on a Mac every preview step before the session's
-    first build dies on Docker's own "No such container:
-    pad-multiboot-worker".  That line reads like a broken app rather than a
+    A run that WRITES starts the container itself, building its image the
+    first time.  The preview starts or remounts one only once that image is
+    built (:func:`multiboot_docker.ensure_ready_container`: it redraws on
+    every keystroke and must not build an image behind the user), so on a
+    Mac that has never built a card every preview step dies on Docker's own
+    "No such container: pad-multiboot-worker".  That line reads like a broken app rather than a
     step waiting for one - :meth:`MultibootPanel._run_commands` always meant
     it to "say so, once", and this is what it says.
     """
-    if not _mac.enabled() or not any(m in (text or "")
-                                     for m in _NO_CONTAINER):
+    if not _mac.enabled():
         return ""
-    return ("The Linux container this Mac runs the tools in is not up yet. "
-            "Build / flash card... starts it (and builds its image the "
-            "first time); the preview and the size check never start one "
-            "behind you, so they stay blank until it is up.")
+    t = (text or "").lower()
+    if any(m in t for m in _NO_CONTAINER):
+        return ("The Linux container this Mac runs the tools in is not up yet. "
+                "Build / flash card... builds its image the first time (a few "
+                "minutes) and starts it; the preview and the size check never "
+                "build one behind you, so they stay blank until then.")
+    if "/host/" in t and any(m in t for m in _UNMOUNTED_HOST):
+        return ("The Linux container this Mac runs the tools in does not have "
+                "this folder mounted yet. Build / flash card... mounts it, and "
+                "offers to share it with the engine if the engine cannot see "
+                "it; the preview and the size check stay blank until then.")
+    return ""
 
 
 def root_command(args, cwd=None, exe="python3"):
@@ -2968,12 +3360,27 @@ def root_command(args, cwd=None, exe="python3"):
     "check that WSL starts" on a WSL that had just built the menu program,
     rendered the preview and planned the card - and could never build one.
     """
-    if sys.platform != "win32":
+    if _mac.enabled():
         return wsl_command_root(args, cwd, exe)
+    if sys.platform != "win32":
+        # resolved on the worker too: the route asks sudo, and an AppImage's
+        # tools are copied where root can read them first (PAD-1188)
+        def linux_later(_texts):
+            return wsl_command_root(args, _linux_root_cwd(cwd), exe)
+        return _root.needs_root(linux_later)
 
     def later(_texts):
         return wsl_command_root(args, cwd, exe, home=_root_step_home())
     return later
+
+
+def _linux_root_cwd(cwd):
+    """The checkout a Linux root step ``cd``s into: the tab's own, or the
+    copy :func:`multiboot_root.root_repo_dir` makes when that is the
+    AppImage's FUSE mount, which root cannot enter (PAD-1188)."""
+    if cwd is None:
+        cwd = wsl(repo_dir())
+    return _root.root_repo_dir(cwd)
 
 
 def root_shell_line(line, cwd=None):
@@ -2984,8 +3391,13 @@ def root_shell_line(line, cwd=None):
     if cwd is None:
         cwd = wsl(repo_dir())
     full = "cd %s && %s" % (_q(cwd), line)
-    if sys.platform != "win32":
+    if _mac.enabled():
         return wsl_shell_root(full)
+    if sys.platform != "win32":
+        def linux_later(_texts):
+            return wsl_shell_root("cd %s && %s"
+                                  % (_q(_linux_root_cwd(cwd)), line))
+        return _root.needs_root(linux_later)
 
     def later(_texts):
         home = wsl_home()
@@ -3080,8 +3492,9 @@ def ensure_selector_line(selector_dir, src_dir, build_dir=PREVIEW_BUILD_DIR,
     filesystem at all: see the comment below, where ensureselect.sh unpacks
     one and does install a selector, because nothing can be compiled until
     it has.  No ``$``: wsl.exe would eat it."""
-    if backend_for(platform).key == "bof":
-        # ensurebofselect.sh builds the static bofselect natively - nothing of
+    if own_tool(platform):
+        # ensurebofselect.sh / ensuredpselect.sh build the static menu natively
+        # (ensures3select.sh: the card's aarch64 menu and a native one for this) - nothing of
         # the machine is needed - and, with --preview, never rebuilds an
         # installed one (PAD-342)
         be = backend_for(platform)
@@ -3235,7 +3648,7 @@ def install_selector_line(selector_dir, card="", tool=ENSURESELECT, platform="st
     prints the same ready line, and the preview's, so one step serves both.
     """
     be = backend_for(platform)
-    if be.key == "bof":
+    if own_tool(be):
         return "bash %s %s %s" % (_q(be.ensure_tool), _q(card or ""),
                                   _q(platform_selector_dir(selector_dir, be)))
     if be.key == "jjp":
@@ -3571,6 +3984,10 @@ def write_preview_conf(form):
                 lines.append(line)
         if not form.settings_tile:
             lines.append("settings=off")
+        # PAD-1279: the test pictures put the card there too; the preview only
+        # needs the lines, never the files
+        for k, (_path, label) in enumerate(clean_tests(form.tests)):
+            lines.append("test=preview%d.png|%s" % (k, label or "test %d" % (k + 1)))
     lines += theme_conf_lines(form)
     return "\n".join(lines) + "\n"
 
@@ -3719,6 +4136,47 @@ def build_commands(form, cwd=None, prepare=False):
         ("plan", step_command("plan", plan_args(form), form, cwd)),
         ("build", step_command("build", build_args(form), form, cwd)),
         ("verify", step_command("verify", verify_args(form), form, cwd))]
+
+
+# ---------------------------------------------------------------- the test card
+#: THE TEST CARD (PAD-1279): a small card that boots straight into the menu's
+#: Settings - Color correction and Test pictures - and never into a game, made
+#: from any Spike 2 image's boot and rootfs (``mkmulticard.py testcard``).
+TESTCARD_NAME = "pad_test_card.raw"
+TESTCARD_LABEL = "testcard"
+
+
+def testcard_colour_arg(form):
+    """``--color`` for the test card: the first image's own built colour
+    profile when it has one (what that game would draw), else none - the
+    card then starts from No change."""
+    col = (form.colour_profiles or {}).get(0) or (form.colour_profiles or {}).get("0")
+    if not col:
+        return []
+    try:
+        trio = ["%.4f %.4f %.4f" % tuple(float(v) for v in col[k]) for k in ("gamma", "gain", "lift")]
+        return ["--color", "%s|%s|%s|%.4f|%s" % (trio[0], trio[1], trio[2], float(col["saturation"]),
+                                               (col.get("name") or "").replace("|", "/"))]
+    except (KeyError, TypeError, ValueError):
+        return []
+
+
+def testcard_commands(form, out, media_dir, cwd=None, test_specs=None):
+    """'Build test card…': the selector, the test pictures (``prepare`` with
+    nothing else to render: no art, no clips, no sounds), then ``testcard``.
+    The first image on the list is only where the boot and rootfs come from."""
+    primary = wsl(form.images[0].path)
+    prep = [SELECTMEDIA, "prepare", "--primary", primary, "--art", "0=none", "--anim", "0=none",
+            "--music", "0=none", "--sound-move", "none", "--sound-confirm", "none",
+            "--cards", "1", "--out", wsl(media_dir)] + (
+                test_args(form) if test_specs is None else list(test_specs)) + [
+            "--volume", str(int(form.volume))]
+    tc = [MKMULTICARD, "testcard", "--primary", primary, "--out", wsl(out),
+          "--selector-dir", form.selector_dir or DEFAULT_SELECTOR_DIR,
+          "--media-dir", wsl(media_dir)] + testcard_colour_arg(form)
+    return install_selector_commands(form, cwd) + [
+        ("prepare", step_command("prepare", prep, form, cwd)),
+        (TESTCARD_LABEL, step_command(TESTCARD_LABEL, tc, form, cwd))]
 
 
 #: The label of the size check's second step: ``update --dry-run`` on the
@@ -4028,6 +4486,50 @@ def parse_inspect(text):
 _REFUSAL_PREFIXES = ("[card] error:", SELECTOR_ERROR, "refused:")
 
 
+#: How a write blocker reads (PAD-776), here and in mkmulticard's own
+#: card_write_blocker: the file is fine, only it cannot be written right now.
+_WRITE_BLOCKED = ("is marked read-only, so it cannot be written",
+                  "is open in another program")
+
+
+def card_write_blocker(path):
+    """A sentence when the card at *path* exists but cannot be opened for
+    writing, else ''.  Asked before an in-place update runs anything: the
+    tool's first write otherwise comes after the media prepare and the p2
+    extract, as a bare ``PermissionError: [Errno 13]`` (PAD-776).  Opening
+    for ``r+b`` writes nothing and leaves the file's time alone."""
+    try:
+        with open(path, "r+b"):
+            return ""
+    except FileNotFoundError:
+        return ""                   # 'The card is gone' says that
+    except OSError as e:
+        name = os.path.basename(path)
+        try:
+            st = os.stat(path)
+            read_only = (bool(getattr(st, "st_file_attributes", 0)
+                              & getattr(stat, "FILE_ATTRIBUTE_READONLY", 0))
+                         or not st.st_mode & 0o222)
+        except OSError:
+            read_only = False
+        if read_only:
+            return ("%s %s in place; untick Read-only in the file's "
+                    "Properties and try again" % (name, _WRITE_BLOCKED[0]))
+        if (getattr(e, "winerror", None) == 32
+                or isinstance(e, PermissionError)):
+            return ("%s %s (an SD card writer, a disk image tool, an "
+                    "emulator?), which stops it being written; close that "
+                    "program and try again" % (name, _WRITE_BLOCKED[1]))
+        return "%s cannot be opened for writing (%s)" % (
+            name, e.strerror or e)
+
+
+def is_write_blocked(why):
+    """Whether a refusal is :func:`card_write_blocker`'s (or the tool's
+    own): nothing wrong with the card, so no 'build a fresh card'."""
+    return any(m in (why or "") for m in _WRITE_BLOCKED)
+
+
 def parse_refusal(text, about=""):
     """The tool's own refusal line, without its prefix, or ''.  What a failed
     load says on the tab instead of an exit code.
@@ -4054,6 +4556,74 @@ def _drop_path_prefix(why, about):
             and os.path.basename(head) == os.path.basename(about)):
         return tail.strip()
     return why
+
+
+#: A verify check that failed, as each verify tool prints one: mkmulticard
+#: (and the BoF/DP tools on it) pads the label and ends the row ``FAIL`` with
+#: its detail two spaces on; mkjjpmulti leads with ``FAIL: ``; mks3multi
+#: closes on ``verify: FAILED (a, b)``.
+_CHECK_FAIL_RE = re.compile(r"^(?P<label>\S.*?)\s+FAIL(?:\s{2,}(?P<detail>.*))?$")
+_JJP_FAIL_RE = re.compile(r"^FAIL: (?P<label>.+?)(?: - (?P<detail>.*))?$")
+_S3_FAIL_RE = re.compile(r"^verify: FAILED \((?P<label>.+)\)$")
+#: How much of the failed checks the one status line carries.
+_FAILS_SHOWN = 3
+_FAIL_DETAIL_CHARS = 160
+
+
+def parse_failed_checks(text):
+    """The checks a failed verify names, as one sentence, or ''.  A verify
+    gives no refusal line: it prints a row per check and ends ``VERIFY <card>
+    FAIL``, so a failed build said only "see the tool output" and the row
+    that mattered was a screen of OK rows away (PAD-1336: pb_lawww pasted
+    the version table and the verdict, and not the one row that said what
+    was wrong)."""
+    rows = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if s.startswith("VERIFY "):
+            continue                       # the verdict, not a check
+        m = _CHECK_FAIL_RE.match(s) or _JJP_FAIL_RE.match(s) or _S3_FAIL_RE.match(s)
+        if not m:
+            continue
+        label = re.sub(r"\s{2,}", " ", m.group("label")).strip()
+        if m.re is _CHECK_FAIL_RE and label.endswith(":"):
+            continue                       # 'verify: FAIL', 'selftest: FAIL': a verdict too
+        detail = _short_detail((m.groupdict().get("detail") or "").strip())
+        if len(detail) > _FAIL_DETAIL_CHARS:
+            detail = detail[:_FAIL_DETAIL_CHARS - 1].rstrip() + "…"
+        rows.append("%s (%s)" % (label, detail) if detail else label)
+    if not rows:
+        return ""
+    shown = "; ".join(rows[:_FAILS_SHOWN])
+    more = len(rows) - _FAILS_SHOWN
+    return "the check that failed: %s" % shown if len(rows) == 1 else \
+        "%d checks failed: %s%s" % (len(rows), shown,
+                                    "; and %d more in the tool output" % more if more > 0 else "")
+
+
+def _short_detail(detail):
+    """A check's detail that is a list of paths (``['a/b.png', 'c.png']``, or
+    ``differ: [...]``) as its first path and how many more: the status line
+    is one line, and five full paths pushed the second failed check off it."""
+    m = re.match(r"^(?P<head>[^\[]*?)\s*(?P<list>\[.*\])$", detail)
+    if not m:
+        return detail
+    try:
+        items = ast.literal_eval(m.group("list"))
+    except (ValueError, SyntaxError):
+        return detail
+    if not isinstance(items, list) or not items or \
+            not all(isinstance(x, str) for x in items):
+        return detail
+    head = m.group("head").strip()
+    text = items[0] + (" and others" if len(items) > 1 else "")
+    return "%s %s" % (head, text) if head else text
+
+
+def failure_why(text, about=""):
+    """Why a step failed, in the tool's own words: its refusal line, else
+    the checks a failed verify names (:func:`parse_failed_checks`), else ''."""
+    return parse_refusal(text, about) or parse_failed_checks(text)
 
 
 _TIME_RE = re.compile(r"^\d+(\.\d+)?$")
@@ -4211,6 +4781,7 @@ def rows_from_inspect(info):
                        # guessed from a file name
                        version=(im.get("version") or "").strip(),
                        own_scores=(im.get("own_scores") or "").strip(),
+                       hiscores=hiscores_from_card(im),
                        modes=(im.get("modes") or "").strip())
         if im.get("art_source"):
             row.art, row.art_video, row.art_time = \
@@ -4311,7 +4882,8 @@ def group_rows(rows, groups):
                         # what such a card does (see row_roll).
                         roll=(g.get("roll") or ""),
                         # its games' store: they were written with one name
-                        own_scores=rows[g["members"][0]].own_scores)
+                        own_scores=rows[g["members"][0]].own_scores,
+                        hiscores=rows[g["members"][0]].hiscores)
         # the card's own media is the group's, not its first member's row
         for key in ("art", "anim", "music", "confirm"):
             val = (g.get(key) or "")
@@ -4382,6 +4954,7 @@ def form_from_inspect(info, card, media_dir="", selector_dir=None, platform="ste
     form = MultibootForm(
         images=rows, out=card, sound_move=move, sound_confirm=confirm,
         volume=_int_of("volume", 50), timeout=_int_of("timeout", 15),
+        back_hold=_int_of("back_hold", 3),
         machine_volume=(info.get("volume") == "machine"),
         compact=(info.get("layout") == "store"),
         # THE CARD'S OWN HEADING.  null in the report = the card never set
@@ -4400,6 +4973,12 @@ def form_from_inspect(info, card, media_dir="", selector_dir=None, platform="ste
         show_counter=(info.get("counter") != COUNTER_OFF),
         # ...and the SETTINGS card: null = the card never said, which is "on"
         settings_tile=(info.get("settings") != "off"),
+        # PAD-1279: the card's test pictures, by the source each was made from
+        # (a card from before media.json kept them has only the file's name)
+        tests=clean_tests([(t.get("source") or t.get("file"), t.get("label"))
+                           for t in (info.get("tests") or []) if isinstance(t, dict)]),
+        # PAD-495: a card of editions boots by the game's EDITION setting
+        editions=bool(info.get("edition")),
         countdown_word=(DEF_COUNTDOWN_WORD if info.get("countdown_word") is None
                         else str(info["countdown_word"])),
         # THE INSTRUCTIONS LINE'S THREE ANSWERS, read back as the two fields
@@ -4426,7 +5005,7 @@ def form_from_inspect(info, card, media_dir="", selector_dir=None, platform="ste
 MENU_FIELD_ORDER = ("title", "subtitle", "art", "animation", "music",
                     "move sound", "confirm sound", "volume", "countdown",
                     "heading", "text size", "card counter", "settings card",
-                    "countdown word", "instructions", "default", "bypass", "theme",
+                    "editions", "countdown word", "instructions", "default", "bypass", "theme",
                     "high scores")
 
 #: Of those, the ones the media has to be rendered again for.
@@ -4466,7 +5045,8 @@ def _menu_fields(before, after):
                 or b.confirm_on_card != a.confirm_on_card):
             changed.add("confirm sound")
         # PAD-226: images.conf's scores= lines, which an inject rewrites
-        if (b.own_scores or "").strip() != (a.own_scores or "").strip():
+        if ((b.own_scores or "").strip() != (a.own_scores or "").strip()
+                or row_table(b) != row_table(a)):
             changed.add("high scores")
     if _media_value(before.sound_move) != _media_value(after.sound_move):
         changed.add("move sound")
@@ -4476,6 +5056,7 @@ def _menu_fields(before, after):
                        ("machine volume", before.machine_volume,
                         after.machine_volume),
                        ("countdown", before.timeout, after.timeout),
+                       ("hold BACK", before.back_hold, after.back_hold),
                        ("default", before.default, after.default)):
         if int(b) != int(a):
             changed.add(name)
@@ -4487,6 +5068,10 @@ def _menu_fields(before, after):
         changed.add("card counter")
     if bool(before.settings_tile) != bool(after.settings_tile):
         changed.add("settings card")
+    if clean_tests(before.tests) != clean_tests(after.tests):
+        changed.add("test pictures")
+    if bool(before.editions) != bool(after.editions):
+        changed.add("editions")
     if ((before.countdown_word or "").strip()
             != (after.countdown_word or "").strip()):
         changed.add("countdown word")
@@ -4539,14 +5124,30 @@ def media_specs_changed(before, after):
     return any(f in MEDIA_FIELDS for f in _menu_fields(before, after))
 
 
-def edit_status_text(card, menu, rebuild):
+def edit_status_text(card, menu, rebuild, updatable=False):
     """The tab's one line about a loaded card: what updating it would write,
     or why only a fresh card can.
+
+    *updatable* is whether the card can take an image-list change IN PLACE
+    (a Stern card carrying the record ``update`` diffs against, read off a
+    file rather than the reader).  Such a card does not need a fresh build
+    for a replaced, added, removed or reordered image: the update writes only
+    the files that differ (PAD-1386), and saying 'only a fresh card can'
+    over it sent people - and a ticket - to rebuild every image for nothing.
 
     ONE BRANCH of :func:`card_path_state` rather than a second opinion: the
     row's verb and the sentence under it are derived from the same call, so
     they cannot come to disagree about which card is being edited."""
     name = os.path.basename(card) or card
+    if rebuild and updatable:
+        msg = ("The image list changed (%s) - %s writes only what changed "
+               "into %s: the files that differ, not every image again."
+               % ("; ".join(rebuild), APPLY_TICK, name))
+        if menu:
+            msg += "  %d menu change%s ride%s along: %s." % (
+                len(menu), "" if len(menu) == 1 else "s",
+                "s" if len(menu) == 1 else "", ", ".join(menu))
+        return msg
     if rebuild:
         msg = ("The image list changed (%s) - only a fresh card can carry "
                "that; %s rewrites the menu of %s and nothing else."
@@ -4876,7 +5477,7 @@ def status_checks(rows, path_state, loaded_card, menu=(), rebuild=(),
 
 
 def card_path_state(field, facts, rows=(), loaded_card="", menu=(),
-                    rebuild=(), platform="stern"):
+                    rebuild=(), platform="stern", updatable=False):
     """What the card path is pointing at, in one sentence:
     ``(kind, sentence, tone, can_read)`` - ``can_read`` being whether there
     is a card at this path that reading would make sense of.  It used to
@@ -4945,8 +5546,9 @@ def card_path_state(field, facts, rows=(), loaded_card="", menu=(),
     # of leaving both writing buttons refusing (see :func:`probe_card_path`).
     if loaded_card and (_plain(loaded_card) == here
                         or (facts or {}).get("loaded")):
-        return ("loaded", edit_status_text(loaded_card, menu, rebuild),
-                "error" if rebuild else "fg", True)
+        return ("loaded", edit_status_text(loaded_card, menu, rebuild,
+                                           updatable),
+                "error" if (rebuild and not updatable) else "fg", True)
 
     kind = (facts or {}).get("kind") or "unknown"
     if kind == "badname":
@@ -4963,7 +5565,7 @@ def card_path_state(field, facts, rows=(), loaded_card="", menu=(),
     elif kind == "dir":
         state = ("dir", "That path is a folder, not a card.", "error", False)
     elif kind == "file":
-        bof = backend_for(platform).key == "bof"
+        bof = backend_for(platform).update_file
         why = (facts or {}).get("unreadable")
         if why:
             # It has been read, and it refused.  The sentence says what was
@@ -4981,7 +5583,7 @@ def card_path_state(field, facts, rows=(), loaded_card="", menu=(),
                      "fg", True)
     elif kind == "missing":
         be = backend_for(platform)
-        button, noun = ((be.build_flash_text, be.out_noun) if be.key == "bof"
+        button, noun = ((be.build_flash_text, be.out_noun) if be.update_file
                         else (WRITE_BUTTON, "card"))
         if (facts or {}).get("parent"):
             sentence = "%s will write a new %s at %s." % (button, noun, name)
@@ -5098,6 +5700,7 @@ def menu_from_state(menu):
             "machine_volume": bool(menu.get("machine_volume", True)),
             "compact": bool(menu.get("compact", False)),
             "timeout": max(0, _as_int("timeout", 15)),
+            "back_hold": max(0, _as_int("back_hold", 3)),
             # A STATE WRITTEN BEFORE THE FIELD EXISTED has no key, and the
             # menu it describes said SELECT GAME CODE - so the absent key is
             # that, not "no heading" (PAD-135).
@@ -5110,6 +5713,10 @@ def menu_from_state(menu):
             "show_counter": bool(menu.get("show_counter", True)),
             # ...and a state from before the SETTINGS card offers it (PAD-307)
             "settings_tile": bool(menu.get("settings_tile", True)),
+            # ...and one from before the test pictures has none (PAD-1279)
+            "tests": clean_tests(menu.get("tests") or []),
+            # ...and one from before editions describes a card with its menu
+            "editions": bool(menu.get("editions", False)),
             "countdown_word": str(menu.get("countdown_word",
                                            DEF_COUNTDOWN_WORD))[:COUNTDOWN_WORD_MAX],
             # ...and a state from before the instructions field describes a
@@ -5422,7 +6029,7 @@ def card_size_view(info, platform="stern"):
     over = info.get("overhead")
     if over:
         view["bands"].append((be.overhead_label, over, "overhead"))
-    if view["over"] and be.key == "bof" and info.get("fat32") is False:
+    if view["over"] and be.update_file and info.get("fat32") is False:
         # not a stick that is too small: the FILE is, for FAT32 (PAD-342)
         view["head"] = "too big"
         view["detail"] = ("%s - more than one file on a FAT32 stick can be (4 GB). "
@@ -5465,7 +6072,7 @@ def card_size_view(info, platform="stern"):
                 "is copied whole - empty space and all. Tick Compact build to "
                 "size the card to what is actually in the images."
                 % (label, _gbytes(cap), _gbytes(total), _gbytes(games)))
-    elif be.key == "bof":
+    elif be.update_file:
         view["head"] = view["need"]
         view["detail"] = "a %s update, %s spare on a %s %s." % (
             _gbytes(total), _gbytes(view["spare"] or 0), view["need"],
@@ -6010,6 +6617,10 @@ def menu_summary(form):
     head = (form.heading or "").strip()
     word = (form.countdown_word or "").strip()
     foot = (form.footer or "").strip()
+    # PAD-495: a card of editions has no menu to describe, only how it picks
+    if form.editions and backend_for(form).editions:
+        return ("no menu: the game's EDITION setting picks the edition at power-up "
+                "(edition 1 = the first image)")
     # THE TEXT SIZE ONLY WHEN IT IS NOT THE USUAL ONE: this line is already
     # eight clauses long, and "every card the same" is what every menu does
     # unless somebody turned it off (PAD-183).
@@ -6034,6 +6645,9 @@ def menu_summary(form):
                 + ("" if form.show_counter else "  ·  no card counter")
                 + ("" if form.settings_tile or not backend_for(form).settings_tile
                    else "  ·  no settings card")
+                + ("" if not form.tests or not backend_for(form).settings_tile
+                   else "  ·  %d test picture%s" % (
+                       len(form.tests), "" if len(form.tests) == 1 else "s"))
                 + ("" if word == DEF_COUNTDOWN_WORD else
                    "  ·  countdown says %s" % (
                        "just the game and the seconds" if not word
@@ -6150,7 +6764,7 @@ MEDIA_NOTES = {
     "video": ("A video is the still too: the frame it starts on shows while "
               "the image is not highlighted. " + CLIP_NOTE),
     "none": ("Text only: the card shows its title and subtitle on the menu's "
-             "own colours."),
+             "own colors."),
     "card": ("Kept exactly as the card has it: the files the load read, "
              "never re-made from what made them."),
 }
@@ -6336,7 +6950,7 @@ class ImageEditorDialog(_PageDialog):
     ROLL_NOTE = ("The machine remembers across power-ups: a shuffle deals "
                  "every game once before any of them comes round again, and "
                  "picks up where it left off. It never gives you the one it "
-                 "just booted either, so the tick is greyed on for it.")
+                 "just booted either, so the tick is grayed on for it.")
 
     #: Under the Members box (PAD-239).  A change here is a REBUILD, not a
     #: menu edit: the games are what the card carries.
@@ -6484,6 +7098,90 @@ class MultibootPanel:
                      ".fun is made by the app's tools in its Linux; nothing here "
                      "touches the .fun files you pick.")
     ADD_ROW_TEXT_BOF = "Add another build or random…"
+    #: ...and on The Big Lebowski (PAD-853).
+    ABOUT_TIP_DP = ("Builds ONE Big Lebowski update (TBL-v9.xxxx.zip) that puts "
+                    "several builds of the game on the machine - the stock "
+                    "version and your own - and a menu it shows at power-up: the "
+                    "flippers choose, START boots, a countdown boots the "
+                    "remembered choice. The first row is the STOCK version the "
+                    "machine already runs: nothing of it travels, its card starts "
+                    "that version. Every other row is an update zip (a mod PAD "
+                    "wrote, or another Dutch Pinball version); its files travel "
+                    "in the zip, and the machine makes the build beside its stock "
+                    "versions the first time the menu starts. Install the zip with "
+                    "the service menu's USB update and select it once in Version "
+                    "Select; selecting another version there takes the menu away. "
+                    "Settings and scores follow you from build to build, as "
+                    "Version Select carries them. Nothing here touches the zips you pick.")
+    ADD_ROW_TEXT_DP = "Add another build…"
+    LIST_TIP_DP = ("Each row carries its own icons: ✎ edits the image, − takes it "
+                   "out of the update, ▲ / ▼ move it in the menu's order (the "
+                   "outlined arrow means that row cannot go further). The first "
+                   "row is the STOCK version the machine already has (pick its "
+                   "Dutch Pinball update zip, e.g. TBL-v1.15.zip): its card starts "
+                   "that version and nothing of it travels. Every other row is a "
+                   "Big Lebowski update zip whose files travel in the update.")
+    SIZE_TIP_DP = (
+        "How big the update comes out - measured from the zips themselves. The "
+        "stock version costs nothing (the machine has it); every other build "
+        "costs its own update zip's files. The gray band at the end is the menu "
+        "and the launcher. A FAT32 stick holds at most 4 GB in one file, and the "
+        "machine's USB update wants 2.5 times the unpacked size free on its drive.")
+    #: ...and on a Stern Spike 3 machine (PAD-1263).
+    ABOUT_TIP_S3 = ("Builds ONE Spike 3 SD card that holds several card images - "
+                    "two versions of a game, the stock code and your own build - "
+                    "and a menu the machine shows at power-up: NEXT and PREVIOUS "
+                    "on the coin door choose, SELECT boots, and a countdown boots "
+                    "the remembered choice. The first row's card is the base: its "
+                    "boot and system partitions are used as they are, and every "
+                    "image's games go into its games partition, so the card is "
+                    "the same 64 GB as the first one. Building needs your own "
+                    "board's Spike 3 key, the one Extract and Emulate use. "
+                    "Settings and scores are one set for every image. Nothing "
+                    "here touches the card images you pick.")
+    ADD_ROW_TEXT_S3 = "Add another Spike 3 card image…"
+    LIST_TIP_S3 = ("Each row carries its own icons: ✎ edits the image, − takes it "
+                   "out of the card, ▲ / ▼ move it in the menu's order (the "
+                   "outlined arrow means that row cannot go further). The first "
+                   "row is the base card: its boot and system partitions are the "
+                   "new card's. Every row is a Spike 3 card image (.raw) - Stern's, "
+                   "or one PAD wrote.")
+    SIZE_TIP_S3 = (
+        "How full the new card's games partition gets - measured inside the "
+        "card images themselves. The first image's games are already there; "
+        "every other image costs its own games. The gray band is the menu. The "
+        "card image is the same size as the first one (64 GB).")
+    #: ...and on a Spooky Pinball game (PAD-980).
+    ABOUT_TIP_SPK = ("Builds ONE update of the game's own kind (a .scooby, a "
+                     ".beetlejuice, a .looney, an .ed, a tcm or code .pkg) that "
+                     "puts several builds of the game on the machine - the stock "
+                     "build and your own - and a menu it shows at power-up: the "
+                     "flippers choose, START boots, a countdown boots the "
+                     "remembered choice. The first row is the STOCK build: it "
+                     "travels whole, and the machine falls back to it if anything "
+                     "goes wrong. Every other row is another update of the same "
+                     "game (a mod PAD wrote, or another Spooky version; Halloween "
+                     "and Ultraman are one machine, so either goes with the other); only its "
+                     "files that differ travel, and the machine makes the build "
+                     "the first time the menu starts. Install it the way every "
+                     "update of the game is installed; installing a normal update "
+                     "later takes the menu away. Settings and scores are shared by "
+                     "every build of a game; Halloween and Ultraman each keep their "
+                     "own. Nothing here touches the updates you pick.")
+    ADD_ROW_TEXT_SPK = "Add another build…"
+    LIST_TIP_SPK = ("Each row carries its own icons: ✎ edits the image, − takes it "
+                    "out of the update, ▲ / ▼ move it in the menu's order (the "
+                    "outlined arrow means that row cannot go further). The first "
+                    "row is the STOCK build (Spooky's own update file): it travels "
+                    "whole and is the one the machine falls back to. Every other row "
+                    "is an update of the same game (Halloween and Ultraman go together); "
+                    "only the files it changes travel.")
+    SIZE_TIP_SPK = (
+        "How big the update comes out - measured from the updates themselves. The "
+        "stock build travels whole; every other build costs only the files it "
+        "changes. The gray band at the end is the menu and the launcher. A FAT32 "
+        "stick holds at most 4 GB in one file (an exFAT or NTFS stick has no such "
+        "limit).")
     LIST_TIP_BOF = ("Each row carries its own icons: ✎ edits the image, − takes "
                     "it out of the update, ▲ / ▼ move it in the menu's order "
                     "(the outlined arrow means that row cannot go further). "
@@ -6496,7 +7194,7 @@ class MultibootPanel:
         "How big the update comes out - measured by the tool from the .fun "
         "files themselves. The primary's .fun goes in whole; every other build "
         "costs only what differs from it, measured file by file inside the "
-        "game. The grey band at the end is the menu and its scripts. A FAT32 "
+        "game. The gray band at the end is the menu and its scripts. A FAT32 "
         "stick holds at most 4 GB in one file, so the update has to stay under "
         "that; the line under the bar says when it does not.")
 
@@ -6521,7 +7219,7 @@ class MultibootPanel:
         "the two ISOs' partition pieces, not guessed from the ISO files. The "
         "bar is the stick you would have to buy: each band is one image's "
         "root as it goes onto the stick (the primary re-imaged with the "
-        "menu, the second verbatim), and the grey one at the end is what "
+        "menu, the second verbatim), and the gray one at the end is what "
         "the stick spends on itself (the installer's live system, the EFI, "
         "boot and perm pieces and the configs). The stick is FAT32, so every "
         "piece stays under 4 GB. It re-measures itself whenever the image "
@@ -6669,6 +7367,9 @@ class MultibootPanel:
         self._drain_job = None
         self._loading = False           # editor <- row, not row <- editor
         self._out_auto_value = ""       # the last output path WE filled in
+        #: The open PROJECT's folder ("" for none), which the default card
+        #: path is named for (PAD-1385); the tab sets it to the app's.
+        self._project_fn = lambda: ""
         #: The last plan's report, which is what the size strip under the
         #: images table draws (see :meth:`_build_size`).  None means nobody
         #: has measured THIS list, and the strip says so rather than leaving
@@ -6779,6 +7480,7 @@ class MultibootPanel:
         self._volume_var = tk.StringVar(value=str(self._backend.volume_default))
         self._machine_vol_var = tk.BooleanVar(value=True)
         self._timeout_var = tk.StringVar(value="15")
+        self._back_hold_var = tk.StringVar(value="3")
         #: The line across the top of the menu (PAD-135).  It STARTS as the
         #: selector's own wording rather than empty, because the box has to
         #: read as what the menu says: emptying it is how somebody asks for
@@ -6792,6 +7494,12 @@ class MultibootPanel:
         self._counter_var = tk.BooleanVar(value=True)
         #: The SETTINGS card (PAD-307): on, as the selector has it.
         self._settings_var = tk.BooleanVar(value=True)
+        #: PAD-1279: the test pictures, [[path, label], ...] as JSON - a var,
+        #: so the list is a menu field like the rest (traced, backed up while
+        #: Menu settings is open, put back on Cancel)
+        self._tests_var = tk.StringVar(value="[]")
+        #: PAD-495: editions, no menu - off, as every card before it was
+        self._editions_var = tk.BooleanVar(value=False)
         self._countdown_word_var = tk.StringVar(value=DEF_COUNTDOWN_WORD)
         #: ...and the instructions line as its two fields: drawn at all, and
         #: the words (empty = the selector's own, which is what every card
@@ -6836,8 +7544,14 @@ class MultibootPanel:
         self._ed_roll = tk.StringVar(value=roll_draw(ROLL_DEFAULT))
         self._ed_roll_norepeat = tk.BooleanVar(
             value=roll_no_repeat(ROLL_DEFAULT))
-        #: PAD-226: the tick that gives the image high scores of its own
+        #: PAD-226: the tick that gives the image high scores of its own,
+        #: and PAD-1194's that gives it settings and audits of its own
         self._ed_own_scores = tk.BooleanVar(value=False)
+        self._ed_own_settings = tk.BooleanVar(value=False)
+        #: PAD-1196: which other images each of those shares with (a name
+        #: on the card, or NEW_GROUP for one of its own) - share_choices
+        self._ed_settings_with = tk.StringVar(value=NEW_GROUP)
+        self._ed_scores_with = tk.StringVar(value=NEW_GROUP)
         #: What the tick said while it was still a question, so coming back
         #: off a shuffle is the round trip it looks like.  None = nothing to
         #: put back.
@@ -6851,7 +7565,8 @@ class MultibootPanel:
                                self._ed_video, self._ed_anim_start)
         for var in (self._ed_title, self._ed_sub, self._ed_music,
                     self._ed_confirm, self._ed_roll, self._ed_roll_norepeat,
-                    self._ed_own_scores):
+                    self._ed_own_scores, self._ed_own_settings,
+                    self._ed_settings_with, self._ed_scores_with):
             var.trace_add("write", lambda *_a: self._editor_changed())
         # ...and a write to what the image SHOWS is the one time the row's
         # art and animation are derived again from the dialog's choice.
@@ -6861,11 +7576,12 @@ class MultibootPanel:
         # ...and the menu's own fields, so the 'what would Apply write' line
         # follows every keystroke while a card is loaded.
         for var in (self._move_var, self._confirm_var, self._volume_var,
-                    self._machine_vol_var, self._timeout_var,
+                    self._machine_vol_var, self._timeout_var, self._back_hold_var,
                     self._heading_var, self._same_text_var, self._counter_var,
-                    self._settings_var,
+                    self._settings_var, self._editions_var,
                     self._countdown_word_var, self._footer_var,
-                    self._footer_text_var, self._default_var):
+                    self._footer_text_var, self._default_var,
+                    self._tests_var):
             var.trace_add("write", lambda *_a: self._menu_changed())
         # Item 100: the compact tick beside the size strip.  Not a menu field
         # (an inject never changes a card's layout: diff_forms puts it in the
@@ -7058,8 +7774,9 @@ class MultibootPanel:
                     self._ed_confirm, self._ed_roll,
                     self._ed_roll_norepeat) + self._ed_media_vars + (
                     self._move_var, self._confirm_var, self._volume_var,
-                    self._timeout_var, self._heading_var, self._same_text_var,
-                    self._counter_var, self._settings_var, self._countdown_word_var,
+                    self._timeout_var, self._back_hold_var, self._heading_var, self._same_text_var,
+                    self._counter_var, self._settings_var, self._editions_var,
+                    self._tests_var, self._countdown_word_var,
                     self._footer_var, self._footer_text_var,
                     self._default_var, self._out_var, self._selector_var,
                     self._theme_var) + tuple(self._color_vars.values()):
@@ -7151,6 +7868,28 @@ class MultibootPanel:
         """``stern`` or ``jjp`` - which builder, which words, which medium."""
         return self._backend.key
 
+    def _upk(self):
+        """``updatable=True`` for :func:`card_path_state` when the loaded card
+        can take an image-list change in place - and NOTHING otherwise, for
+        the same reason as :meth:`_pk`: the tests stub these functions with
+        their old signatures."""
+        return {"updatable": True} if self._updatable_in_place() else {}
+
+    def _updatable_in_place(self):
+        """Whether the loaded card takes a replaced, added, removed or
+        reordered image by the in-place update rather than a fresh build:
+        a Stern card read off a FILE (the reader's copy holds only its menu
+        here) that carries the record the update diffs against, and that
+        the tool has not already refused.  The same test the write dialog's
+        'Update the loaded card in place' makes (:meth:`_write_plan`)."""
+        if self._backend.key != "stern" or not self._loaded_card:
+            return False
+        if getattr(self, "_card_device", None) \
+                or getattr(self, "_loaded_trees", None) is None:
+            return False
+        upd = getattr(self, "_update_info", None)
+        return not (upd or {}).get("refused")
+
     def _pk(self):
         """The ``platform=`` keyword for the module functions - and NOTHING
         on the Stern platform, so every call the Stern tests stub with the
@@ -7178,7 +7917,9 @@ class MultibootPanel:
 
     def about_tip(self):
         """The badge's words for the platform the tab is on."""
-        return {"jjp": self.ABOUT_TIP_JJP, "bof": self.ABOUT_TIP_BOF}.get(
+        return {"jjp": self.ABOUT_TIP_JJP, "bof": self.ABOUT_TIP_BOF,
+                "dp": self.ABOUT_TIP_DP, "spooky": self.ABOUT_TIP_SPK,
+                "s3": self.ABOUT_TIP_S3}.get(
             self._backend.key, self.ABOUT_TIP)
 
     def _apply_platform_words(self):
@@ -7195,10 +7936,13 @@ class MultibootPanel:
         sel = getattr(self, "_selector_var", None)
         if sel is not None:
             cur = sel.get().strip()
-            defaults = (DEFAULT_SELECTOR_DIR, JJP.selector_default, BOF.selector_default)
-            if be.key in ("jjp", "bof") and (not cur or cur in defaults):
+            defaults = (DEFAULT_SELECTOR_DIR, JJP.selector_default, BOF.selector_default,
+                        DP.selector_default, SPOOKY.selector_default, S3.selector_default)
+            if be.key != "stern" and (not cur or cur in defaults):
                 sel.set(be.selector_default)
-            elif be.key == "stern" and cur in (JJP.selector_default, BOF.selector_default):
+            elif be.key == "stern" and cur in (JJP.selector_default, BOF.selector_default,
+                                               DP.selector_default, SPOOKY.selector_default,
+                                               S3.selector_default):
                 sel.set(os.environ.get("PAD_MULTIBOOT_SELECTOR") or DEFAULT_SELECTOR_DIR)
         about = getattr(getattr(self, "_about_badge", None), "icon_tip", None)
         if about is not None:
@@ -7208,7 +7952,8 @@ class MultibootPanel:
         # compact layout or in-place update to explain.  Instance attributes
         # over the class's, so a Stern panel keeps the texts its tests pin.
         cls = type(self)
-        suffix = {"jjp": "_JJP", "bof": "_BOF"}.get(be.key, "")
+        suffix = {"jjp": "_JJP", "bof": "_BOF", "dp": "_DP", "spooky": "_SPK",
+                  "s3": "_S3"}.get(be.key, "")
         self.ADD_ROW_TEXT = getattr(cls, "ADD_ROW_TEXT" + suffix)
         self.LIST_TIP = getattr(cls, "LIST_TIP" + suffix)
         self.SIZE_TIP = getattr(cls, "SIZE_TIP" + suffix)
@@ -7472,7 +8217,7 @@ class MultibootPanel:
         "guessed from the .raw files, which are all the same size whatever "
         "is inside them. The bar is the card you would have to buy: each "
         "band is one image's games, a hollow one is room the card keeps for "
-        "updating an image in place, and the grey one at the end is what the "
+        "updating an image in place, and the gray one at the end is what the "
         "card spends on itself (boot, rootfs, /data, /dump and the "
         "filesystems' own bookkeeping). It re-measures itself whenever the "
         "image list changes, and for a loaded card it also works out what an "
@@ -7576,7 +8321,7 @@ class MultibootPanel:
         def done(rc, failed, texts):
             if rc != 0:
                 if self.run_cancelled():
-                    self._ok("Recovering the images was cancelled; whatever "
+                    self._ok("Recovering the images was canceled; whatever "
                              "was written into %s is half a file." % out_dir)
                     return
                 why = parse_refusal(texts.get(failed, ""), card) or \
@@ -7865,7 +8610,7 @@ class MultibootPanel:
         "pictures and sounds are copied out beside them; the rows are then "
         "pointed at those files, so the card can be updated, rebuilt or "
         "given another image. Reads the card, writes only into the folder "
-        "you pick. Greyed while every image is already on this machine, "
+        "you pick. Grayed while every image is already on this machine, "
         "and for a card read from the reader as its menu only (read the "
         "whole card for this).")
 
@@ -7874,7 +8619,7 @@ class MultibootPanel:
     #: hit a second Cancel widget belonging to somebody else's run.
     BUILD_FLASH_TEXT = "Build / flash card\u2026"
     CANCEL_TEXT = "Cancel"
-    CANCELLING_TEXT = "Cancelling\u2026"
+    CANCELLING_TEXT = "Canceling\u2026"
 
     BUILD_FLASH_TIP = (
         "Write the card. The dialog decides for you whether that is a full "
@@ -7915,13 +8660,15 @@ class MultibootPanel:
         self._cancel_pending = True
         self._cancelled = True
         self._pending_run = None
-        self._write("[multi-boot] cancelling - stopping the tool now.")
-        self._ok("Cancelling\u2026")
+        self._write("canceling - stopping the tool now.")
+        self._ok("Canceling\u2026")
         self._sync_build_button()
         try:
-            self._phase_fn(None, status="Cancelling\u2026")
+            self._phase_fn(None, status="Canceling\u2026")
         except Exception:                               # noqa: BLE001
             pass
+        if _mac.enabled():
+            _mac.cancel_build()     # the toolbox image, before the first step
         proc, mine = self._proc, not self._proc_preview
         if proc is not None and mine:
             try:
@@ -7949,7 +8696,7 @@ class MultibootPanel:
             menu, rebuild = self._loaded_diff()
         facts = self._facts_now(field)
         state = card_path_state(field, facts, self._rows, self._loaded_card,
-                                menu, rebuild, **self._pk())
+                                menu, rebuild, **self._pk(), **self._upk())
         built = None
         if self._built is not None and _plain(self._built[0]) == _plain(field):
             built = diff_forms(self._built[1], self.form())
@@ -8063,18 +8810,52 @@ class MultibootPanel:
 
     def _scores_cell(self, row):
         """PAD-226: 'own' / 'shared' - whose high-score table this image
-        plays into on the machine.  Blank on a JJP card, and on a random card
-        that only stands in front of games other rows already hold."""
+        plays into on the machine, and PAD-1194's 'own settings' / 'own
+        scores' when only one of the two is its own.  Blank on a JJP card,
+        and on a random card that only stands in front of games other rows
+        already hold."""
         if self._backend.key != "stern" or (is_group(row) and row.keep):
             return ""
-        return "own" if (row.own_scores or "").strip() else "shared"
+        settings, scores = row_own_settings(row), row_own_hiscores(row)
+        if settings and scores:
+            return "own"
+        if settings:
+            return "own settings"
+        if scores:
+            return "own scores"
+        return "shared"
 
     def _scores_tip(self, row):
+        tip = self._scores_tip_alone(row)
+        if not tip:
+            return tip
+        # PAD-1196: the other images it shares a named store or table with
+        for kind, what in (("settings", "Shares its settings and audits with: %s."),
+                           ("scores", "Shares its high-score table with: %s.")):
+            mine = share_choice_of(self._rows, row, kind)
+            if mine == NEW_GROUP:
+                continue
+            with_ = [c["label"] for c in share_choices(self._rows, row, kind)
+                     if c["value"] == mine]
+            if with_:
+                tip += " " + what % with_[0]
+        return tip
+
+    def _scores_tip_alone(self, row):
         cell = self._scores_cell(row)
         runs = ("Runs custom modes (%s). " % row.modes) if (row.modes or "").strip() else ""
         if cell == "own":
             return runs + ("Keeps its own high scores, settings and audits on the "
                            "machine (store '%s' on the card)." % row.own_scores.strip())
+        if cell == "own settings":
+            return runs + ("Keeps its own settings and audits on the machine (store "
+                           "'%s' on the card) and plays into the high-score table it "
+                           "shares with the other images of the same game."
+                           % row.own_scores.strip())
+        if cell == "own scores":
+            return runs + ("Keeps its own high scores on the machine and shares its "
+                           "settings and audits with the other images of the same "
+                           "game.")
         if cell == "shared":
             if runs:
                 return runs + ("It SHARES its high-score table with the other images "
@@ -8085,7 +8866,8 @@ class MultibootPanel:
 
     def _scores_warn(self, row):
         """A modded image that still shares its table: worth a second look."""
-        return self._scores_cell(row) == "shared" and bool((row.modes or "").strip())
+        return (self._scores_cell(row) != "" and not row_own_hiscores(row)
+                and bool((row.modes or "").strip()))
 
     def _refresh_tree(self, select=None):
         """Rebuild the table from ``self._rows`` and settle everything that
@@ -8213,7 +8995,12 @@ class MultibootPanel:
             self._roll_norepeat_free = None
             self._ed_roll.set(roll_draw(row_roll(row)))
             self._ed_roll_norepeat.set(roll_no_repeat(row_roll(row)))
-            self._ed_own_scores.set(bool((row.own_scores or "").strip()))
+            self._ed_own_settings.set(row_own_settings(row))
+            self._ed_own_scores.set(row_own_hiscores(row))
+            self._ed_settings_with.set(
+                share_choice_of(self._rows, row, "settings"))
+            self._ed_scores_with.set(
+                share_choice_of(self._rows, row, "scores"))
             # A still taken off a video with no clip yet (an older form)
             # keeps its second as the clip's start.
             self._ed_anim_start.set(row.anim_start or (
@@ -8278,19 +9065,19 @@ class MultibootPanel:
         self._update_row_label()
 
     def _own_scores_from_editor(self, row):
-        """PAD-226: the row's store name <- the tick.  A name is made from the
-        title the first time the box is ticked and KEPT after that, so a title
-        edited later does not move the image to a new, empty store; untick
-        and it shares again.  A JJP or BOF install keeps no such store."""
+        """PAD-226 / PAD-1194: the row's store and high-score names <- the two
+        ticks (:func:`set_row_scores`).  A name is made from the title the
+        first time a box is ticked and KEPT after that, so a title edited
+        later does not move the image to a new, empty store; untick and it
+        shares again.  A JJP or BOF install keeps no such store."""
         if self._backend.key != "stern":
             return
-        if not bool(self._ed_own_scores.get()):
-            row.own_scores = ""
-        elif not (row.own_scores or "").strip():
-            taken = {(r.own_scores or "").strip() for r in self._rows
-                     if r is not row}
-            row.own_scores = scores_name_for(
-                row.title or self._ed_title.get(), taken)
+        set_row_scores(row, bool(self._ed_own_settings.get()),
+                       bool(self._ed_own_scores.get()),
+                       [r for r in self._rows if r is not row],
+                       row.title or self._ed_title.get(),
+                       settings_with=self._ed_settings_with.get(),
+                       scores_with=self._ed_scores_with.get())
 
     def _apply_media(self, i, row):
         """Row *i*'s art and animation <- the dialog's one choice.  'card'
@@ -8410,10 +9197,16 @@ class MultibootPanel:
             # card, and its own music while it is highlighted (mkbofmulti.py
             # media pulls both out of the .fun); the menu-wide confirm sound
             row.art, row.anim, row.music, row.confirm = "auto", "auto", "auto", ""
+        elif be.key in ("dp", "spooky", "s3"):
+            # PAD-853: a Big Lebowski update has no still or clip the tools can
+            # take, so a card is its words until a picture is given; the
+            # menu-wide confirm sound.  A Spooky update the same (PAD-980)
+            row.art, row.anim, row.music, row.confirm = "none", "none", "none", ""
         self._rows.append(row)
         self._refresh_tree(select=len(self._rows) - 1)
         if len(self._rows) == 1:
             self._maybe_default_output()
+        self._warm_container()
         self._ok("")
 
     #: What the add row at the foot of the list offers, as
@@ -8905,7 +9698,12 @@ class MultibootPanel:
             return
         if not self._rows:
             return
-        new = default_output_path(self._rows[0].path, self._backend.key)
+        try:
+            project = self._project_fn() or ""
+        except Exception:                               # noqa: BLE001
+            project = ""
+        new = default_output_path(self._rows[0].path, self._backend.key,
+                                  project=project)
         self._out_auto_value = new
         self._out_var.set(new)
 
@@ -8951,10 +9749,12 @@ class MultibootPanel:
             self._volume_var.set(str(self._backend.volume_default))
             self._machine_vol_var.set(True)
             self._timeout_var.set("15")
+            self._back_hold_var.set("3")
             self._heading_var.set(DEF_HEADING)
             self._same_text_var.set(True)
             self._counter_var.set(True)
             self._settings_var.set(True)
+            self._editions_var.set(False)
             self._countdown_word_var.set(DEF_COUNTDOWN_WORD)
             self._footer_var.set(True)
             self._footer_text_var.set("")
@@ -9200,6 +10000,7 @@ class MultibootPanel:
         # the preview' manually. if we're on this tab after we load the app,
         # it should fire off that event for us").  Opening the tab is the
         # deliberate act; the app still starts no tool merely by launching.
+        self._warm_container()
         self.schedule_preview()
         # AND SO DOES THE SIZE, for exactly the same reason - and it needs
         # asking for, because _maybe_plan will NEVER ask by itself after a
@@ -9401,13 +10202,16 @@ class MultibootPanel:
                              self._same_text_var.get(),
                              self._counter_var.get(),
                              self._settings_var.get(),
+                             self._editions_var.get(),
                              self._countdown_word_var.get(),
                              self._footer_var.get(),
                              self._footer_text_var.get(),
                              self._default_var.get(),
                              self._selector_var.get(), self._theme_var.get(),
                              {role: var.get()
-                              for role, var in self._color_vars.items()})
+                              for role, var in self._color_vars.items()},
+                             self._tests_var.get(),
+                             self._back_hold_var.get())
         self._menu_dialog = MenuSettingsDialog(self, len(self._rows))
         return self._menu_dialog.show()
 
@@ -9420,18 +10224,21 @@ class MultibootPanel:
         self._forget_menu_dialog()
         if self._menu_backup is not None:
             (move, confirm, vol, machine, timeout, heading, same_text,
-             counter, settings, word, foot_on, foot_text, default, selector, theme,
-             colors) = self._menu_backup
+             counter, settings, editions, word, foot_on, foot_text, default, selector,
+             theme, colors, tests, back_hold) = self._menu_backup
             self._menu_backup = None
             self._move_var.set(move)
             self._confirm_var.set(confirm)
             self._volume_var.set(vol)
             self._machine_vol_var.set(machine)
             self._timeout_var.set(timeout)
+            self._back_hold_var.set(back_hold)
             self._heading_var.set(heading)
             self._same_text_var.set(same_text)
             self._counter_var.set(counter)
             self._settings_var.set(settings)
+            self._tests_var.set(tests)
+            self._editions_var.set(editions)
             self._countdown_word_var.set(word)
             self._footer_var.set(foot_on)
             self._footer_text_var.set(foot_text)
@@ -9599,12 +10406,15 @@ class MultibootPanel:
             machine_volume=bool(self._machine_vol_var.get()),
             compact=bool(self._compact_var.get()),
             timeout=_int(self._timeout_var, 15),
+            back_hold=_int(self._back_hold_var, 3),
             # NOT `or DEF_HEADING`: an empty box is a menu with no heading,
             # which is a thing somebody can ask for (PAD-135)
             heading=self._heading_var.get().strip(),
             same_text_size=bool(self._same_text_var.get()),
             show_counter=bool(self._counter_var.get()),
             settings_tile=bool(self._settings_var.get()),
+            tests=self.test_pictures(),
+            editions=bool(self._editions_var.get()),
             show_footer=bool(self._footer_var.get()),
             # NOT `or` anything: an empty box with the tick on is the
             # selector's own instructions line, which is a real answer
@@ -9621,6 +10431,62 @@ class MultibootPanel:
             platform=self._backend.key,
             theme=theme, colors=colors,
             colour_profiles=self._colour_profiles())
+
+    # -- the test pictures (PAD-1279) -----------------------------------
+    def test_pictures(self):
+        """[(path, label)] as the menu dialog has them - none any more (PAD-1279, round 2:
+        the test pictures are the Test card tab's); an older saved menu's are left out."""
+        if not getattr(self, "_keep_tests", False):
+            return []
+        try:
+            return clean_tests(json.loads(self._tests_var.get() or "[]"))
+        except ValueError:
+            return []
+
+    def set_test_pictures(self, tests):
+        self._tests_var.set(json.dumps([list(t) for t in clean_tests(tests)]))
+
+    def test_add(self, paths):
+        """Add files to the end, skipping one already on the list; -> how many."""
+        have = self.test_pictures()
+        known = {os.path.normcase(os.path.abspath(p)) for p, _l in have}
+        added = 0
+        for p in paths:
+            if len(have) >= TEST_MAX:
+                break
+            key = os.path.normcase(os.path.abspath(p))
+            if key in known:
+                continue
+            known.add(key)
+            have.append((p, os.path.splitext(os.path.basename(p))[0]))
+            added += 1
+        self.set_test_pictures(have)
+        return added
+
+    def test_remove(self, k):
+        have = self.test_pictures()
+        if not 0 <= k < len(have):
+            return False
+        del have[k]
+        self.set_test_pictures(have)
+        return True
+
+    def test_move(self, k, d):
+        have = self.test_pictures()
+        j = k + d
+        if not (0 <= k < len(have) and 0 <= j < len(have)):
+            return False
+        have[k], have[j] = have[j], have[k]
+        self.set_test_pictures(have)
+        return True
+
+    def test_label(self, k, label):
+        have = self.test_pictures()
+        if not 0 <= k < len(have):
+            return False
+        have[k] = (have[k][0], label)
+        self.set_test_pictures(have)
+        return True
 
     def _colour_profiles(self):
         """``{image index: built colour profile}`` for the images known to be
@@ -9733,10 +10599,13 @@ class MultibootPanel:
                      "machine_volume": bool(self._machine_vol_var.get()),
                      "compact": bool(self._compact_var.get()),
                      "timeout": _int(self._timeout_var, 15),
+                     "back_hold": _int(self._back_hold_var, 3),
                      "heading": self._heading_var.get().strip(),
                      "same_text_size": bool(self._same_text_var.get()),
                      "show_counter": bool(self._counter_var.get()),
                      "settings_tile": bool(self._settings_var.get()),
+                     "tests": [list(t) for t in self.test_pictures()],
+                     "editions": bool(self._editions_var.get()),
                      "show_footer": bool(self._footer_var.get()),
                      "footer": self._footer_text_var.get().strip(),
                      "countdown_word":
@@ -9857,6 +10726,7 @@ class MultibootPanel:
             self._machine_vol_var.set(bool(menu.get("machine_volume", True)))
             self._compact_var.set(bool(menu.get("compact", False)))
             self._timeout_var.set(str(menu["timeout"]))
+            self._back_hold_var.set(str(menu.get("back_hold", 3)))
             self._heading_var.set(menu["heading"])
             # a document written before the tick existed is a menu the
             # selector drew at one size anyway, so it comes back ticked
@@ -9865,6 +10735,8 @@ class MultibootPanel:
             # countdown word existed: both come back as the selector's own
             self._counter_var.set(bool(menu.get("show_counter", True)))
             self._settings_var.set(bool(menu.get("settings_tile", True)))
+            self.set_test_pictures(menu.get("tests") or [])
+            self._editions_var.set(bool(menu.get("editions", False)))
             self._countdown_word_var.set(menu.get("countdown_word",
                                                   DEF_COUNTDOWN_WORD))
             self._footer_var.set(bool(menu.get("show_footer", True)))
@@ -10208,7 +11080,7 @@ class MultibootPanel:
             if new and not row.modes and not (row.own_scores or "").strip():
                 taken = {(r.own_scores or "").strip() for r in self._rows if r is not row}
                 row.own_scores = scores_name_for(row.title or list_title(row, ri), taken)
-                self._write("[multi-boot] image %d runs custom modes (%s): it keeps its own "
+                self._write("image %d runs custom modes (%s): it keeps its own "
                          "high scores (Edit image... to change that)" % (ri, new))
             row.modes = new
             changed = True
@@ -10294,7 +11166,7 @@ class MultibootPanel:
                 # The half-written file is NOT left unmentioned: it is the
                 # size of a card, it is at the path the box names, and the
                 # only thing to do with it is build over it.
-                self._ok("Build cancelled at %s. %s is unfinished - it is "
+                self._ok("Build canceled at %s. %s is unfinished - it is "
                          "not a card; building again writes over it."
                          % (failed or "the start", form.out))
             else:
@@ -10303,12 +11175,61 @@ class MultibootPanel:
                 # not a directory" was the one that sent PAD-105 in), and
                 # "see the tool output" made a person read a wall of build
                 # log for a line the app had already been handed.
-                why = parse_refusal(texts.get(failed, ""), form.out)
+                why = failure_why(texts.get(failed, ""), form.out)
                 self._error("%s failed (exit %d) - %s"
                             % (failed or "the build", rc,
                                why or "see the tool output."))
         self._run_kind = "build"
         return self._run_commands(cmds, on_step=self._plan_step, on_done=done)
+
+    def testcard_default_path(self):
+        """Beside the card image the tab builds, else beside the first image."""
+        out = (self._out_var.get() or "").strip().strip('"')
+        base = os.path.dirname(out) if out else (
+            os.path.dirname(self._rows[0].path) if self._rows else "")
+        return os.path.join(base, TESTCARD_NAME) if base else TESTCARD_NAME
+
+    def build_test_card(self, out):
+        """'Build test card…' (PAD-1279): a small card that opens on the
+        menu's Settings - Color correction and the test pictures - and boots
+        no game.  The first image on the list lends its boot and rootfs."""
+        form = self.form()
+        if not self._backend.settings_tile:
+            self._error("A test card is a Stern Spike 2 card.")
+            return False
+        if not form.images or is_group(form.images[0]) or not source_exists(form.images[0].path):
+            self._error("Add a Stern Spike 2 card image to the list first: the test card "
+                        "borrows its boot and system partitions (any title will do; "
+                        "nothing of its game goes on the test card).")
+            return False
+        out = (out or "").strip().strip('"')
+        if not out:
+            return False
+        if _norm(out) in {_norm(r.path) for r in form.images} or (
+                self._loaded_card and _norm(out) == _norm(self._loaded_card)):
+            self._error("Pick a new file for the test card, not one of the card images.")
+            return False
+        media_dir = os.path.join(os.path.dirname(out) or ".", "pad_test_card_media")
+        os.makedirs(media_dir, exist_ok=True)
+        n = len(clean_tests(form.tests))
+        self._ok("Building the test card %s (%d test picture%s of your own)…"
+                 % (out, n, "" if n == 1 else "s"))
+
+        def done(rc, failed, texts):
+            if rc == 0:
+                size = os.path.getsize(out) if os.path.exists(out) else 0
+                self._ok("Test card built: %s (%.2f GB). Write it to an SD card like any "
+                         "card image; on the machine it opens on TEST CARD: Color "
+                         "correction and Test pictures." % (out, size / 1e9))
+            elif self.run_cancelled():
+                self._ok("Test card canceled. %s is unfinished." % out)
+            else:
+                why = failure_why(texts.get(failed, ""), out)
+                self._error("%s failed (exit %d) - %s" % (failed or "the test card", rc,
+                                                          why or "see the tool output."))
+        self._run_kind = "build"
+        self._run_commands(testcard_commands(form, out, media_dir), on_done=done)
+        return True
 
     def _confirm_overwrite(self, path):
         """The one gate between Build & verify and a card that is already
@@ -10451,7 +11372,7 @@ class MultibootPanel:
                     # A load only READS the card, so there is nothing to
                     # warn about and nothing to clean up but the empty dir
                     # the branch below removes.
-                    self._ok("Reading %s was cancelled." % path)
+                    self._ok("Reading %s was canceled." % path)
                     return
                 why = parse_refusal(texts.get(failed, ""), path) or \
                     "%s failed (exit %d) - see the tool output." % (failed, rc)
@@ -10511,10 +11432,13 @@ class MultibootPanel:
             self._machine_vol_var.set(bool(form.machine_volume))
             self._compact_var.set(bool(form.compact))
             self._timeout_var.set(str(int(form.timeout)))
+            self._back_hold_var.set(str(int(form.back_hold)))
             self._heading_var.set(form.heading)
             self._same_text_var.set(bool(form.same_text_size))
             self._counter_var.set(bool(form.show_counter))
             self._settings_var.set(bool(form.settings_tile))
+            self.set_test_pictures(form.tests)
+            self._editions_var.set(bool(form.editions))
             self._countdown_word_var.set(form.countdown_word)
             self._footer_var.set(bool(form.show_footer))
             self._footer_text_var.set(form.footer)
@@ -10665,10 +11589,13 @@ class MultibootPanel:
             self._machine_vol_var.set(bool(menu.get("machine_volume", True)))
             self._compact_var.set(bool(menu.get("compact", False)))
             self._timeout_var.set(str(menu["timeout"]))
+            self._back_hold_var.set(str(menu.get("back_hold", 3)))
             self._heading_var.set(menu["heading"])
             self._same_text_var.set(bool(menu.get("same_text_size", True)))
             self._counter_var.set(bool(menu.get("show_counter", True)))
             self._settings_var.set(bool(menu.get("settings_tile", True)))
+            self.set_test_pictures(menu.get("tests") or [])
+            self._editions_var.set(bool(menu.get("editions", False)))
             self._countdown_word_var.set(menu["countdown_word"])
             self._footer_var.set(bool(menu.get("show_footer", True)))
             self._footer_text_var.set(menu.get("footer", ""))
@@ -10697,6 +11624,10 @@ class MultibootPanel:
         errs = []
         if not os.path.isfile(self._loaded_card):
             errs.append("The card is gone: %s" % self._loaded_card)
+        else:
+            blocked = card_write_blocker(self._loaded_card)
+            if blocked:
+                errs.append("Cannot update the card: %s." % blocked)
         for i, row in enumerate(form.images):
             for what, text in (("title", row.title),
                                ("subtitle", row.subtitle)):
@@ -10759,6 +11690,8 @@ class MultibootPanel:
         if int(form.timeout) < 0:
             errs.append("The countdown cannot be negative (0 = wait for "
                         "START).")
+        if not 0 <= int(form.back_hold) <= 60:
+            errs.append("Hold BACK to restart takes 0 to 60 seconds (0 = off).")
         if n and not 0 <= int(form.default) < n:
             errs.append("The default image must be one of 0..%d." % (n - 1))
         return errs
@@ -10790,6 +11723,11 @@ class MultibootPanel:
             return False
         form = self.form()
         menu, rebuild = self._loaded_diff(form)
+        if rebuild and self._updatable_in_place():
+            # A REPLACED IMAGE IS NOT A FRESH CARD (PAD-1386): this card
+            # carries the record the in-place update diffs against, so the
+            # list change goes in as the files that differ, with the menu.
+            return self.update_card(after=after)
         if rebuild:
             self._error(
                 "The image list changed (%s). Updating in place only "
@@ -10833,14 +11771,14 @@ class MultibootPanel:
         def done(rc, failed, texts):
             if rc != 0:
                 if self.run_cancelled():
-                    self._ok("The update was cancelled at %s. The card's "
+                    self._ok("The update was canceled at %s. The card's "
                              "menu may be half written - %s again to finish "
                              "it." % (failed or "the start", WRITE_BUTTON))
                 else:
                     # The step's own sentence when it gave one (the selector
                     # step always does) - see _build_card's own done.
-                    why = parse_refusal(texts.get(failed, ""),
-                                        self._loaded_card or "")
+                    why = failure_why(texts.get(failed, ""),
+                                      self._loaded_card or "")
                     self._error("Updating the card failed at %s (exit %d) - %s"
                                 % (failed or "the start", rc,
                                    why or "see the tool output."))
@@ -10922,7 +11860,7 @@ class MultibootPanel:
         def done(rc, failed, texts):
             if rc != 0:
                 if self.run_cancelled():
-                    self._ok("The update was cancelled at %s. %s may be half "
+                    self._ok("The update was canceled at %s. %s may be half "
                              "updated - press %s again: it carries on from "
                              "what was already written, and the images that "
                              "were there still boot."
@@ -10930,10 +11868,12 @@ class MultibootPanel:
                 else:
                     why = parse_refusal(texts.get(failed or "update", ""),
                                         self._loaded_card)
-                    if why and failed == "selector":
+                    if why and (failed == "selector"
+                                or is_write_blocked(why)):
                         # THE MENU PROGRAM, NOT THE CARD.  A fresh card
                         # would need the very same one, so this refusal
-                        # must not send anybody off to build one.
+                        # must not send anybody off to build one.  Nor a
+                        # card that is only read-only or held open now.
                         self._error("Cannot update %s: %s" % (name, why))
                     elif why:
                         self._update_info = {"refused": why}
@@ -10941,9 +11881,12 @@ class MultibootPanel:
                                     "image' at a new path to build a fresh "
                                     "card." % (name, why))
                     else:
+                        checks = parse_failed_checks(
+                            texts.get(failed or "update", ""))
                         self._error("Updating the card failed at %s (exit %d) "
-                                    "- see the tool output."
-                                    % (failed or "the start", rc))
+                                    "- %s"
+                                    % (failed or "the start", rc,
+                                       checks or "see the tool output."))
                 self._update_edit_status()
                 return
             self._loaded_form = form
@@ -10990,7 +11933,7 @@ class MultibootPanel:
             menu, rebuild = self._loaded_diff()
         kind, _text, _tone, can_read = card_path_state(
             field, self._facts_now(field), self._rows, self._loaded_card,
-            menu, rebuild, **self._pk())
+            menu, rebuild, **self._pk(), **self._upk())
         # (The 'unticking the bypass cannot un-patch a card' note is gone
         # with the bypass tick itself - the bypass is always on now, so it
         # can never be untied.  The Apply-vs-Build decision that used to
@@ -11063,7 +12006,7 @@ class MultibootPanel:
         upd = self._update_info if (editing and not self._card_device) else None
         refused = (upd or {}).get("refused") if upd else None
         stale = [i for i, (n, nbytes, action) in ((upd or {}).get("files") or {}).items()
-                 if not refused and (nbytes > 0 or action in ("new", "remove", "rename", "sync"))]
+                 if not refused and (nbytes > 0 or action in ("new", "remove", "rename", "sync", "replace"))]
         updatable = editing and self._loaded_trees is not None
         if editing and updatable and refused:
             # THE TOOL WOULD NOT UPDATE THIS CARD IN PLACE, and said why: a
@@ -11149,7 +12092,7 @@ class MultibootPanel:
             # pressed); ``default_write`` pre-ticks it only when something
             # actually changed, so opening the modal on an untouched card
             # does not offer to re-write it for nothing.
-            if menu and self._backend.key == "bof":
+            if menu and self._backend.update_file:
                 detail = ("%s - the builds are untouched; the update is "
                           "unpacked, its menu rewritten and packed again "
                           "(a minute or two, not a fresh build)."
@@ -11178,7 +12121,19 @@ class MultibootPanel:
             }
         can = bool(self._rows and field) and not self._busy
         bof = self._backend.key == "bof"
-        if can and bof:
+        if can and self._backend.key == "dp":
+            # PAD-853: what a Big Lebowski build does, in its own words
+            detail = ("Writes a new update at %s - the stock version stays on "
+                      "the machine, every other build's files go into the zip "
+                      "beside the menu, and the zip is read back (a minute or "
+                      "two)." % field)
+        elif can and self._backend.key == "spooky":
+            # PAD-980: what a Spooky build does, in its own words
+            detail = ("Writes a new update into %s, under the stock update's "
+                      "own name - the stock build whole, every other build's "
+                      "changed files beside it, and the menu - and reads it "
+                      "back (minutes)." % field)
+        elif can and bof:
             # PAD-342: what a BOF build does, in its own words
             detail = ("Writes a new update at %s - the .fun files are "
                       "unpacked, every build after the first is stored as "
@@ -12739,6 +13694,11 @@ class MultibootPanel:
             self._pv_ready = None
             self._pv_visual = None
             self._stop_play(None)
+            note = container_note(_texts.get(failed, ""))
+            if note:
+                self._media_say("video", "waiting for container")
+                self._pv_say(note, error=False)
+                return
             self._media_say("video", "failed - see the Log")
             self._pv_say("Preview failed at %s (exit %d) - see the tool "
                          "output." % (failed or "the start", rc), error=True)
@@ -13064,7 +14024,7 @@ class MultibootPanel:
 
     def _phase_cancelled(self):
         try:
-            self._phase_fn(None, status="Cancelled")
+            self._phase_fn(None, status="Canceled")
         except Exception:                               # noqa: BLE001
             pass
 
@@ -13079,7 +14039,7 @@ class MultibootPanel:
             pass
 
     def _run_commands(self, cmds, on_step=None, on_done=None, quiet=(),
-                      preview=False, on_tick=None):
+                      preview=False, on_tick=None, _ready=False):
         """Run ``[(label, argv), ...]`` in order on a worker, streaming every
         line into the pane; stop at the first failure.  An *argv* may be a
         callable ``fn(texts)`` - evaluated on the worker just before its
@@ -13110,18 +14070,16 @@ class MultibootPanel:
         ordinary output.
         """
         # macOS runs its steps in a container, so one has to be up and able
-        # to see this run's ISOs before the first step starts.  Only for a
-        # WRITING run: the preview redraws on every keystroke and must not
-        # build an image or start a container behind one: it either finds a
-        # container already up (a build earlier in the session) or its step
-        # fails and says so, once.
-        if not preview and _mac.enabled():
-            try:
-                _mac.ensure_container(self._run_paths(), rig_repo_dir(),
-                                      log=self._append)
-            except Exception as exc:                    # noqa: BLE001
-                self._error(str(exc))
-                return False
+        # to see this run's ISOs before the first step starts.  A WRITING run
+        # builds the image if it has to - on a worker, see
+        # _prepare_container - and comes back here with _ready once it is up.
+        # The preview redraws on every keystroke and must not, so its worker
+        # only starts or remounts a container once the image is built
+        # (_start_worker, multiboot_docker.ensure_ready_container) and
+        # otherwise its step fails and says so, once.
+        if not preview and not _ready and _mac.enabled():
+            return self._prepare_container((cmds, on_step, on_done, quiet,
+                                            on_tick))
         if preview:
             # A render never queues behind anything: it is cheap, and the
             # next keystroke asks for another one anyway.
@@ -13144,15 +14102,69 @@ class MultibootPanel:
                            on_tick)
         return True
 
+    def _ask_root_first(self, label, texts):
+        """Open the run's root shell before its first step (see
+        :func:`multiboot_root.ask_first`).  ``(0, None)`` to go on, else
+        ``(rc, label)`` with *label* the root step the run stops for."""
+        try:
+            proc = _root.ask_first()
+        except Exception as exc:                        # noqa: BLE001
+            self._append("%s: %s" % (label, exc))
+            return 1, label
+        if proc is None:
+            return 0, None
+        self._append("Asking for your password now, before the run starts, "
+                     "so it can finish on its own.")
+        self._proc, self._proc_preview = proc, False
+        lines = []
+        try:
+            for raw in proc.stdout:
+                lines.append(raw.decode("utf-8", "replace").rstrip())
+        except Exception:                               # noqa: BLE001
+            pass
+        rc = proc.wait()
+        self._proc = None
+        if self._cancelled:
+            return rc or -9, label
+        if rc != 0:
+            texts[label] = "\n".join(lines)
+            for line in lines:
+                self._append(line)
+            self._append("%s: exit %d" % (label, rc))
+            self._say_once(sudo_password_note(texts[label]))
+            return rc, label
+        return 0, None
+
     def _start_worker(self, cmds, on_step, on_done, quiet, preview, on_tick=None):
         """The worker itself - see :meth:`_run_commands`, which owns the
         guards.  Split out so a queued action can be started from the
         render's own finish without going through them again."""
+        paths = self._run_paths() if preview and _mac.enabled() else ()
+        log_fn = getattr(self, "_warm_log", self._append)
+
         def run():
+            mac_ready = True
+            if preview and _mac.enabled():
+                # Never raises; False stops any docker exec step before
+                # spawning a process against a container that is not up.
+                mac_ready = _mac.ensure_ready_container(
+                    paths, rig_repo_dir(), log=log_fn)
             rc = 0
             failed = None
             texts = {}
-            for label, argv in cmds:
+            steps = cmds
+            first_root = (None if preview or sys.platform == "win32"
+                          or _mac.enabled() else _root.wants_root(cmds))
+            if first_root is not None:
+                # THE PASSWORD FIRST: a run with a root step asks for it
+                # before its first step, so the minutes of user steps and
+                # the build itself run with nobody at the keyboard
+                # (PAD-1188: the dialog came up mid-run, went unanswered,
+                # and the build failed).
+                rc, failed = self._ask_root_first(first_root, texts)
+                if failed is not None:
+                    steps = ()
+            for label, argv in steps:
                 if not preview and self._cancelled:
                     # Cancel was pressed between two steps: stop here rather
                     # than start the next tool.
@@ -13169,7 +14181,7 @@ class MultibootPanel:
                     try:
                         argv = argv(texts)
                     except Exception as exc:                # noqa: BLE001
-                        self._append("[multi-boot] %s: %s" % (label, exc))
+                        self._append("%s: %s" % (label, exc))
                         rc, failed = 1, label
                         break
                 # EVERY STEP OF A RUN IN THE SAME LINUX: the distro is asked
@@ -13179,14 +14191,30 @@ class MultibootPanel:
                 # preview compiled its menu program in one and ran it in the
                 # other, and failed at frame 0 (PAD-307; runtime.rehead, which
                 # leaves anything that is not a wsl.exe command alone).
+                # the pkexec route's root step goes to the run's root shell
+                # (multiboot_root, PAD-1188), never to Popen
+                root_line = argv if isinstance(argv, _root.RootLine) else None
                 argv = runtime.rehead(argv)
+                is_container_exec = (
+                    len(argv) >= 2 and argv[1] == "exec"
+                    and os.path.basename(argv[0]).lower()
+                    in ("docker", "podman"))
+                if not mac_ready and is_container_exec:
+                    texts[label] = "No such container"
+                    self._say_once(container_note(texts[label]))
+                    rc, failed = 1, label
+                    break
                 self._append("$ " + argv[-1])
                 try:
-                    proc = subprocess.Popen(
-                        argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        creationflags=_rig.CREATE_FLAGS)
+                    if root_line is not None:
+                        proc = _root.start(root_line, preview=preview)
+                    else:
+                        proc = subprocess.Popen(
+                            argv, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            creationflags=_rig.CREATE_FLAGS)
                 except Exception as exc:                # noqa: BLE001
-                    self._append("[multi-boot] cannot start %s: %s"
+                    self._append("cannot start %s: %s"
                                  % (label, exc))
                     rc, failed = 1, label
                     break
@@ -13238,6 +14266,10 @@ class MultibootPanel:
                     failed = label
                     break
 
+            if not preview:
+                # the run's root shell, if it opened one, ends with the run
+                _root.end_run()
+
             def finish():
                 if preview:
                     self._pv_busy = False
@@ -13287,6 +14319,126 @@ class MultibootPanel:
             self._drain_job = None
         self._drain()
 
+    def _prepare_container(self, run):
+        """Bring the Mac's container up for *run* on a worker, then start it.
+
+        NOT ON THE MAIN THREAD (PAD-911).  The first Build after an app
+        update that changes the image builds it: minutes, ten or more on
+        Apple silicon, where every apt-get runs emulated.  Run from the
+        button handler it froze the window for all of them - the Log could
+        not even show the line saying so - and a person who quit the
+        frozen app cancelled the build, so the next Build started it from
+        nothing again.  Here the tab is busy (actions greyed, Cancel live)
+        and the Log shows the build going.  False when a run is already up.
+        """
+        if self._busy:
+            self._error("A run is already in progress.")
+            return False
+        self._cancelled = self._cancel_pending = False
+        self._set_busy(True)
+        try:
+            self._phase_fn(None, status="Preparing the Linux toolbox\u2026")
+        except Exception:                               # noqa: BLE001
+            pass
+        paths = self._run_paths()       # reads the form: main thread only
+        box = {}
+
+        def work():
+            try:
+                _mac.ensure_container(paths, rig_repo_dir(),
+                                      log=self._append)
+            except Exception as exc:                    # noqa: BLE001
+                box["exc"] = exc
+
+            def back():
+                self._set_busy(False)
+                exc = box.get("exc")
+                if self._cancelled:
+                    self._cancelled = self._cancel_pending = False
+                    self._phase_cancelled()
+                    return
+                if isinstance(exc, _mac.Unshared):
+                    # Offered once per folder: a Colima that came back still
+                    # blind gets the sentence, not the same question again.
+                    tried = getattr(self, "_share_tried", set())
+                    if (exc.fix and not set(exc.unseen) <= tried
+                            and self._share_and_retry(exc, run)):
+                        return
+                if exc is not None:
+                    self._phase_done(1, "the Linux toolbox")
+                    self._error(str(exc))
+                    return
+                cmds, on_step, on_done, quiet, on_tick = run
+                self._run_commands(cmds, on_step, on_done, quiet,
+                                   on_tick=on_tick, _ready=True)
+            self._ui(back)
+
+        threading.Thread(target=work, daemon=True).start()
+        if self._drain_job is not None:
+            try:
+                self._timer().after_cancel(self._drain_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._drain_job = None
+        self._drain()
+        return True
+
+    def _share_and_retry(self, exc, run):
+        """Colima cannot see this run's folders (PAD-903): offer to share
+        them, restarting Colima the way :func:`multiboot_docker.colima_fix`
+        says, and start *run* again once it is back.  False when the user
+        said no, so the run stops with the sentence instead.
+
+        THE APP DOES IT rather than handing over two Terminal lines (David,
+        2026-08-19: a Mac handed a command to type was being asked to do the
+        app's job).  The ISOs are GBs of the user's own data, so copying
+        them in the way the emulator's rig is copied is no answer; sharing
+        /Volumes is, once, and Colima keeps it for every start after.
+        """
+        folders = "\n".join("  " + d for d in exc.unseen)
+        if not messagebox.askyesno(
+                "Share these folders with Colima?",
+                "The Linux tools cannot see:\n\n%s\n\nColima shares only "
+                "your home folder with its Linux machine, so these would "
+                "look empty. Restart Colima sharing them too? It takes a "
+                "minute, and stops the emulator if it is running. Colima "
+                "remembers it for next time." % folders):
+            return False
+        self._share_tried = (getattr(self, "_share_tried", set())
+                             | set(exc.unseen))
+        self._set_busy(True)
+        self._write("restarting Colima to share %s"
+                    % ", ".join(exc.unseen))
+
+        def work():
+            ok = _mac.share_folders(exc.fix, log=self._append)
+
+            def back():
+                self._set_busy(False)
+                if self._cancelled:
+                    self._cancelled = self._cancel_pending = False
+                    self._phase_cancelled()
+                elif ok:
+                    self._write("Colima is back; starting the "
+                                "run again")
+                    cmds, on_step, on_done, quiet, on_tick = run
+                    self._run_commands(cmds, on_step, on_done, quiet,
+                                       on_tick=on_tick)
+                else:
+                    self._error("Colima did not restart (see the Log). "
+                                + str(exc))
+            self._ui(back)
+
+        threading.Thread(target=work, daemon=True).start()
+        if self._drain_job is not None:
+            try:
+                self._timer().after_cancel(self._drain_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._drain_job = None
+        self._drain()
+        return True
+
     def _run_paths(self):
         """Every host path a run reads or writes, for the container's bind
         mounts.  Over-listing is cheap (a mount it never touches costs
@@ -13310,6 +14462,61 @@ class MultibootPanel:
         if md:
             paths.append(md)
         return paths
+
+    def _warm_log(self, line):
+        """Log a container warm-up or image-build line, and show it on the
+        preview caption strip while no frame is on screen yet."""
+        self._append(line)
+        if getattr(self, "_pv_src", None) is None:
+            self._ui(lambda m=line: self._pv_say(m, error=False, log=False))
+
+    def _warm_container(self):
+        """Build the Linux toolbox image if needed and start the container in
+        the background on macOS when the Multi-boot tab opens or an image is
+        added, without locking the UI."""
+        if not _mac.enabled() or getattr(self, "_stopped", False):
+            return False
+        if (os.environ.get("PAD_UI_NO_RIG", "") not in ("", "0")
+                or os.environ.get("PAD_MULTIBOOT_AUTO") == "0"):
+            return False
+        auto = getattr(self, "_auto_preview", None)
+        if auto is not None and not auto.get():
+            return False
+        if (getattr(self, "_busy", False)
+                or getattr(self, "_pv_busy", False)
+                or getattr(self, "_warming_container", False)):
+            return False
+        paths = self._run_paths()
+        self._warming_container = True
+
+        def work():
+            ok = _mac.ensure_ready_container(
+                paths, rig_repo_dir(), log=self._warm_log)
+
+            def back():
+                self._warming_container = False
+                if getattr(self, "_stopped", False):
+                    return
+                if (ok and _mac.mount_points(self._run_paths())
+                        != _mac.mount_points(paths)):
+                    self._warm_container()
+                    return
+                if ok and getattr(self, "_rows", None):
+                    self.schedule_preview()
+                    if getattr(self, "_plan_info", None) is None:
+                        self._plan_for = None
+                        self._maybe_plan()
+            self._ui(back)
+
+        threading.Thread(target=work, daemon=True).start()
+        if getattr(self, "_drain_job", None) is not None:
+            try:
+                self._timer().after_cancel(self._drain_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._drain_job = None
+        self._drain()
+        return True
 
     def _append(self, line):
         """A tool line, from the worker.  Queued for the main loop, because

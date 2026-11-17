@@ -17,6 +17,22 @@ import os
 from ..rpc import RpcError
 from .base import TabService, rpc
 
+
+def multiboot_platform(mfr):
+    """The Multi-boot platform for a manufacturer: its own key, except a
+    Stern card of the Spike 3 era, whose multi-boot card is built another way
+    (PAD-1263: the "s3" platform)."""
+    key = getattr(mfr, "key", "stern") or "stern"
+    if key == "stern":
+        era = getattr(mfr, "current_era", None)
+        try:
+            era = era() if callable(era) else getattr(mfr, "_era", None)
+        except Exception:                               # noqa: BLE001
+            era = None
+        if era == "spike3":
+            return "s3"
+    return key
+
 log = logging.getLogger(__name__)
 
 # THE PANEL MAY NOT LOAD, AND THE TAB MUST STILL BE BUILT.  A build missing
@@ -90,6 +106,9 @@ class MultibootTab(TabService):
         ("ed_confirm", "_ed_confirm"), ("ed_roll", "_ed_roll"),
         ("ed_roll_norepeat", "_ed_roll_norepeat"),
         ("ed_own_scores", "_ed_own_scores"),
+        ("ed_own_settings", "_ed_own_settings"),
+        ("ed_settings_with", "_ed_settings_with"),
+        ("ed_scores_with", "_ed_scores_with"),
     )
 
     #: Menu settings' fields (and ``color_<role>``): the same, while that
@@ -97,9 +116,9 @@ class MultibootTab(TabService):
     _MENU = (
         ("move", "_move_var"), ("confirm", "_confirm_var"),
         ("volume", "_volume_var"), ("machine_vol", "_machine_vol_var"),
-        ("timeout", "_timeout_var"), ("heading", "_heading_var"),
+        ("timeout", "_timeout_var"), ("back_hold", "_back_hold_var"), ("heading", "_heading_var"),
         ("same_text", "_same_text_var"), ("counter", "_counter_var"),
-        ("settings_tile", "_settings_var"),
+        ("settings_tile", "_settings_var"), ("editions", "_editions_var"),
         ("countdown_word", "_countdown_word_var"),
         ("footer_on", "_footer_var"), ("footer", "_footer_text_var"),
         ("default", "_default_var"), ("theme", "_theme_var"),
@@ -132,6 +151,7 @@ class MultibootTab(TabService):
             raise RuntimeError("its module did not load: %s"
                                % _PANEL_IMPORT_ERROR)
         panel = mbp.WebMultibootPanel(self)
+        panel._project_fn = self._project_for_card
         try:
             for key, attr in self._BOUND:
                 mbp.mirror(getattr(panel, attr), self.store, self.window,
@@ -186,6 +206,31 @@ class MultibootTab(TabService):
             self.window.append_log("[multi-boot] the Barrels of Fun emulator runs one "
                                    "program and has no boot-menu step yet")
             return
+        if getattr(self._multiboot_panel, "platform", "stern") == "spooky":
+            # PAD-980: proven on the rig by tools/spooky_emu/machine_sim.sh;
+            # the Emulate Spooky tab runs one build
+            self.window.append_log("[multi-boot] the Emulate Spooky tab runs one build "
+                                   "and has no boot-menu step yet")
+            return
+        if getattr(self._multiboot_panel, "platform", "stern") == "dp":
+            # PAD-853: the whole multi-boot is proven on the rig by
+            # tools/dp_emu/machine_sim.sh; the Emulate DP tab runs one build
+            self.window.append_log("[multi-boot] the Emulate DP tab runs one build "
+                                   "and has no boot-menu step yet")
+            return
+        if getattr(self._multiboot_panel, "platform", "stern") == "s3":
+            # PAD-1263: a Spike 3 card boots on the Spike 3 rig, which runs
+            # /games/game - the card's own menu first - like any Spike 3 card
+            target = getattr(self.window, "_emulate_panel", None) \
+                or self.window.service("emulate")
+            fn = getattr(target, "launch_spike3_card", None)
+            if fn is None:
+                self.window.append_log("[multi-boot] the Emulate tab is not "
+                                       "built; cannot start the Spike 3 rig")
+                return
+            self._show_tab("emulate")
+            fn(path)
+            return
         if getattr(self._multiboot_panel, "platform", "stern") == "jjp":
             target = getattr(self.window, "_jjp_emulate_panel", None) \
                 or self.window.service("emulate_jjp")
@@ -219,7 +264,7 @@ class MultibootTab(TabService):
             return
         panel = self._multiboot_panel
         if getattr(getattr(mfr, "capabilities", None), "multiboot", False):
-            panel.set_platform(getattr(mfr, "key", "stern"))
+            panel.set_platform(multiboot_platform(mfr))
         panel._apply_platform_words()
         panel.flush_now()
 
@@ -280,6 +325,16 @@ class MultibootTab(TabService):
         started = bool(panel.load_card(path))
         self._done()
         return started
+
+    def _project_for_card(self):
+        """The open PROJECT's folder, which a new card's default path is
+        named for (PAD-1385), or "" when the folder is not a project."""
+        try:
+            folder = self.app._project_folder() or ""
+            from ...core import project_file
+            return folder if project_file.has_anchor(folder) else ""
+        except Exception:                               # noqa: BLE001
+            return ""
 
     def _project_key(self):
         try:

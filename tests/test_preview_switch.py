@@ -24,6 +24,9 @@ import pytest
 from pinball_decryptor.core import ed25519 as E
 from pinball_decryptor.core import preview as P
 
+#: the switch as it was while the mode maker was a preview (it is released since PAD-763)
+pytestmark = pytest.mark.usefixtures("preview_modes_off")
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
 #: A made-up signing key for these tests (never the shipped one).
@@ -303,13 +306,14 @@ def test_git_ignores_a_key_file_dropped_in_the_repo():
 # ---- what the switch gates, OFF ----------------------------------------------------------
 from pinball_decryptor.plugins.stern import engine                     # noqa: E402
 from pinball_decryptor.plugins.stern import mode_project as MP         # noqa: E402
+from tests.mode_examples import form as MX  # noqa: E402
 from pinball_decryptor.plugins.stern import mode_write as MW           # noqa: E402
 from pinball_decryptor.plugins.stern import stock_modes as SM          # noqa: E402
 
 
 def _hold_modes(project):
     """Two example modes, a code mode, and a mode whose file does not load."""
-    for _name, spec in MP.example_specs()[:2]:
+    for _name, spec in MX.example_specs()[:2]:
         MP.new_mode(str(project), spec=spec)
     root = pathlib.Path(MP.modes_dir(str(project)))
     (root / "blitz").mkdir()

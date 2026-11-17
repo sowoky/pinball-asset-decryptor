@@ -19,6 +19,7 @@ import types
 import pytest
 
 from tests.webui_harness import web_app
+from tests.mode_examples import form as MX  # noqa: E402
 
 
 # ---------------------------------------------------------------------- helpers
@@ -255,13 +256,14 @@ def test_modes_tab_makes_and_edits_a_mode_in_the_project(tmp_path):
 
 
 @pytest.mark.usefixtures("preview_modes_on")
-def test_modes_tab_examples_add_kaiju_rush_and_an_empty_editor_keeps_its_labels(tmp_path):
+def test_modes_tab_examples_add_target_rush_and_an_empty_editor_keeps_its_labels(tmp_path):
     """Two things David saw on 2026-09-16 with a project that had no modes: the form was
     "barely legible" in the dark theme, and KAIJU RUSH was nowhere to be found.
 
     The first was every control under the editor being greyed with no mode open, labels
     included; the page now greys only what a person types in or clicks (``editor_on``). The
-    second is an example: KAIJU RUSH, as it ran on the machine, one click away.
+    second is an example one click away: PAD-691, TARGET RUSH on every title (Godzilla's own
+    examples, KAIJU RUSH among them, are out of the app).
     """
     from pinball_decryptor.plugins.stern import mode_project as MP
 
@@ -269,17 +271,17 @@ def test_modes_tab_examples_add_kaiju_rush_and_an_empty_editor_keeps_its_labels(
     with web_app(tmp_path, mfr="stern") as w:
         _project(w, project)
         st = _st(w)
-        assert "Start from an example" in st["status"] and "KAIJU RUSH" in st["status"]
+        assert "Start from an example" in st["status"] and "KAIJU RUSH" not in st["status"]
         assert st["open"] is False and st["editor_on"] is False     # nothing to edit yet
         assert st["ex_ok"] is True
+        assert [e["name"] for e in st["examples"]] == ["TARGET RUSH"]
 
-        w.call("modes.example", "KAIJU RUSH")
+        w.call("modes.example", "TARGET RUSH")
         st = _st(w)
-        assert st["rows"][0]["name"] == "KAIJU RUSH"
+        assert st["rows"][0]["name"] == "TARGET RUSH"
         assert st["editor_on"] is True
-        spec = MP.load(str(project / "modes" / "kaiju_rush" / "mode.json"))
-        assert spec.start_shot == "Maser target" and spec.start_count == 3 and spec.seconds == 30
-        assert "0x08000000 3" in MP.runtime_cfg(spec, "kaiju_rush")   # the machine-proven trigger
+        spec = MP.load(str(project / "modes" / "target_rush" / "mode.json"))
+        assert spec.name == "TARGET RUSH" and MP.validate(spec) == []
 
 
 @pytest.mark.usefixtures("preview_modes_on")
@@ -530,7 +532,7 @@ def test_modes_tab_try_it_pressed_again_during_a_build_is_cancel(tmp_path, monke
         assert _tryit(w)["state"] == "preflight" and _tryit(w)["working"]   # the button: Cancel
         assert w.run(svc.on_try) is False                    # the second press: Cancel
         assert len(handed) == 1 and svc._tryit_cancel is True
-        assert _line(w) == "cancelling…"
+        assert _line(w) == "canceling…"
         assert _tryit(w)["working"]                          # until the worker lands it
         # the worker (a thread, as the Emulate tab's is) finds the flag at the engine's
         # checkpoint
@@ -541,8 +543,8 @@ def test_modes_tab_try_it_pressed_again_during_a_build_is_cancel(tmp_path, monke
         assert result == [None] and asked == [True]
         assert _wait(w, lambda: _tryit(w)["state"] == "failed", 5)
         assert _tryit(w)["reason"] == "cancelled"
-        assert _line(w) == "Try it was cancelled; nothing was started."
-        assert svc.tryit_prepare.last_reason == "Try it was cancelled; nothing was started."
+        assert _line(w) == "Try it was canceled; nothing was started."
+        assert svc.tryit_prepare.last_reason == "Try it was canceled; nothing was started."
         assert not _tryit(w)["working"]
         assert [c[2] for c in ran] == ["check"]              # nothing installed
         # a run that came up meanwhile is the Emulate tab's: Cancel at "starting" only says
@@ -891,6 +893,85 @@ def test_modes_tab_a_save_that_changes_nothing_pushes_nothing(tmp_path, monkeypa
         time.sleep(0.2)
         w.drain()
         assert len(ran) == 1
+
+
+@pytest.mark.usefixtures("preview_modes_on")
+def test_modes_tab_a_pushed_file_keeps_the_screen_the_running_game_has(tmp_path, monkeypatch):
+    """PAD-493 (DragonRR, Godzilla Premium): Screen unticked on MOTHRA'S SONG just after Try it
+    pushed a file naming no screen. The game's HUD still had the built screen, authored visible,
+    and the runtime never learned its name: the panel was up from the game's start, under ATOMIC
+    BREATH, and after MOTHRA'S SONG ended. A screen changes at the next Try it, so until then a
+    pushed file names the built screen; a screen-only change pushes nothing and says so once."""
+    from pinball_decryptor.plugins.stern import mode_assets as MA
+    from pinball_decryptor.plugins.stern import mode_project as MP
+    from pinball_decryptor.plugins.stern import mode_tryit as MT
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    for name in ("ATOMIC BREATH", "MOTHRA'S SONG"):
+        MP.new_mode(str(project), name, MP.ModeSpec(name=name, screen=True, clip="none"))
+    with web_app(tmp_path, mfr="stern") as w:
+        _project(w, project)
+        _no_wsl(monkeypatch)
+        svc = _svc(w)
+        ran = []
+        _fake_rig(svc, ran)
+        svc._running_fn = lambda: True
+        stage = tmp_path / "stage"
+        stage.mkdir()
+        found = MP.list_modes(str(project))[0]
+        for slot, (slug, spec) in enumerate(found):
+            with open(stage / MA.mode_file_name(slot), "w", encoding="utf-8", newline="\n") as f:
+                f.write(MP.runtime_cfg(spec, slug))
+        built = (stage / MA.mode_file_name(1)).read_text(encoding="utf-8")
+        assert "screen_node    PadMode_mothra_s_song_Screen" in built
+        svc._tryit_live = {"project": str(project),
+                           "slots": {slug: i for i, (slug, _s) in enumerate(found)},
+                           "signatures": {slug: MT.asset_signature(s) for slug, s in found},
+                           "stage": str(stage)}
+
+        _select(w, "mothra_s_song")
+        _f(w, "screen", False)                               # the screen alone: nothing to push
+        _save(w)
+        assert _wait(w, lambda: "MOTHRA'S SONG: a change to its screen or clip reaches the game "
+                                "at the next Try it." in _line(w))
+        assert ran == []
+        _save(w)
+        _f(w, "seconds", "35")                               # a live edit is pushed, screen kept
+        _save(w)
+        assert _wait(w, lambda: any(c[2] == "push" for c in ran))
+        assert [c[-1] for c in ran if c[2] == "push"] == ["1"]
+        pushed = (stage / "push" / MA.mode_file_name(1)).read_text(encoding="utf-8")
+        for key in ("screen_scene", "screen_node", "screen_text", "restore_after"):
+            line = next(ln for ln in built.splitlines() if ln.startswith(key))
+            assert line in pushed.splitlines(), key
+        assert "seconds        35" in pushed
+        assert pushed == built.replace("seconds        30", "seconds        35")
+        assert _wait(w, lambda: "MOTHRA'S SONG updated in the running game. Its screen or clip "
+                                "changes at the next Try it." in _line(w))
+
+
+def test_keep_built_screen_names_only_the_screen_the_build_made():
+    """PAD-493: the pushed file's screen lines are the built file's: kept when the form drops the
+    screen, left out when the form adds one the build never made, the rest of the file as is."""
+    from pinball_decryptor.plugins.stern import mode_tryit as MT
+
+    built = ("# GENERATED\nname           M\ntrigger        0x00100000 2\nseconds        25\n"
+             "award          750000\nscreen_scene   32e6\nscreen_node    PadMode_m_Screen\n"
+             "screen_text    PadMode_m_Screen.PadMode_m_Screen_Words\nrestore_after  6\n"
+             "clip_start     PadMode_m_Clip\n")
+    no_screen = ("# GENERATED\nname           M\ntrigger        0x00100000 2\nseconds        20\n"
+                 "award          750000\nclip_start     PadMode_m_Clip\n")
+    assert MT.keep_built_screen(no_screen, built) == built.replace("seconds        25",
+                                                                   "seconds        20")
+    # a screen ticked on after a build without one: the game has none yet
+    assert MT.keep_built_screen(built, no_screen) == built.replace(
+        "screen_scene   32e6\nscreen_node    PadMode_m_Screen\n"
+        "screen_text    PadMode_m_Screen.PadMode_m_Screen_Words\n", "")
+    # the new file's own restore_after wins while both have a screen
+    assert MT.keep_built_screen(built.replace("restore_after  6", "restore_after  9"), built) == \
+        built.replace("restore_after  6", "restore_after  9")
+    assert MT.keep_built_screen(no_screen, None) == no_screen
 
 
 @pytest.mark.usefixtures("preview_modes_on")
@@ -1429,7 +1510,8 @@ def test_modes_tab_on_a_tmnt_pro_project_lists_its_shots_and_greys_what_it_canno
         # item 163: TMNT Pro 1.59 counts down now (441, heard); item 164: it has no time-up call, so a
         # mode's own end sound rides a carrier of its own (heard at time-up in the emulator)
         assert not st["dis"]["countdown"] and not st["dis"]["own_sound"]
-        assert "time-up" in st["reasons"]["sound"]              # nothing of the game's own plays then
+        # nothing of the game's own plays then: PAD-479, its voice has no such line - grey, not yellow
+        assert "no time-is-up line" in st["reasons"]["sound_limit"] and "sound" not in st["reasons"]
         assert st["editor_on"] is True                          # the shots stay live
         # PAD-420: its inserts are tied to its shots (by the game's names), so the shots that score light up
         assert not st["dis"]["lit_shots"] and "lit_shots" not in st["reasons"]
@@ -1451,7 +1533,7 @@ def test_modes_tab_on_a_tmnt_pro_project_lists_its_shots_and_greys_what_it_canno
 @pytest.mark.usefixtures("preview_modes_on")
 def test_modes_tab_premium_1_16_project_offers_godzillas_names(tmp_path):
     """The machine's card, Godzilla Premium 1.16 (a godzilla_le card): Godzilla's names
-    including its third shield target, KAIJU RUSH under Examples, nothing greyed."""
+    including its third shield target, TARGET RUSH (PAD-691: the one example) under Examples, nothing greyed."""
     from pinball_decryptor.plugins.stern import mode_project as MP
 
     project = _modes_card_project(tmp_path, "godzilla_le-1_16_0_spike2.Release.8G.sdcard.raw", "1.16.0")
@@ -1459,12 +1541,13 @@ def test_modes_tab_premium_1_16_project_offers_godzillas_names(tmp_path):
         _project(w, project)
         st = _st(w)
         names = st["profile"]["shots"]
-        assert len(names) == 24 and "Shield target center" in names and "Maser target" in names
+        assert len(names) == 26 and "Shield target center" in names and "Maser target" in names
+        assert {"Right scoop", "Mecha exit top"} <= set(names)                                 # PAD-658
         assert {"Action button", "Left flipper button", "Right flipper button"} <= set(names)   # PAD-228
         assert "Left spinner" in names and "Top spinner" in names and "Shield ramp spinner" in names
         assert "Godzilla Premium/LE 1.16" in st["title_text"]
-        assert st["examples"][0]["name"] == "KAIJU RUSH"
-        w.call("modes.example", "KAIJU RUSH")
+        assert [e["name"] for e in st["examples"]] == ["TARGET RUSH"]
+        w.call("modes.example", "TARGET RUSH")
         st = _st(w)
         assert "Ready to build" in st["status"]
         if "godzilla_le-1.16" not in MP.MULTIBALL_PROVEN:   # item 167: greyed until emulator-proven
@@ -1473,12 +1556,15 @@ def test_modes_tab_premium_1_16_project_offers_godzillas_names(tmp_path):
             assert "not yet seen a mode of yours give a ball save" in st["reasons"].pop("ball_save")
         if "godzilla_le-1.16" not in MP.MAGNET_PROVEN:      # PAD-381: the same
             assert "not yet seen a mode of yours hold the ball on it" in st["reasons"].pop("magnet")
-        assert "own mini-wizards" in st["reasons"].pop("wizard")      # PAD-436: Bond LE 1.06 only
+        if "godzilla_le-1.16" not in MP.WIZARDS_PROVEN:     # PAD-436 / PAD-473: greyed until emulator-proven
+            assert "own mini-wizards" in st["reasons"].pop("wizard")
+        # PAD-619: its game-mode table's challenges, proven on the rig - offered, no longer greyed (PAD-615 had none)
+        assert not st["dis"]["challenge"] and "challenge" not in st["reasons"]
         assert st["reasons"] == {}, st["reasons"]
         assert not st["dis"]["lights"]
-        spec = MP.load(str(project / "modes" / "kaiju_rush" / "mode.json"))
-        assert spec.title == "godzilla_le_1_16"
-        assert "0x08000000 3" in MP.runtime_cfg(spec, "kaiju_rush")
+        spec = MP.load(str(project / "modes" / "target_rush" / "mode.json"))
+        assert spec.title == "godzilla_le_1_16" and spec.start_shot == "Maser target"   # the port's example shot
+        assert "0x08000000" in MP.runtime_cfg(spec, "target_rush")
 
 
 @pytest.mark.usefixtures("preview_modes_on")
@@ -1507,7 +1593,7 @@ def test_modes_tab_jaws_greys_lights_and_screen_and_a_godzilla_mode_is_retargete
     from pinball_decryptor.plugins.stern import mode_project as MP
 
     project = _modes_card_project(tmp_path, "jaws_le-1_02_0.Release.16G.sdcard.raw", "1.02.0")
-    MP.new_mode(str(project), spec=MP.example("KAIJU RUSH"))
+    MP.new_mode(str(project), spec=MX.example("KAIJU RUSH"))
     with web_app(tmp_path, mfr="stern") as w:
         logged = []
         real_log = w.window.append_log
@@ -1613,7 +1699,7 @@ def test_modes_tab_no_port_card_after_another_title_never_rewrites_a_modes_shots
     tmnt = _modes_card_project(tmp_path, "turtles_pro-1_59_0.Release.8G.sdcard.raw", "1.59.0")
     gz116 = _modes_card_project(tmp_path, "godzilla_pro-1_14_0_spike2.Release.8G.sdcard.raw", "1.14.0",
                                 folder="gz116")
-    for name, spec in MP.example_specs()[:2]:
+    for name, spec in MX.example_specs()[:2]:
         MP.new_mode(str(gz116), name, spec)
     files = {slug: (gz116 / "modes" / slug / "mode.json").read_bytes()
              for slug, _s in MP.list_modes(str(gz116))[0]}
@@ -1628,7 +1714,7 @@ def test_modes_tab_no_port_card_after_another_title_never_rewrites_a_modes_shots
         pro = [n for n, _m in MP.GODZILLA_PRO_1_15.shots]
         assert st["profile"]["shots"] == pro and "Center loop" not in st["profile"]["shots"]
         assert svc._spec.name == "ATOMIC BREATH"                  # slug order: atomic_breath first
-        assert sorted(st["shots_on"]) == sorted(MP.example("ATOMIC BREATH").scoring_shots)
+        assert sorted(st["shots_on"]) == sorted(MX.example("ATOMIC BREATH").scoring_shots)
         assert st["editor_on"] is False, "a mode on a card with no port is shown read-only"
         assert st["del_ok"] is True
         assert "read-only" in st["status"]
@@ -1636,7 +1722,7 @@ def test_modes_tab_no_port_card_after_another_title_never_rewrites_a_modes_shots
         _save(w)
         _select(w, "kaiju_rush")                                # and moving between modes
         assert svc._spec.name == "KAIJU RUSH"
-        assert sorted(_st(w)["shots_on"]) == sorted(MP.example("KAIJU RUSH").scoring_shots)
+        assert sorted(_st(w)["shots_on"]) == sorted(MX.example("KAIJU RUSH").scoring_shots)
         _save(w)
         assert {slug: (gz116 / "modes" / slug / "mode.json").read_bytes() for slug in files} == files
 
@@ -1698,8 +1784,8 @@ def test_modes_tab_opening_a_mode_on_another_titles_card_writes_nothing_until_an
         w.drain()
 
     jaws = _modes_card_project(tmp_path, "jaws_le-1_02_0.Release.16G.sdcard.raw", "1.02.0", folder="jaws")
-    MP.new_mode(str(jaws), spec=MP.example("KAIJU RUSH"))
-    MP.new_mode(str(jaws), spec=MP.example("ATOMIC BREATH"))
+    MP.new_mode(str(jaws), spec=MX.example("KAIJU RUSH"))
+    MP.new_mode(str(jaws), spec=MX.example("ATOMIC BREATH"))
     before = files(jaws)
     bare = tmp_path / "bare"
     bare.mkdir()
@@ -1726,7 +1812,7 @@ def test_modes_tab_opening_a_mode_on_another_titles_card_writes_nothing_until_an
 
         prem = _modes_card_project(tmp_path, "godzilla_le-1_16_0_spike2.Release.8G.sdcard.raw",
                                    "1.16.0", folder="prem")
-        MP.new_mode(str(prem), spec=MP.example("KAIJU RUSH"))
+        MP.new_mode(str(prem), spec=MX.example("KAIJU RUSH"))
         saved = files(prem)
         assert MP.load(str(prem / "modes" / "kaiju_rush" / "mode.json")).title == "godzilla_pro_1_15"
         _project(w, prem)
@@ -1759,7 +1845,7 @@ def test_modes_tab_advanced_and_the_games_call_follow_the_title(tmp_path):
         assert st["profile"]["end_shots"] == [svc.PARAM_NEVER, MP.END_SHOT_OTHERS, svc.END_PICK]   # PAD-314
         assert st["profile"]["callouts"] == [] and "TMNT Pro 1.59" in st["profile"]["callouts_none"]
         assert st["dis"]["end_game"]                            # "The game's own call" greyed
-        assert "nothing plays when time is up" in st["reasons"]["sound"]
+        assert "cannot play when time is up" in st["reasons"]["sound_limit"]    # PAD-479: grey
         assert st["editor_on"] is True                          # a shot's own points stay live
         assert not st["dis"]["clip_both"]                     # item 164: TMNT Pro 1.59 plays a clip
 
@@ -1816,7 +1902,7 @@ def test_modes_tab_a_godzilla_modes_advanced_fields_follow_a_jaws_card(tmp_path)
     from pinball_decryptor.plugins.stern import mode_project as MP
 
     project = _modes_card_project(tmp_path, "jaws_le-1_02_0.Release.16G.sdcard.raw", "1.02.0")
-    spec = MP.example("KAIJU RUSH")
+    spec = MX.example("KAIJU RUSH")
     spec.clip = "none"                                   # no stock bank is read here
     spec.screen = False                                  # nor a stock HUD (item 164: Jaws has one)
     spec.shot_award = [["Powerline left", 750000], ["Left ramp", 500000]]
@@ -2717,7 +2803,7 @@ def test_the_write_scan_lists_each_mode_and_what_it_adds(manufacturers_by_key, t
     monkeypatch.setattr(MW, "host_refusal", lambda platform=None: "")
     stern, spooky = manufacturers_by_key["stern"], manufacturers_by_key["spooky"]
     project = str(tmp_path / "project")
-    for name, spec in MP.example_specs()[:2]:
+    for name, spec in MX.example_specs()[:2]:
         slug, spec = MP.new_mode(project, spec=spec)
         if name == "KAIJU RUSH":
             spec.end_sound = "end.wav"
@@ -2754,7 +2840,7 @@ def test_the_write_scan_says_a_direct_sd_write_leaves_the_modes_out(manufacturer
 
     stern = manufacturers_by_key["stern"]
     project = str(tmp_path / "project")
-    for _name, spec in MP.example_specs()[:2]:
+    for _name, spec in MX.example_specs()[:2]:
         MP.new_mode(project, spec=spec)
     rows = [r[0] for r in WS.mode_rows(stern, project, direct=True)]
     assert len(rows) == 2
@@ -2776,7 +2862,7 @@ def test_the_write_scan_says_a_mac_leaves_the_modes_out(manufacturers_by_key, tm
 
     stern = manufacturers_by_key["stern"]
     project = str(tmp_path / "project")
-    for _name, spec in MP.example_specs()[:2]:
+    for _name, spec in MX.example_specs()[:2]:
         MP.new_mode(project, spec=spec)
     monkeypatch.setattr(MW, "host_refusal", lambda platform=None: MW.MAC_REFUSAL)
     rows = [r[0] for r in WS.mode_rows(stern, project, direct=False)]
@@ -2820,7 +2906,7 @@ def test_a_mode_edit_makes_the_write_tab_rescan(tmp_path, monkeypatch):
 
         ws._scan_fp = w.run(ws._fingerprint)
         assert not shown_again()                      # nothing changed: no rescan
-        _name, spec = MP.example_specs()[0]
+        _name, spec = MX.example_specs()[0]
         slug, spec = MP.new_mode(str(project), spec=spec)
         assert shown_again(), "a mode added"
         assert not shown_again()
@@ -2839,90 +2925,6 @@ def test_a_mode_edit_makes_the_write_tab_rescan(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------- code modes with assets
-@pytest.mark.usefixtures("preview_modes_on")
-def test_modes_tab_offers_the_intricate_modes_as_code_examples(tmp_path):
-    """Examples lists the form modes, then the SDK's intricate modes (the six and PAD-379's five) as CODE
-    modes (a Godzilla title only: their shots are Godzilla's)."""
-    project = _modes_card_project(tmp_path, "godzilla_le-1_16_0_spike2.Release.8G.sdcard.raw", "1.16.0")
-    with web_app(tmp_path, mfr="stern") as w:
-        _project(w, project)
-        labels = [e.get("label") or e["name"] for e in _st(w)["examples"]]
-        assert labels[0] == "KAIJU RUSH"
-        assert sorted(labels[-11:]) == ["ANGUIRUS (code mode)", "BIOLLANTE (code mode)", "DESTOROYAH (code mode)",
-                                        "FINAL WARS (code mode)", "GODZILLA ANGRY (code mode)", "KING GHIDORAH (code mode)",
-                                        "KIRYU (code mode)", "MASER BARRAGE (code mode)", "MELTDOWN (code mode)",
-                                        "OXYGEN DESTROYER (code mode)", "SPACEGODZILLA (code mode)"]
-        assert "No code modes in this project" in _st(w)["code_words"]
-
-
-@pytest.mark.usefixtures("preview_modes_on")
-def test_a_code_example_without_its_films_is_added_and_the_tab_says_which(tmp_path, monkeypatch):
-    from pinball_decryptor.plugins.stern import mode_project as MP
-
-    monkeypatch.delenv("PAD_FILMS_DIR", raising=False)
-    project = _modes_card_project(tmp_path, "godzilla_le-1_16_0_spike2.Release.8G.sdcard.raw", "1.16.0")
-    with web_app(tmp_path, mfr="stern") as w:
-        svc = _svc(w)
-        _project(w, project)
-        t = w.run(svc.add_code_example, "ANGUIRUS", [str(tmp_path)])
-        assert t is not None
-        t.join(60)
-        assert not t.is_alive()
-        w.drain()
-        folder = MP.mode_folder(str(project), "anguirus_assist")
-        assert sorted(os.listdir(folder)) == ["anguirus_assist.c", "assets.json", "intricate_kit.h"]
-        status = _line(w)
-        assert "added the example ANGUIRUS as modes/anguirus_assist with its code" in status
-        assert "Godzilla Raids Again (1955)" in status and "Choose your films folder" in status
-        assert _wait(w, lambda: "ANGUIRUS (its film assets are not cut yet)" in _st(w)["code_words"])
-        # its own page says which films it needs, until they are cut
-        assert _wait(w, lambda: (_st(w).get("code") or {}).get("slug") == "anguirus_assist")
-        assert _st(w)["code"]["needs_films"] == (          # its clips come from three films
-            "Godzilla Raids Again (1955), Godzilla: Final Wars (2004) and Destroy All Monsters (1968)")
-        assert _st(w)["code"]["needs_files"].endswith(".mp4")
-        # not a form mode: a code mode has no mode.json
-        assert [r for r in _st(w)["rows"] if r["kind"] == "form"] == []
-        assert w.run(svc.add_code_example, "ANGUIRUS") is None
-        assert "already in this project" in _line(w)
-
-
-@pytest.mark.usefixtures("preview_modes_on")
-def test_a_code_example_is_cut_from_the_films_folder_the_person_picks(tmp_path, monkeypatch):
-    """The recipe's clip, picture, music loop and calls are cut with the film cutter from the folder
-    asked for (a synthetic film under a collection file name: nothing of a film is in the repo)."""
-    from pinball_decryptor.plugins.stern import code_modes as CM
-    from tests.test_stern_code_modes import _ffmpeg, _synthetic_film
-
-    ff = _ffmpeg()
-    monkeypatch.delenv("PAD_FILMS_DIR", raising=False)
-    films = str(tmp_path / "films")
-    _synthetic_film(films, CM.FILMS["fw04"], ff)
-    ex = {"name": "TEST WARS", "slug": "test_wars", "source": "final_wars.c", "headers": ["intricate_kit.h"],
-          "seconds": 40,
-          "recipe": {"clip": {"film": "fw04", "from": 1.0, "length": 3.0, "crop": "fill"},
-                     "art": {"film": "fw04", "at": 2.0, "crop": "fill"},
-                     "music": {"film": "fw04", "from": 2.0, "length": 10.0},
-                     "calls": {"won": {"film": "fw04", "from": 3.0, "length": 1.5}}}}
-    monkeypatch.setattr(CM, "EXAMPLES", [ex])
-    project = _modes_card_project(tmp_path, "godzilla_le-1_16_0_spike2.Release.8G.sdcard.raw", "1.16.0")
-    with web_app(tmp_path, mfr="stern") as w:
-        svc = _svc(w)
-        _project(w, project)
-        svc._ffmpeg_fn = lambda: ff
-        w.answers.append(films)                              # "Where are the films?"
-        assert w.call("modes.code_example", "TEST WARS") is True
-        assert "Godzilla: Final Wars (2004)" in json.dumps(w.asked[-1])
-        _wait_threads("modes-code-example", 60)
-        assert _wait(w, lambda: "TEST WARS (clip, picture, music, 1 call(s))" in _st(w)["code_words"],
-                     10)
-        assert "its own clip, picture, music and calls cut from the films" in _line(w)
-        spec = CM.load(str(project), "test_wars")
-        assert spec.film["dir"] == films and spec.calls == {"won": "won.wav"}
-        # cut: its page no longer asks for the films folder
-        assert _wait(w, lambda: (_st(w).get("code") or {}).get("slug") == "test_wars")
-        assert _st(w)["code"]["needs_films"] == ""
-
-
 @pytest.mark.usefixtures("preview_modes_on")
 def test_try_it_carries_code_modes_with_assets_through_writes_set(tmp_path, monkeypatch):
     """A project of code modes WITH assets is not the code-only fast path: Try it builds Write's own
@@ -2982,8 +2984,8 @@ def test_try_it_carries_code_modes_with_assets_through_writes_set(tmp_path, monk
 @pytest.mark.usefixtures("preview_modes_on")
 def test_modes_tab_counts_the_modes_and_at_the_cap_greys_only_the_form_examples(tmp_path, monkeypatch):
     """The line under New says how many of the card's modes the project has. At the cap New
-    is off and the line says what to do; Examples stays live with only its FORM entries
-    greyed, since a mode written in C takes none of the card's slots."""
+    is off and the line says what to do; Examples stays live with its FORM entry greyed (PAD-691: there
+    are no examples in C any more; blocks and C modes take none of the card's slots)."""
     from pinball_decryptor.plugins.stern import mode_project as MP
 
     monkeypatch.setattr(MP, "MAX_MODES", 3)       # the real cap is 64; test the guard small
@@ -3003,9 +3005,8 @@ def test_modes_tab_counts_the_modes_and_at_the_cap_greys_only_the_form_examples(
         assert st["new_ok"] is False
         assert st["ex_ok"] is True
         states = {e.get("label") or e["name"]: e["disabled"] for e in st["examples"]}
-        assert states["KAIJU RUSH"] is True
-        code = {k: v for k, v in states.items() if k.endswith(" (code mode)")}
-        assert len(code) == 11 and set(code.values()) == {False}      # the six and PAD-379's five
+        assert states == {"TARGET RUSH": True}
+        assert not any(e["code"] for e in st["examples"])
         w.run(svc.delete_mode, slugs[0])
         st = _st(w)
         assert st["cap_text"] == "" and st["n_form"] == 2
@@ -3088,11 +3089,11 @@ def test_modes_help_names_every_port_and_the_tab_as_it_is(tmp_path):
 
     sections = HD.sections_for("Modes")
     assert [t for t, _b in sections] == [
-        "What it's for", HD.MODES_LIMITS_TITLE, "Which games", "Making a mode", "Try it",
+        "What it's for", HD.MODES_LIMITS_TITLE, "Which games", "Co-op play", "Making a mode", "Try it",
         "Several modes", "Modes made of blocks", "Modes written in C", "The game's own modes",
-        "Cut from a video", "Copy and share", "Five things people ask for",
+        "Cut from a video", "Copy and share", "The rules sheet", "Five things people ask for",
         "Why your mode always gives way", "Sizes", "Before you flash a real machine",
-        "A preview feature"]
+        "Asking for more"]
     bodies = {t: TR.plain(TR.render(b)) for t, b in sections}
     assert all(bodies.values()), [t for t, b in bodies.items() if not b]
     # PAD-380: a table, one row per port, what differs from build to build
@@ -3108,8 +3109,12 @@ def test_modes_help_names_every_port_and_the_tab_as_it_is(tmp_path):
     assert "about a minute" in bodies["Try it"] and "Cancel" in bodies["Try it"]
     assert "used as it is" in bodies["Try it"] and "Start mode now" in bodies["Try it"]
     code = bodies["Modes written in C"]
-    assert "Blank mode in C" in code and "assets.json" in code and "MODE_SDK.md" in code
-    assert "Choose your films folder" in code and "Cut film assets" not in code
+    assert "New mode > C" in code and "assets.json" in code and "MODE_SDK.md" in code
+    assert "copy for an agent" in code                     # PAD-652
+    making = bodies["Making a mode"]
+    assert "recommended" in making and "AI agent" in making and "playground" in making
+    assert "Choose your films folder" not in code and "Cut film assets" not in code   # PAD-691: no film examples
+    assert "KAIJU RUSH" not in making and "TARGET RUSH" in making
     stock = bodies["The game's own modes"]
     assert "All to stock" in stock and "Defaults tab" in stock and "Text tab" in stock
     assert "listed under yours" in stock and "All timers and awards" in stock
@@ -3119,6 +3124,7 @@ def test_modes_help_names_every_port_and_the_tab_as_it_is(tmp_path):
     assert "MODE_LIMITS.md" not in json.dumps(bodies)          # nothing sends anyone to the file
     assert "seven slots" in bodies["Five things people ask for"]
     assert "Insider Connected" in bodies["Before you flash a real machine"]
+    assert not re.search(r"preview (feature|code|switch)", json.dumps(bodies), re.I)   # PAD-763
     assert "Examples" not in bodies["Making a mode"] and "under Examples" not in json.dumps(bodies)
     assert "as many modes as you make" in bodies["Several modes"] and "counted apart" in bodies["Several modes"]
     for title, body in sections:
@@ -3135,6 +3141,7 @@ def test_modes_help_names_every_port_and_the_tab_as_it_is(tmp_path):
     assert "Modes written in C" in shown and "Ball save" in shown and "Godzilla Pro 1.15" in shown
 
 
+@pytest.mark.usefixtures("preview_modes_off")
 def test_modes_help_stays_behind_the_switch_and_its_which_games_never_raises(monkeypatch):
     from pinball_decryptor.core import preview
     from pinball_decryptor.plugins.stern import mode_project as MP
@@ -3147,3 +3154,45 @@ def test_modes_help_stays_behind_the_switch_and_its_which_games_never_raises(mon
     # a section whose body fails to render is left out, never a traceback in the window
     monkeypatch.setitem(HD.HELP_CONTENT, "Modes", [("Broken", lambda: 1 / 0), ("Kept", "words")])
     assert HD.sections_for("Modes") == [("Kept", "words")]
+
+
+def test_modes_tab_says_a_spike3_cards_build_has_no_modes_yet(tmp_path):
+    """PAD-1269/1272: Try it's card verdict on a Stern Spike 3 card. Modes go onto a Spike 3
+    card once the app knows how to run them on its build (its port); until then the footer
+    says so in the same words as for any build with none, rather than letting Try it find out.
+    """
+    from pinball_decryptor.plugins.stern import mode_project as MP
+    from tests.test_spike3 import _build_spike3_disk
+
+    s3 = tmp_path / "walking_dead_le-0_92_0.Release.64G.sdcard-secure.raw"
+    s3.write_bytes(_build_spike3_disk().getvalue())
+
+    project = tmp_path / "proj"
+    with web_app(tmp_path, mfr="stern") as w:
+        _project(w, project)
+        svc = _svc(w)
+        verdict = w.run(lambda: svc._card_verdict(str(s3)))
+    text, kind, tip = verdict
+    assert text == "a Spike 3 card, no modes for its build yet"
+    assert kind == "info"
+    assert tip == MP.no_port_words(MP.title_label("walking_dead_le", "0.92.0"))
+
+
+def test_modes_tab_takes_a_spike3_card_whose_build_has_a_port_as_any_card(tmp_path, monkeypatch):
+    """PAD-1272: with a port for its build the Spike 3 card is no special case: the verdict is
+    the one any card gets next to the project's (here: another game build)."""
+    from pinball_decryptor.plugins.stern import mode_project as MP
+    from tests.test_spike3 import _build_spike3_disk
+
+    s3 = tmp_path / "walking_dead_le-0_92_0.Release.64G.sdcard-secure.raw"
+    s3.write_bytes(_build_spike3_disk().getvalue())
+    asked = []
+    monkeypatch.setattr(MP, "profile_for_card", lambda g, v, ports_dir=None, arch="arm":
+                        asked.append((g, arch)) or MP.GODZILLA_PRO_1_15)
+    project = tmp_path / "proj"
+    with web_app(tmp_path, mfr="stern") as w:
+        _project(w, project)
+        svc = _svc(w)
+        text, _kind, _tip = w.run(lambda: svc._card_verdict(str(s3)))
+    assert "Spike 3" not in text
+    assert ("walking_dead_le", "a64") in asked          # PAD-1277: the card's own machine's port

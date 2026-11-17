@@ -81,6 +81,9 @@ static unsigned long now_ms;
 unsigned long pm_ms(void) { return now_ms; }
 long pm_port_value(const char *name, long fallback)
 { const char *v = getenv("ROSTER_AFTER_MS"); return (!strcmp(name, "roster_start_after_ms") && v) ? atol(v) : fallback; }
+/* PAD-733: the selection screen closes ROSTER_CLOSE_MS after the harness's pick (the runtime watches the game's player) */
+static unsigned long picked_at;
+int pm_roster_closing(void) { const char *v = getenv("ROSTER_CLOSE_MS"); return v && now_ms < picked_at + (unsigned long)atol(v); }
 int pm_stock_mode_running(unsigned kinds) { return 0; }
 const char *pm_stock_mode_what(unsigned kind) { return "a stock mode"; }
 void pm_callout(unsigned id) {}
@@ -90,6 +93,7 @@ int pm_can(unsigned w) { return 1; }
 int pm_roster_claim(unsigned slot, int (*f)(unsigned)) { if (slot >= 7) return 0; claimed[slot] = f; printf("CLAIM %u\n", slot); return 1; }
 void pm_roster_release(unsigned slot) { if (slot < 16) claimed[slot] = 0; printf("RELEASE %u\n", slot); }
 void pm_roster_done(void) { printf("ROSTER_DONE\n"); }
+void pm_roster_over(int won) { printf("ROSTER_DONE%s\n", won ? " WON" : ""); }   /* PAD-706 */
 int pm_roster_callout(unsigned slot, unsigned id) { printf("CALLOUT %u %u\n", slot, id); return slot < 7 && claimed[slot]; }
 
 int main(int argc, char **argv)
@@ -120,6 +124,7 @@ int main(int argc, char **argv)
             printf("SWAPPED\n");
         } else if (!strcmp(argv[k], "pick")) {
             unsigned s = (unsigned)atoi(argv[++k]);
+            picked_at = now_ms;
             printf("PICK %u -> %d\n", s, claimed[s] ? claimed[s](s) : -1);
         } else if (!strcmp(argv[k], "ball_end")) {
             m->ball_end();
@@ -204,8 +209,9 @@ def _run(harness, tmp_path, cfg, *args, mode1=None, after_ms=None):
         (tmp_path / "mode1.cfg").write_text(mode1)
     env = dict(os.environ, MODE_DIR=str(tmp_path))
     env.pop("ROSTER_AFTER_MS", None)
-    if after_ms is not None:
-        env["ROSTER_AFTER_MS"] = str(after_ms)
+    env.pop("ROSTER_CLOSE_MS", None)
+    if after_ms is not None:                    # PAD-733: the selection screen closes this long after the pick
+        env["ROSTER_AFTER_MS"] = env["ROSTER_CLOSE_MS"] = str(after_ms)
     r = subprocess.run([str(harness), *args], capture_output=True, text=True, env=env, timeout=30)
     assert r.returncode == 0, r.stderr
     return r.stdout
@@ -290,9 +296,10 @@ def test_a_pick_while_another_mode_runs_starts_when_that_one_ends(harness, tmp_p
     assert out.index("MOTHRA START (roster pick)") < out.index("ROSTER_DONE") < out.index("MOTHRA END (ball ended)")
 
 
-def test_the_start_waits_roster_start_after_ms(harness, tmp_path):
+def test_the_start_waits_for_the_screens_close(harness, tmp_path):
+    """PAD-733: a picked mode starts as the selection screen's close ends (pm_roster_closing), not on a clock."""
     out = _run(harness, tmp_path, ROSTER_ONLY, "pick", "0", "tick", "120", "tick", "80", after_ms=3000)
-    assert "PICK 0 -> 1" in out and "picked - it starts in 3000 ms, once the selection screen has closed" in out
+    assert "PICK 0 -> 1" in out and "picked - it starts once the selection screen has closed" in out
     first, second = out.index("TICKED 120"), out.index("TICKED 80")
     assert "START" not in out[:first]                              # 2.0 s: not yet
     assert out.index("MOTHRA START (roster pick)") < second         # by 3.4 s: started
@@ -360,7 +367,7 @@ def test_a_waiting_pick_lapses_when_another_player_is_up(harness, tmp_path):
     game). The mode must not start for the wrong player; the pick is given back (the runtime then waits for the
     player who picked - test_the_runtime_gives_a_pick_back_only_to_the_player_who_picked)."""
     out = _run(harness, tmp_path, ROSTER_ONLY, "pick", "0", "player", "2", "tick", "300", after_ms=3000)
-    assert "PICK 0 -> 1" in out and "picked - it starts in 3000 ms" in out
+    assert "PICK 0 -> 1" in out and "picked - it starts once the selection screen has closed" in out
     assert "the roster pick lapsed - the player changed or the game ended" in out
     assert out.count("ROSTER_DONE") == 1 and "START" not in out
 
@@ -430,9 +437,23 @@ def _lift(src, signature):
     raise AssertionError("unbalanced: " + signature)
 
 
+# PAD-1269: the runtime's address and saved-register types, as its 32-bit (Spike 2) build has them, so code
+# lifted from it compiles on the host. Repeating them (a harness that includes the whole runtime) is legal C.
+# PAD-1273: and PMA / PMU, the printf lengths of a pm_addr / pm_reg (the runtime's identical #define may follow).
+# PAD-1284: and a pm_str / PM_STR, a std::string as Spike 2 hands it (one word, its address taken).
+PM_TYPES = ("typedef unsigned pm_addr;\ntypedef unsigned pm_reg;\n#define PM_A64 0\n#define PMA \"x\"\n#define PMU \"u\"\n"
+            "typedef unsigned pm_str;\n#define PM_STR(s) ((void *)&(s))\n")
+# PAD-1282: the sound engine's request-record layout (PM_PTR, REQ_*), lifted from the runtime's own #defines so a
+# lifted pm_sound_* function compiles; the identical #define in a harness holding the whole runtime is legal C.
+_rt_src = (SDK / "pad_mode_runtime.c").read_text(encoding="utf-8")
+PM_TYPES += "\n".join(ln for ln in _rt_src.splitlines()
+                      if re.match(r"#define (PM_PTR|REQ_PTRS|REQ_SIZE|REQ_PRIO|REQ_FLAGS|REQ_CHECK|REQ_LIST|REQ_LIST_V)\b", ln)) + "\n"
+del _rt_src
+
+
 def _host_run(tmp_path, code, flags=(), args=()):
     cc = _cc()
-    (tmp_path / "t.c").write_text(code)
+    (tmp_path / "t.c").write_text(PM_TYPES + code)
     r = subprocess.run([cc, "-std=gnu17", "-Wall", "-Wno-unused-parameter", *flags, "-o", str(tmp_path / "t"),
                         str(tmp_path / "t.c")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
@@ -627,7 +648,7 @@ def test_the_pro_port_names_the_roster():
     assert int(p[("value", "roster_vec_at")][0], 0) == 8
     assert int(p[("value", "roster_record_size")][0], 0) == 12
     assert int(p[("value", "roster_id_at")][0], 0) == 4
-    assert int(p[("value", "roster_start_after_ms")][0], 0) == 3000
+    assert int(p[("value", "roster_start_after_ms")][0], 0) == 2500   # PAD-733: the most a pick waits for the screen's close
 
 
 def test_the_premium_port_names_the_roster_and_it_is_on():
@@ -638,7 +659,7 @@ def test_the_premium_port_names_the_roster_and_it_is_on():
     assert p[("site", "roster_done")][:3] == ["0x00124924", "0xe92d4010", "0xe1a04000"]
     assert int(p[("data", "rule_battle")][0], 0) == 0x7B0C70
     for name, want in (("roster_slots", 7), ("roster_vec_at", 8), ("roster_record_size", 12), ("roster_id_at", 4),
-                       ("roster_qualified_at", 83), ("roster_start_after_ms", 3000)):
+                       ("roster_qualified_at", 83), ("roster_start_after_ms", 2500)):
         assert int(p[("value", name)][0], 0) == want, name
     assert "#off" not in (SDK / "ports" / "godzilla_le-1.16.port").read_text(encoding="utf-8")
 
@@ -742,7 +763,7 @@ def test_the_runtime_counts_a_pick_in_the_players_city(tmp_path):
     city table (the game's function throws on a bad one). A port without the lines changes nothing."""
     src = RUNTIME.read_text(encoding="utf-8")
     lifted = _lift(src, "static int roster_city_step(unsigned p)")
-    assert "roster_city_step(pm_player());" in _lift(src, "void pm_roster_done(void)")
+    assert "roster_city_step(pm_player());" in _lift(src, "void pm_roster_over(int won)")
     out = _host_run(tmp_path, CITY_PRELUDE + lifted + CITY_MAIN, flags=("-no-pie",))
     if out.strip() == "HIGH":
         pytest.skip("this host links above 4 GB even with -no-pie")
@@ -755,6 +776,51 @@ def test_the_runtime_counts_a_pick_in_the_players_city(tmp_path):
     assert rows["no_record_size"] == "0 0" and "record 0" in out
     assert rows["no_site"] == "0 0" and rows["no_data"] == "0 0"
     assert rows["no_vector"] == "0 0" and "city 3 is not in the city table (0 bytes)" in out
+
+
+def test_a_battles_end_waits_for_its_modes_total_after_the_finish(tmp_path):
+    """PAD-733 (David, v29: "the scene text plays after that but only for a very brief portion of a second"): the
+    battle's own stop shows the game's battle-over display at once, so the end that waited for the mode's finish (its
+    clip) waits out the rest of the mode's ending hold too (pm_end_holding: its TOTAL after the clip) - and not past
+    the hold, another mode beginning, or the game's end."""
+    src = RUNTIME.read_text(encoding="utf-8")
+    lifted = "\n".join(_lift(src, sig) for sig in ("static int roster_ending_on(void)\n{",
+                                                    "static void roster_late_tick(void)\n{"))
+    out = _host_run(tmp_path, r"""#include <stdio.h>
+struct pm_mode { const char *name; };
+static const struct pm_mode kc = { "KING CAESAR" }, other = { "OTHER" };
+static const struct pm_mode *running, *disp_owner;
+static unsigned disp_prio;
+static unsigned long disp_linger_until, now;
+static int fin, in_game = 1;
+static struct { int on, won; const char *name; const struct pm_mode *mode; } roster_late;
+static unsigned long pm_ms(void) { return now; }
+static int pm_in_game(void) { return in_game; }
+static int finish_on(void) { return fin; }
+static void roster_late_run(const char *why) { roster_late.on = 0; printf("RAN %lu %s\n", now, why); }
+""" + lifted + r"""
+static void arm(void)
+{
+    roster_late.on = 1, roster_late.mode = &kc;
+    disp_prio = 180, disp_owner = &kc, disp_linger_until = 10000, running = 0;
+}
+int main(void)
+{
+    arm();
+    fin = 1; now = 6400; roster_late_tick();             /* the clip plays: no end */
+    fin = 0; now = 6420; roster_late_tick();             /* the clip is over, its TOTAL shows: still none */
+    now = 9990; roster_late_tick();
+    now = 10000; roster_late_tick();                     /* the hold is over: the battle ends */
+    arm(); now = 7000; disp_prio = 0, disp_owner = 0, disp_linger_until = 0; roster_late_tick();   /* no hold left */
+    arm(); now = 7000; running = &other; roster_late_tick();   /* another mode began */
+    arm(); now = 7000; disp_owner = &other; roster_late_tick();   /* the hold is another's */
+    arm(); now = 7000; in_game = 0; roster_late_tick();   /* the game ended */
+    return 0;
+}
+""")
+    assert out.splitlines() == ["RAN 10000 its finish and its total are over", "RAN 7000 its finish and its total are over",
+                                "RAN 7000 its finish and its total are over", "RAN 7000 its finish and its total are over",
+                                "RAN 7000 the game ended"]
 
 
 def test_both_godzilla_ports_count_the_pick_in_the_city():

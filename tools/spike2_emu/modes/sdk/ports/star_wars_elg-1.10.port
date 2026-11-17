@@ -17,6 +17,8 @@ site tick             0x001e23ec 0xe92d4038 0xe3a00037
 site ball_end         0x00136a54 0xe92d4070 0xe1a06000
 #   sound_lookup: located (strict) [The Beatles 1.29, Godzilla Premium/LE 1.16, Godzilla Pro 1.15, Jaws LE 1.02, Deadpool LE 1.14, Deadpool Pro 1.16, TMNT Pro 1.59]
 site sound_lookup     0x002867c0 0xe92d4038 0xe1a05000
+# PAD-494/724 music modes: get_asset_descriptor, WRAPPED (sounds.cfg)
+site sound_resolve    0x001ec69c 0xe92d41f0 0xe1a05820
 #   score_add32: located (strict) [The Beatles 1.29]
 site score_add32      0x00287078 0xe30b376a 0xe3a02000
 #   callout: located (strict) [The Beatles 1.29, Jaws LE 1.02, Deadpool LE 1.14, Deadpool Pro 1.16, TMNT Pro 1.59]
@@ -324,6 +326,17 @@ site surface_find     0x0043bdf0 0xe92d4070 0xe24dd008
 site surface_set_video 0x004334d4 0xe5d030d4 0xe92d4ff0
 site surface_play     0x004312e0 0xe5d030d4 0xe92d43f0
 site surface_stop     0x00430a90 0xe5d030d4 0xe92d40f0
+# PAD-725: the surface's own seek, length and position (PAD-530's, from Bond 1.06): a mode's clip the game's own
+# clip took the surface from comes back where it would be by then. Placed by the James Bond LE 1.06 recipe at
+# its distances from surface_play (-0x36c / -0x6b4 / -0x510), each proven by its call: the player function it
+# calls calls gst_element_seek / query_duration / query_position.
+site surface_seek     0x00430f74 0xe92d43f0 0xe1a07003
+site surface_duration 0x00430c2c 0xe5d030d4 0xe92d40f0
+site surface_position 0x00430dd0 0xe5d030d4 0xe92d40f0
+# PAD-725: the backdrop on the bank's surface, as Bond's (PAD-521): a mode's loop plays there again whenever it
+# is idle, and a clip the game loops there gets one pass before the loop takes it back. Emulator-proven on the
+# newest build of every title with a clip v2 bank, 2026-10-25.
+value backdrop_surface 1
 
 # ---- callouts and text: a start shot for a template mode ----
 text example_start_shot     Death star target
@@ -540,3 +553,88 @@ site show_7               0x0002fb00 0xe92d4ff0 0xe24dd00c   # 57 lights in its 
 text show_name_7          Fast strobe
 text show_kind_7          accent
 value show_secs_7         2
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+value challenge_on_flag   18
+site  challenge_balls     0x00345428 0xe92d4030 0xe1a05000
+site  challenge_extra_ball 0x003254e8 0xe3003114 0xe3403060
+site  challenge_menu      0x00042afc 0xe1a07000 0xe3170080
+site  challenge_menu_pick 0x00042cb8 0xe2433001 0xe3530005
+value challenge_menu_list_at   268
+value challenge_menu_count_at  44
+value challenge_menu_cap       7
+value challenge_menu_entry     12
+value challenge_menu_kind      2
+value challenge_menu_slot      -1
+value challenge_menu_caption   1921
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x00107d18 0xe30b276a 0xe3402058
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x00103b88 0xe92d4010 0xe30b4a9c
+value ball_launch_flag       12
+value ball_launch_wait_flag  13
+
+# ---- PAD-663: the game's champions for a mode's challenge game, read off this build's own code (portchallenge.py) ----
+# PAD-640: the game's end-of-game high scores (a mode's challenge game keeps the mode's own)
+site  challenge_scores       0x00118494 0xe92d4ff0 0xe24dd0bc
+site  challenge_score_entry  0x001179e8 0xe1a03000 0xe303060c
+# PAD-663: its question to the bus before it files a player under a category's entry ({player, category +2, entry +4}): in a mode's challenge game only the mode's record says yes
+site  challenge_scores_gate  0x00118700 0xebfed149 0xe3500000
+value challenge_scores_gate_id       91
+value challenge_scores_gate_cat_at   2
+value challenge_scores_gate_entry_at 4
+# PAD-663: the category table (36 bytes each; +28 the entry list a category's insert shifts) and its count
+data  challenge_scores_table 0x005592cc
+data  challenge_scores_count 0x004a86e8
+# PAD-663: HIGHEST SCORES, whose first entry a mode's challenge game goes in as the mode's own record
+value challenge_scores_cat   1
+# PAD-663: the champion records' layout (the score's place and size, the check's place)
+value challenge_record_check_at   84
+value challenge_record_score_at   80
+value challenge_record_score_size 4
+# PAD-663: the champion page function(s) (each called per category; the attract mode's is the one it calls): a mode's challenge champion is shown on it after the lowest category the attract mode shows
+site  challenge_pages_0     0x0001ff2c 0xe92d4ff0 0xe1a08002
+site  challenge_pages_1     0x00057ff0 0xe3043340 0xe340304c
+# PAD-663: an 800x480 one-screen cabinet: a mode's champion title past this many characters is its name alone
+value challenge_page_title_max 18
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x00118494 0xe92d4ff0 0xe24dd0bc
+
+# PAD-710: the game's own books of its modes (mode_framework.py, from this build's audit and flag names): a
+# mode of ours in one's place counts its STARTED audit and PLAYED flag, and when completed its COMPLETED ones
+value place_flag_completed_0       69
+value place_flag_completed_1       67
+value place_flag_completed_2       68
+
+# PAD-747: the game's other modes it keeps books of (mode_framework.done_lines): a mode of ours may start once
+# some of them are completed - each one's COMPLETED audit (through audit_add) or COMPLETED flag
+text  done_name_0                  Captive Multiball
+value done_flag_0                  66
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x004669ac 0xe5d13000 0xe3530008
+site coil_off              0x00462a98 0xe3510008 0xe1a02001
+data sw_struct             0x00601cc4
+
+# ---- PAD-1017: co-op play (portcoop.py, read off this build's program) ----
+site  coop_player_change 0x00345558 0xe92d41f0 0xe24dd008
+site  coop_add_player    0x00345398 0xe92d4038 0xe3a00051
+data  coop_player        0x0054d670
+data  coop_players       0x00600e94
+site  coop_first_ball    0x001016e4 0xeb090f68 0xe1a04000
+site  coop_icon_draw         0x002e22d8 0xebfffdf3 0xe1560004
+
+# ---- PAD-1017: more for co-op play (the message table and its BALL line; the end-of-game high scores) ----
+data  message_table          0x0055c698
+value coop_ball_msg          1255
+
+# ---- PAD-1316: co-op play - the game start's adds of the Insider lobby's players, made while ball 1 waits (portcoop.py) ----
+site  coop_start_game        0x00101930 0xe92d47f0 0xe3044f04
+site  coop_lobby_add         0x00101a58 0xebfffe98 0xe2506000

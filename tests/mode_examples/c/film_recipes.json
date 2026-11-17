@@ -1,0 +1,1939 @@
+{
+ "about": "The Modes tab's code-mode Examples (pinball_decryptor/plugins/stern/code_modes.py): each mode's code in this folder and the recipe its own clip, picture, music loop and calls are cut from. Times are seconds into the film (the collection's file names are in 'films'). Nothing of a film is in the app: the tab cuts these from the person's own copy with the film cutter. Measured for the showcase card, 2026-09-18; see the README beside this file.",
+ "films": {
+  "ghi64": "Ghidorah.The.Three.Headed.Monster1964.JAPANESE.1080p.BluRay.H264.AC3.DD2.0.mp4",
+  "am65": "Invasion.of.Astro.Monster.1965.H264.AC3.DD2.0.mp4",
+  "g54": "Godzilla.1954.REMASTERED.JAPANESE.1080p.BluRay.H264.AC3.DD1.0.mp4",
+  "des95": "Godzilla.Vs.Destoroyah.1995.JAPANESE.1080p.BluRay.H264.AC3.DD2.0.mp4",
+  "meg73": "Godzilla.Vs.Megalon.1973.JAPANESE.1080p.BluRay.H264.AC3.DD5.1.mp4",
+  "fw04": "Godzilla.Final.Wars.2004.JAPANESE.1080p.BluRay.H264.AC3.DD5.1.mp4",
+  "ra55": "Godzilla.Raids.Again.1955.JAPANESE.1080p.BluRay.H264.AC3.DD1.0.mp4",
+  "gvkg91": "Godzilla.VS.King.Ghidorah.1991.JAPANESE.1080p.BluRay.H264.AC3.DD2.0.mp4",
+  "gmk01": "Godzilla.Mothra.And.King.Ghidorah.Giant.Monsters.All-Out.Attack.2001.JAPANESE.1080p.BluRay.H264.AC3.DD5.1.mp4",
+  "gvm92": "Godzilla.And.Mothra.The.Battle.For.Earth.1992.JAPANESE.1080p.BluRay.H264.AC3.DD2.0.mp4",
+  "dam68": "Destroy.All.Monsters.1968.JAPANESE.1080p.BluRay.H264.AC3.DD2.0.mp4",
+  "mg93": "Godzilla.VS.Mechagodzilla.II.1993.JAPANESE.1080p.BluRay.H264.AC3.DD5.1.mp4",
+  "sg94": "Godzilla.VS.Spacegodzilla.1994.JAPANESE.1080p.BluRay.H264.AC3.DD5.1.mp4",
+  "amg02": "Godzilla.Against.Mechagodzilla.2002.JAPANESE.1080p.BluRay.H264.AC3.DD5.1.mp4",
+  "bio89": "Godzilla.VS.Biollante.1989.JAPANESE.1080p.BluRay.H264.AC3.DD5.1.mp4",
+  "son67": "Son.of.Godzilla.1967.1080p.H264.AC3.DD5.1.mp4",
+  "mg74": "Godzilla.vs.Mechagodzilla.1974.H264.AC3.DD2.0.mp4",
+  "ama69": "All Monsters Attack (1969) 1080p H264 AC3 DD2.0.mp4",
+  "gkg91": "Godzilla.VS.King.Ghidorah.1991.JAPANESE.1080p.BluRay.H264.AC3.DD2.0.mp4",
+  "gig72": "Godzilla.Vs.Gigan.1972.JAPANESE.1080p.BluRay.H264.AC3.DD2.0.mp4",
+  "hed71": "Godzilla.Vs.Hedorah.1971.JAPANESE.1080p.BluRay.H264.AC3.DD2.0.mp4",
+  "gvm64": "Godzilla.vs.Mothra.1964.JAPANESE.1080p.BluRay.H264.AC3.DD2.0.mp4",
+  "mot61": "Mothra.1961.JAPANESE.1080p.BluRay.H264.AC3.DD1.0.mp4",
+  "sea66": "Godzilla.Vs.The.Sea.Monster.1966.JAPANESE.1080p.BluRay.H264.AC3.DD2.0.mp4",
+  "tmg75": "Terror.of.Mechagodzilla.1975.1080p.H264.AC3.DD5.1.mp4",
+  "kkg63": "King.Kong.Vs.Godzilla.1963.1080p.BluRay.H264.AC3.DD1.0.mp4",
+  "ret84": "The.Return.Of.Godzilla.1984.JAPANESE.1080p.BluRay.H264.AC3.DD5.1.mp4",
+  "g2k99": "Godzilla.2000.1999.JAPANESE.1080p.BluRay.H264.AC3.DD5.1.mp4",
+  "gxm00": "Godzilla.vs.Megaguirus.2000.JAPANESE.1080p.BluRay.H264.AC3.DD5.1.mp4",
+  "sos03": "Godzilla.Tokyo.S.O.S.2003.JAPANESE.1080p.BluRay.H264.AC3.DD5.1.mp4",
+  "shin16": "Shin.Godzilla.2016.JAPANESE.1080p.BluRay.H264.AC3.DD2.0.mp4",
+  "g98": "Godzilla.1998.REMASTERED.1080p.BluRay.H264.AC3.DD5.1.mp4"
+ },
+ "titles": {
+  "ghi64": "Ghidorah, the Three-Headed Monster (1964)",
+  "am65": "Invasion of Astro-Monster (1965)",
+  "g54": "Godzilla (1954)",
+  "des95": "Godzilla vs. Destoroyah (1995)",
+  "meg73": "Godzilla vs. Megalon (1973)",
+  "fw04": "Godzilla: Final Wars (2004)",
+  "ra55": "Godzilla Raids Again (1955)",
+  "gvkg91": "Godzilla vs. King Ghidorah (1991)",
+  "gmk01": "Godzilla, Mothra and King Ghidorah: Giant Monsters All-Out Attack (2001)",
+  "gvm92": "Godzilla vs. Mothra (1992)",
+  "dam68": "Destroy All Monsters (1968)",
+  "mg93": "Godzilla vs. Mechagodzilla II (1993)",
+  "sg94": "Godzilla vs. SpaceGodzilla (1994)",
+  "amg02": "Godzilla Against Mechagodzilla (2002)",
+  "bio89": "Godzilla vs. Biollante (1989)",
+  "son67": "Son of Godzilla (1967)",
+  "mg74": "Godzilla vs. Mechagodzilla (1974)",
+  "ama69": "All Monsters Attack (1969)",
+  "gkg91": "Godzilla vs. King Ghidorah (1991)",
+  "gig72": "Godzilla vs. Gigan (1972)",
+  "hed71": "Godzilla vs. Hedorah (1971)",
+  "gvm64": "Mothra vs. Godzilla (1964)",
+  "mot61": "Mothra (1961)",
+  "sea66": "Ebirah, Horror of the Deep (1966)",
+  "tmg75": "Terror of Mechagodzilla (1975)",
+  "kkg63": "King Kong vs. Godzilla (1962)",
+  "ret84": "The Return of Godzilla (1984)",
+  "g2k99": "Godzilla 2000: Millennium (1999)",
+  "gxm00": "Godzilla vs. Megaguirus (2000)",
+  "sos03": "Godzilla: Tokyo S.O.S. (2003)",
+  "shin16": "Shin Godzilla (2016)",
+  "g98": "Godzilla (1998)"
+ },
+ "examples": [
+  {
+   "name": "KING GHIDORAH",
+   "slug": "ghidorah_heads",
+   "source": "ghidorah_heads.c",
+   "headers": [
+    "intricate_kit.h"
+   ],
+   "seconds": 90,
+   "panel_color": "#5a3d00",
+   "title_color": "#ffd24a",
+   "recipe": {
+    "clip": {
+     "film": "am65",
+     "from": 5549.0,
+     "length": 8.0,
+     "crop": "fill",
+     "what": "Godzilla and Rodan against King Ghidorah, its three heads and wings spread"
+    },
+    "art": {
+     "film": "am65",
+     "at": 5553.0,
+     "crop": "fill",
+     "what": "King Ghidorah, three heads, wings spread"
+    },
+    "music": {
+     "film": "am65",
+     "from": 1607.37,
+     "length": 14.48,
+     "what": "Akira Ifukube's score, Planet X (bed finder: final 0.833, loop chroma 0.82, 0 untuned blocks)"
+    },
+    "calls": {
+     "sever": {
+      "film": "ghi64",
+      "from": 5379.4,
+      "length": 1.4,
+      "what": "Ghidorah's shriek in the final battle at Mt. Fuji (the game's own Ghidorah screech matches 0.74; a pulsed trill clear of music)"
+     },
+     "won": {
+      "film": "am65",
+      "from": 5484.5,
+      "length": 2.2,
+      "what": "Godzilla's roar in the final fight (harmonic roar cpp 0.38)"
+     },
+     "lost": {
+      "film": "am65",
+      "from": 5601.3,
+      "length": 3.0,
+      "what": "Ghidorah flying off at the end (the game's own Ghidorah flying matches 0.97)"
+     },
+     "regrow": {
+      "film": "ghi64",
+      "from": 4787.1,
+      "length": 1.3,
+      "what": "Ghidorah's trilling cackle in the final battle (the game's own Ghidorah screech matches 0.84; the clearest trill, a 6 dB step at its start)"
+     }
+    },
+    "clips": {
+     "intro": {
+      "film": "ghi64",
+      "from": 3242.0,
+      "length": 6.0,
+      "crop": "fill",
+      "what": "Ghidorah's birth: the flaming shape in a dark blue sky resolves into the golden three-headed dragon, wings spread (one continuous shot)"
+     },
+     "loop": {
+      "film": "gmk01",
+      "from": 4392.9,
+      "length": 14.0,
+      "crop": "fill",
+      "what": "Night, Yokohama in flames: Ghidorah's golden necks weave among burning buildings and power lines, dark orange, starts and ends on necks among flames"
+     },
+     "sever": {
+      "film": "gvkg91",
+      "from": 4663.35,
+      "length": 3.0,
+      "crop": "fill",
+      "what": "Godzilla fires his atomic ray; it slams into Ghidorah's neck in a burst of light and sparks"
+     },
+     "regrow": {
+      "film": "gmk01",
+      "from": 4676.3,
+      "length": 3.5,
+      "crop": "fill",
+      "what": "GMK: Ghidorah re-forms in golden light over the city, wings sweeping up and the three heads rearing"
+     },
+     "won": {
+      "film": "gvkg91",
+      "from": 4746.7,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "Godzilla fires his atomic ray; it blasts Ghidorah's wing to pieces and Ghidorah tumbles out of the sky"
+     },
+     "lost": {
+      "film": "ghi64",
+      "from": 5150.8,
+      "length": 3.5,
+      "crop": "fill",
+      "what": "Ghidorah's lightning blasts Godzilla off his feet into smoke, then the three heads fire again"
+     }
+    }
+   },
+   "hud": {
+    "title": "KING GHIDORAH",
+    "line": "SHOOT THE LIT HEAD",
+    "counters": [
+     [
+      "LEFT HEAD",
+      "3",
+      "HEALTH"
+     ],
+     [
+      "MIDDLE HEAD",
+      "3",
+      "HEALTH"
+     ],
+     [
+      "RIGHT HEAD",
+      "3",
+      "HEALTH"
+     ]
+    ],
+    "timer": {
+     "label": "GHIDORAH",
+     "icon": "bolt"
+    },
+    "gauge": {
+     "label": "SEVERED",
+     "kind": "diamond",
+     "count": 3,
+     "colours": [
+      [
+       255,
+       170,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "OXYGEN DESTROYER",
+   "slug": "oxygen_destroyer",
+   "source": "oxygen_destroyer.c",
+   "headers": [
+    "intricate_kit.h"
+   ],
+   "seconds": 45,
+   "panel_color": "#0b3d5c",
+   "title_color": "#9ff3ff",
+   "recipe": {
+    "clip": {
+     "film": "g54",
+     "from": 5498.0,
+     "length": 8.0,
+     "crop": "fill",
+     "what": "the Oxygen Destroyer glowing on the sea bed, then its bubbles erupting"
+    },
+    "art": {
+     "film": "g54",
+     "at": 5215.0,
+     "crop": "fill",
+     "what": "the Oxygen Destroyer in its case"
+    },
+    "music": {
+     "film": "des95",
+     "from": 5852.394,
+     "length": 14.4,
+     "what": "Destoroyah's score near the end (bed finder: final 0.820, 1 of 30 blocks untuned)"
+    },
+    "calls": {
+     "collect": {
+      "film": "g54",
+      "from": 5502.0,
+      "length": 2.5,
+      "what": "the Oxygen Destroyer starting on the sea bed (the frames: it glows at 1:31:42, its bubbles erupt at 1:31:44)"
+     },
+     "won": {
+      "film": "g54",
+      "from": 5616.8,
+      "length": 3.0,
+      "what": "Godzilla's last roar as it surfaces (harmonic roar, -15 dB, the loudest in the scene)"
+     },
+     "lost": {
+      "film": "g54",
+      "from": 3391.9,
+      "length": 3.0,
+      "what": "Godzilla's roar in the Tokyo rampage (the game's own 1954 roar matches 0.86)"
+     }
+    },
+    "clips": {
+     "intro": {
+      "film": "g54",
+      "from": 5497.3,
+      "length": 5.5,
+      "crop": "fill",
+      "what": "The Oxygen Destroyer canister on the sea bed, beginning to fizz and bubble (one shot)"
+     },
+     "loop": {
+      "film": "g54",
+      "from": 5316.4,
+      "length": 13.0,
+      "crop": "fill",
+      "what": "Murky underwater depths: a diver sinks slowly through grey gloom, fish drift past (one continuous shot, dark and even)"
+     },
+     "collect": {
+      "film": "g54",
+      "from": 5503.9,
+      "length": 2.4,
+      "crop": "fill",
+      "what": "The device goes off: a column of bubbles erupts from the sea bed (one shot)"
+     },
+     "won": {
+      "film": "g54",
+      "from": 5655.5,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "On the sea bed Godzilla's body dissolves to a skeleton, which fades away (one shot)"
+     },
+     "lost": {
+      "film": "g54",
+      "from": 5616.1,
+      "length": 4.5,
+      "crop": "fill",
+      "what": "Godzilla surges up out of the sea, roaring (one shot)"
+     }
+    }
+   },
+   "hud": {
+    "title": "OXYGEN DESTROYER",
+    "line": "SHOOT THE LEFT RAMP",
+    "counters": [
+     [],
+     [
+      "HURRY-UP",
+      "20,000,000",
+      "LEFT RAMP"
+     ],
+     []
+    ],
+    "timer": {
+     "label": "OXYGEN",
+     "icon": "oxygen"
+    },
+    "gauge": {
+     "label": "OXYGEN",
+     "kind": "segment",
+     "count": 10,
+     "colours": [
+      [
+       0,
+       90,
+       255
+      ],
+      [
+       0,
+       110,
+       255
+      ],
+      [
+       0,
+       130,
+       255
+      ],
+      [
+       0,
+       150,
+       255
+      ],
+      [
+       0,
+       170,
+       255
+      ],
+      [
+       0,
+       190,
+       255
+      ],
+      [
+       0,
+       210,
+       255
+      ],
+      [
+       40,
+       225,
+       255
+      ],
+      [
+       90,
+       240,
+       255
+      ],
+      [
+       170,
+       250,
+       255
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "MASER BARRAGE",
+   "slug": "maser_barrage",
+   "source": "maser_barrage.c",
+   "headers": [
+    "intricate_kit.h"
+   ],
+   "seconds": 90,
+   "panel_color": "#3a3a3a",
+   "title_color": "#7fe7ff",
+   "recipe": {
+    "clip": {
+     "film": "meg73",
+     "from": 2568.0,
+     "length": 8.0,
+     "crop": "fill",
+     "what": "the Maser cannons firing their beams at Megalon"
+    },
+    "art": {
+     "film": "meg73",
+     "at": 2570.0,
+     "crop": "fill",
+     "what": "a Maser cannon, dish raised"
+    },
+    "music": {
+     "film": "meg73",
+     "from": 4301.985,
+     "length": 21.57,
+     "what": "Riichiro Manabe's score, the final battle (bed finder: final 0.806, loop chroma 0.865)"
+    },
+    "calls": {
+     "barrage": {
+      "film": "meg73",
+      "from": 2589.6,
+      "length": 2.2,
+      "what": "a Maser volley hitting Megalon and the blast (broadband onset at 0:43:09.8)"
+     },
+     "broken": {
+      "film": "meg73",
+      "from": 2607.4,
+      "length": 1.8,
+      "what": "Megalon's cry as it shrugs the attack off (harmonic roar cpp 0.34)"
+     }
+    },
+    "clips": {
+     "intro": {
+      "film": "gvkg91",
+      "from": 4976.9,
+      "length": 5.9,
+      "crop": "fill",
+      "what": "Night Tokyo street: a maser dish tank rolls up, then the tank line takes aim and the first beam fires"
+     },
+     "loop": {
+      "film": "gvkg91",
+      "from": 4945.3,
+      "length": 12.9,
+      "crop": "fill",
+      "what": "Night Tokyo battle: maser tanks roll and fire, blue beams strike Godzilla in showers of sparks (fast run of shots, dark)"
+     },
+     "barrage": {
+      "film": "gvkg91",
+      "from": 4947.4,
+      "length": 2.85,
+      "crop": "fill",
+      "what": "A volley of blue maser beams fires and hits Godzilla, erupting in sparks"
+     },
+     "broken": {
+      "film": "gvm92",
+      "from": 4604.2,
+      "length": 2.8,
+      "crop": "fill",
+      "what": "Godzilla's ray hits a tank, which explodes in a fireball"
+     },
+     "won": {
+      "film": "gvkg91",
+      "from": 4985.2,
+      "length": 4.8,
+      "crop": "fill",
+      "what": "Maser dishes fire; blue beams strike Godzilla, who staggers in sparks and smoke"
+     },
+     "lost": {
+      "film": "meg73",
+      "from": 2599.8,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "Tanks blasted by lightning amid a sea of fire (the attacker is Megalon, not Godzilla)"
+     }
+    }
+   },
+   "hud": {
+    "title": "MASER BARRAGE",
+    "line": "LEFT RAMP  >  RIGHT RAMP  >  BUILDING",
+    "counters": [
+     [
+      "MULTIPLIER",
+      "X1",
+      "MAX X5"
+     ],
+     [
+      "BARRAGES",
+      "0",
+      " "
+     ],
+     [
+      "WINDOW",
+      "7",
+      "SECONDS"
+     ]
+    ],
+    "timer": {
+     "label": "MASER",
+     "icon": "maser"
+    },
+    "gauge": {
+     "label": "CHAIN",
+     "kind": "diamond",
+     "count": 3,
+     "colours": [
+      [
+       0,
+       140,
+       255
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "FINAL WARS",
+   "slug": "final_wars",
+   "source": "final_wars.c",
+   "headers": [
+    "intricate_kit.h"
+   ],
+   "seconds": 110,
+   "panel_color": "#5c0b0b",
+   "title_color": "#ffb000",
+   "recipe": {
+    "clip": {
+     "film": "fw04",
+     "from": 6625.0,
+     "length": 8.0,
+     "crop": "fill",
+     "what": "Godzilla's atomic breath against Keizer Ghidorah's gravity beams"
+    },
+    "art": {
+     "film": "fw04",
+     "at": 261.0,
+     "crop": "letterbox",
+     "what": "the GODZILLA FINAL WARS title (the whole frame, letterboxed)",
+     "band": 60,
+     "band_below": true
+    },
+    "music": {
+     "film": "fw04",
+     "from": 7249.602,
+     "length": 18.3,
+     "what": "the end-title score (bed finder: final 0.895, the best of the eight films)"
+    },
+    "calls": {
+     "phase1": {
+      "film": "fw04",
+      "from": 5437.7,
+      "length": 2.4,
+      "what": "Godzilla roaring through the smoke in the city (the game's own 1954 roar matches 0.77; a harmonic roar)"
+     },
+     "won": {
+      "film": "fw04",
+      "from": 6896.9,
+      "length": 2.4,
+      "what": "Godzilla's roar after the battle (harmonic roar cpp 0.43, the strongest)"
+     },
+     "lost": {
+      "film": "fw04",
+      "from": 6698.9,
+      "length": 2.2,
+      "what": "Keizer Ghidorah's gravity beams striking (broadband onset at 1:51:39.0)"
+     },
+     "phase2": {
+      "film": "fw04",
+      "from": 6604.0,
+      "length": 2.0,
+      "what": "Keizer Ghidorah's three heads rising and roaring as Monster X becomes it"
+     }
+    },
+    "clips": {
+     "intro": {
+      "film": "fw04",
+      "from": 5323.0,
+      "length": 6.0,
+      "crop": "fill",
+      "what": "Godzilla close-up at night: his dorsal plates and mouth light up blue as he charges his ray (one shot)"
+     },
+     "loop": {
+      "film": "fw04",
+      "from": 1212.6,
+      "length": 12.4,
+      "crop": "fill",
+      "what": "New York at night: Rodan swoops past the Empire State Building and a full moon, glass shatters, ends on Rodan silhouetted against the moon"
+     },
+     "loop2": {
+      "film": "fw04",
+      "from": 5362.7,
+      "length": 15.9,
+      "crop": "fill",
+      "what": "Dark blue ruined Tokyo: Godzilla faces Monster X, then a wide shot of the two fighting among burning ruins"
+     },
+     "loop3": {
+      "film": "fw04",
+      "from": 6702.6,
+      "length": 14.5,
+      "crop": "fill",
+      "what": "Keizer Ghidorah towers over the dark smoking city, then its heads attack Godzilla"
+     },
+     "phase": {
+      "film": "fw04",
+      "from": 5330.1,
+      "length": 2.5,
+      "crop": "fill",
+      "what": "Godzilla's ray erupts across the night city in a blue-white blast"
+     },
+     "won": {
+      "film": "fw04",
+      "from": 6874.2,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "Godzilla glows blue and fires his red spiral ray, a blazing column across the screen"
+     },
+     "lost": {
+      "film": "fw04",
+      "from": 6689.0,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "Keizer Ghidorah's golden gravity beams pour into Godzilla, draining him"
+     }
+    }
+   },
+   "hud": {
+    "title": "GODZILLA: FINAL WARS",
+    "line": "SAVE THE CITIES",
+    "counters": [
+     [
+      "PHASE",
+      "1",
+      "INVASION"
+     ],
+     [
+      "TARGETS",
+      "0",
+      "OF 3"
+     ],
+     [
+      "ADD TIME",
+      "3",
+      "SHIELDS"
+     ]
+    ],
+    "timer": {
+     "label": "FINAL WARS",
+     "icon": "xilien"
+    },
+    "gauge": {
+     "label": "PHASES",
+     "kind": "diamond",
+     "count": 3,
+     "colours": [
+      [
+       255,
+       60,
+       0
+      ],
+      [
+       255,
+       140,
+       0
+      ],
+      [
+       255,
+       210,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "ANGUIRUS",
+   "slug": "anguirus_assist",
+   "source": "anguirus_assist.c",
+   "headers": [
+    "intricate_kit.h"
+   ],
+   "seconds": 120,
+   "panel_color": "#2f3a1f",
+   "title_color": "#ff8c1a",
+   "recipe": {
+    "clip": {
+     "film": "ra55",
+     "from": 2685.0,
+     "length": 8.0,
+     "crop": "fill",
+     "what": "Anguirus and Godzilla fighting on Osaka Castle"
+    },
+    "art": {
+     "film": "ra55",
+     "at": 2766.0,
+     "crop": "fill",
+     "what": "Anguirus's spiked shell"
+    },
+    "music": {
+     "film": "ra55",
+     "from": 4888.482,
+     "length": 15.53,
+     "what": "Masaru Sato's score at the end (loop chroma 0.62, in tune 0.68)"
+    },
+    "calls": {
+     "spike": {
+      "film": "ra55",
+      "from": 2732.0,
+      "length": 1.8,
+      "priority": 3,
+      "what": "Anguirus's short roar (the game's own short Anguirus roar matches 0.87)"
+     },
+     "roll": {
+      "film": "ra55",
+      "from": 2680.6,
+      "length": 1.8,
+      "priority": 3,
+      "what": "Anguirus's roar as it charges (the game's own Anguirus roar matches 0.95)"
+     },
+     "won": {
+      "film": "ra55",
+      "from": 2751.0,
+      "length": 1.8,
+      "what": "Anguirus's roar in the castle fight (the game's own Anguirus roar matches 0.88)"
+     }
+    },
+    "clips": {
+     "intro": {
+      "film": "fw04",
+      "from": 1421.4,
+      "length": 6.0,
+      "crop": "fill",
+      "what": "Shanghai: Anguirus bursts through an explosion, rolls in and roars into the camera"
+     },
+     "spike": {
+      "film": "fw04",
+      "from": 4709.8,
+      "length": 1.6,
+      "crop": "fill",
+      "what": "Close on Anguirus roaring, the spiked shell behind its head (one shot)"
+     },
+     "roll": {
+      "film": "fw04",
+      "from": 4800.7,
+      "length": 2.6,
+      "crop": "fill",
+      "what": "Anguirus as a spiked ball hurtles at the camera and smashes into Godzilla"
+     },
+     "won": {
+      "film": "dam68",
+      "from": 4802.5,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "Godzilla and Anguirus stand side by side, allies victorious (one shot)"
+     },
+     "lost": {
+      "film": "fw04",
+      "from": 4852.8,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "Anguirus, Rodan and King Caesar lie in a smoking heap, then Godzilla stands triumphant before Mt Fuji"
+     }
+    }
+   },
+   "hud": {
+    "title": " ",
+    "line": " ",
+    "gauge": {
+     "label": "SPIKES",
+     "kind": "spike",
+     "count": 3,
+     "colours": [
+      [
+       255,
+       120,
+       0
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "MELTDOWN",
+   "slug": "meltdown",
+   "source": "meltdown.c",
+   "headers": [
+    "intricate_kit.h"
+   ],
+   "seconds": 240,
+   "panel_color": "#5a0f00",
+   "title_color": "#ff7a1a",
+   "hud": {
+    "title": "BURNING GODZILLA",
+    "line": "SHOOT RED SHOTS  -  SHIELDS COOL THE CORE",
+    "counters": [
+     [
+      "CORE",
+      "20%",
+      "TEMPERATURE"
+     ],
+     [
+      "JACKPOT",
+      "2,000,000",
+      "X1 HEAT"
+     ],
+     [
+      "JACKPOTS",
+      "0",
+      " "
+     ]
+    ],
+    "timer": {
+     "label": "MELTDOWN",
+     "icon": "radiation"
+    },
+    "gauge": {
+     "label": "CORE",
+     "kind": "segment",
+     "count": 10,
+     "colours": [
+      [
+       255,
+       230,
+       60
+      ],
+      [
+       255,
+       205,
+       45
+      ],
+      [
+       255,
+       180,
+       30
+      ],
+      [
+       255,
+       150,
+       20
+      ],
+      [
+       255,
+       120,
+       10
+      ],
+      [
+       255,
+       90,
+       0
+      ],
+      [
+       255,
+       60,
+       0
+      ],
+      [
+       255,
+       35,
+       0
+      ],
+      [
+       255,
+       15,
+       20
+      ],
+      [
+       255,
+       240,
+       240
+      ]
+     ]
+    }
+   },
+   "recipe": {
+    "clips": {
+     "intro": {
+      "film": "des95",
+      "from": 5425.1,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "Burning Godzilla in the dark, glowing red, steam pouring off him (one shot)"
+     },
+     "loop": {
+      "film": "des95",
+      "from": 4410.5,
+      "length": 15.9,
+      "crop": "fill",
+      "what": "Night Tokyo: Burning Godzilla glows through steam, then a wide shot of him walking through the dark city, red-orange"
+     },
+     "jackpot": {
+      "film": "des95",
+      "from": 5644.2,
+      "length": 3.0,
+      "crop": "fill",
+      "what": "Godzilla fires the red spiral ray; it tears into Destoroyah's face"
+     },
+     "cool": {
+      "film": "des95",
+      "from": 5791.5,
+      "length": 3.3,
+      "crop": "fill",
+      "what": "The freezing beam hits Godzilla; he disappears in icy blue-white mist (one shot)"
+     },
+     "critical": {
+      "film": "des95",
+      "from": 5734.0,
+      "length": 3.5,
+      "crop": "fill",
+      "what": "Burning Godzilla in profile, red veins glowing, white-hot energy behind him (one shot)"
+     },
+     "meltdown": {
+      "film": "des95",
+      "from": 5863.2,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "Godzilla melts down: his body dissolves into glowing red particles (one shot)"
+     },
+     "won": {
+      "film": "des95",
+      "from": 5993.0,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "In the radiant mist the revived, grown Godzilla Junior rises as a silhouette and roars (one shot)"
+     },
+     "lost": {
+      "film": "des95",
+      "from": 5634.8,
+      "length": 3.0,
+      "crop": "fill",
+      "what": "Night: the city erupts in fireballs and burns (one shot)"
+     }
+    },
+    "music": {
+     "film": "des95",
+     "from": 6015.56,
+     "length": 19.53,
+     "what": "Akira Ifukube's end-title march under the credits: the driving ostinato of the Godzilla theme (bed finder: final 0.821, loop chroma 0.835, 0 untuned blocks, beat-locked)"
+    },
+    "calls": {
+     "lit": {
+      "film": "des95",
+      "from": 4158.95,
+      "length": 2.9,
+      "what": "Godzilla's roar in close-up, mouth open (1:09:19), ending where the roar ends",
+      "priority": 4
+     },
+     "jackpot": {
+      "film": "des95",
+      "from": 5645.0,
+      "length": 2.15,
+      "what": "the red spiral ray firing at Destoroyah (1:34:05)",
+      "priority": 3
+     },
+     "cool": {
+      "film": "des95",
+      "from": 5795.3,
+      "length": 2.75,
+      "what": "the freezer beams hitting Godzilla, the white cloud bursting (1:36:35); 2.75 s, so MELTDOWN's five long calls each have a carrier as long",
+      "priority": 4
+     },
+     "critical": {
+      "film": "des95",
+      "from": 5146.45,
+      "length": 2.05,
+      "what": "Burning Godzilla roaring through the steam (1:25:46)",
+      "priority": 4
+     },
+     "meltdown": {
+      "film": "des95",
+      "from": 5729.5,
+      "length": 3.0,
+      "what": "the biggest blast of the final battle (1:35:29)",
+      "priority": 4
+     },
+     "won": {
+      "film": "des95",
+      "from": 5997.92,
+      "length": 3.0,
+      "what": "Godzilla Junior's roar as he rises, revived (1:39:58)",
+      "priority": 4
+     },
+     "add": {
+      "film": "des95",
+      "from": 5149.2,
+      "length": 1.3,
+      "what": "a short Burning Godzilla roar (1:25:49)",
+      "priority": 3
+     },
+     "heat": {
+      "film": "des95",
+      "from": 5742.05,
+      "length": 2.73,
+      "what": "the core-temperature monitor beeping as it reads 1191-1192 C (1:35:42), 7 beeps",
+      "priority": 4
+     },
+     "lost": {
+      "film": "des95",
+      "from": 4825.3,
+      "length": 3.0,
+      "what": "Godzilla's grieving cry, head raised, just after Junior dies (1:20:25), cut to end on its dying tail",
+      "priority": 4
+     }
+    }
+   }
+  },
+  {
+   "name": "GODZILLA ANGRY",
+   "slug": "godzilla_angry",
+   "source": "godzilla_angry.c",
+   "headers": [
+    "intricate_kit.h"
+   ],
+   "seconds": 240,
+   "panel_color": "#5a0a00",
+   "title_color": "#ff5a1a",
+   "hud": {
+    "title": "GODZILLA ANGRY!",
+    "line": "LOCK IS LIT AT THE CAPTIVE BALL",
+    "counters": [
+     [
+      "LOCKS",
+      "0/5",
+      "ADONOA ISLAND"
+     ],
+     [
+      "JACKPOT",
+      "0",
+      "BUILT BY SHOTS"
+     ],
+     [
+      "SUPER",
+      "5.00M",
+      "FED BY SWITCHES"
+     ]
+    ],
+    "timer": {
+     "label": "ANGRY",
+     "icon": "rage"
+    },
+    "gauge": {
+     "label": "0%",
+     "kind": "bar",
+     "count": 40,
+     "words": [
+      "GODZILLA",
+      "RAGE"
+     ],
+     "icon": "rage",
+     "colours": [
+      [
+       150,
+       0,
+       0
+      ],
+      [
+       230,
+       20,
+       10
+      ],
+      [
+       255,
+       90,
+       0
+      ],
+      [
+       255,
+       170,
+       20
+      ]
+     ]
+    }
+   },
+   "recipe": {
+    "clips": {
+     "intro": {
+      "film": "mg93",
+      "from": 2840.8,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "Kyoto: Godzilla faces the camera head and shoulders and roars as debris flies, then black smoke billows up around him (0:47:20.8 to 0:47:25.8, one shot)."
+     },
+     "loop": {
+      "film": "mg93",
+      "from": 2679.0,
+      "length": 15.0,
+      "crop": "fill",
+      "what": "Kyoto: wide shot of Godzilla advancing behind a five-story pagoda past a temple, onlookers in the foreground, small explosions and a helicopter at right (0:44:39.0 to 0:44:54.0, one continuous shot)."
+     },
+     "lock": {
+      "film": "mg93",
+      "from": 2899.4,
+      "length": 3.5,
+      "crop": "fill",
+      "what": "Kyoto: Godzilla roars over the top of a white office block, then tears through it in a burst of debris (0:48:19.4 to 0:48:22.9, a run of two shots)."
+     },
+     "baby": {
+      "film": "mg93",
+      "from": 3613.7,
+      "length": 4.5,
+      "crop": "fill",
+      "what": "Baby Godzilla in his pen at the research facility cries out with his mouth wide open, then turns to the people at the bars (1:00:13.7 to 1:00:18.2, one shot)."
+     },
+     "jackpot": {
+      "film": "mg93",
+      "from": 2223.6,
+      "length": 3.2,
+      "crop": "fill",
+      "what": "First battle: Godzilla fires his blue atomic ray, then from behind him the ray strikes Mechagodzilla in a red burst (0:37:03.6 to 0:37:06.8, a run of two shots)."
+     },
+     "super": {
+      "film": "mg93",
+      "from": 5726.8,
+      "length": 4.3,
+      "crop": "fill",
+      "what": "Climax at Makuhari: Godzilla glows and fires his red spiral ray, the ray streaks across, and Super Mechagodzilla is engulfed in a huge fireball (1:35:26.8 to 1:35:31.1, a run of three shots)."
+     },
+     "won": {
+      "film": "mg93",
+      "from": 6292.0,
+      "length": 6.0,
+      "crop": "fill",
+      "what": "Ending: wide night shot of Godzilla wading out to sea with Baby swimming beside him while three people watch from the beach (1:44:52.0 to 1:44:58.0, one shot)."
+     },
+     "lost": {
+      "film": "mg93",
+      "from": 2310.5,
+      "length": 4.9,
+      "crop": "fill",
+      "what": "First battle: Godzilla lies felled in the smoke, then Mechagodzilla hovers over his fallen body (0:38:30.5 to 0:38:35.4, a run of two shots)."
+     }
+    },
+    "music": {
+     "film": "mg93",
+     "from": 210.15,
+     "length": 13.25,
+     "what": "Opening titles: Akira Ifukube's main title music, rhythmic orchestral brass chords with cymbal and percussion, no dialogue or effects (0:03:30.15 to 0:03:43.40, loops cleanly)."
+    },
+    "calls": {
+     "rage": {
+      "film": "mg93",
+      "from": 6043.28,
+      "length": 1.6,
+      "priority": 3,
+      "what": "Revived Godzilla gives a short isolated roar in close-up at Makuhari (1:40:43.3), silence before and after."
+     },
+     "angry": {
+      "film": "mg93",
+      "from": 6013.2,
+      "length": 3.0,
+      "priority": 4,
+      "what": "Revived Godzilla, a silhouette in fire and smoke, lets out a long full roar out of near silence (1:40:13.2)."
+     },
+     "lock": {
+      "film": "mg93",
+      "from": 2675.35,
+      "length": 1.65,
+      "priority": 3,
+      "what": "Outside Kyoto a shell explodes in the smoke around Godzilla, one heavy blast that decays to quiet (0:44:35.4)."
+     },
+     "baby": {
+      "film": "mg93",
+      "from": 1655.37,
+      "length": 1.6,
+      "priority": 4,
+      "what": "Newly hatched Baby Godzilla gives a short cry in the dark lab (0:27:35.4), silence before and after."
+     },
+     "jackpot": {
+      "film": "mg93",
+      "from": 2223.85,
+      "length": 1.5,
+      "priority": 3,
+      "what": "Godzilla's atomic ray fires at Mechagodzilla, a rushing blast that swells and falls back, score underneath (0:37:03.9)."
+     },
+     "super": {
+      "film": "mg93",
+      "from": 5194.45,
+      "length": 2.25,
+      "priority": 4,
+      "what": "Super Mechagodzilla's salvo fires over burning Makuhari, a huge blast out of silence that rolls off (1:26:34.5)."
+     },
+     "won": {
+      "film": "mg93",
+      "from": 6167.55,
+      "length": 2.5,
+      "priority": 4,
+      "what": "Godzilla calls out to Baby at their night reunion by the bay, soft score underneath (1:42:47.6)."
+     },
+     "lost": {
+      "film": "mg93",
+      "from": 2311.75,
+      "length": 2.2,
+      "priority": 4,
+      "what": "Godzilla, felled by Mechagodzilla, gives a low pained cry from the ground in the smoke (0:38:31.8)."
+     }
+    }
+   }
+  },
+  {
+   "name": "SPACEGODZILLA",
+   "slug": "spacegodzilla",
+   "source": "spacegodzilla.c",
+   "headers": [
+    "intricate_kit.h"
+   ],
+   "seconds": 240,
+   "panel_color": "#2a0050",
+   "title_color": "#c070ff",
+   "hud": {
+    "title": "SPACEGODZILLA",
+    "line": "SHATTER THE CRYSTAL TOWERS",
+    "counters": [
+     [
+      "TOWERS",
+      "3",
+      "STANDING"
+     ],
+     [
+      "JACKPOT",
+      "1,000,000",
+      " "
+     ],
+     [
+      "SUPER",
+      "0",
+      "THE SUM"
+     ]
+    ],
+    "timer": {
+     "label": "SUPER",
+     "icon": "crystal"
+    },
+    "gauge": {
+     "label": "CRYSTALS",
+     "kind": "segment",
+     "count": 9,
+     "colours": [
+      [
+       60,
+       140,
+       255
+      ],
+      [
+       78,
+       130,
+       255
+      ],
+      [
+       95,
+       120,
+       255
+      ],
+      [
+       112,
+       110,
+       255
+      ],
+      [
+       130,
+       100,
+       255
+      ],
+      [
+       148,
+       90,
+       255
+      ],
+      [
+       165,
+       80,
+       255
+      ],
+      [
+       182,
+       70,
+       255
+      ],
+      [
+       200,
+       60,
+       255
+      ]
+     ]
+    }
+   },
+   "recipe": {
+    "clips": {
+     "intro": {
+      "film": "sg94",
+      "from": 2165.9,
+      "length": 3.3,
+      "crop": "fill",
+      "what": "At 0:36:06 SpaceGodzilla descends through pillars of light with blue lightning onto Birth Island, lands, and crystals erupt around him in a white burst (one shot)."
+     },
+     "loop": {
+      "film": "sg94",
+      "from": 4587.2,
+      "length": 10.6,
+      "crop": "fill",
+      "what": "At 1:16:27 Godzilla stands among glowing crystal towers in night Fukuoka as sparks fountain from their tips, then a wide shot of the whole blue crystal field glowing over the city (run of two shots, cut at 1:16:31.7)."
+     },
+     "jackpot": {
+      "film": "sg94",
+      "from": 5091.3,
+      "length": 2.5,
+      "crop": "fill",
+      "what": "At 1:24:51 Land M.O.G.U.E.R.A. fires blue beams into a crystal tower and it bursts in pink fire and sparks (run of quick shots, same angle)."
+     },
+     "tower": {
+      "film": "sg94",
+      "from": 4762.7,
+      "length": 3.5,
+      "crop": "fill",
+      "what": "At 1:19:23 Godzilla's blue ray sweeps across the night crystal field and the crystal towers explode in white and pink sparks and fire (one shot)."
+     },
+     "super": {
+      "film": "sg94",
+      "from": 5818.3,
+      "length": 3.6,
+      "crop": "fill",
+      "what": "At 1:36:58 Godzilla fires his red burning spiral ray in close up and it slams into SpaceGodzilla in fire and white sparks (run of shots: cut at 1:37:00.8, then flash cuts during the hit)."
+     },
+     "won": {
+      "film": "sg94",
+      "from": 5840.9,
+      "length": 5.0,
+      "crop": "fill",
+      "what": "At 1:37:21 SpaceGodzilla explodes in a huge pink and orange fireball over the city while Godzilla stands in silhouette (one shot)."
+     },
+     "lost": {
+      "film": "sg94",
+      "from": 2414.1,
+      "length": 4.4,
+      "crop": "fill",
+      "what": "At 0:40:14 after SpaceGodzilla's corona beam hits him on Birth Island, Godzilla topples backwards into the smoke and lies on the ground (run of three shots, cuts at 0:40:16.8 and 0:40:17.9)."
+     }
+    },
+    "music": {
+     "film": "sg94",
+     "from": 89.073,
+     "length": 15.24,
+     "what": "Main title march under the opening credits at 0:01:29, the theme that returns in the Birth Island battle with SpaceGodzilla at 0:38:43; orchestral, no dialogue."
+    },
+    "calls": {
+     "lit": {
+      "film": "sg94",
+      "from": 2227.75,
+      "length": 1.65,
+      "priority": 3,
+      "what": "At 0:37:07.75 a glassy crackling crystal shimmer as crystal spires rise around Little Godzilla, clean start and stop."
+     },
+     "lock": {
+      "film": "sg94",
+      "from": 2210.55,
+      "length": 2.05,
+      "priority": 3,
+      "what": "At 0:36:50.55 SpaceGodzilla shrieks in close up on Birth Island."
+     },
+     "jackpot": {
+      "film": "sg94",
+      "from": 5247.35,
+      "length": 1.4,
+      "priority": 3,
+      "what": "At 1:27:27.35 a crackling energy blast with a shower of sparks as a lightning burst strikes Godzilla among the crystals."
+     },
+     "tower": {
+      "film": "sg94",
+      "from": 4344.85,
+      "length": 2.0,
+      "priority": 4,
+      "what": "At 1:12:24.85 a big crash with debris and sparks as M.O.G.U.E.R.A. slams into the ground, decaying to quiet."
+     },
+     "super": {
+      "film": "sg94",
+      "from": 5069.88,
+      "length": 2.1,
+      "priority": 4,
+      "what": "At 1:24:29.88 a sharp burst and a roar over a close shot of SpaceGodzilla's glowing shoulder crystals."
+     },
+     "add": {
+      "film": "sg94",
+      "from": 5406.85,
+      "length": 1.3,
+      "priority": 3,
+      "what": "At 1:30:06.85 M.O.G.U.E.R.A. launches a missile from its side, a rocket blast and whoosh."
+     },
+     "won": {
+      "film": "sg94",
+      "from": 5927.93,
+      "length": 3.0,
+      "priority": 4,
+      "what": "At 1:38:47.93 Godzilla gives his victory roar in close up after SpaceGodzilla is destroyed."
+     },
+     "lost": {
+      "film": "sg94",
+      "from": 4524.27,
+      "length": 2.2,
+      "priority": 4,
+      "what": "At 1:15:24.27 Godzilla roars in pain as SpaceGodzilla's blue lightning strikes him."
+     }
+    }
+   }
+  },
+  {
+   "name": "KIRYU",
+   "slug": "kiryu",
+   "source": "kiryu.c",
+   "headers": [
+    "intricate_kit.h"
+   ],
+   "seconds": 90,
+   "panel_color": "#0a2440",
+   "title_color": "#8cdcff",
+   "hud": {
+    "title": "KIRYU",
+    "line": "CHARGE THE ABSOLUTE ZERO: LIT SHOTS",
+    "counters": [
+     [
+      "CHARGE",
+      "0%",
+      "CHARGING"
+     ],
+     [
+      "ABSOLUTE ZERO",
+      "10.0M",
+      "THE CAPTIVE BALL"
+     ],
+     [
+      "MULTIPLIER",
+      "X1",
+      "X1 AT 100%"
+     ]
+    ],
+    "timer": {
+     "label": "KIRYU",
+     "icon": "snowflake"
+    },
+    "gauge": {
+     "label": "CHARGE",
+     "kind": "segment",
+     "count": 10,
+     "colours": [
+      [
+       40,
+       120,
+       255
+      ],
+      [
+       62,
+       134,
+       255
+      ],
+      [
+       83,
+       149,
+       255
+      ],
+      [
+       105,
+       163,
+       255
+      ],
+      [
+       127,
+       178,
+       255
+      ],
+      [
+       148,
+       192,
+       255
+      ],
+      [
+       170,
+       207,
+       255
+      ],
+      [
+       192,
+       221,
+       255
+      ],
+      [
+       213,
+       236,
+       255
+      ],
+      [
+       235,
+       250,
+       255
+      ]
+     ]
+    }
+   },
+   "recipe": {
+    "clips": {
+     "intro": {
+      "film": "amg02",
+      "from": 3741.25,
+      "length": 4.0,
+      "crop": "fill",
+      "what": "Kiryu's face at night against an orange sky, its eyes light up yellow and the head turns as it comes online, 1:02:21.2."
+     },
+     "loop": {
+      "film": "amg02",
+      "from": 2722.0,
+      "length": 9.0,
+      "crop": "fill",
+      "what": "Kiryu's head in profile against the sunset sky, red eye glowing, almost still, 0:45:22.0."
+     },
+     "charge": {
+      "film": "amg02",
+      "from": 4139.0,
+      "length": 3.7,
+      "crop": "fill",
+      "what": "Kiryu faces the camera in the night city as the Absolute Zero cannon in its chest glows orange then blue white, 1:08:59.0."
+     },
+     "ready": {
+      "film": "amg02",
+      "from": 2472.0,
+      "length": 3.6,
+      "crop": "fill",
+      "what": "Close-up of Kiryu's twin shoulder cannons, the camera rising to its head against a blue sky, 0:41:12.0."
+     },
+     "fire": {
+      "film": "amg02",
+      "from": 4149.95,
+      "length": 3.5,
+      "crop": "fill",
+      "what": "A run of quick shots: the Absolute Zero beam fires and streaks blue white across the night city, 1:09:09.9."
+     },
+     "overheat": {
+      "film": "amg02",
+      "from": 2516.9,
+      "length": 3.6,
+      "crop": "fill",
+      "what": "Kiryu stands engulfed in fireballs and billowing smoke, 0:41:56.9."
+     },
+     "won": {
+      "film": "amg02",
+      "from": 4742.2,
+      "length": 5.8,
+      "crop": "fill",
+      "what": "Wounded Godzilla stands in the frozen sea at dusk as ice falls around him and he roars in pain, 1:19:02.2."
+     },
+     "lost": {
+      "film": "amg02",
+      "from": 2731.0,
+      "length": 4.2,
+      "crop": "fill",
+      "what": "Close on Kiryu's head at sunset as its red eye fades out and the machine goes dead, 0:45:31.0."
+     }
+    },
+    "music": {
+     "film": "amg02",
+     "from": 5067.248,
+     "length": 11.33,
+     "what": "End-credits orchestral score by Michiru Oshima, a repeating phrase over a steady pulse with no dialogue or effects, 1:24:27.2."
+    },
+    "calls": {
+     "charge": {
+      "film": "amg02",
+      "from": 4660.2,
+      "length": 1.95,
+      "what": "A rising rush of energy as Kiryu's chest cannon charges at dusk, peaking and falling away, 1:17:40.2.",
+      "priority": 3
+     },
+     "ready": {
+      "film": "amg02",
+      "from": 3802.4,
+      "length": 2.1,
+      "what": "Kiryu's mechanical blast with a high metallic whine as it squares up to Godzilla at night, 1:03:22.4.",
+      "priority": 4
+     },
+     "fire": {
+      "film": "amg02",
+      "from": 4149.1,
+      "length": 2.75,
+      "what": "The Absolute Zero cannon fires, a hissing blast and a second burst as the beam crosses the city, 1:09:09.1.",
+      "priority": 4
+     },
+     "overheat": {
+      "film": "amg02",
+      "from": 4155.2,
+      "length": 2.15,
+      "what": "Crackling electric discharge with a falling whine after the Absolute Zero shot, 1:09:15.2.",
+      "priority": 3
+     },
+     "won": {
+      "film": "amg02",
+      "from": 4697.4,
+      "length": 2.35,
+      "what": "A rushing whoosh and the huge booming eruption as the Absolute Zero blast freezes the sea, 1:18:17.4.",
+      "priority": 4
+     },
+     "lost": {
+      "film": "amg02",
+      "from": 2398.3,
+      "length": 2.3,
+      "what": "Godzilla's roar, the cry that sends Kiryu out of control, 0:39:58.3.",
+      "priority": 4
+     }
+    }
+   }
+  },
+  {
+   "name": "BIOLLANTE",
+   "slug": "biollante",
+   "source": "biollante.c",
+   "headers": [
+    "intricate_kit.h"
+   ],
+   "seconds": 90,
+   "panel_color": "#0a3a12",
+   "title_color": "#ff3c78",
+   "hud": {
+    "title": "BIOLLANTE",
+    "line": "SWITCHES FEED THE SAP  -  CUT A VINE BANK",
+    "counters": [
+     [
+      "BANKS CUT",
+      "0/3",
+      "VINE BANKS"
+     ],
+     [
+      "SAP JACKPOT",
+      "0",
+      "X1 AT A BANK"
+     ],
+     [
+      "PER SWITCH",
+      "100K",
+      "SAP"
+     ]
+    ],
+    "timer": {
+     "label": "BIOLLANTE",
+     "icon": "rose"
+    },
+    "gauge": {
+     "label": "VINES",
+     "kind": "segment",
+     "count": 6,
+     "colours": [
+      [
+       20,
+       210,
+       60
+      ],
+      [
+       67,
+       176,
+       68
+      ],
+      [
+       114,
+       142,
+       76
+      ],
+      [
+       161,
+       108,
+       84
+      ],
+      [
+       208,
+       74,
+       92
+      ],
+      [
+       255,
+       40,
+       100
+      ]
+     ]
+    }
+   },
+   "recipe": {
+    "clips": {
+     "intro": {
+      "film": "bio89",
+      "from": 2059.4,
+      "length": 3.6,
+      "crop": "fill",
+      "what": "0:34:19.4, the camera tilts up across Lake Ashi to reveal Biollante's rose form standing in the misty, glowing lake, one shot."
+     },
+     "loop": {
+      "film": "bio89",
+      "from": 2067.0,
+      "length": 11.6,
+      "crop": "fill",
+      "what": "0:34:27, a slow low-angle tilt up Biollante's rose-form stalk and leaves to the closed red rose head, vines gently swaying, one continuous shot."
+     },
+     "cut": {
+      "film": "bio89",
+      "from": 3309.8,
+      "length": 3.2,
+      "crop": "fill",
+      "what": "0:55:10, at night on the lake Godzilla's ray strikes a vine reaching out from Biollante and the vine bursts into smoke, one shot."
+     },
+     "collect": {
+      "film": "bio89",
+      "from": 3295.4,
+      "length": 2.5,
+      "crop": "fill",
+      "what": "0:54:55, a run of two shots: a vine mouth sprays yellow sap into Godzilla's face, then Godzilla's head steams with it."
+     },
+     "beast": {
+      "film": "bio89",
+      "from": 5479.45,
+      "length": 5.5,
+      "crop": "fill",
+      "what": "1:31:19, a run of two shots: extreme close-ups of the beast form's huge tooth-lined jaws, then the jaws opening on the red mouth, under lightning flashes."
+     },
+     "won": {
+      "film": "bio89",
+      "from": 5773.0,
+      "length": 6.0,
+      "crop": "fill",
+      "what": "1:36:13, Biollante's beast form dissolves into a glowing pink cloud of spores that drift upward, one shot."
+     },
+     "lost": {
+      "film": "bio89",
+      "from": 5635.45,
+      "length": 4.3,
+      "crop": "fill",
+      "what": "1:33:55, a run of two shots: Biollante's beast jaws close on Godzilla's head, then a close-up of the jaws clamped on him."
+     }
+    },
+    "music": {
+     "film": "bio89",
+     "from": 6128.682,
+     "length": 19.12,
+     "what": "1:42:08.682, Koichi Sugiyama's Super X2 march as reprised in the end credits (the same passage the earlier bed took at 0:43:05 under the Super X2 launch), orchestra only, no dialogue or effects."
+    },
+    "calls": {
+     "cut": {
+      "film": "bio89",
+      "from": 4140.22,
+      "length": 2.02,
+      "priority": 3,
+      "what": "1:09:00, a short, clean Godzilla roar during the Osaka attack, from its onset until it falls away at 1:09:02."
+     },
+     "collect": {
+      "film": "bio89",
+      "from": 3295.56,
+      "length": 1.46,
+      "priority": 3,
+      "what": "0:54:55, the wet burst of Biollante's sap spraying from a vine mouth into Godzilla's face and the first hiss of it burning, ending at a dip."
+     },
+     "beast": {
+      "film": "bio89",
+      "from": 5459.85,
+      "length": 3.0,
+      "priority": 4,
+      "what": "1:30:59.9, Biollante's beast-form roar as she rises at night, a falling screech into a deep growl."
+     },
+     "won": {
+      "film": "bio89",
+      "from": 5774.38,
+      "length": 2.4,
+      "priority": 4,
+      "what": "1:36:14.4, Biollante's soft, eerie dying cry, a falling wail that settles and fades as she turns to spores, over a quiet score."
+     },
+     "lost": {
+      "film": "bio89",
+      "from": 5569.05,
+      "length": 3.0,
+      "priority": 4,
+      "what": "1:32:49, Godzilla's pained roar as Biollante's vine mouths bite into his hands, ending as it falls away."
+     }
+    }
+   }
+  },
+  {
+   "name": "DESTOROYAH",
+   "slug": "destoroyah",
+   "source": "destoroyah.c",
+   "headers": [
+    "intricate_kit.h"
+   ],
+   "seconds": 180,
+   "panel_color": "#3a0008",
+   "title_color": "#ff3c28",
+   "hud": {
+    "title": "DESTOROYAH",
+    "line": "WAVE 1: 3 MORE  -  CLOSER PAYS MORE",
+    "counters": [
+     [
+      "WAVE",
+      "1/3",
+      "THE SWARM"
+     ],
+     [
+      "KILLS",
+      "0/3",
+      "0"
+     ],
+     [
+      "CITY",
+      "3",
+      "HITS TO TAKE"
+     ]
+    ],
+    "timer": {
+     "label": "PERFECT",
+     "icon": "claw"
+    },
+    "gauge": {
+     "label": "KILLS",
+     "kind": "segment",
+     "count": 5,
+     "colours": [
+      [
+       255,
+       200,
+       0
+      ],
+      [
+       255,
+       158,
+       8
+      ],
+      [
+       255,
+       115,
+       15
+      ],
+      [
+       255,
+       72,
+       22
+      ],
+      [
+       255,
+       30,
+       30
+      ]
+     ]
+    }
+   },
+   "recipe": {
+    "clips": {
+     "intro": {
+      "film": "des95",
+      "from": 3576.1,
+      "length": 4.4,
+      "crop": "fill",
+      "what": "Crab-like juvenile Destoroyahs crawl up out of the smoking ground by the waterfront in daylight, 0:59:36."
+     },
+     "loop": {
+      "film": "des95",
+      "from": 3553.0,
+      "length": 13.9,
+      "crop": "fill",
+      "what": "SDF tanks and trucks draw up in a field below an elevated expressway to face the aggregates, one calm shot, 0:59:13."
+     },
+     "kill": {
+      "film": "des95",
+      "from": 3704.15,
+      "length": 2.75,
+      "crop": "fill",
+      "what": "A juvenile Destoroyah beside a building is hit by the SDF freezer beam and bursts in blue light, sparks and smoke, 1:01:44."
+     },
+     "escape": {
+      "film": "des95",
+      "from": 3637.0,
+      "length": 2.3,
+      "crop": "fill",
+      "what": "A juvenile Destoroyah, struck by sparks, rears up and lunges toward a yellow SDF vehicle in the foreground, 1:00:37."
+     },
+     "wave": {
+      "film": "des95",
+      "from": 4151.5,
+      "length": 3.5,
+      "crop": "fill",
+      "what": "A glittering red swarm of aggregates converges and the giant aggregate form of Destoroyah takes shape out of it, 1:09:11."
+     },
+     "boss": {
+      "film": "des95",
+      "from": 5046.95,
+      "length": 4.9,
+      "crop": "fill",
+      "what": "The perfect form of Destoroyah in close-up, eye glowing and jaws open, roars through blue mist, 1:24:07."
+     },
+     "won": {
+      "film": "des95",
+      "from": 5540.5,
+      "length": 4.2,
+      "crop": "fill",
+      "what": "Destoroyah crashes down in a burst of sparks and lies sprawled on the ground, wings crumpled, 1:32:20."
+     },
+     "lost": {
+      "film": "des95",
+      "from": 4854.0,
+      "length": 3.05,
+      "crop": "fill",
+      "what": "A run of shots: Destoroyah's purple micro-oxygen beam strikes Godzilla in a shower of sparks and he disappears in a fiery explosion, 1:20:54."
+     }
+    },
+    "music": {
+     "film": "des95",
+     "from": 4002.337,
+     "length": 25.09,
+     "what": "Ifukube's pounding brass battle music as the flying form of Destoroyah attacks the city and crowds flee, 1:06:42."
+    },
+    "calls": {
+     "kill": {
+      "film": "des95",
+      "from": 2322.58,
+      "length": 1.42,
+      "priority": 3,
+      "what": "A sharp explosion bursts against a juvenile Destoroyah in the night street, 0:38:42."
+     },
+     "escape": {
+      "film": "des95",
+      "from": 2111.82,
+      "length": 1.4,
+      "priority": 3,
+      "what": "A juvenile Destoroyah shrieks in close-up, horns crackling with lightning, as it turns on the riot police, 0:35:11."
+     },
+     "wave": {
+      "film": "des95",
+      "from": 4895.6,
+      "length": 2.15,
+      "priority": 4,
+      "what": "Destoroyah roars in close-up at the airport, a harsh rasping cry, 1:21:35."
+     },
+     "boss": {
+      "film": "des95",
+      "from": 5084.65,
+      "length": 2.5,
+      "priority": 4,
+      "what": "The perfect form of Destoroyah screeches in close-up with its jaws wide open, 1:24:44."
+     },
+     "won": {
+      "film": "des95",
+      "from": 5607.32,
+      "length": 3.0,
+      "priority": 4,
+      "what": "A huge explosion engulfs Destoroyah as Godzilla's ray strikes it, 1:33:27."
+     },
+     "lost": {
+      "film": "des95",
+      "from": 4889.4,
+      "length": 2.9,
+      "priority": 4,
+      "what": "Godzilla cries out in pain, glowing and staggering, after Destoroyah's beam hits him, 1:21:29."
+     }
+    }
+   }
+  }
+ ],
+ "about_calls": "Each call rides a stock request that can carry one of a mode's own (mode_sounds.Carriers.calls: 21 on Godzilla Premium/LE 1.16), SHARED across modes: every mode's call is its own record, swapped in for its own play, so the six examples carry all 25 of their calls (hud-layers). Within one mode each call takes another carrier. A cue a card does not carry plays the game's own call or nothing (pad_mode_assets.h)."
+}

@@ -292,7 +292,8 @@ def test_open_project_reveals_the_folder(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ buttons
 @pytest.mark.parametrize("method,cb", [
     ("export_pack", "on_export"), ("import_pack", "on_import"),
-    ("port", "on_port_mods"), ("transfer", "on_transfer_mods")])
+    ("port", "on_port_mods"), ("transfer", "on_transfer_mods"),
+    ("whats_new", "on_whats_new")])
 def test_buttons_start_the_run_logic(tmp_path, monkeypatch, method, cb):
     with web_app(tmp_path, mfr="stern") as w:
         hits = []
@@ -394,8 +395,73 @@ def test_port_guards(tmp_path):
         w.call("modpack.port")
         pick = w.asked[-1]
         assert pick["kind"] == "file" and pick["multiple"] is True
-        assert pick["title"].startswith("Stock card image(s) to port onto")
+        assert pick["title"].startswith("New card image(s) to port onto")
         assert w.state("shell")["running"] is False
+        # PAD-1388: a card typed into the form needs no picker, but one that
+        # is not there is refused before anything starts
+        w.call("ui.set", "modpack", "port_imgs", str(tmp_path / "gone.raw"))
+        w.answers.append("yes")
+        n = len(w.asked)
+        w.call("modpack.port")
+        assert [a["title"] for a in w.asked[n:]] == [
+            "No staged mods found", "Card image not found"]
+        assert w.state("shell")["running"] is False
+
+
+def test_port_form_defaults_the_build_folder_to_the_cards(tmp_path):
+    """PAD-1388: the new card image is picked in the form; the build folder
+    follows it until the user picks their own."""
+    raw = tmp_path / "cards" / "king_kong_le-1_00_0.Release.16G.sdcard.raw"
+    raw.parent.mkdir()
+    raw.write_bytes(b"\0" * 16)
+    with web_app(tmp_path, mfr="stern") as w:
+        w.call("ui.set", "modpack", "port_imgs", str(raw))
+        w.drain()
+        st = w.state("modpack")
+        assert st["port_out"] == str(raw.parent)
+        assert st["imgs_ver"].startswith("1.00.0")
+        w.call("ui.set", "modpack", "port_out", str(tmp_path / "mine"))
+        w.call("ui.set", "modpack", "port_imgs", str(raw) + "; " + str(raw))
+        w.drain()
+        assert w.state("modpack")["port_out"] == str(tmp_path / "mine")
+
+
+def test_whats_new_compares_the_new_card_with_the_project(tmp_path,
+                                                          monkeypatch):
+    """PAD-1388: What's new reuses (or makes) the port's own extract of the
+    new card, lists what it adds against the project's version, writes the
+    full list beside the builds and says whether the modes can run."""
+    from pinball_decryptor.core import mod_port
+    from tests.test_version_news import _pair
+    old, new = _pair(tmp_path)
+    raw = tmp_path / "cards" / "king_kong_le-1_00_0.Release.16G.sdcard.raw"
+    raw.parent.mkdir()
+    raw.write_bytes(b"\0" * 16)
+    out = tmp_path / "builds"
+    job = mod_port.plan_ports(old, [str(raw)], str(out))[0]
+    os.makedirs(out)
+    os.rename(new, job["workspace"])            # the extract is already made
+    with web_app(tmp_path, mfr="stern") as w:
+        monkeypatch.setattr(
+            type(w.app._current_mfr), "mode_news",
+            lambda self, r, project=None, progress=None, cancel=None:
+                "Modes can run on King Kong LE 1.00.", raising=False)
+        _set_project(w, old)
+        w.call("ui.set", "modpack", "port_imgs", str(raw))
+        w.call("ui.set", "modpack", "port_out", str(out))
+        n = len(w.asked)
+        w.call("modpack.whats_new")
+        spec = _wait_for(w, "What's new: done")
+        assert "1.00.0 adds 1 video, 1 sound, 1 picture and 1 text line."             in spec["message"]
+        assert all(a.get("kind") != "file" for a in w.asked[n:])
+        news = w.state("modpack")["news"]
+        assert [x["card"] for x in news] == [raw.name]
+        assert news[0]["modes"] == "Modes can run on King Kong LE 1.00."
+        video = news[0]["kinds"][0]
+        assert (video["kind"], video["added"]) == ("video",
+                                                   ["SKULL_ISLAND.mp4"])
+        assert os.path.isfile(news[0]["report"])
+        assert os.path.dirname(news[0]["report"]) == str(out)
 
 
 def test_transfer_and_port_do_nothing_without_the_capability(tmp_path):
@@ -429,3 +495,71 @@ def test_stock_extract_found_for_an_old_extract_off_a_modified_card(tmp_path):
         w.call("ui.set", "modpack", "oldstock", "")
         w.drain()
         assert w.window.transfer_oldstock_var.get() == ""
+
+
+# ---- PAD-1050: a file of modes picked on the Mod Pack tab --------------------------
+def _modes_zip(path):
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("pad_modes.json", json.dumps({
+            "format": 1, "kind": "pad-modes", "modes": ["kiryu"],
+            "from": {"label": "Godzilla Premium/LE 1.16"}}))
+        zf.writestr("modes/kiryu/assets.json", json.dumps({"name": "SUPER X2"}))
+    return str(path)
+
+
+def _gz_extract(tmp_path):
+    from pinball_decryptor.core.checksums import generate_checksums
+    dst = tmp_path / "gz"
+    (dst / "audio").mkdir(parents=True)
+    (dst / "audio" / "idx0000.wav").write_bytes(b"stock")
+    (dst / ".extract_source.json").write_text(json.dumps(
+        {"input_name": "godzilla_le-1_16_0_spike2.Release.8G.sdcard.raw"}), encoding="utf-8")
+    generate_checksums(str(dst))
+    return dst
+
+
+def _loads(w, monkeypatch):
+    got = []
+    modes = w.window.service("modes")
+    monkeypatch.setattr(modes, "_visible", True, raising=False)
+    monkeypatch.setattr(modes, "load_file", lambda path=None, **k: got.append(path))
+    return got
+
+
+@pytest.mark.parametrize("answer", ["yes", "no"])
+def test_import_of_a_file_of_modes_offers_the_modes_tab(tmp_path, monkeypatch, answer):
+    dst = _gz_extract(tmp_path)
+    z = _modes_zip(tmp_path / "Godzilla modes v38 - Premium-LE 1.16 mod pack.zip")
+    with web_app(tmp_path, mfr="stern") as w:
+        got = _loads(w, monkeypatch)
+        _set_project(w, str(dst))
+        w.answers.extend([z, answer])
+        w.call("modpack.import_pack")
+        ask = _wait_for(w, "Import Mod Pack")
+        assert "file of modes, not a mod pack" in ask["message"]
+        assert "SUPER X2" in ask["message"] and "Godzilla Premium/LE 1.16" in ask["message"]
+        assert "Nothing to Import" not in _titles(w)
+        w.drain()
+        assert got == ([z] if answer == "yes" else [])
+        if answer == "yes":
+            assert w.state("shell")["tab"] == "modes"
+    assert sorted(os.listdir(dst / "audio")) == ["idx0000.wav"]
+
+
+def test_transfer_from_an_unzipped_file_of_modes_offers_the_modes_tab(tmp_path, monkeypatch):
+    dst = _gz_extract(tmp_path)
+    folder = tmp_path / "Godzilla modes v38 - Premium-LE 1.16 mod pack"
+    with zipfile.ZipFile(_modes_zip(tmp_path / "m.zip")) as zf:
+        zf.extractall(folder)
+    with web_app(tmp_path, mfr="stern") as w:
+        got = _loads(w, monkeypatch)
+        w.call("ui.set", "modpack", "src", str(folder))
+        w.call("ui.set", "modpack", "dst", str(dst))
+        w.answers.append("yes")
+        w.call("modpack.transfer")
+        ask = _wait_for(w, "Transfer Mods")
+        assert "folder holds a file of modes, unzipped" in ask["message"]
+        w.drain()
+        assert len(got) == 1 and got[0].endswith(".zip")
+        with zipfile.ZipFile(got[0]) as zf:
+            assert sorted(zf.namelist()) == ["modes/kiryu/assets.json", "pad_modes.json"]

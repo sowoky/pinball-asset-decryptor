@@ -17,7 +17,7 @@ import sys
 import threading
 from collections import deque
 
-from ...core import runtime
+from ...core import root_session, runtime
 
 # Prevent console windows from flashing when launched via pythonw.exe on Windows
 _CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -296,13 +296,19 @@ class WslExecutor(CommandExecutor):
 
 
 class NativeExecutor(CommandExecutor):
-    """Execute commands natively on Linux using sudo (or directly as root)."""
+    """Native Linux.  Root when the app is root or sudo asks no password, and
+    otherwise the USER's own shell (with /usr/sbin on PATH): nothing these
+    commands do needs root (partclone and debugfs on the user's own files,
+    gpg, tar), and ``sudo bash -c`` from a desktop launcher has no terminal to
+    ask a password on, so every command failed (PAD-1173; the Stern
+    executor's PAD-314)."""
 
     def _cmd_prefix(self):
-        """Use sudo unless already running as root (e.g. inside Docker)."""
         if hasattr(os, "getuid") and os.getuid() == 0:
             return ["bash", "-c"]
-        return ["sudo", "bash", "-c"]
+        if root_session.passwordless_sudo():
+            return ["sudo", "bash", "-c"]
+        return ["bash", "-c"]
 
     def run(self, bash_cmd, timeout=120):
         full_cmd = [*self._cmd_prefix(), bash_cmd]
@@ -314,6 +320,7 @@ class NativeExecutor(CommandExecutor):
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
+                env=root_session.user_env(),
             )
         except subprocess.TimeoutExpired as e:
             raise CommandError(bash_cmd, -1, f"Command timed out after {timeout}s") from e
@@ -334,6 +341,7 @@ class NativeExecutor(CommandExecutor):
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=root_session.user_env(),
         )
 
         with self._lock:
@@ -383,6 +391,20 @@ class DockerExecutor(CommandExecutor):
         self._container_running = False
         self._host_mounts = []
 
+    def _cli(self):
+        try:
+            from ...webui.emulate_core import docker_cli
+            return docker_cli() or "docker"
+        except Exception:
+            return "docker"
+
+    def _env(self):
+        try:
+            from ...webui.emulate_core import docker_env
+            return docker_env(cli=self._cli())
+        except Exception:
+            return None
+
     def _dockerfile_path(self):
         """Find the bundled Dockerfile."""
         # Check inside the package directory first
@@ -410,8 +432,8 @@ class DockerExecutor(CommandExecutor):
         """Build the Docker image if it doesn't exist."""
         try:
             result = subprocess.run(
-                ["docker", "image", "inspect", _DOCKER_IMAGE],
-                capture_output=True, timeout=15,
+                [self._cli(), "image", "inspect", _DOCKER_IMAGE],
+                capture_output=True, timeout=15, env=self._env(),
             )
             if result.returncode == 0:
                 return  # Image exists
@@ -426,12 +448,13 @@ class DockerExecutor(CommandExecutor):
         build_dir = os.path.dirname(dockerfile)
         try:
             result = subprocess.run(
-                ["docker", "build", "-t", _DOCKER_IMAGE, "-f", dockerfile, build_dir],
+                [self._cli(), "build", "-t", _DOCKER_IMAGE, "-f", dockerfile, build_dir],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 timeout=300,
+                env=self._env(),
             )
             if result.returncode != 0:
                 raise CommandError("docker build", result.returncode,
@@ -453,8 +476,8 @@ class DockerExecutor(CommandExecutor):
 
         # Stop any leftover container
         subprocess.run(
-            ["docker", "rm", "-f", _DOCKER_CONTAINER],
-            capture_output=True, timeout=15,
+            [self._cli(), "rm", "-f", _DOCKER_CONTAINER],
+            capture_output=True, timeout=15, env=self._env(),
         )
 
         mount_args = []
@@ -468,7 +491,7 @@ class DockerExecutor(CommandExecutor):
                 self._host_mounts.append(hp)
 
         cmd = [
-            "docker", "run", "-d",
+            self._cli(), "run", "-d",
             "--name", _DOCKER_CONTAINER,
             "--privileged",
             *mount_args,
@@ -484,6 +507,7 @@ class DockerExecutor(CommandExecutor):
                 encoding="utf-8",
                 errors="replace",
                 timeout=30,
+                env=self._env(),
             )
             if result.returncode != 0:
                 raise CommandError("docker run", result.returncode,
@@ -499,8 +523,8 @@ class DockerExecutor(CommandExecutor):
             return
         try:
             subprocess.run(
-                ["docker", "rm", "-f", _DOCKER_CONTAINER],
-                capture_output=True, timeout=30,
+                [self._cli(), "rm", "-f", _DOCKER_CONTAINER],
+                capture_output=True, timeout=30, env=self._env(),
             )
         except Exception:
             pass
@@ -513,7 +537,7 @@ class DockerExecutor(CommandExecutor):
                 "Docker container not running. Call start_container() first.")
 
         full_cmd = [
-            "docker", "exec", _DOCKER_CONTAINER,
+            self._cli(), "exec", _DOCKER_CONTAINER,
             "bash", "-c", bash_cmd,
         ]
         try:
@@ -524,6 +548,7 @@ class DockerExecutor(CommandExecutor):
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
+                env=self._env(),
             )
         except subprocess.TimeoutExpired as e:
             raise CommandError(bash_cmd, -1, f"Command timed out after {timeout}s") from e
@@ -540,7 +565,7 @@ class DockerExecutor(CommandExecutor):
                 "Docker container not running. Call start_container() first.")
 
         full_cmd = [
-            "docker", "exec", _DOCKER_CONTAINER,
+            self._cli(), "exec", _DOCKER_CONTAINER,
             "bash", "-c", bash_cmd,
         ]
         proc = subprocess.Popen(
@@ -551,6 +576,7 @@ class DockerExecutor(CommandExecutor):
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=self._env(),
         )
 
         with self._lock:
@@ -590,18 +616,22 @@ class DockerExecutor(CommandExecutor):
         return f"/host{path}"
 
     def check_available(self):
+        cli = self._cli()
+        name = "Podman" if "podman" in os.path.basename(cli).lower() else "Docker"
+        desktop = ("Podman Desktop, or run 'podman machine start'"
+                   if name == "Podman" else "Docker Desktop")
         try:
             result = subprocess.run(
-                ["docker", "info"],
-                capture_output=True, timeout=15,
+                [cli, "info"],
+                capture_output=True, timeout=15, env=self._env(),
             )
             if result.returncode == 0:
-                return True, "Docker Desktop available"
-            return False, "Docker Desktop not running. Start Docker Desktop."
+                return True, f"{name} available"
+            return False, f"{name} not running. Start {desktop}."
         except FileNotFoundError:
-            return False, "Docker not installed. Install Docker Desktop."
+            return False, f"{name} not installed. Install Docker Desktop or Podman."
         except Exception:
-            return False, "Docker check failed."
+            return False, f"{name} check failed."
 
 
 def create_executor():

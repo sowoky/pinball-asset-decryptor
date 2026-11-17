@@ -1015,6 +1015,7 @@ list of confident conclusions that turned out to be wrong — lives there.
 | Build | `build.sh`, `buildgl.sh`, `buildbridge.sh` |
 | Run | `watch.sh`, `runbridge.sh`, `nbrun.sh`, `verify2.sh`, `verify3.sh` |
 | Safety | `alive.sh`, `killgame.sh`, `runlim.sh` |
+| Record and replay a run (PAD-764) | `runrec.py` (every boot: the title's NVRAM + its switch log in `<logdir>/runs/`), `replayrun.sh` (boots one back on a free rig, exactly), `swreplay.py` |
 
 Everything else is an instrument. They were written one at a time against a
 specific wrong answer, and the handoff says which.
@@ -1371,6 +1372,11 @@ headless Xvfb with `GALLIUM_DRIVER=llvmpipe`, which is what a container with no
 GPU gets: guest **57.1 fps**, renderer **59.9 fps**. The 1 fps figure this
 project remembers is `glraster.c` running *inside* the emulated ARM guest, which
 the GL bridge replaced and which none of this uses.
+It is not free on a visible WSL run, though (PAD-497): there the renderer
+took 120-200% of a core in software against 7.5% on the GPU, and with the
+guest and the video decode beside it the window showed 19 of the game's 30
+pictures a second. `watch.sh` falls back to software when the GPU will not
+start, says why, and the Emulate tab's Renderer row says so too.
 
 Three container details are load-bearing, all in `padbox.sh`:
 
@@ -1379,6 +1385,54 @@ Three container details are load-bearing, all in `padbox.sh`:
 | `--security-opt seccomp=unconfined` | Docker's default profile blocks `unshare`, so the guest could never get its mount and PID namespaces |
 | `--cap-add SYS_ADMIN --device /dev/fuse` | `cardmount.sh`'s read-only card mount |
 | `-p 127.0.0.1:5900` | the VNC display is an unauthenticated view of the machine; loopback only |
+
+**Sound leaves through `docker exec`** (PAD-1109): `playaudio.sh`'s relay sink
+keeps the guest's PCM FIFO, and `padbox.sh`'s `host_player` runs
+`docker exec <box> python3 padrelay.py --pipe <fifo> <volume file>` piped into
+`ffplay -i pipe:0` on the Mac. It used to be a published loopback port, and
+under Colima Lima's port forwarder took the whole stream at full rate while
+ffplay received 310 KB and then nothing; docker exec rides the Docker socket
+and pushes back. **The stream is paced on the Mac** (PAD-1109): `host_player`
+runs the app's own binary with `--pace` (`PAD_PACER`, pyinstaller_entry.py;
+a developer's python with `PAD_PACER_SCRIPT`) between docker exec and ffplay,
+which is `padrelay.py --pace`: whatever arrives goes out as a continuous
+real-time stream 350 ms ahead of the clock (`PAD_AUDIO_LEAD_MS`), digital
+silence for what is late, a source more than 750 ms ahead cut back to the
+lead. The Mac's player must never wait: Colima's machine has 2 CPUs unless
+told otherwise, the box's renderer drew 14 fps there and the sound came
+through docker exec in lumps, and on a Mac a player left waiting loses the
+next second of sound while the audio queue restarts (a 3 s pause in a piped
+tone cost 1 s of the tone after it), so a game's sound was consumed in full
+and never heard while a file or a tone always played. The cushion is after
+the transport because a lead put on in the box is eaten by it (`--pipe` is
+the plain copy; `PAD_AUDIO_LEAD_MS` there is opt-in). The app also sizes
+Colima's machine to the Mac when it starts it (`colima_resource_args`: half
+the cores up to 4, 4 GiB from 16 GiB of RAM). ffplay cannot be given a new
+level while it plays, so the
+Emulate tab's Volume / Mute are applied by `padrelay.py` (PAD-957):
+`padbox.sh`'s `ctl_sync` copies `audio_ctl.json` to
+`/tmp/pad_ctl/audio_ctl.json` in the box whenever it changes, and the relay
+scales the samples. It says `[padrelay] volume -> 0.50` and, every 30 s, how
+much it sent and how loud, on stderr, which lands in the app's log. A copy,
+not a mount: the app replaces the file on every slider move, which a file
+bind mount loses.
+
+**The box's playfield window has the same Volume, Mute and Restart game as on
+Windows** (PAD-1129). It is handed `PAD_AUDIO_CTL=/tmp/pad_ctl/audio_ctl.json`,
+the relay's copy, so its Volume moves the sound in the box at once.
+`ctl_sync` carries that folder both ways through one `docker exec -i ...
+docker/boxctl.py`: the tab's volume file and the run's clip names go in; the
+window's volume, its Restart game request and its clip and sound records come
+back out into the tab's own files, so the tab's slider follows the window's
+and its Restart and Sound and video log work as on Windows. Before it the
+window had no such file and its page left those controls out.
+
+**x11vnc runs with `-threads`** (`entrypoint.sh`, PAD-805). Without it, clicks
+and keys wait in line behind the ~1.5 MB frames the server is sending. The
+picture stays smooth, but input gets later and later while the mouse moves:
+Start landed 14 s late after 20 s of mouse movement, and not within 4 minutes
+after 60 s (one CPU, Jurassic Park Pro). Threaded, it lands in 0.1 s. A loop
+restarts x11vnc if it exits.
 
 **KNOWN, and see REMAINING item 30: a container run ends by itself after about
 60 seconds.** Everything is healthy until it does — full frame rate, clean

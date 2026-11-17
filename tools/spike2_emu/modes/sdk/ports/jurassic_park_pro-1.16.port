@@ -12,6 +12,8 @@ version        1.16
 site tick             0x0044bb68 0xe92d4038 0xe3a00037
 site ball_end         0x0013a84c 0xe92d40f8 0xe30961f4
 site sound_lookup     0x002fb510 0xe92d4038 0xe1a05000
+# PAD-494/724 music modes: get_asset_descriptor, WRAPPED (sounds.cfg)
+site sound_resolve    0x0026129c 0xe92d41f0 0xe1a05820
 site score_add        0x0039a304 0xe3081492 0xe3401078
 site callout          0x00262450 0xe92d4010 0xe303e2b8
 site callout_nth      0x00262604 0xe92d4010 0xe303e2b8
@@ -48,6 +50,17 @@ site surface_find     0x005651d0 0xe92d4070 0xe24dd008
 site surface_set_video 0x0055c8b4 0xe5d030d4 0xe92d4ff0
 site surface_play     0x0055a6c0 0xe5d030d4 0xe92d43f0
 site surface_stop     0x00559e70 0xe5d030d4 0xe92d40f0
+# PAD-725: the surface's own seek, length and position (PAD-530's, from Bond 1.06): a mode's clip the game's own
+# clip took the surface from comes back where it would be by then. Placed by the James Bond LE 1.06 recipe at
+# its distances from surface_play (-0x36c / -0x6b4 / -0x510), each proven by its call: the player function it
+# calls calls gst_element_seek / query_duration / query_position.
+site surface_seek     0x0055a354 0xe92d43f0 0xe1a07003
+site surface_duration 0x0055a00c 0xe5d030d4 0xe92d40f0
+site surface_position 0x0055a1b0 0xe5d030d4 0xe92d40f0
+# PAD-725: the backdrop on the bank's surface, as Bond's (PAD-521): a mode's loop plays there again whenever it
+# is idle, and a clip the game loops there gets one pass before the loop takes it back. Emulator-proven on the
+# newest build of every title with a clip v2 bank, 2026-10-25.
+value backdrop_surface 1
 site agent_header     0x005b1f20 0xe92d40f8 0xe2505000
 site agent_begin      0x005bc88c 0xe590c004 0xe1a00001
 site balls_in_play    0x0020f564 0xe92d4010 0xe30d4a9c
@@ -301,6 +314,31 @@ lamp 30           0x8000000      CONTROL ROOM  # lamp 99, I/O group 8 index 50, 
 lamp 112          0              RAPTOR PIT FLASH  # lamp 100, I/O group 8 index 51, at 38,302
 lamp 113          0              LEFT HALFPIPE SPOTLIGHT  # lamp 101, I/O group 8 index 52, at 34,190
 lamp 47           0              SUPPLY DROP  # lamp 102, I/O group 8 index 53, at 111,297
+# ---- cabinet: cablamp <light ids R,G,B | one> <u> <name> - the expression lights, read by lamp_map.py ----
+# 0 blade pixel(s), 23 speaker light(s), placed on the cabinet drawing (PAD-1040)
+cablamp 153,154,155  41  SPEAKER 1  # lamp 132, I/O group 6 index 1, at 95,28, speaker L
+cablamp 156,157,158  125 SPEAKER 2  # lamp 133, I/O group 6 index 4, at 116,34, speaker L
+cablamp 159,160,161  208 SPEAKER 3  # lamp 134, I/O group 6 index 7, at 131,49, speaker L
+cablamp 162,163,164  291 SPEAKER 4  # lamp 135, I/O group 6 index 10, at 137,70, speaker L
+cablamp 165,166,167  375 SPEAKER 5  # lamp 136, I/O group 6 index 13, at 131,91, speaker L
+cablamp 168,169,170  458 SPEAKER 6  # lamp 137, I/O group 6 index 16, at 116,106, speaker L
+cablamp 171,172,173  541 SPEAKER 7  # lamp 138, I/O group 6 index 19, at 95,112, speaker L
+cablamp 174,175,176  625 SPEAKER 8  # lamp 139, I/O group 6 index 22, at 74,106, speaker L
+cablamp 177,178,179  708 SPEAKER 9  # lamp 140, I/O group 6 index 25, at 59,91, speaker L
+cablamp 180,181,182  791 SPEAKER 10  # lamp 141, I/O group 6 index 28, at 53,70, speaker L
+cablamp 183,184,185  875 SPEAKER 11  # lamp 142, I/O group 6 index 31, at 59,49, speaker L
+cablamp 186,187,188  958 SPEAKER 12  # lamp 143, I/O group 6 index 34, at 74,34, speaker L
+cablamp 189,190,191  45  SPEAKER 13  # lamp 144, I/O group 6 index 37, at 205,28, speaker R
+cablamp 192,193,194  136 SPEAKER 14  # lamp 145, I/O group 6 index 40, at 228,35, speaker R
+cablamp 195,196,197  227 SPEAKER 15  # lamp 146, I/O group 6 index 43, at 243,53, speaker R
+cablamp 198,199,200  318 SPEAKER 16  # lamp 147, I/O group 6 index 46, at 247,76, speaker R
+cablamp 201,202,203  409 SPEAKER 17  # lamp 148, I/O group 6 index 49, at 237,98, speaker R
+cablamp 204,205,206  500 SPEAKER 18  # lamp 149, I/O group 6 index 52, at 217,110, speaker R
+cablamp 207,208,209  590 SPEAKER 19  # lamp 150, I/O group 6 index 55, at 193,110, speaker R
+cablamp 210,211,212  681 SPEAKER 20  # lamp 151, I/O group 6 index 58, at 173,98, speaker R
+cablamp 213,214,215  772 SPEAKER 21  # lamp 152, I/O group 6 index 61, at 163,76, speaker R
+cablamp 216,217,218  863 SPEAKER 22  # lamp 153, I/O group 6 index 64, at 167,53, speaker R
+cablamp 219,220,221  954 SPEAKER 23  # lamp 154, I/O group 6 index 67, at 182,35, speaker R
 
 # PAD-363: the game's own modes a mode of ours may keep from starting (game_mode_blocks.py, from the
 # game program: each mode's start = its vtable + 8 + 4 * the title's start slot). Never a multiball.
@@ -555,3 +593,107 @@ text shake_tap              0:100:0
 text shake_short            0:200:0
 text shake_medium           0:334:0
 text shake_rumble           0:2000:2
+
+# ---- PAD-473: the game's own mini-wizards (MODE_SDK.md "The game's own mini-wizards on the other titles"): each one's
+# mode object, started by its own START (v[21]) as the game's rules start it and asked its ACTIVE (v[27]);
+# the names and what earns each are the game's rulesheet's, the objects this build's own (stock_scan_cpp).
+data  wizard_obj_1    0x00728f6c   # cmode_visitor_center, a multiball
+text  wizard_name_1   Visitor's Center
+text  wizard_film_1   MAP spelled after a level 4 paddock
+data  wizard_obj_2    0x007292d4   # its object in the mode table (the block lines'), built at run time
+text  wizard_name_2   Museum Mayhem
+text  wizard_film_2   all four T-Rex events, then T-REX
+data  wizard_obj_3    0x007294c8   # its object in the mode table (the block lines'), built at run time
+text  wizard_name_3   Secure Control Room
+text  wizard_film_3   all three Control Room modes
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+value challenge_on_flag   18
+site  challenge_balls     0x0022c244 0xe92d4030 0xe1a05000
+site  challenge_extra_ball 0x00321b4c 0xe30b3280 0xe3403073
+site  challenge_menu      0x000e382c 0xe1a06000 0xe3160080
+site  challenge_menu_pick 0x000e385c 0xe51330c4 0xe3530000
+value challenge_menu_pick_back 196
+value challenge_menu_list_at   508
+value challenge_menu_count_at  60
+value challenge_menu_cap       9
+value challenge_menu_entry     20
+value challenge_menu_kind      0
+value challenge_menu_slot      -1
+value challenge_menu_sets_on   1
+value challenge_menu_caption   1921
+site  challenge_end_ball  0x002116b0 0xe3082492 0xe3402078
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x0020d520 0xe92d4010 0xe30d4a9c
+value ball_launch_flag       12
+value ball_launch_wait_flag  13
+
+# ---- PAD-663: the game's champions for a mode's challenge game, read off this build's own code (portchallenge.py) ----
+# PAD-640: the game's end-of-game high scores (a mode's challenge game keeps the mode's own)
+site  challenge_scores       0x0048f1e4 0xe92d4ff0 0xe24dd0bc
+site  challenge_score_entry  0x0048e718 0xe1a03000 0xe30c09f4
+# PAD-663: its question to the bus before it files a player under a category's entry ({player, category +2, entry +4}): in a mode's challenge game only the mode's record says yes
+site  challenge_scores_gate  0x0048f450 0xebf61d9f 0xe3500000
+value challenge_scores_gate_id       91
+value challenge_scores_gate_cat_at   2
+value challenge_scores_gate_entry_at 4
+# PAD-663: the category table (36 bytes each; +28 the entry list a category's insert shifts) and its count
+data  challenge_scores_table 0x006dc620
+data  challenge_scores_count 0x005da26c
+# PAD-663: HIGHEST SCORES, whose first entry a mode's challenge game goes in as the mode's own record
+value challenge_scores_cat   1
+# PAD-663: the champion page function(s) (each called per category; the attract mode's is the one it calls): a mode's challenge champion is shown on it after the lowest category the attract mode shows
+site  challenge_pages_0     0x000226ac 0xe308c0dc 0xe340c078
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x0048f1e4 0xe92d4ff0 0xe24dd0bc
+
+# PAD-710: the game's own mode framework (mode_framework.py, from this build's program): what one of its
+# modes writes as it starts and stops, so a mode of ours in one's place counts as it
+site  mode_player            0x0022c214 0xe30230bc 0xe340306c
+value mode_slot_stop         24
+value mode_stopped_at        0xc3
+value mode_starts_at         0xd8
+value mode_slot_stopped_get  32   # PAD-716: the mode's own "stopped?" (mode, player)
+value mode_slot_stopped_set  55   # PAD-716: its own "mark stopped" (mode, value, player)
+site  mode_started           0x00139978 0xe3510018 0xe92d4008
+data  mode_manager           0x0072516c
+value mode_id_at             4
+
+# PAD-782: the attract mode's page table (portattract.py); an owner's attract items play between its pages
+data  attract_table       0x006bd8a0
+value attract_entry_size  16
+value attract_page_at     4
+value attract_count       75
+site  attract_sleep       0x00408da4 0xe30830d8 0xe3403078
+# PAD-782: the scene show an attract item's page puts the video bank's scene on the glass with
+site  attract_show        0x0046384c 0xe92d4070 0xe30840dc
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x0058fd8c 0xe5d13000 0xe3530008
+site coil_off              0x0058be78 0xe3510008 0xe1a02001
+data sw_struct             0x0073b294
+
+# ---- PAD-1017: co-op play (portcoop.py, read off this build's program) ----
+site  coop_player_change 0x0022c374 0xe92d41f0 0xe24dd008
+site  coop_add_player    0x0022c1b4 0xe92d4038 0xe3a00051
+data  coop_player        0x006c20bc
+data  coop_players       0x0072e978
+site  coop_first_ball    0x004a7554 0xebf61353 0xe1a04000
+site  coop_icon_draw         0x003d0e5c 0xebfffdf3 0xe1560004
+
+# ---- PAD-1202: co-op play - the ball start's "player N, you're up" call's read of the player up (portcoop.py) ----
+site  coop_up_call           0x000de6b4 0xeb0536d6 0xe2404001
+
+# ---- PAD-1316: co-op play - the game start's adds of the Insider lobby's players, made while ball 1 waits (portcoop.py) ----
+site  coop_start_game        0x004a7774 0xe92d47f0 0xe30d4e64
+site  coop_lobby_add         0x004a789c 0xebfffea3 0xe2506000
+
+# ---- PAD-1028: co-op awards - the game's audit add (portcoop.py, read off this build's program) ----
+site  audit_add              0x0021d13c 0xe92d43f0 0xe2505000

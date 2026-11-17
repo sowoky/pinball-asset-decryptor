@@ -28,8 +28,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from ...core.lazy_import import lazy_module
+
+# numpy and PIL load on first use, not with this module (PAD-797)
+np = lazy_module("numpy")
+Image = lazy_module("PIL.Image")
+ImageDraw = lazy_module("PIL.ImageDraw")
+ImageFont = lazy_module("PIL.ImageFont")
 
 from . import mode_project as MP
 from . import scene_write as SW
@@ -93,6 +98,32 @@ def load_art(path, max_w=1360, max_h=768):
     return np.asarray(img)
 
 
+def check_picture(src):
+    """Raise ``OSError`` / ``ValueError`` unless *src* (a path or a file object) decodes whole: every pixel, not
+    just PIL's ``verify()``, which checks a PNG's chunk checksums and never inflates its data (PAD-1192: a PNG
+    with damaged image data passed it)."""
+    with Image.open(src) as im:
+        im.load()
+
+
+def clean_still(src, out_png):
+    """PAD-1192: the picture *src* decoded whole by PIL and saved again at *out_png* as a plain PNG (its first
+    frame, RGB or RGBA) - what a looped still (``ffmpeg -loop 1 -i``) is made from. ffmpeg retries a picture it
+    cannot decode forever under ``-loop 1`` (its ``-t`` counts frames out, and none come), so a damaged picture hung
+    the build with no word; and an animated PNG has no ``-loop`` at all. Raises ``ValueError`` naming the file
+    when PIL cannot read it either."""
+    try:
+        with Image.open(src) as im:
+            im.load()
+            im = im.convert("RGBA" if ("A" in im.getbands() or "transparency" in im.info) else "RGB")
+    except Exception as e:                              # noqa: BLE001 - say which file and why
+        raise ValueError("%s is not a picture that reads whole (%s) - open it in an image editor and save it "
+                         "again, or pick another" % (os.path.basename(str(src)), e)) from None
+    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
+    im.save(out_png, "PNG", compress_level=1)
+    return out_png
+
+
 # ---- the clip -----------------------------------------------------------------------------
 def _encode_args(ffmpeg, out):
     return [ffmpeg, "-v", "error", "-y"], ["-c:v", "libx264", "-profile:v", "baseline", "-level", "3.0",
@@ -147,12 +178,33 @@ def render_title_clip(out, title, w, h, seconds, panel_color, title_color, ffmpe
         raise ModeAssetError("ffmpeg could not encode the title clip: %s" % err.strip()[-300:])
 
 
-def convert_clip(src, out, w, h, ffmpeg, max_seconds=30):
+#: PAD-530: a person's own video is kept up to this long. It was 30 s, so a video made as long as its
+#: mode ran out mid-mode (Jim-Beam's Bond mode: the clip ended at 30 000 ms and the game's own video
+#: played for the rest). 300 s is the longest a mode's clock runs (the Modes tab's seconds).
+#: A title card keeps its own 1-30 s, and a cut from a film its own limit (film_cut.MAX_SECONDS).
+MODE_CLIP_MAX_SECONDS = 300
+
+
+def burned_picture(src, ffmpeg):
+    """PAD-562: the picture inside black bars burned into a person's own video, ``(w, h, x, y)``
+    (:func:`.film_cut.detect_picture`, what From a film leaves out), or None. luvthatapex's
+    920x416 Bond video was a 16:9 letterboxed film fitted into 920x416, so its picture sat in
+    black on all four sides and the TV showed it small in the middle."""
+    from . import film_cut as FC
+    try:
+        return FC.detect_picture(src, ffmpeg)
+    except (FC.FilmCutError, OSError, ValueError):
+        return None
+
+
+def convert_clip(src, out, w, h, ffmpeg, max_seconds=MODE_CLIP_MAX_SECONDS):
     """A user's own video, made into what the bank plays: the bank's size (letterboxed,
-    never stretched), 30 fps, silent, and no longer than ``max_seconds``."""
+    never stretched), 30 fps, silent, and no longer than ``max_seconds``. Black bars burned
+    into the video are cut off first (:func:`burned_picture`), so its picture fills the frame."""
     head, tail = _encode_args(ffmpeg, out)
-    vf = ("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,fps=%d"
-          % (w, h, w, h, FPS))
+    pic = burned_picture(src, ffmpeg)
+    vf = ("%sscale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,fps=%d"
+          % ("crop=%d:%d:%d:%d," % pic if pic else "", w, h, w, h, FPS))
     cmd = head + ["-i", src, "-t", str(max_seconds), "-vf", vf] + tail
     r = subprocess.run(cmd, capture_output=True, text=True, creationflags=_NO_WINDOW)
     if r.returncode != 0 or not os.path.isfile(out):
@@ -170,10 +222,14 @@ def convert_clip(src, out, w, h, ffmpeg, max_seconds=30):
 #: ``PAD_CLIP_CACHE=0``: no clip is kept between builds (they are still made side by side).
 CLIP_CACHE_ENV = "PAD_CLIP_CACHE"
 CLIP_WORKERS = 4
-#: Clips kept at most; the least recently used go first.
-CLIP_CACHE_KEEP = 40
-#: Bump when a clip's encode changes in a way its key does not show.
-_CLIP_REV = 1
+#: Clips kept at most, and their bytes at most; the least recently used go first. PAD-609: it was
+#: 40 clips, and Godzilla's 11 modes make 76 in two batches, so each batch's prune threw out the
+#: other's and every build encoded all 76 again (35 s); a mode clip is 1-5 MB.
+CLIP_CACHE_KEEP = 1000
+CLIP_CACHE_BYTES = 1 << 30
+#: Bump when a clip's encode changes in a way its key does not show (2: PAD-562 cuts a video's
+#: burned-in bars off).
+_CLIP_REV = 2
 
 
 @dataclass(frozen=True)
@@ -234,7 +290,7 @@ def clip_key(job, ffmpeg):
                   _tool_identity(font) if font else "default font"]
     else:
         try:
-            parts += [_file_digest(job.src), 30]
+            parts += [_file_digest(job.src), MODE_CLIP_MAX_SECONDS]
         except OSError:
             parts += ["missing", job.src]     # the encode says what is wrong with it
     return hashlib.sha256(repr(parts).encode("utf-8")).hexdigest()
@@ -248,12 +304,17 @@ def _encode_clip(job, out, ffmpeg):
         convert_clip(job.src, out, job.w, job.h, ffmpeg)
 
 
-def _prune_clip_cache(folder, keep=CLIP_CACHE_KEEP):
+def _prune_clip_cache(folder, keep=CLIP_CACHE_KEEP, budget=CLIP_CACHE_BYTES):
     try:
         names = [n for n in os.listdir(folder) if n.endswith(".mp4") and ".tmp" not in n]
-        names.sort(key=lambda n: os.path.getmtime(os.path.join(folder, n)))
-        for n in (names[:-keep] if len(names) > keep else ()):
-            os.remove(os.path.join(folder, n))
+        stats = {n: os.stat(os.path.join(folder, n)) for n in names}
+        names.sort(key=lambda n: stats[n].st_mtime, reverse=True)
+        total = 0
+        for i, n in enumerate(names):
+            total += stats[n].st_size
+            # the newest is always kept, however big
+            if i and (i >= keep or total > budget):
+                os.remove(os.path.join(folder, n))
     except OSError:
         pass
 
@@ -291,7 +352,7 @@ def make_clips(jobs, ffmpeg, workers=CLIP_WORKERS, progress=None):
     lock = threading.Lock()
 
     def one(item):
-        job, path = item
+        job, path, alike = item
         tmp = "%s.%d.%d.tmp.mp4" % (path[:-4], os.getpid(), threading.get_ident())
         try:
             _encode_clip(job, tmp, ffmpeg)
@@ -303,22 +364,30 @@ def make_clips(jobs, ffmpeg, workers=CLIP_WORKERS, progress=None):
                 except OSError:
                     pass
         with lock:
-            done[0] += 1
+            done[0] += alike
             if progress is not None:
                 progress(done[0], len(jobs), "Making the modes' clips (%d of %d)..."
                          % (done[0], len(jobs)))
         return path
 
+    # PAD-1030: two clips of the same content (one video under two names, or two files alike) share a cache path;
+    # it is made once, or the two encodes race to rename onto it and Windows refuses the second ("Access is denied")
+    by_path = {}
+    for job, path in todo:
+        by_path.setdefault(path, []).append(job)
     if todo:
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(todo)))) as pool:
-            futures = [(job, pool.submit(one, (job, path))) for job, path in todo]
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(by_path)))) as pool:
+            futures = [(alike, pool.submit(one, (alike[0], path, len(alike)))) for path, alike in by_path.items()]
             first_error = None
-            for job, fut in futures:
+            for alike, fut in futures:
                 try:
-                    made[job] = fut.result()
+                    path = fut.result()
                 except Exception as e:                      # noqa: BLE001
                     if first_error is None:
                         first_error = e
+                    continue
+                for job in alike:
+                    made[job] = path
         if first_error is not None:
             if scratch:
                 shutil.rmtree(scratch, ignore_errors=True)
@@ -382,12 +451,26 @@ def _code_clip_jobs(project, code_clips, parsed):
 HUD_SCENE = "32e6ae280ddaec08e203a02289bb39a04968e7b0"
 
 
-def _code_huds(code, prof, hud_font):
+#: PAD-690: a picture of this name in a mode's folder is its badge's icon (any mode, any title with the HUD)
+BADGE_ICON_FILE = "badge.png"
+
+
+def _code_huds(project, code, prof, hud_font):
     """``[(slug, hud spec)]`` of the code modes with a HUD, when this title's HUD scene is Godzilla's
-    slide-outs and the card gave the game font's scene (hud-layers)."""
+    slide-outs and the card gave the game font's scene (hud-layers). A mode whose folder holds BADGE_ICON_FILE
+    wears that picture on its badge (``icon_file``) instead of a drawn icon."""
     if not hud_font or not prof.can("screen") or not (prof.lcd("hud") or "").endswith(HUD_SCENE):
         return []
-    return [(slug, dict(c.hud)) for slug, c in code or () if c.hud]
+    out = []
+    for slug, c in code or ():
+        if not c.hud:
+            continue
+        spec = dict(c.hud)
+        pic = os.path.join(MP.mode_folder(project, slug), BADGE_ICON_FILE) if project else ""
+        if pic and os.path.isfile(pic):
+            spec["icon_file"] = pic
+        out.append((slug, spec))
+    return out
 
 
 # ---- the whole build -----------------------------------------------------------------------
@@ -410,7 +493,7 @@ def mode_file_name(slot):
 
 
 def build(project, stock_hud, stock_bank, out_dir, ffmpeg=None, only=None, code=None, prof=None,
-          progress=None, stock_font=b"", hud_font=b""):
+          progress=None, stock_font=b"", hud_font=b"", stock_select=b""):
     """Build every mode in ``project`` (or the slugs in ``only``) from the stock scenes.
 
     ``stock_hud`` / ``stock_bank`` are the stock bytes of the title's HUD scene and video
@@ -428,7 +511,10 @@ def build(project, stock_hud, stock_bank, out_dir, ffmpeg=None, only=None, code=
 
     ``hud_font`` (hud-layers) is the card's scene that holds the game's own font
     (``mode_hud.GAME_FONT_SCENE``): with it, each code mode's HUD goes into Godzilla's slide-outs scene
-    in the same pass as the screens."""
+    in the same pass as the screens.
+
+    ``stock_select`` (PAD-707) is the card's battle selection scene (``battle_select.REL``), the card's own (a Heisei
+    card's is Heisei's): with new monsters in the project it is written again with them on it."""
     found, broken = MP.list_modes(project)
     if broken:
         raise ModeAssetError("these modes could not be read: %s"
@@ -478,7 +564,15 @@ def build(project, stock_hud, stock_bank, out_dir, ffmpeg=None, only=None, code=
     screens = [with_layout(form_screen(project, slug, spec), spec.screen_layout)
                for slug, spec in own if spec.screen and prof.can("screen")]
     screens += _code_screens(project, code, prof)
-    huds = _code_huds(code, prof, hud_font)
+    from . import coop_play as CP                      # PAD-1031: the co-op pick's screens, in the same pass
+    if CP.wants_screens(project, prof):
+        screens += CP.pick_screens(project, words_for=CP.words_for(project))
+        screens += CP.award_screens(project)          # PAD-1028 round 2: the awards on the characters
+    huds = _code_huds(project, code, prof, hud_font)
+    select = _more_scene(project, own, code, prof, stock_select)     # PAD-707: the new monsters' tiles
+    if select is not None:
+        from . import battle_select as BS
+        write(BS.REL, select)
 
     # the clips: made first (side by side, kept between builds), then one after another into
     # the stock bank
@@ -503,10 +597,12 @@ def build(project, stock_hud, stock_bank, out_dir, ffmpeg=None, only=None, code=
     def with_screens(bank):
         return SW.add_screens(bank, screens, stock=stock_bank, font_source=stock_font)[0] if shared else bank
     made, scratch = {}, None
+    # PAD-562: every clip at the size the bank's own clips are (Bond's TV clips are not its Video's)
+    frame = _Frame(*VB.clip_frame(stock_bank)) if clips or code_clips else None
     if clips or code_clips:
         if not ffmpeg:
             raise ModeAssetError("building a clip needs ffmpeg, and none was found")
-        size = VB.parse(stock_bank)
+        size = frame
         jobs = []
         for slug, spec in clips:
             jobs.append(_first_clip_job(project, slug, spec, size))
@@ -516,7 +612,7 @@ def build(project, stock_hud, stock_bank, out_dir, ffmpeg=None, only=None, code=
     try:
         if code_clips and not clips:
             bank, _parsed = _add_code_clips(project, code_clips, stock_bank, VB.parse(stock_bank),
-                                            prof, out_dir, ffmpeg, result, made)
+                                            prof, out_dir, ffmpeg, result, made, frame=frame)
             write("%s/scene.radium" % prof.lcd("bank"), with_screens(bank))
             code_clips = []
         if clips:
@@ -528,16 +624,16 @@ def build(project, stock_hud, stock_bank, out_dir, ffmpeg=None, only=None, code=
                 rel = "%s/scene.assets/%s" % (prof.lcd("bank"), path)
                 local = os.path.join(out_dir, *rel.split("/"))
                 os.makedirs(os.path.dirname(local), exist_ok=True)
-                _place_clip(_first_clip_job(project, slug, spec, parsed), local, made, ffmpeg)
+                _place_clip(_first_clip_job(project, slug, spec, frame), local, made, ffmpeg)
                 result.files.append(rel)
                 result.new_files.append(rel)
                 bank, _info = VB.add_clip(bank, names["clip"], os.path.getsize(local), path)
                 parsed = VB.parse(bank)
                 bank, parsed = _add_second_clip(project, slug, spec, bank, parsed, prof, out_dir,
-                                                ffmpeg, result, made)
+                                                ffmpeg, result, made, frame=frame)
             if code_clips:
                 bank, parsed = _add_code_clips(project, code_clips, bank, parsed, prof, out_dir,
-                                               ffmpeg, result, made)
+                                               ffmpeg, result, made, frame=frame)
             write("%s/scene.radium" % prof.lcd("bank"), with_screens(bank))
     finally:
         if scratch:
@@ -596,11 +692,13 @@ def _modes_for_the_card(project, found):
     return out
 
 
-def _add_second_clip(project, slug, spec, bank, parsed, prof, out_dir, ffmpeg, result, made=None):
+def _add_second_clip(project, slug, spec, bank, parsed, prof, out_dir, ffmpeg, result, made=None,
+                     frame=None):
     """Item 141: a mode's SECOND clip (``clip_both`` a title card or a video file), added to
     the bank as :func:`MP.second_clip_name`. "same" plays the first clip again and adds
-    nothing. Returns the bank and its parse. ``made``: the clips :func:`make_clips` made."""
-    job = _second_clip_job(project, slug, spec, parsed)
+    nothing. Returns the bank and its parse. ``made``: the clips :func:`make_clips` made;
+    ``frame``: the clip's size (the bank's parse's when not given)."""
+    job = _second_clip_job(project, slug, spec, frame or parsed)
     if job is None:
         return bank, parsed
     path = VB.next_path(parsed)
@@ -638,6 +736,8 @@ def code_screen(project, slug, spec):
     the mode writes its own from then on."""
     names = MP.asset_names(slug)
     folder = MP.mode_folder(project, slug)
+    if getattr(spec, "screen_style", "") == "words" and not spec.screen_art:
+        return words_screen(names, spec.name)
     art = (load_art(os.path.join(folder, spec.screen_art)) if spec.screen_art
            else panel_art(spec.name, spec.panel_color, spec.title_color))
     x, y, words_at = screen_place(                     # PAD-314: a big picture stays on the glass
@@ -645,6 +745,93 @@ def code_screen(project, slug, spec):
     return dict(name=names["screen_node"], art_rgba=art, words=spec.name,
                 words_name=names["screen_text"].split(".", 1)[1],
                 x=x, y=y, words_at=words_at)
+
+
+#: PAD-521: a screen of words alone (``screen_style`` "words"): a clear picture the size of James Bond's TV frame (the
+#: video bank's surface, 218-1140 x 12-430 on the glass) at its middle, the words twice the HUD font's size in white
+WORDS_ART = (920, 200)
+WORDS_AT = (218.0, 121.0)
+WORDS_SCALE = 2.0
+
+
+def words_screen(names, words):
+    """PAD-521: the game's own look for a mode's words (James Bond: a mode's name lettered over its intro, its TOTAL over
+    the total's picture): no panel, a clear picture over the TV and the words on its middle, large and white in the
+    game's own lettering (the HUD scene's font), centred."""
+    w, h = WORDS_ART
+    art = np.zeros((h, w, 4), dtype=np.uint8)
+    # the text box is (0, -40) .. (w, 8) about the words' place, scaled about that place: centred on the picture
+    words_at = (w / 2.0 - w * WORDS_SCALE / 2.0, h / 2.0 + 16.0 * WORDS_SCALE)
+    return dict(name=names["screen_node"], art_rgba=art, words=words,
+                words_name=names["screen_text"].split(".", 1)[1],
+                x=WORDS_AT[0], y=WORDS_AT[1], words_at=words_at, words_scale=WORDS_SCALE,
+                words_rgba=(1.0, 1.0, 1.0, 1.0))
+
+
+#: PAD-547: a mode's info line ("SUPER JACKPOT = 53,200,000"): a clear strip this size, its words in white across its
+#: middle at this size, centred on the title's place for it (the port's ``text info_line_at``; Bond LE: under its status
+#: bar) or, on a title whose port names none, under where a mode's screen shows its words
+INFO_ART = (920, 40)
+INFO_SCALE = 1.0
+INFO_AT_DEFAULT = (680.0, 450.0)
+
+
+def info_screen(names, prof):
+    """PAD-547: a mode's info line - a line of words and a value under its name, as the game's own modes show one (James
+    Bond's mini-wizards: their SUPER JACKPOT under the status bar). Built as a screen of its own (``PadMode_<slug>_Info``)
+    so it goes on every title that takes screens; where it goes is the title's (:attr:`TitleProfile.info_at`)."""
+    w, h = INFO_ART
+    cx, cy = getattr(prof, "info_at", ()) or INFO_AT_DEFAULT
+    words_at = (w / 2.0 - w * INFO_SCALE / 2.0, h / 2.0 + 16.0 * INFO_SCALE)    # as words_screen: centred on the strip
+    return dict(name=names["info_node"], art_rgba=np.zeros((h, w, 4), dtype=np.uint8), words=" ",
+                words_name=names["info_text"].split(".", 1)[1],
+                x=cx - w / 2.0, y=cy - h / 2.0, words_at=words_at, words_scale=INFO_SCALE,
+                words_rgba=(1.0, 1.0, 1.0, 1.0))
+
+
+#: PAD-574: a words-alone mode's TOTAL as the game's own modes end (James Bond: "TOTAL" over the number, large, under
+#: the status bar, where the info line was): two clear strips centred this far under the title's info line place, the
+#: word at the first size and the number at the second (measured off the game's own TOTAL at 1360x768: the word 18 px
+#: high about y 522, the number 56 px about y 565, both about x 676)
+TOTAL_ART = (920, 80)
+TOTAL_NAME_DY, TOTAL_NAME_SCALE = 12.0, 0.9
+TOTAL_DY, TOTAL_SCALE = 55.0, 2.8
+
+
+def total_screens(names, prof):
+    """PAD-574: the two screens of a words-alone mode's TOTAL (``PadMode_<slug>_TotalName`` and ``_Total``), built
+    blank (a screen is built shown, and a mode that never finds them must show nothing): the mode writes "TOTAL" and its
+    number into them at its end and shows them for its moment."""
+    w, h = TOTAL_ART
+    cx, cy = getattr(prof, "info_at", ()) or INFO_AT_DEFAULT
+    out = []
+    for node, text, dy, scale in ((names["total_name_node"], names["total_name_text"], TOTAL_NAME_DY, TOTAL_NAME_SCALE),
+                                  (names["total_node"], names["total_text"], TOTAL_DY, TOTAL_SCALE)):
+        out.append(dict(name=node, art_rgba=np.zeros((h, w, 4), dtype=np.uint8), words=" ",
+                        words_name=text.split(".", 1)[1], x=cx - w / 2.0, y=cy + dy - h / 2.0,
+                        words_at=(w / 2.0 - w * scale / 2.0, h / 2.0 + 16.0 * scale), words_scale=scale,
+                        words_rgba=(1.0, 1.0, 1.0, 1.0)))
+    return out
+
+
+#: PAD-709: a words-alone mode's scored shot as the game's own mini-wizards show one (James Bond: the points, large and
+#: white, under the status bar - not over the TV): a clear strip centred this far under the title's info line place, the
+#: number at this size (the game's own at 1360x768: condensed digits about 140 px high, 1,000,000 about 700 px wide,
+#: about y 620, x 678; the HUD font is wider, so 5x: about 100 px high and 760 wide, emulator-measured)
+POINTS_ART = (920, 40)             # clear: only its middle matters (the number is drawn about it, larger)
+POINTS_DY, POINTS_SCALE = 110.0, 5.0
+
+
+def points_screen(names, prof):
+    """PAD-709: the screen of a words-alone mode's scored shot (``PadMode_<slug>_Points``), built blank: a Words or
+    Award block with a number, while the mode runs, writes the number into it and shows it for its moment (its info
+    line hidden meanwhile), so the game's video above stays clear."""
+    w, h = POINTS_ART
+    cx, cy = getattr(prof, "info_at", ()) or INFO_AT_DEFAULT
+    return dict(name=names["points_node"], art_rgba=np.zeros((h, w, 4), dtype=np.uint8), words=" ",
+                words_name=names["points_text"].split(".", 1)[1], x=cx - w / 2.0, y=cy + POINTS_DY - h / 2.0,
+                words_at=(w / 2.0 - w * POINTS_SCALE / 2.0, h / 2.0 + 16.0 * POINTS_SCALE), words_scale=POINTS_SCALE,
+                words_rgba=(1.0, 1.0, 1.0, 1.0))
 
 
 #: PAD-323: what a mode's ``screen_layout`` holds (MODE_PARAMETERS.md), all optional: the
@@ -760,15 +947,35 @@ def code_words_at(art):
 def _code_screens(project, code, prof):
     """The screens of the project's code modes (:func:`code_screen`, laid out as each one's
     ``screen_layout`` says), for :func:`build`'s one pass over the HUD scene."""
-    return [with_layout(code_screen(project, slug, spec), getattr(spec, "screen_layout", None))
-            for slug, spec in code or () if spec.screen and prof.can("screen")]
+    out = [with_layout(code_screen(project, slug, spec), getattr(spec, "screen_layout", None))
+           for slug, spec in code or () if spec.screen and prof.can("screen")]
+    # PAD-547: a mode's info line, a screen of its own wherever the title's port puts one
+    out += [with_layout(info_screen(MP.asset_names(slug), prof), getattr(spec, "info_layout", None))
+            for slug, spec in code or () if getattr(spec, "info_line", False) and prof.can("screen")]
+    # PAD-574: a words-alone screen's TOTAL, where the game's own modes put theirs; PAD-709: and its scored shots
+    return out + [s for slug, spec in code or ()
+                  if spec.screen and getattr(spec, "screen_style", "") == "words" and prof.can("screen")
+                  for s in total_screens(MP.asset_names(slug), prof)
+                  + [with_layout(points_screen(MP.asset_names(slug), prof), getattr(spec, "points_layout", None))]]
 
 
-def _add_code_clips(project, code_clips, bank, parsed, prof, out_dir, ffmpeg, result, made=None):
+def _more_scene(project, forms, code, prof, stock):
+    """PAD-707: the card's battle selection scene with the project's new monsters on it (form and code modes), or
+    None when it has none."""
+    from . import more_kaiju as MK
+    try:
+        return MK.scene(project, code, prof, forms, stock)
+    except MK.MoreKaijuError as e:
+        raise ModeAssetError(str(e))
+
+
+def _add_code_clips(project, code_clips, bank, parsed, prof, out_dir, ffmpeg, result, made=None,
+                    frame=None):
     """The code modes' start clips into the bank, after the form modes' (``PadMode_<slug>_Clip``),
     each made into the bank's format like a form mode's own video. Returns the bank and its parse.
-    ``made``: the clips :func:`make_clips` made."""
-    for job, name in _code_clip_jobs(project, code_clips, parsed):
+    ``made``: the clips :func:`make_clips` made; ``frame``: their size (the bank's parse's when
+    not given)."""
+    for job, name in _code_clip_jobs(project, code_clips, frame or parsed):
         path = VB.next_path(parsed)
         rel = "%s/scene.assets/%s" % (prof.lcd("bank"), path)
         local = os.path.join(out_dir, *rel.split("/"))
@@ -783,7 +990,7 @@ def _add_code_clips(project, code_clips, bank, parsed, prof, out_dir, ffmpeg, re
 
 @dataclass
 class _Frame:
-    """A clip's frame size, where the bank's parse would give it."""
+    """A clip's frame size, where the bank's parse would give it (PAD-562: :func:`.video_bank.clip_frame`)."""
     width: int
     height: int
 

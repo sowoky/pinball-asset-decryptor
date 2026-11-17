@@ -114,6 +114,16 @@ def _not_a_session(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_linux_root(monkeypatch):
+    """Every test is a Linux desktop with no password-free root (PAD-871),
+    whatever the machine running it: a CI runner's sudo asks no password, and
+    asked for real it would turn on the root launch under tests that never
+    meant one.  A test of that launch pins ``_LINUX_ROOT`` itself."""
+    from pinball_decryptor.webui import emulate_core
+    monkeypatch.setattr(emulate_core, "_LINUX_ROOT", [None, True])
+
+
+@pytest.fixture(autouse=True)
 def _isolate_title_cache(tmp_path_factory, monkeypatch):
     """Every test gets its own empty per-build cache (title_reader.cache_dir: ports and
     tables worked out on this machine), so no test reads or writes the developer's own,
@@ -143,6 +153,16 @@ def preview_modes_on(monkeypatch):
     real = preview.enabled
     monkeypatch.setattr(preview, "enabled",
                         lambda feature: feature == "modes" or real(feature))
+
+
+@pytest.fixture
+def preview_modes_off(monkeypatch):
+    """The mode maker back as a PREVIEW, switched off: how every copy without a code ran
+    it until PAD-763 released it (``preview.RELEASED``). The tests of the switch's off
+    path - which a feature that is a preview again takes - run under this."""
+    from pinball_decryptor.core import preview
+    monkeypatch.setattr(preview, "RELEASED", {})
+    monkeypatch.setattr(preview, "FEATURES", {"modes": "Mode maker"})
 
 
 @pytest.fixture
@@ -215,6 +235,9 @@ def _isolate_title_cache_session(tmp_path_factory):
     derived is never read by a test (every port lookup reads that folder) and a test's
     is never left in ``%LOCALAPPDATA%``. A test that wants its own sets the variable."""
     os.environ["PAD_TITLE_CACHE"] = str(tmp_path_factory.mktemp("title_cache"))
+    # PAD-1307: a test that starts a rig must never turn off timesyncd in the
+    # developer's own distros (core/timesync.py runs real wsl.exe calls).
+    os.environ["PAD_KEEP_TIMESYNC"] = "1"
 
 
 

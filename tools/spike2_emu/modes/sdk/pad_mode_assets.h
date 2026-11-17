@@ -19,8 +19,16 @@
  *                                                 an event (pa_clip_event) or at the end
  *                                                 (pa_clip_full)
  *     music  125 618                              the music carrier, and this mode's own bed (a sid)
+ *     bed    swamp 619                            PAD-658: a further bed by name (a sid; a swapped one is a
+ *                                                 `swap ... music:swamp` line), switched to with pa_music_bed
  *     call   sever 1251 1850 4                    a call of its own: cue, carrier request, its own
  *     call   spike 1249 700 3                     length in ms, and its priority on the voice bus
+ *     sid    1251 65537 call:sever                 (PAD-595) the build put the sound in a sound bank
+ *                                                 of the mode's own: while the call plays on its
+ *                                                 carrier request, the request is pointed at that
+ *                                                 bank's sound id (pm_sound_sid) and its own list
+ *                                                 put back once the call is over; the music's bed
+ *                                                 in a bank is the `music` line's sid
  *     swap   927 a20a51102c1c0020 d1eaa8b4ae100000 call:sever
  *                                                 item 163: the build appended the sound as a record
  *                                                 NO descriptor names; while it plays on request 927
@@ -83,8 +91,9 @@
 #define PA_POLL_MS          500
 #define PA_FILE_MAX         8192
 #define PA_SWAPS_MAX        24          /* the calls and the music, each swapped in (item 163) */
+#define PA_BEDS_MAX         6           /* PAD-658: further music beds, switched to by name (pa_music_bed) */
 #define PA_SWAP_TAG         24          /* "call:<cue>" or "music", with its 0 */
-#define PA_CLIPS_MAX        12          /* hud-layers: clips by cue */
+#define PA_CLIPS_MAX        32          /* hud-layers: clips by cue (PAD-1030: was 12) */
 #define PA_BLOCK_MAX        128         /* PAD-363: the game's mode ids `block_modes` may list */
 
 #define PA_UNUSED __attribute__((unused))
@@ -99,10 +108,14 @@ struct pa_assets {
     struct { char cue[PA_CUE]; char name[PA_NAME]; } clips[PA_CLIPS_MAX];   /* hud-layers: by cue */
     unsigned n_clips;
     unsigned music, music_sid;            /* 0 = no music of its own */
+    struct { char name[PA_CUE]; unsigned sid; } beds[PA_BEDS_MAX];   /* PAD-658: `bed <name> <sid>` */
+    unsigned n_beds;
     struct pa_call calls[PA_CALLS_MAX];
     unsigned n_calls;
     struct { unsigned request; unsigned char keys[16]; char tag[PA_SWAP_TAG]; } swaps[PA_SWAPS_MAX];   /* item 163 */
     unsigned n_swaps;
+    struct { unsigned request, sid; char tag[PA_SWAP_TAG]; } points[PA_SWAPS_MAX];   /* PAD-595: bank sids */
+    unsigned n_points;
     int give_way;                         /* PAD-347: `game_modes give_way` - it does not block the game's modes */
     unsigned char block_ids[PA_BLOCK_MAX];   /* PAD-363: `block_modes <id> ...` - which of the game's modes it holds off */
     int block_n;                          /* ... how many (0 = every one the port names) */
@@ -112,8 +125,8 @@ struct pa_assets {
     int running;                          /* between pa_start and pa_end */
     unsigned long clip_due;               /* pm_ms() the start clip plays at; 0 = none */
     unsigned long shot_until[PA_CALLS_MAX];   /* a priority-3 call still sounds until then */
-    struct { unsigned request, prio, ms, holder; const unsigned char *swap; unsigned long due, deadline; const char *cue; } waiting[PA_WAITING_MAX];
-    struct { unsigned request; unsigned long due; } stops[PA_STOPS_MAX];
+    struct { unsigned request, prio, ms, holder, sid; const unsigned char *swap; unsigned long due, deadline; const char *cue; } waiting[PA_WAITING_MAX];
+    struct { unsigned request; unsigned long due; int pointed; } stops[PA_STOPS_MAX];
     unsigned long next_poll;
     unsigned music_restarts;
 };
@@ -132,6 +145,7 @@ struct pa_music_state {
     unsigned bus1[4];                     /* what held the music bus at the last look (logged on a change) */
     int nbus1;
     unsigned long check_due;              /* after the end: look at the music bus once, then */
+    int ducked, duck_said;                /* PAD-678: ours is down under a call of the mode's; said so once */
 };
 __attribute__((weak, visibility("hidden"))) struct pa_music_state pa_music;
 
@@ -194,6 +208,27 @@ static PA_UNUSED const unsigned char *pa_swap_of(struct pa_assets *a, unsigned r
     return 0;
 }
 
+/* PAD-595: the bank sound id `request` is pointed at while this mode's sound plays on it, or 0 */
+static PA_UNUSED unsigned pa_sid_of(struct pa_assets *a, unsigned request, const char *tag)
+{
+    unsigned i;
+    for (i = 0; request && i < a->n_points; i++)
+        if (a->points[i].request == request && (!tag || !a->points[i].tag[0] || pa_is(a->points[i].tag, tag)))
+            return a->points[i].sid;
+    return 0;
+}
+
+static PA_UNUSED unsigned pa_sid_of_call(struct pa_assets *a, const struct pa_call *c)
+{
+    char tag[PA_SWAP_TAG];
+    unsigned i = 0, j;
+    const char *p = "call:";
+    while (*p && i + 1 < sizeof tag) tag[i++] = *p++;
+    for (j = 0; c->cue[j] && i + 1 < sizeof tag; j++) tag[i++] = c->cue[j];
+    tag[i] = 0;
+    return pa_sid_of(a, c->request, tag);
+}
+
 /* the swap of the call `cue` */
 static PA_UNUSED const unsigned char *pa_swap_of_call(struct pa_assets *a, const struct pa_call *c)
 {
@@ -244,6 +279,23 @@ static PA_UNUSED void pa_parse_line(struct pa_assets *a, const char *s)
     } else if (pa_is(key, "music")) {
         if (pa_word(&s, w, sizeof w)) a->music = pa_num(w);
         if (pa_word(&s, w, sizeof w)) a->music_sid = pa_num(w);
+    } else if (pa_is(key, "bed") && a->n_beds < PA_BEDS_MAX) {       /* PAD-658: bed <name> <sid> */
+        unsigned i;
+        if (!pa_word(&s, w, sizeof w) || !w[0]) return;
+        for (i = 0; w[i] && i + 1 < PA_CUE; i++) a->beds[a->n_beds].name[i] = w[i];
+        a->beds[a->n_beds].name[i] = 0;
+        if (!pa_word(&s, w, sizeof w) || !(a->beds[a->n_beds].sid = pa_num(w))) return;
+        a->n_beds++;
+    } else if (pa_is(key, "sid") && a->n_points < PA_SWAPS_MAX) {     /* PAD-595 */
+        unsigned r, v, i;
+        if (!pa_word(&s, w, sizeof w) || !(r = pa_num(w))) return;
+        if (!pa_word(&s, w, sizeof w) || !(v = pa_num(w))) return;
+        a->points[a->n_points].tag[0] = 0;
+        if (pa_word(&s, w, sizeof w))                            /* whose: "call:<cue>" */
+            for (i = 0; w[i] && i + 1 < PA_SWAP_TAG; i++) a->points[a->n_points].tag[i] = w[i], a->points[a->n_points].tag[i + 1] = 0;
+        a->points[a->n_points].request = r;
+        a->points[a->n_points].sid = v;
+        a->n_points++;
     } else if (pa_is(key, "swap") && a->n_swaps < PA_SWAPS_MAX) {
         unsigned r, n = 0, i;
         if (!pa_word(&s, w, sizeof w) || !(r = pa_num(w))) return;
@@ -297,6 +349,7 @@ static PA_UNUSED int pa_load(struct pa_assets *a)
     a->looked = a->loaded = 1;
     a->n_calls = 0;
     a->music = a->music_sid = 0;
+    a->n_beds = 0;
     a->clip_start[0] = 0;
     a->n_clips = 0;
     a->keep_n = 0;
@@ -340,17 +393,18 @@ static PA_UNUSED int pa_request_prio(unsigned request)
 }
 
 /* stop <request> once its own <ms> have played (faded, never cut); a new play moves the time */
-static PA_UNUSED void pa_stop_after(struct pa_assets *a, unsigned request, unsigned ms)
+static PA_UNUSED void pa_stop_after(struct pa_assets *a, unsigned request, unsigned ms, int pointed)
 {
     unsigned long due;
     int i, free_i = -1;
-    if (!request || !ms) return;
+    if (!request) return;
+    if (!ms) { if (!pointed) return; ms = 3000; }   /* PAD-595: a pointed carrier gets its list back */
     due = pm_ms() + ms + ms / 8 + 120;
     for (i = 0; i < PA_STOPS_MAX; i++) {
-        if (a->stops[i].request == request) { a->stops[i].due = due; return; }
+        if (a->stops[i].request == request) { a->stops[i].due = due; a->stops[i].pointed |= pointed; return; }
         if (!a->stops[i].request && free_i < 0) free_i = i;
     }
-    if (free_i >= 0) { a->stops[free_i].request = request; a->stops[free_i].due = due; }
+    if (free_i >= 0) { a->stops[free_i].request = request; a->stops[free_i].due = due; a->stops[free_i].pointed = pointed; }
 }
 
 /* 1 if <request> is one of this mode's own calls */
@@ -408,7 +462,7 @@ static PA_UNUSED int pa_try(struct pa_assets *a, unsigned request, unsigned prio
 static PA_UNUSED int pa_call(struct pa_assets *a, const char *cue)
 {
     int k, i, free_i = -1;
-    unsigned holder = 0;
+    unsigned holder = 0, sid;
     struct pa_call *c;
     const unsigned char *swap;
     pa_load(a);
@@ -425,10 +479,17 @@ static PA_UNUSED int pa_call(struct pa_assets *a, const char *cue)
                cue, c->request);
         return 0;
     }
+    sid = pa_sid_of_call(a, c);
+    if (sid && !pm_sound_sid(c->request, sid)) {    /* PAD-595: a call in a sound bank of its own */
+        pm_log("own sound: call %s (%u) NOT played - its carrier could not be pointed at sound id %u (no request table in the port)",
+               cue, c->request, sid);
+        return 0;
+    }
     a->shot_until[k] = pm_ms() + c->ms;
     if (pa_try(a, c->request, c->prio, cue, 1, &holder)) {
-        pm_log("own sound: call %s (%u) played", cue, c->request);
-        pa_stop_after(a, c->request, c->ms);
+        if (sid) pm_log("own sound: call %s (%u) played (sound id %u, its own in a sound bank)", cue, c->request, sid);
+        else pm_log("own sound: call %s (%u) played", cue, c->request);
+        pa_stop_after(a, c->request, c->ms, sid != 0);
         return 1;
     }
     for (i = 0; i < PA_WAITING_MAX; i++) {
@@ -444,6 +505,7 @@ static PA_UNUSED int pa_call(struct pa_assets *a, const char *cue)
     a->waiting[free_i].ms = c->ms;
     a->waiting[free_i].cue = c->cue;
     a->waiting[free_i].swap = swap;
+    a->waiting[free_i].sid = sid;
     a->waiting[free_i].holder = holder;
     a->waiting[free_i].due = pm_ms() + 70;
     a->waiting[free_i].deadline = pm_ms() + (c->prio <= 3 ? 800u : 1500u);
@@ -486,9 +548,10 @@ static PA_UNUSED void pa_music_start_now(void)
 static PA_UNUSED void pa_music_begin(struct pa_assets *a)
 {
     unsigned reqs[8], buses[8], carry;
-    int n, i;
+    int n, i, fading;
     if (!a->music) return;
     carry = pa_music.after_game;          /* the last mode's music still fading: the game's music */
+    fading = pa_music.after_request == a->music;
     pa_music.after_request = pa_music.after_game = 0;
     pa_music.request = a->music;
     pa_music.sid = a->music_sid;
@@ -496,6 +559,7 @@ static PA_UNUSED void pa_music_begin(struct pa_assets *a)
     pa_music.owner = a->folder;
     pa_music.game = 0;
     for (i = 0; i < 4; i++) pa_music.silenced[i] = 0;
+    pa_music.ducked = pa_music.duck_said = 0;
     a->music_restarts = 0;
     if (a->music_sid)
         pm_log("own sound: music %u plays its own bed, sound id %u%s", a->music, a->music_sid,
@@ -511,6 +575,13 @@ static PA_UNUSED void pa_music_begin(struct pa_assets *a)
         pm_sound_fade(pa_music.game, 250);
         pa_music.start_due = pm_ms() + PA_MUSIC_WAIT_MS;
         pm_log("own sound: the game's music %u fades out (250 ms) before music %u starts", pa_music.game, a->music);
+    } else if (!fading && pm_sound_active(a->music)) {
+        /* PAD-682: the game's own play of the carrier (Bond LE: Bird One Multiball's music is 94): faded first, or
+         * ours would never start - the engine does not start a request that still sounds */
+        pm_sound_fade(a->music, 250);
+        pa_music.game = carry;
+        pa_music.start_due = pm_ms() + PA_MUSIC_WAIT_MS;
+        pm_log("own sound: the game's own music on carrier %u fades out (250 ms) before the mode's starts", a->music);
     } else {
         pa_music.game = carry;
         pa_music_start_now();
@@ -538,6 +609,30 @@ static PA_UNUSED void pa_music_bus_note(const unsigned *reqs, const unsigned *bu
     pm_log("own sound: the music bus %s: %s", when ? when : "now holds", m ? words : "nothing");
 }
 
+/* PAD-678: the mode's music goes down under its own calls - a film clip's sound most of all - as the game's
+ * music does under its clips (mode_file.c's own_music_duck says what was measured: a call's speech carrier ducks
+ * the music 20 steps, the game's own clip sounds 48, so ours takes PA_MUSIC_DUCK_STEPS more while a call plays). */
+#define PA_MUSIC_DUCK_STEPS   28
+#define PA_MUSIC_DUCK_DOWN_MS 150
+#define PA_MUSIC_DUCK_UP_MS   400
+
+static PA_UNUSED void pa_music_duck(struct pa_assets *a)
+{
+    unsigned i;
+    int want = 0;
+    for (i = 0; i < a->n_calls && !want; i++)
+        if (a->calls[i].request && a->calls[i].request != a->music && pm_sound_active(a->calls[i].request)) want = 1;
+    want = want && pm_sound_active(a->music);
+    if (want == pa_music.ducked) return;
+    if (want && !pm_sound_duck(a->music, PA_MUSIC_DUCK_STEPS, PA_MUSIC_DUCK_DOWN_MS)) return;   /* no voice offsets */
+    if (!want) pm_sound_duck(a->music, 0, PA_MUSIC_DUCK_UP_MS);
+    pa_music.ducked = want;
+    if (want && !pa_music.duck_said) {
+        pa_music.duck_said = 1;
+        pm_log("own sound: music %u goes down %u steps under the mode's own calls", a->music, PA_MUSIC_DUCK_STEPS);
+    }
+}
+
 static PA_UNUSED void pa_music_under(struct pa_assets *a)
 {
     unsigned reqs[8], buses[8];
@@ -547,6 +642,7 @@ static PA_UNUSED void pa_music_under(struct pa_assets *a)
         if (pm_ms() >= pa_music.start_due) pa_music_start_now();
         return;
     }
+    pa_music_duck(a);
     if (pm_ms() < a->next_poll) return;
     a->next_poll = pm_ms() + PA_POLL_MS;
     if (pa_music.swap) pm_sound_swap(a->music, pa_music.swap, pa_music.swap + 8, -1, 0);   /* held while it runs */
@@ -565,6 +661,57 @@ static PA_UNUSED void pa_music_under(struct pa_assets *a)
     if (pm_sound_active(a->music)) return;
     if (pm_sound(a->music) && (++a->music_restarts <= 3 || a->music_restarts % 20 == 0))
         pm_log("own sound: music %u had stopped - started again (%u)", a->music, a->music_restarts);
+}
+
+/* PAD-658: switch the running music to the bed called `name` ("" = its own first bed again): the one playing fades
+ * (200 ms), the carrier is pointed at the bed's sound id (or the bed's record is swapped in), and it starts again
+ * once the fade is over. 1 = switched (or already that bed); 0 when the mode's music is not playing or the card
+ * does not carry that bed (the music plays on). */
+static PA_UNUSED int pa_music_bed(struct pa_assets *a, const char *name)
+{
+    char tag[PA_SWAP_TAG];
+    const unsigned char *swap = 0;
+    unsigned sid = 0, i, k;
+    if (!a->music || pa_music.request != a->music || pa_music.owner != a->folder) return 0;
+    if (!name || !name[0] || pa_is(name, "music")) {
+        sid = a->music_sid;
+        swap = pa_swap_of(a, a->music, "music");
+    } else {
+        for (i = 0; i < a->n_beds; i++)
+            if (pa_is(a->beds[i].name, name)) sid = a->beds[i].sid;
+        for (k = 0; k + 1 < PA_SWAP_TAG && "music:"[k]; k++) tag[k] = "music:"[k];
+        for (i = 0; name[i] && k + 1 < PA_SWAP_TAG; i++) tag[k++] = name[i];
+        tag[k] = 0;
+        if (!sid)
+            for (i = 0; i < a->n_swaps; i++)
+                if (a->swaps[i].request == a->music && pa_is(a->swaps[i].tag, tag)) swap = a->swaps[i].keys;
+        if (!sid && !swap) {
+            pm_log("own sound: music bed %s is not on this card - the music plays on", name);
+            return 0;
+        }
+    }
+    if (sid == pa_music.sid && swap == pa_music.swap) return 1;
+    pm_sound_fade(a->music, 200);
+    if (pa_music.swap && pa_music.swap != swap)       /* the old bed's swap lasts out the fade only */
+        pm_sound_swap(a->music, pa_music.swap, pa_music.swap + 8, -1, 200);
+    if (sid) pm_sound_sid(a->music, sid);
+    else if (pa_music.sid) pm_sound_sid(a->music, 0);   /* the carrier's own list again: a swap plays on it */
+    pa_music.sid = sid;
+    pa_music.swap = swap;
+    pa_music.start_due = pm_ms() + PA_MUSIC_WAIT_MS;
+    pm_log("own sound: music %u switches to %s%s (%s %u)", a->music, name && name[0] ? "the bed " : "its own bed",
+           name && name[0] ? name : "", sid ? "sound id" : "swapped record, request", sid ? sid : a->music);
+    return 1;
+}
+
+/* PAD-682: the carrier's own priority and steal flag back once the mode's music is over: the game may play that
+ * request itself (Bond LE 1.06: music carrier 94 is Bird One Multiball's music), and with the flag left cleared its
+ * next music could not take the bus back - Bird One's played on through the rest of the game. */
+static PA_UNUSED void pa_music_stock(unsigned request)
+{
+    int was = pm_sound_priority_stock(request), now = pm_sound_priority(request, -1, -1);
+    if (was >= 0 && now != was)
+        pm_log("own sound: music %u has its own priority and flags again (%d, %d)", request, now >> 8, now & 0xff);
 }
 
 static PA_UNUSED void pa_music_finish(struct pa_assets *a)
@@ -602,6 +749,7 @@ static PA_UNUSED void pa_music_after(void)
     if (!pa_music.after_request || pm_ms() < pa_music.after_due) return;
     if (pm_sound_active(pa_music.after_request)) { pa_music.after_due = pm_ms() + 50; return; }
     pm_sound_sid(pa_music.after_request, 0);
+    pa_music_stock(pa_music.after_request);
     if (pa_music.after_game && pm_in_game())
         pm_log("own sound: music %u (%s's) faded out; the game's music %u %s", pa_music.after_request,
                pa_music.after_owner ? pa_music.after_owner : "?", pa_music.after_game,
@@ -672,7 +820,8 @@ static PA_UNUSED void pa_end(struct pa_assets *a)
         pm_log("own clip %s dropped before it played: the mode ended first", a->clip_start);
         a->clip_due = 0;
     }
-    if (pa_clip_name(a, "loop")) pm_backdrop(0);        /* hud-layers: the city again */
+    /* hud-layers: the city again - the runtime takes the loop away at pm_end, or (PAD-658) once the ending it holds
+     * the screen for is over: the loop stays behind its TOTAL, where the game's live map labels were */
     pa_music_finish(a);
 }
 
@@ -692,7 +841,9 @@ static PA_UNUSED void pa_tick(struct pa_assets *a)
         if (pm_sound_fade(a->stops[i].request, 40))
             pm_log("own sound: call %u stopped - its own sound is over, the rest of the record is silence",
                    a->stops[i].request);
+        if (a->stops[i].pointed) pm_sound_sid(a->stops[i].request, 0);   /* PAD-595: its own list back */
         a->stops[i].request = 0;
+        a->stops[i].pointed = 0;
     }
     for (i = 0; i < PA_WAITING_MAX; i++) {
         unsigned holder = 0;
@@ -703,7 +854,7 @@ static PA_UNUSED void pa_tick(struct pa_assets *a)
         if (pa_try(a, a->waiting[i].request, a->waiting[i].prio, a->waiting[i].cue, 0, &holder)) {
             pm_log("own sound: call %s (%u) played (after waiting for the voice bus)", a->waiting[i].cue,
                    a->waiting[i].request);
-            pa_stop_after(a, a->waiting[i].request, a->waiting[i].ms);
+            pa_stop_after(a, a->waiting[i].request, a->waiting[i].ms, a->waiting[i].sid != 0);
             a->waiting[i].request = 0;
             continue;
         }
@@ -715,6 +866,7 @@ static PA_UNUSED void pa_tick(struct pa_assets *a)
             else
                 pm_log("own sound: call %s (%u) NOT played - the voice bus did not come free in time",
                        a->waiting[i].cue, a->waiting[i].request);
+            if (a->waiting[i].sid) pm_sound_sid(a->waiting[i].request, 0);   /* PAD-595 */
             a->waiting[i].request = 0;
         } else {
             a->waiting[i].due = now + 70;

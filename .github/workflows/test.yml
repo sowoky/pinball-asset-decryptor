@@ -52,9 +52,12 @@ jobs:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     # A wedged or looping test should fail the job, not hang for the
-    # 6-hour default and hold up a release.  Healthy runs take about 2
-    # minutes per leg.
-    timeout-minutes: 15
+    # 6-hour default and hold up a release.  Healthy runs take about 10
+    # minutes on Linux and 11-15 on macOS, whose slower runners passed the
+    # old 15-minute cap at 98% with nothing failing (PAD-550).  By
+    # 2026-11 the macOS test step alone took 18-25 minutes, and a slow
+    # runner passed the 30-minute cap at 98% the same way (PAD-1368).
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -79,7 +82,7 @@ jobs:
           # are listed by the "Flaky tests" step below: delete them.
           # pyyaml: the P-ROC and American Pinball rigs read their machine
           # yaml (tools/proc_emu, tools/ap_emu), and their tests with them.
-          pip install pytest pytest-xdist pytest-rerunfailures pycryptodome pyyaml
+          pip install pytest pytest-xdist pytest-rerunfailures pycryptodome pyyaml olefile
           # Pillow is in requirements.txt — Williams' DMD render
           # path (dmd_render.py, capture_pipeline.py) imports it at
           # module load, so missing it causes the Williams plugin
@@ -97,6 +100,17 @@ jobs:
       - name: Install gpg (macOS)
         if: runner.os == 'macOS'
         run: brew install gnupg
+
+      # e2fsprogs: the CGC Extract/Write round trip on a built installer
+      # (tests/test_cgc_mac_portable.py) - the Mac's own dd/wc/find with the
+      # e2fsprogs the macOS app ships, built by the same script the DMG build
+      # runs and found through PAD_E2FSPROGS_DIR, with no Homebrew copy: a
+      # user's Mac has none (PAD-571, PAD-573).
+      - name: Build the app's own e2fsprogs (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          bash installer/build_mac_e2fsprogs.sh "$RUNNER_TEMP/e2fsprogs"
+          echo "PAD_E2FSPROGS_DIR=$RUNNER_TEMP/e2fsprogs" >> "$GITHUB_ENV"
 
       - name: Run tests (Linux)
         if: runner.os == 'Linux'

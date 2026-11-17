@@ -204,7 +204,10 @@ def test_the_game_pictures_switched_on_are_counted(tmp_path, monkeypatch):
         slots[rel] = image_slots.ImageSlot(rel_path=rel, abs_path=str(tmp_path / n),
                                            ext=".png", info=None, size=1)
     monkeypatch.setattr(cp, "active", lambda d: None)
-    monkeypatch.setattr(cp, "any_asset_active", lambda d: True)
+    # each with a profile that changes something (PAD-528: one with No change is counted
+    # only where an earlier build changed it)
+    monkeypatch.setattr(cp, "asset_map", lambda d, kind, rels: {
+        r: cp.Profile(name="Black and white", saturation=0.0) for r in rels})
     monkeypatch.setattr(cp, "stock_image_rels",
                         lambda d, assigned=(): sorted(set(slots) - set(assigned)))
     monkeypatch.setattr(cp, "built_image_on", lambda d: [])
@@ -400,6 +403,8 @@ def test_the_override_build_shows_its_own_steps(monkeypatch, tmp_path):
     monkeypatch.setattr(rig, "overrides_reason", lambda *a, **k: "first run")
     monkeypatch.setattr(E, "read_override_manifest", lambda out: None)
     monkeypatch.setattr(E, "stamp_override_manifest", lambda *a, **k: None)
+    # a set there to patch (a first one says so: tests/test_pad863_first_set_notice.py)
+    monkeypatch.setattr(E, "override_set_kept", lambda out, card: True)
     monkeypatch.setattr(tab, "_scene_edits_on", lambda: True, raising=False)
     monkeypatch.setattr(tab, "_live_ready", lambda a, o, env: env, raising=False)
     monkeypatch.setattr(tab, "_with_override_modes", lambda o, env: env, raising=False)
@@ -459,13 +464,13 @@ def test_cancel_says_so_at_once_and_until_the_work_stops(monkeypatch):
     tab._preparing = "Converting videos: 3 of 658 (about 15 minutes left)"
     assert tab.toggle() is True
     assert tab._cancel_prepare is True
-    assert painted[-1] == "Cancelling…"
-    assert shown["run_btn"] == {"label": "Cancelling…", "enabled": False, "mode": "busy"}
+    assert painted[-1] == "Canceling…"
+    assert shown["run_btn"] == {"label": "Canceling…", "enabled": False, "mode": "busy"}
     # what the staging says while it winds down does not take the words back
     tab._show_preparing("Converting videos: 4 of 658 (about 15 minutes left)", 1)
-    assert painted[-1] == "Cancelling…"
+    assert painted[-1] == "Canceling…"
     tab.set_preparing("Preparing your modes…")
-    assert tab._preparing == "Cancelling…"
+    assert tab._preparing == "Canceling…"
     # a second press asks nothing more
     assert tab.toggle() is True
 
@@ -493,10 +498,10 @@ def test_a_cancel_ends_the_start_after_the_staging(monkeypatch):
     monkeypatch.setattr(tab, "_paint_run_btn", lambda: None, raising=False)
     assert tab._stage_pending("C:/proj") is False
     # after the staging's own lines, which go through the app's queue
-    assert queued == [("[emulate] Cancelled: the game was not started. The 2 videos "
-                       "converted before you cancelled are kept, so the next Start goes on "
+    assert queued == [("[emulate] Canceled: the game was not started. The 2 videos "
+                       "converted before you canceled are kept, so the next Start goes on "
                        "from there.", "info")]
-    assert not any("Cancelled:" in l for l in logged)
+    assert not any("Canceled:" in l for l in logged)
     assert told == ["C:/proj"]                  # the tabs still learn what changed
     assert not any("None of the" in l for l in logged)
 
@@ -585,4 +590,4 @@ def test_a_clip_cut_off_by_cancel_is_not_called_a_failure(tmp_path, monkeypatch)
                                                    "video/c.mp4": "x"},
                "best_quality": False}
     App._stage_pending_video(_S(), str(tmp_path), staging=staging)
-    assert said[-1] == ("Applied 2 video replacement(s).  Cancelled before the rest.", "warning")
+    assert said[-1] == ("Applied 2 video replacement(s).  Canceled before the rest.", "warning")

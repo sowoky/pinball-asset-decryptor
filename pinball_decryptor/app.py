@@ -10,20 +10,28 @@ import threading
 import time
 
 from . import __version__
-from .core import build_output, desktop, modpack
+from .core import build_output, desktop, modpack, update_slots, update_splash
+from .core.atomic_file import write_json_atomic
 from .core.config import APP_NAME, SETTINGS_FILE
 from .core.extract_source import write_extract_source
 from .core.messages import (DoneMsg, LinkMsg, LogLineMsg, LogMsg, PhaseMsg,
                             PrereqMsg, ProgressMsg, UiCallMsg)
 from .core.prereqs import check_prerequisite, probes_wsl
 from .core.registry import all_manufacturers, get_manufacturer, load_plugins
-from .core.updater import (check_for_update, download_installer,
-                           install_update_macos, launch_installer_windows,
-                           restart_wsl_for_update)
+from .core.updater import (AUTO_DOWNLOAD_DEFAULT, AUTO_DOWNLOAD_KEY,
+                           check_for_update, commit_update_macos,
+                           download_installer, install_update_macos,
+                           launch_installer_windows, restart_wsl_for_update,
+                           stage_update_macos, staged_update_ok)
 from .webui import compat
 from .webui.compat import filedialog, messagebox
+from .webui.i18n import translator
 
 log = logging.getLogger(__name__)
+
+#: the download window's stand-in when there was none to close: Restart to
+#: update installs what the background download fetched (PAD-1024)
+_NO_DIALOG = type("_NoDialog", (), {"close": staticmethod(lambda: None)})()
 
 
 #: The form fields that belong to the PROJECT, not to the app (David,
@@ -61,6 +69,8 @@ PROJECT_FIELDS = (
     ("modpack_dst", "transfer_dst_var", "path", ""),
     ("modpack_oldstock", "transfer_oldstock_var", "path", ""),
     ("modpack_newimg", "transfer_newimg_var", "path", ""),
+    ("modpack_port_imgs", "port_imgs_var", "path", ""),
+    ("modpack_port_out", "port_out_var", "path", ""),
 )
 
 #: Fields anchors have carried since they first existed: a project file
@@ -210,6 +220,44 @@ def replacement_mismatch_message(assets_dir, mismatches, recorded,
             f"{'Build' if is_build else 'Export'} anyway?")
 
 
+class UiQueue(queue.Queue):
+    """The worker to UI-loop message queue: a ``put`` wakes the loop.
+
+    The loop used to poll this queue every 100 ms (PAD-797): a worker's
+    line, progress or Done waited up to that long, and the idle loop woke
+    ten times a second for nothing.  Now ``put`` schedules one drain
+    (:meth:`App._poll_queue`) through *schedule* when none is pending; the
+    drain clears the flag as it starts, so a put that lands while it runs
+    schedules the next one and nothing is ever left waiting.  A put from
+    the loop thread itself works the same way (the drain runs after the
+    current job).  ``get_nowait`` and friends are the plain queue's, so a
+    test can drain it by hand.
+    """
+
+    def __init__(self, schedule):
+        super().__init__()
+        self._schedule = schedule
+        self._pending = False
+        self._flag = threading.Lock()
+
+    def put(self, item, block=True, timeout=None):
+        super().put(item, block, timeout)
+        self.wake()
+
+    def wake(self):
+        """Schedule a drain unless one is already on its way."""
+        with self._flag:
+            if self._pending:
+                return
+            self._pending = True
+        self._schedule()
+
+    def drain_started(self):
+        """The drain is running: the next put must schedule again."""
+        with self._flag:
+            self._pending = False
+
+
 class App:
     """The run logic behind the web window.  Constructed ON the UI loop
     (``webui.host.build``) with the web UI's context: ``ctx.loop`` is the
@@ -239,7 +287,8 @@ class App:
         # wsl.exe (core.runtime answers from its cache there).
         from .core import runtime as _runtime
         _runtime.ui_thread_check = ctx.loop.in_loop
-        self.msg_queue = queue.Queue()
+        self.msg_queue = UiQueue(
+            lambda: self.root.after(0, self._poll_queue))
         self.pipeline = None
         self._active_mode = "extract"
         # Set when the user clicks Cancel; checked by the post-job chain
@@ -414,6 +463,7 @@ class App:
             on_write_cancel=self._cancel,
             on_apply_delta=self._start_apply_delta,
             on_revert_all=self._start_revert_all,
+            on_reset=self._start_reset,
             on_flash_image=self._start_flash_image,
             on_read_card=self._start_read_card,
             on_build_flash=self._on_build_flash_request,
@@ -432,6 +482,8 @@ class App:
             on_show_log_history_change=self._on_show_log_history_change,
             initial_scenes_own_colours=bool(s.get("scenes_own_colours", False)),
             on_scenes_own_colours_change=self._on_scenes_own_colours_change,
+            initial_agent_access=bool(s.get("agent_access", False)),
+            on_agent_access_change=self._on_agent_access_change,
             initial_look_switches=s.get("look_switches") or {},
             on_look_switches_change=self._on_look_switches_change,
             initial_compare_row_limit=s.get("compare_row_limit"),
@@ -446,10 +498,13 @@ class App:
             on_import=self._start_import,
             on_transfer_mods=self._start_transfer_mods,
             on_port_mods=self._start_port_mods,
+            on_whats_new=self._start_whats_new,
             on_theme_change=self._on_theme_change,
             initial_theme=saved_theme,
             on_check_updates=self._check_for_update_now,
             on_install_update=self._install_update,
+            on_update_not_now=self._cancel_pending_restart,
+            on_update_restart_now=self._restart_with_ready_now,
             initial_fda_acknowledged=bool(
                 s.get("macos_fda_acknowledged", False)),
             on_fda_acknowledge=self._on_fda_acknowledge,
@@ -463,6 +518,14 @@ class App:
             on_voice_quality_change=self._on_voice_quality_change,
             initial_update_interval=s.get("update_check_hours"),
             on_update_interval_change=self._on_update_interval_change,
+            initial_old_versions=s.get("old_versions_keep"),
+            on_old_versions_change=self._on_old_versions_change,
+            initial_update_auto_download=bool(
+                s.get(AUTO_DOWNLOAD_KEY, AUTO_DOWNLOAD_DEFAULT)),
+            on_update_auto_download_change=(
+                self._on_update_auto_download_change),
+            initial_autosave_interval=s.get("autosave_minutes"),
+            on_autosave_interval_change=self._on_autosave_interval_change,
             initial_audio_advanced=s.get("audio_advanced") or {},
             on_audio_advanced_change=self._on_audio_advanced_change,
             initial_text_grow=self._text_grow_setting(),
@@ -482,7 +545,13 @@ class App:
             on_flash_choices_change=self._on_flash_choices_change,
             initial_flashed_images=s.get("flashed_images", []),
             on_flashed_images_change=self._on_flashed_images_change,
+            initial_donations=s.get("donations") or {},
+            on_donations_change=self._on_donations_change,
+            initial_report=s.get("report") or {},
+            on_report_change=self._on_report_change,
             on_ui_zoom_change=self._on_ui_zoom_change,
+            initial_language=s.get("ui_language"),
+            on_language_change=self._on_language_change,
         )
 
     def _start_session(self):
@@ -509,6 +578,10 @@ class App:
         self._refresh_title()
         self._log_preview_startup()
         self.root.after(1500, self._check_for_update)
+        if not os.environ.get("PAD_UI_NO_UPDATE_CHECK"):
+            # captures and tests never delete the PC's real files
+            self.root.after(2500, self._prune_old_versions, True)
+        self._schedule_autosave()
 
     def accept_disclaimer(self, accepted):
         """The first-launch disclaimer, answered on the page.  Declining
@@ -519,8 +592,7 @@ class App:
         self._settings["disclaimer_accepted"] = True
         try:
             os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
-            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self._settings, f, indent=2)
+            write_json_atomic(SETTINGS_FILE, self._settings)
         except OSError:
             pass
         self._need_disclaimer = False
@@ -561,6 +633,13 @@ class App:
             pass
 
     def _on_close(self):
+        # ONCE.  An update's quit runs this itself and then closes the window
+        # (_close_for_update), and the window's own close runs it again; a
+        # second emulator shutdown would go through wsl.exe and boot the VM
+        # the first one has just shut down.
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         # THE SESSION'S STATE IS WRITTEN FIRST, BEFORE ANYTHING THAT BLOCKS.
         # It used to be written after the emulator shutdown below, and that
         # shutdown runs through wsl.exe and is bounded in TENS of seconds - so
@@ -606,45 +685,101 @@ class App:
         # A question still open on the page must not hold the loop.
         self.ctx.dialogs.cancel_all()
 
+    def _close_for_update(self):
+        """An update's quit: close down as the window's X does, then end the
+        process, which the update is waiting for.
+
+        PAD-1032 (David: "Trying to restart my pad app after update locally
+        and it never does").  In the web UI :meth:`_on_close` is what the
+        window's close RUNS - it does not close the window.  The old in-app
+        update never noticed, because its installer force-closes the app
+        (/FORCECLOSEAPPLICATIONS); Restart to update's swap helper only waits
+        for this process to exit, so the app sat there with its window up
+        and the helper gave up after three minutes.  Same for the macOS swap,
+        which waits for the pid with no limit at all."""
+        self._on_close()
+        host = getattr(getattr(self, "ctx", None), "host", None)
+        quit_ = getattr(host, "quit_for_update", None)
+        if quit_ is not None:
+            quit_()
+
     # ------------------------------------------------------------------
     # Queue polling — bridge background threads to the UI loop.
     # ------------------------------------------------------------------
 
+    #: The longest one turn of :meth:`_poll_queue` hands messages on before
+    #: the loop's other work gets its turn (seconds).
+    POLL_TURN_S = 0.05
+
     def _poll_queue(self):
-        try:
-            while True:
-                msg = self.msg_queue.get_nowait()
-                if isinstance(msg, LogMsg):
-                    self.window.append_log(msg.text, msg.level)
-                elif isinstance(msg, LinkMsg):
-                    self.window.append_log_link(msg.text, msg.url)
-                elif isinstance(msg, PhaseMsg):
-                    self.window.set_phase(msg.index, mode=self._active_mode)
-                elif isinstance(msg, ProgressMsg):
-                    self.window.set_progress(
-                        msg.current, msg.total, msg.desc, mode=self._active_mode)
-                elif isinstance(msg, LogLineMsg):
-                    self.window.update_log_line(msg.key, msg.text, msg.level)
-                elif isinstance(msg, DoneMsg):
-                    self._on_done(msg.success, msg.summary)
-                elif isinstance(msg, UiCallMsg):
-                    # A UI call whose target went away while it was queued
-                    # must not stop the polling.
-                    try:
-                        msg.fn()
-                    except Exception:
-                        log.exception("a queued UI call failed")
-                elif isinstance(msg, PrereqMsg):
-                    # Drop stale results if the user switched mfrs while
-                    # the worker was still running.
-                    if (self._current_mfr is not None and
-                            self._current_mfr.key == msg.mfr_key):
-                        self.window.set_prereq_result(
-                            msg.result.name, msg.result.ok,
-                            msg.result.message, msg.result.install_hint)
-        except queue.Empty:
-            pass
-        self.root.after(100, self._poll_queue)
+        # A TURN ENDS, EMPTY QUEUE OR NOT (PAD-505, DragonRR: "PAD locked up
+        # ... Needs visual sign that it is working").  Emulate's Start staging
+        # a whole game's pictures under a color profile logs two lines a
+        # picture, 11,622 for Godzilla's 5,811, and on a busy PC the worker
+        # put them here faster than this loop wrote them out.  The turn ran
+        # until the queue was empty, so it did not end: 89 s on end in a
+        # stand-in of his PC, and every other job on this one loop waited
+        # behind it - the State line's paint (it sat at "Converting
+        # pictures: 5 of 5,811" while the log scrolled on), every button,
+        # Send log.  Now a turn stops after POLL_TURN_S and the next comes
+        # straight after whatever else is waiting, and the turn's log lines
+        # reach the log files in one write, not two file opens a line.
+        #
+        # A turn starts when a worker's put wakes the loop (UiQueue,
+        # PAD-797), not on a 100 ms poll: the flag is cleared here, first,
+        # so a put that lands during this turn schedules the next one.
+        from .core import session_log
+        q = self.msg_queue
+        started = getattr(q, "drain_started", None)
+        if started is not None:
+            started()
+        deadline = time.monotonic() + self.POLL_TURN_S
+        more = False
+        with session_log.batched():
+            try:
+                while True:
+                    if time.monotonic() >= deadline:
+                        more = True
+                        break
+                    msg = self.msg_queue.get_nowait()
+                    if isinstance(msg, LogMsg):
+                        self.window.append_log(msg.text, msg.level)
+                    elif isinstance(msg, LinkMsg):
+                        self.window.append_log_link(msg.text, msg.url)
+                    elif isinstance(msg, PhaseMsg):
+                        self.window.set_phase(msg.index, mode=self._active_mode)
+                    elif isinstance(msg, ProgressMsg):
+                        self.window.set_progress(
+                            msg.current, msg.total, msg.desc, mode=self._active_mode)
+                    elif isinstance(msg, LogLineMsg):
+                        self.window.update_log_line(msg.key, msg.text, msg.level)
+                    elif isinstance(msg, DoneMsg):
+                        self._on_done(msg.success, msg.summary)
+                    elif isinstance(msg, UiCallMsg):
+                        # A UI call whose target went away while it was queued
+                        # must not stop the polling.
+                        try:
+                            msg.fn()
+                        except Exception:
+                            log.exception("a queued UI call failed")
+                    elif isinstance(msg, PrereqMsg):
+                        # Drop stale results if the user switched mfrs while
+                        # the worker was still running.
+                        if (self._current_mfr is not None and
+                                self._current_mfr.key == msg.mfr_key):
+                            self.window.set_prereq_result(
+                                msg.result.name, msg.result.ok,
+                                msg.result.message, msg.result.install_hint)
+            except queue.Empty:
+                pass
+        if more:
+            # straight back after the others' turn (once: a put that already
+            # scheduled the next turn is not doubled)
+            wake = getattr(q, "wake", None)
+            if wake is not None:
+                wake()
+            else:
+                self.root.after(0, self._poll_queue)
 
     # ------------------------------------------------------------------
     # Manufacturer switching
@@ -1218,21 +1353,177 @@ class App:
                 "installer/install_prerequisites.ps1.")
             return
 
-        # A worker thread: ShellExecuteEx waits for the UAC answer, and the
-        # started-check then waits out its grace period.
-        threading.Thread(target=self._run_install_prereqs_win,
+        # A worker thread: the route is decided by asking wsl.exe, which
+        # must never wait on the interface thread; ShellExecuteEx then waits
+        # for the UAC answer, and the started-check out its grace period.
+        threading.Thread(target=self._install_prereqs_win_route,
                          args=(script,), daemon=True).start()
 
-    def _run_install_prereqs_win(self, script):
+    def _install_prereqs_win_route(self, script):
+        """Install Missing on Windows: the ONE step this PC is missing
+        (PAD-1103, core.prereq_launch.pick_route) - WSL2 alone, the app's
+        own Linux, or the full prerequisite installer as before."""
+        from .core import prereq_launch
+        try:
+            route, rows, state = self._install_route_win()
+        except Exception:                               # noqa: BLE001
+            route, rows, state = prereq_launch.ROUTE_SCRIPT, [], ""
+        if route == prereq_launch.ROUTE_SCRIPT:
+            self._run_install_prereqs_win(script)
+            return
+        self.msg_queue.put(UiCallMsg(
+            lambda: self._offer_install_route_win(route, rows, state,
+                                                  script)))
+
+    def _install_route_win(self):
+        """(route, names of the missing WSL-side rows, runtime state).
+        Asks wsl.exe: worker thread only."""
+        from .core import prereq_launch, prereqs, runtime
+        results = getattr(self, "_prereq_results", None) or {}
+        mfr = self._current_mfr
+        rows = [p.name for p in tuple(getattr(mfr, "prerequisites", ())
+                                      or ())
+                if p.name in results and not results[p.name].ok
+                and prereqs.probes_wsl(p)]
+        if not rows:
+            return prereq_launch.ROUTE_SCRIPT, rows, ""
+        state = runtime.status(refresh=True)[0]
+        route = prereq_launch.pick_route(
+            True, prereqs._wsl_status_ok(), state,
+            restart_pending=prereqs._wsl_restart_pending())
+        return route, rows, state
+
+    def _offer_install_route_win(self, route, rows, state, script):
+        """Ask before the route's step; UI thread."""
+        from .core import prereq_launch, runtime
+        title = "Install Prerequisites"
+        if route == prereq_launch.ROUTE_WSL:
+            if messagebox.askyesno(title, prereq_launch.wsl_setup_text(rows)):
+                threading.Thread(target=self._run_install_prereqs_win,
+                                 args=(script, True), daemon=True).start()
+            return
+        answer = messagebox.askyesnocancel(title, prereq_launch.runtime_text(
+            rows, round(runtime.IMAGE.size / 1e6), stale=state == "stale"))
+        if answer is None:
+            return
+        if answer is False:
+            threading.Thread(target=self._run_install_prereqs_win,
+                             args=(script,), daemon=True).start()
+            return
+        self._install_runtime_from_prereqs()
+
+    def _install_runtime_from_prereqs(self):
+        """The app's own Linux, installed from Install Missing: a banner with
+        the download's progress, the log for the words, then a re-check so
+        the strip turns green on its own."""
+        from .core import runtime
+        from .webui import runtime_prompt
+        banner = getattr(self.window, "set_banner", None)
+        last = {"pct": None}
+
+        def show(pct):
+            if banner is None:
+                return
+            self.msg_queue.put(UiCallMsg(lambda: banner("runtime_install", {
+                "kind": "info",
+                "text": "Installing the app's own Linux (%s)... The log "
+                        "below says what it is doing." % runtime.IMAGE.version,
+                "progress": pct, "dismiss": False})))
+
+        def progress(done, total=None):
+            # the download's (bytes done, total); the import after it has no
+            # percent, so a finished download turns the bar into a spinner
+            if not total:
+                return
+            pct = int(done * 100 / total)
+            if pct >= 100:
+                pct = -1
+            if pct != last["pct"]:
+                last["pct"] = pct
+                show(pct)
+
+        def say(line):
+            self.msg_queue.put(LogMsg("[prerequisites] %s" % line, "info"))
+
+        def ask():
+            box = {}
+            done = threading.Event()
+
+            def _q():
+                try:
+                    box["yes"] = runtime_prompt.ask_before_replacing()
+                finally:
+                    done.set()
+            self.msg_queue.put(UiCallMsg(_q))
+            done.wait()
+            return bool(box.get("yes"))
+
+        def blocked(exc):
+            # runtime_prompt.offer_from_file installs on the calling thread,
+            # so the same question is asked on the UI thread and the install
+            # (a 1 GB import) goes to a worker, as on the Emulate tab
+            from .webui.emulate_rig import from_file_question
+            title, message, pick_title, filename = from_file_question(exc)
+
+            def _q():
+                if not messagebox.askyesno(title, message):
+                    return
+                path = filedialog.askopenfilename(title=pick_title,
+                                                  initialfile=filename)
+                if not path:
+                    return
+
+                def _from_file():
+                    try:
+                        replace = (ask() if runtime.status()[0] != "absent"
+                                   else False)
+                        runtime.install(log=say, source=path,
+                                        replace=replace)
+                    except Exception as e:              # noqa: BLE001
+                        say(str(e))
+                    finally:
+                        runtime.invalidate()
+                        self.msg_queue.put(UiCallMsg(self._recheck_prereqs))
+                threading.Thread(target=_from_file, daemon=True).start()
+            self.msg_queue.put(UiCallMsg(_q))
+
+        def work():
+            show(-1)
+            state = None
+            try:
+                state = runtime_prompt.ensure(say=say, progress=progress,
+                                              ask=ask, on_blocked=blocked)
+            except Exception as exc:                    # noqa: BLE001
+                say(str(exc))
+            finally:
+                runtime.invalidate()
+                if banner is not None:
+                    self.msg_queue.put(UiCallMsg(
+                        lambda: banner("runtime_install", None)))
+            if state == "ready":
+                self.msg_queue.put(LogMsg(
+                    "[prerequisites] the app's own Linux is installed; "
+                    "checking again.", "success"))
+            else:
+                self.msg_queue.put(LogMsg(
+                    "[prerequisites] the app's own Linux did not install; "
+                    "the lines above say why.", "error"))
+            self.msg_queue.put(UiCallMsg(self._recheck_prereqs))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _run_install_prereqs_win(self, script, wsl_only=False):
         """Run install_prerequisites.ps1 in an elevated PowerShell (it needs
         admin for winget install + wsl --install) and say so when that
         window never starts the script (PAD-327: a blank window on hotel
-        Wi-Fi, and the app said nothing)."""
+        Wi-Fi, and the app said nothing).  ``wsl_only``: its -WslOnly mode,
+        which switches WSL2 on and installs no distro (PAD-1103)."""
         from .core import prereq_launch
         marker = prereq_launch.new_marker_path()
         try:
             console = prereq_launch.ElevatedConsole(
-                prereq_launch.installer_args(script, marker),
+                prereq_launch.installer_args(script, marker,
+                                             wsl_only=wsl_only),
                 cwd=os.path.dirname(script))
         except Exception:
             console = None
@@ -1243,7 +1534,8 @@ class App:
             subprocess.Popen([
                 "powershell", "-NoProfile", "-Command",
                 f"Start-Process powershell -Verb RunAs -ArgumentList "
-                f"'-NoProfile -ExecutionPolicy Bypass -File \"{script}\"'",
+                f"'-NoProfile -ExecutionPolicy Bypass -File \"{script}\""
+                f"{' -WslOnly' if wsl_only else ''}'",
             ])
             return
         if console.declined:
@@ -2139,7 +2431,7 @@ class App:
     # ------------------------------------------------------------------
 
     def _start_write(self, chain_flash_device=None, again=False,
-                     chain_flash_verify=True):
+                     chain_flash_verify=True, chain_flash_keep_data=False):
         """Dispatch a Build.  ``chain_flash_device`` (the Build / flash
         dialog with both sections ticked) makes a successful build chain
         straight into flashing its output onto that device — armed only at
@@ -2381,6 +2673,7 @@ class App:
             write_kwargs["update"] = update
         self._chain_flash_after_build = (
             (chain_flash_device, output_path, bool(chain_flash_verify))
+            + ((True,) if chain_flash_keep_data else ())
             if chain_flash_device else None)
         # what _offer_bigger_card needs if this build is refused for room
         self._last_build_output = output_path
@@ -2525,11 +2818,13 @@ class App:
             target=self._run_pipeline_with_audio, args=(assets_dir,),
             daemon=True).start()
 
-    def _on_build_flash_request(self, build_path, device_path, verify=True):
+    def _on_build_flash_request(self, build_path, device_path, verify=True,
+                                keep_data=False):
         """The Build / flash dialog's build section was ticked: build to
         *build_path*, then (when *device_path* is set) chain a flash of the
         fresh build onto that card - read back afterwards unless *verify* is
-        False (the dialog's "Skip verify", PAD-217).
+        False (the dialog's "Skip verify", PAD-217), keeping the card's own
+        settings, audits and high scores with *keep_data* (PAD-736).
 
         The dialog's Build-to box may have been edited — push it back into
         the Write tab's Output Folder + File Name so ``_start_write`` (and
@@ -2539,12 +2834,13 @@ class App:
             self.window.write_output_var.set(folder)
         if name and getattr(self.window, "write_filename_var", None):
             self.window.write_filename_var.set(name)
+        keep = {"chain_flash_keep_data": True} if keep_data else {}
         self._start_write(chain_flash_device=device_path,
-                          chain_flash_verify=verify)
+                          chain_flash_verify=verify, **keep)
 
     def _start_flash_image(self, image_path, device_path, menu_only=False,
                            target=None, disk_mode=None, image=None,
-                           from_iso=None, verify=True):
+                           from_iso=None, verify=True, keep_data=False):
         """Flash a pre-built image onto a card (dd-style whole-image write).
 
         ``menu_only`` writes ONLY the boot menu partition onto a card this
@@ -2552,6 +2848,10 @@ class App:
         and the machine's own settings and scores survive it.  The core
         refuses outright if the card is not that card
         (:func:`core.rawdevice.flash_menu_to_device`).
+
+        ``keep_data`` writes the whole image but keeps the card's own
+        settings, audits and high scores (PAD-736,
+        :func:`core.rawdevice.card_data_overlay`).
 
         The image + target card were collected and confirmed by the flash
         dialog (``webui/write_dialogs.py``); this just runs the
@@ -2619,6 +2919,10 @@ class App:
         # (``flash_skip_verify``) takes it, and only when it was ticked.
         if not verify and getattr(mfr, "flash_skip_verify", False):
             extra["verify"] = False
+        # ``keep_data`` likewise: only a plugin that offers it, only ticked
+        if (keep_data and not menu_only
+                and getattr(mfr, "flash_keep_data", False)):
+            extra["keep_data"] = True
         try:
             if to_disk:
                 # ``disk_mode`` (item 124): "menu" = only the boot menu,
@@ -3071,6 +3375,21 @@ class App:
 
     def _import_inspect_worker(self, zip_path, assets_dir):
         """Worker: work out what the pack would do here, then ask."""
+        # PAD-1050: a file of modes (the Modes tab's Save to a file...) is not a
+        # mod pack: judged as one, none of its files "belong to this extract"
+        # and the box blamed the card
+        about = modpack.modes_file_about(zip_path)
+        if about is not None:
+            self.root.after(0, lambda: self._offer_modes_file(
+                zip_path, about, "Import Mod Pack"))
+            return
+        # PAD-1053: nor is a file of co-op settings (the Modes tab's co-op Save...)
+        from .plugins.stern import coop_play
+        coop = coop_play.file_about(zip_path)
+        if coop is not None:
+            self.root.after(0, lambda: self._offer_modes_file(
+                zip_path, {"coop": coop}, "Import Mod Pack"))
+            return
         try:
             plan = modpack.inspect_mod_pack(zip_path, assets_dir)
         except Exception as e:
@@ -3080,6 +3399,47 @@ class App:
             return
         self.root.after(0, lambda: self._confirm_import(
             zip_path, assets_dir, plan))
+
+    def _offer_modes_file(self, path, about, where):
+        """PAD-1050, main thread: ``path`` (a zip, or a folder one was unzipped
+        into: :func:`modpack.modes_file_about`) is a file of modes picked on
+        the Mod Pack tab. Say so, and load it on the Modes tab when asked.
+        PAD-1053: ``about`` ``{"coop": coop_play.file_about(...)}`` is a zip of
+        co-op settings instead."""
+        is_zip = not about.get("folder")
+        what = ("This zip is a file of modes, not a mod pack." if is_zip else
+                "This folder holds a file of modes, unzipped, not an extract.")
+        modes = None
+        if hasattr(self.window, "service"):
+            modes = self.window.service("modes")
+            if modes is not None and not getattr(modes, "_visible", False):
+                modes = None
+        if about.get("coop") is not None:
+            from .plugins.stern import coop_play
+            text = ("This zip is a file of co-op settings, not a mod pack. %s\n\nCo-op settings are "
+                    "loaded on the Modes tab, with Load... under Co-op play."
+                    % coop_play.file_words(about["coop"]))
+        else:
+            text = "%s %s\n\nModes are loaded on the Modes tab, with Load from a file..." % (
+                what, modpack.modes_file_words(about))
+        if modes is None:
+            messagebox.showinfo(where, text)
+            return
+        if not messagebox.askyesno(where, text + "\n\nLoad them into this project now?"):
+            return
+        src = path
+        if not is_zip:
+            import tempfile
+            src = os.path.join(tempfile.mkdtemp(prefix="pad-modes-"),
+                               os.path.basename(os.path.normpath(path)) + ".zip")
+            try:
+                modpack.zip_modes_folder(about["folder"], src)
+            except OSError as e:
+                messagebox.showerror(where, "Could not read the modes in %s: %s"
+                                     % (path, e))
+                return
+        self.window.select_tab("modes")
+        modes.load_file(src)
 
     def _confirm_import(self, zip_path, assets_dir, plan):
         """Main thread: the import confirmation, spelling out the mismatch."""
@@ -3157,6 +3517,12 @@ class App:
                     extra += ("\n\n%d default setting(s) came across too — see "
                               "the Defaults tab."
                               % res["extras"]["settings"])
+                if res["extras"].get("sound_modes"):
+                    # PAD-494: the files sit in the project, the modes on
+                    # the Audio tab's sounds
+                    extra += ("\n\nMusic mode files for %d sound(s) came "
+                              "across too — see Music modes on the Audio "
+                              "tab." % res["extras"]["sound_modes"])
                 if skipped:
                     extra += ("\n\n%d file(s) were skipped: this extract has "
                               "nothing they match. Each one is named in the "
@@ -3224,6 +3590,13 @@ class App:
             return
         source_dir = os.path.normpath(source_dir)
         target_dir = os.path.normpath(target_dir)
+        # PAD-1050: an unzipped file of modes is no extract; compared as one it
+        # carried nothing and said only that nothing differed
+        for folder in (source_dir, target_dir):
+            about = modpack.modes_file_about(folder)
+            if about is not None:
+                self._offer_modes_file(folder, about, "Transfer Mods")
+                return
         if os.path.normcase(source_dir) == os.path.normcase(target_dir):
             messagebox.showwarning(
                 "Same folder",
@@ -3283,27 +3656,50 @@ class App:
                 source_dir, target_dir, log_cb=self._transfer_log_cb()),
             lambda plan: self._transfer_plan_ready(source_dir, target_dir,
                                                    plan),
-            "Transfer failed")
+            "Transfer failed",
+            status="Transfer mods: reading the old extract…")
 
     def _transfer_log_cb(self):
         """Worker-thread-safe logger for the transfer comparisons: lines land
-        in the main log via the message queue."""
-        return lambda t, l="info": self.msg_queue.put(LogMsg(t, l))
+        in the main log via the message queue, and each one is also the
+        status line under the busy bar, so the footer says which step the
+        comparison is on rather than only that something is running."""
+        def _log(t, l="info"):
+            self.msg_queue.put(LogMsg(t, l))
+            self.msg_queue.put(UiCallMsg(
+                lambda t=t: self._transfer_status(t)))
+        return _log
 
-    def _transfer_worker(self, work, done, fail_title):
+    def _transfer_status(self, text):
+        """Main thread: show *text* under the busy bar while a transfer step
+        runs (never over a real extract or build, which own the footer)."""
+        if (getattr(self, "_transfer_busy", False)
+                and not self.window.is_running()):
+            self.window.set_status(" ".join(str(text).split())[:200])
+
+    def _transfer_worker(self, work, done, fail_title, status=None):
         """Run *work()* on a worker thread — the extract comparisons are
         minutes of file I/O on big or cloud-synced folders, so the UI must
         stay live and the log must keep moving — then continue with
         *done(result)* on the main thread.  One at a time via
-        ``_transfer_busy``."""
+        ``_transfer_busy``.
+
+        While it runs the footer is busy (moving bar, "Working", the elapsed
+        clock) with *status* under it, and the Mod Pack tab's Transfer button
+        says it is working: it used to sit on the last job's 0% or 100%, so a
+        user who didn't read the log took it for idle and clicked Transfer
+        again (PAD-718)."""
         self._transfer_busy = True
+        self._transfer_task(True, status or "Transfer mods: working…")
 
         def _finish(result):
             self._transfer_busy = False
+            self._transfer_task(False)
             done(result)
 
         def _fail(e):
             self._transfer_busy = False
+            self._transfer_task(False, "Transfer mods failed")
             messagebox.showerror(fail_title, "Couldn't finish:\n%s" % e)
 
         def _work():
@@ -3317,6 +3713,16 @@ class App:
             self.root.after(0, _finish, result)
 
         threading.Thread(target=_work, daemon=True).start()
+
+    def _transfer_task(self, busy, status=None):
+        """Footer + Mod Pack tab state for a transfer step (main thread)."""
+        set_task = getattr(self.window, "set_task", None)
+        if set_task is not None:
+            set_task(busy, status)
+        service = getattr(self.window, "service", None)
+        tab = service("modpack") if service is not None else None
+        if tab is not None:
+            tab.set(transfer_busy=bool(busy))
 
     def _transfer_plan_ready(self, source_dir, target_dir, plan):
         """Main-thread continuation of _start_transfer_mods once the pending-
@@ -3634,20 +4040,30 @@ class App:
                 "Apply them anyway?  (No = skip just those; recommended.)"
                 % totals["flagged"])
 
-        try:
-            res = mod_transfer.apply_transfer(
+        # On the worker too: copying a few hundred clips into the new extract
+        # froze the window for as long as it took, with the footer still on
+        # the last job's number.  A failed apply stops the chain (see above).
+        self._transfer_worker(
+            lambda: mod_transfer.apply_transfer(
                 source_dir, target_dir, plan, include_flagged=include_flagged,
-                src_saved=src_saved, origin=origin)
-        except Exception as e:
-            messagebox.showerror("Transfer failed",
-                                 "Couldn't write the transferred mods:\n%s" % e)
-            return
+                src_saved=src_saved, origin=origin),
+            lambda res: self._transfer_applied(source_dir, target_dir, res,
+                                               source_label, then),
+            "Couldn't write the transferred mods",
+            status="Transfer mods: copying your mods into the new extract…")
 
+    def _transfer_applied(self, source_dir, target_dir, res, source_label,
+                          then):
+        """Main-thread tail of :meth:`_confirm_apply_transfer` once the
+        transferred mods are written."""
         tags_note = ("" if not res.get("group_tags")
                      else ", %d group name(s)" % res["group_tags"])
         if res.get("video_variants"):
             tags_note += (", %d slot(s) with random clips"
                           % res["video_variants"])
+        if res.get("sound_modes"):
+            tags_note += (", %d sound(s) with music mode files"
+                          % res["sound_modes"])
         if res.get("defaults"):
             tags_note += ", %d staged default(s)" % res["defaults"]
         # An earlier transfer of the same mods onto this folder is replaced,
@@ -3737,6 +4153,13 @@ class App:
             lines.append("Random clips:  %d slot(s) matched, %d dropped"
                          % (len(vv.get("matched", ())),
                             len(vv.get("dropped", ()))))
+        sm = plan.get("sound_modes") or {}
+        if any(sm.get(k) for k in ("matched", "remapped", "flagged", "dropped")):
+            # PAD-494: a sound's music mode files go where its replacement would
+            lines.append("Music modes:  %d sound(s) matched, %d moved to a new "
+                         "index, %d flagged, %d dropped"
+                         % (len(sm.get("matched", ())), len(sm.get("remapped", ())),
+                            len(sm.get("flagged", ())), len(sm.get("dropped", ()))))
         lines.append("Image:  %d matched, %d dropped"
                      % (len(i["matched"]), len(i["dropped"])))
         lines.append("Text:   %d matched, %d dropped"
@@ -3847,21 +4270,10 @@ class App:
                     "the wrong folder the port will build unmodified "
                     "cards.\n\nContinue with this folder?\n\n%s" % project):
                 return
-        raws = filedialog.askopenfilenames(
-            title="Stock card image(s) to port onto — pick one or several",
-            filetypes=[("Card images", "*.raw *.img *.bin"),
-                       ("All files", "*.*")])
-        if not raws:
+        got = self._port_targets()
+        if not got:
             return
-        raws = [os.path.normpath(r) for r in raws]
-        out_dir = filedialog.askdirectory(
-            title="Folder for the built card image(s) — the per-card "
-                  "extracts land here too",
-            initialdir=((self.window.write_output_var.get() or "").strip()
-                        or os.path.dirname(raws[0])))
-        if not out_dir:
-            return
-        out_dir = os.path.normpath(out_dir)
+        raws, out_dir = got
         from .core import mod_port
         jobs = mod_port.plan_ports(project, raws, out_dir)
         lines = []
@@ -3886,6 +4298,7 @@ class App:
         self._save_settings()
         self._active_mode = "write"
         self._port_active = True
+        self._port_words = ("Port", "Ported")
         self._cancel_requested = False
         self._chain_flash_after_build = None
         self._staging_failures = []
@@ -3894,18 +4307,89 @@ class App:
         threading.Thread(target=self._run_port_chain, args=(project, jobs),
                          daemon=True).start()
 
-    def _run_port_chain(self, project, jobs):
-        """Worker-thread body of the one-click port: bind the app's extract /
-        transfer / stage / write services and hand the sequencing to
-        :func:`core.mod_port.run_ports`.  Every sub-pipeline is installed as
-        ``self.pipeline`` while it runs, so the ordinary Stop button cancels
-        the live step and the chain stops at the next boundary."""
-        from .core import mod_port, mod_transfer
+    def _port_targets(self):
+        """``(raws, out_dir)`` for the one-click port and What's new (PAD-1388):
+        the Mod Pack form's "New card image(s)" and "Build into" fields, and
+        the pickers only for what they leave empty.  ``None`` when cancelled
+        or a picked image is missing."""
+        w = self.window
+        imgs_var = getattr(w, "port_imgs_var", None)
+        out_var = getattr(w, "port_out_var", None)
+        typed = ((imgs_var.get() if imgs_var is not None else "") or "")
+        raws = [os.path.normpath(r.strip()) for r in typed.split(";")
+                if r.strip()]
+        if not raws:
+            raws = filedialog.askopenfilenames(
+                title="New card image(s) to port onto — pick one or several",
+                filetypes=[("Card images", "*.raw *.img *.bin"),
+                           ("All files", "*.*")])
+            if not raws:
+                return None
+            raws = [os.path.normpath(r) for r in raws]
+            if imgs_var is not None:
+                imgs_var.set("; ".join(raws))
+        gone = [r for r in raws if not os.path.isfile(r)]
+        if gone:
+            messagebox.showwarning(
+                "Card image not found",
+                "This card image isn't there:\n%s" % "\n".join(gone))
+            return None
+        out_dir = ((out_var.get() if out_var is not None else "") or "").strip()
+        if not out_dir:
+            out_dir = filedialog.askdirectory(
+                title="Folder for the built card image(s) — each card's "
+                      "extract lands here too",
+                initialdir=((self.window.write_output_var.get() or "").strip()
+                            or os.path.dirname(raws[0])))
+            if not out_dir:
+                return None
+            if out_var is not None:
+                out_var.set(os.path.normpath(out_dir))
+        return raws, os.path.normpath(out_dir)
 
+    def _start_whats_new(self):
+        """What's new in this version? (PAD-1388): extract each new card into
+        the folder the port itself uses (so a port after it reuses that
+        extract) and list what the new version adds, changes and drops
+        against this project's version, plus whether this project's modes
+        can run on it.  Nothing is transferred or built."""
+        if not getattr(self._current_mfr.capabilities, "mod_transfer", False):
+            return
+        project = (self.window.write_assets_var.get() or "").strip()
+        if not project or not os.path.isdir(project):
+            messagebox.showwarning(
+                "No project folder",
+                "Open the project that holds your mods first (the Extract "
+                "tab's project folder): the new version is compared with the "
+                "version it was extracted from.")
+            return
+        got = self._port_targets()
+        if not got:
+            return
+        raws, out_dir = got
+        from .core import mod_port
+        jobs = mod_port.plan_ports(os.path.normpath(project), raws, out_dir)
+        self._save_settings()
+        self._active_mode = "write"
+        self._port_active = True
+        self._port_words = ("What's new", "Checked")
+        self._cancel_requested = False
+        self._chain_flash_after_build = None
+        self._staging_failures = []
+        self.window.set_running(True, mode="write")
+        self.window.reset_steps(mode="write")
+        threading.Thread(target=self._run_whats_new,
+                         args=(os.path.normpath(project), jobs),
+                         daemon=True).start()
+
+    def _port_sub_runner(self):
+        """``(log_cb, progress_cb, extract, run_sub)`` for a port worker:
+        *extract(raw, ws)* runs the plugin's full extract as ``self.pipeline``
+        (so Stop cancels it) and raises when it fails; *run_sub* runs any
+        sub-pipeline the same way."""
         log_cb = lambda t, l="info": self.msg_queue.put(LogMsg(t, l))
         progress_cb = (lambda c, t, d="":
                        self.msg_queue.put(ProgressMsg(c, t, d)))
-        phase_cb = lambda i: None
         box = {}
 
         def step_done(success, summary):
@@ -3922,12 +4406,118 @@ class App:
         def extract(raw, ws):
             os.makedirs(ws, exist_ok=True)
             p = self._current_mfr.make_extract_pipeline(
-                raw, ws, log_cb, phase_cb, progress_cb, step_done)
+                raw, ws, log_cb, lambda i: None, progress_cb, step_done)
             if hasattr(p, "set_log_line_cb"):
                 p.set_log_line_cb(self._post_log_line)
             run_sub(p)
 
+        run_sub.step_done = step_done
+        return log_cb, progress_cb, extract, run_sub
+
+    def _report_news(self, project, job, log_cb, progress_cb=None):
+        """Compare *job*'s new extract with *project*, log it, write the full
+        list beside the builds and show it on the Mod Pack tab.  Never
+        raises: the port goes on without it."""
+        from .core import version_news
+        try:
+            log_cb("Comparing %s with this project's version..."
+                   % os.path.basename(job["raw"]), "info")
+            news = version_news.compare(project, job["workspace"])
+            if not news.get("new_version") and hasattr(self._current_mfr,
+                                                       "card_version"):
+                try:   # an extract with no record of its card: ask the card
+                    news["new_version"] = self._current_mfr.card_version(
+                        job["raw"])[0] or ""
+                except Exception:                   # noqa: BLE001
+                    pass
+            for level, line in version_news.summary_lines(news):
+                log_cb(line, level)
+            page = version_news.for_page(news)
+            stem = os.path.splitext(os.path.basename(job["raw"]))[0]
+            report = os.path.join(os.path.dirname(job["workspace"]),
+                                  stem + version_news.REPORT_SUFFIX)
+            try:
+                version_news.write_report(news, report)
+                log_cb("The full list: %s" % report, "info")
+                page["report"] = report
+            except OSError as e:
+                log_cb("Couldn't write the list (%s)." % e, "warning")
+            page["card"] = os.path.basename(job["raw"])
+            modes = getattr(self._current_mfr, "mode_news", None)
+            if modes is not None:
+                try:
+                    page["modes"] = modes(
+                        job["raw"], project,
+                        progress=(lambda f, s="": progress_cb(
+                            int(f * 100), 100, s or "Modes"))
+                        if progress_cb else None,
+                        cancel=lambda: self._cancel_requested) or ""
+                except Exception as e:              # noqa: BLE001
+                    page["modes"] = ""
+                    log_cb("Couldn't check modes on this card: %s" % e,
+                           "warning")
+                if page["modes"]:
+                    log_cb("Modes: " + page["modes"], "info")
+            show = getattr(self.window, "_show_news", None)
+            if show is not None:
+                self.msg_queue.put(UiCallMsg(lambda: show(page)))
+            return news
+        except Exception as e:                      # noqa: BLE001
+            log.exception("what's new failed")
+            log_cb("Couldn't compare the versions: %s" % e, "warning")
+            return None
+
+    def _run_whats_new(self, project, jobs):
+        """Worker body of :meth:`_start_whats_new`."""
+        from .core import mod_port, version_news
+        log_cb, progress_cb, extract, _run_sub = self._port_sub_runner()
+        heads = []
+        clear = getattr(self.window, "_show_news", None)
+        if clear is not None:
+            self.msg_queue.put(UiCallMsg(lambda: clear(None)))
+        for i, job in enumerate(jobs):
+            if self._cancel_requested:
+                break
+            name = os.path.basename(job["raw"])
+            log_cb("=== What's new %d of %d: %s ===" % (i + 1, len(jobs), name),
+                   "info")
+            try:
+                if mod_port.has_baseline(job["workspace"]):
+                    log_cb("Reusing the finished extract at %s."
+                           % job["workspace"], "info")
+                else:
+                    log_cb("Extracting %s first (once: Port + build reuses "
+                           "it)." % name, "info")
+                    extract(job["raw"], job["workspace"])
+            except Exception as e:                  # noqa: BLE001
+                if self._cancel_requested:
+                    break
+                heads.append("%s: couldn't extract it - %s" % (name, e))
+                continue
+            news = self._report_news(project, job, log_cb, progress_cb)
+            heads.append("%s: %s" % (name, version_news.headline(news))
+                         if news else "%s: couldn't compare" % name)
+        ok = len(heads) == len(jobs) and not any(
+            "couldn't" in h for h in heads)
+        self.msg_queue.put(DoneMsg(ok, "\n".join(heads) or "Canceled"))
+
+    def _run_port_chain(self, project, jobs):
+        """Worker-thread body of the one-click port: bind the app's extract /
+        transfer / stage / write services and hand the sequencing to
+        :func:`core.mod_port.run_ports`.  Every sub-pipeline is installed as
+        ``self.pipeline`` while it runs, so the ordinary Stop button cancels
+        the live step and the chain stops at the next boundary."""
+        from .core import mod_port, mod_transfer
+
+        log_cb, progress_cb, extract, run_sub = self._port_sub_runner()
+        step_done = run_sub.step_done
+        phase_cb = lambda i: None
+        by_ws = {job["workspace"]: job for job in jobs}
+
         def transfer(ws):
+            # What the new version adds, before the mods go onto it (PAD-1388)
+            if ws in by_ws:
+                self._report_news(project, by_ws[ws], log_cb, progress_cb)
             plan = mod_transfer.plan_transfer(project, ws, log_cb=log_cb)
             for level, line in mod_transfer.plan_detail_lines(plan):
                 log_cb(line, level)
@@ -3943,12 +4533,15 @@ class App:
                        % totals["flagged"], "warning")
             res = mod_transfer.apply_transfer(project, ws, plan,
                                               include_flagged=False)
-            return ("%d audio, %d video, %d image, %d text transferred%s"
+            return ("%d audio, %d video, %d image, %d text transferred%s%s"
                     % (res["audio"], res["video"], res["image"],
                        res["text"],
                        ("; %d slot(s) with random clips"
                         % res["video_variants"])
-                       if res.get("video_variants") else ""))
+                       if res.get("video_variants") else "",
+                       ("; %d sound(s) with music mode files"
+                        % res["sound_modes"])
+                       if res.get("sound_modes") else ""))
 
         def stage(ws):
             pend_a = self._stage_pending_audio(ws)
@@ -4068,7 +4661,7 @@ class App:
             # The user cancelled during staging — don't dress the partial
             # staging up as a failure, and don't start the pipeline just to
             # have it notice the cancel.  _on_done shows the Cancelled state.
-            self.msg_queue.put(DoneMsg(False, "Cancelled."))
+            self.msg_queue.put(DoneMsg(False, "Canceled."))
             return
 
         if pending and not staged:
@@ -4127,17 +4720,20 @@ class App:
             from .core.audio_slots import scan_audio_slots
             slots = scan_audio_slots(assets_dir,
                                      roots=_hook("audio_slot_dirs"),
+                                     keep_dirs=_hook("slot_keep_dirs") or (),
                                      exts=_hook("audio_slot_exts"))
         elif kind == "video":
             from .core.video_slots import scan_video_slots
             slots = scan_video_slots(assets_dir,
                                      roots=_hook("video_slot_dirs"),
+                                     keep_dirs=_hook("slot_keep_dirs") or (),
                                      exts=_hook("video_slot_exts"),
                                      probe=False)
         else:
             from .core.image_slots import scan_image_slots
             slots = scan_image_slots(assets_dir,
                                      roots=_hook("image_slot_dirs"),
+                                     keep_dirs=_hook("slot_keep_dirs") or (),
                                      exts=_hook("image_slot_exts"),
                                      probe=False)
         slots_by_rel = {s.rel_path: s for s in slots}
@@ -4185,15 +4781,25 @@ class App:
         if kind == "video":
             # Probe only the assigned slots — the tab's background pass probes
             # the whole folder, far too slow to repeat here per build.
+            # Each probe is an ffprobe process, so they run several at once:
+            # one after another, a retheme's 300 clips took 13 s before the
+            # first clip was staged (PAD-599).
+            from concurrent.futures import ThreadPoolExecutor
             from .core.video import backend_for, detect_video_info
-            for rel in assignments:
-                s = slots_by_rel[rel]
-                if s.info is None and backend_for(s.abs_path) is None:
-                    try:
-                        s.info = detect_video_info(s.abs_path)
-                    except Exception:
-                        s.info = None
-                    s.probed = True
+
+            def _probe(s):
+                try:
+                    s.info = detect_video_info(s.abs_path)
+                except Exception:
+                    s.info = None
+                s.probed = True
+
+            todo = [slots_by_rel[rel] for rel in assignments
+                    if slots_by_rel[rel].info is None
+                    and backend_for(slots_by_rel[rel].abs_path) is None]
+            if todo:
+                with ThreadPoolExecutor(max_workers=min(8, len(todo))) as ex:
+                    list(ex.map(_probe, todo))
             return (slots_by_rel, assignments,
                     bool(saved.get("video_trim",
                                    self.window.video_trim_var.get())),
@@ -4294,7 +4900,7 @@ class App:
                 f"Applied {staged} video replacement(s)."
                 + (f"  {len(bad)} could not be converted (see above)."
                    if bad else "")
-                + ("  Cancelled before the rest." if cut else ""),
+                + ("  Canceled before the rest." if cut else ""),
                 "error" if bad else "warning" if cut else "success"))
             from .core import history_log
             history_log.record(assets_dir,
@@ -4324,18 +4930,22 @@ class App:
         # the game's own clips switched on for color (PAD-336): each one is
         # its own replacement, re-encoded with the profile baked in, and
         # only where there is one to bake (Spike 2, a profile that changes
-        # something)
+        # something); with No change, put back where an earlier build
+        # re-encoded it (PAD-528)
+        from .core import staged_originals
         assignments = dict(assignments)
         mfr = self._current_mfr
         try:
             per_file = bool(mfr is not None
-                            and mfr.colour_profile_on_display()
-                            and colour_profile.any_asset_active(assets_dir))
+                            and mfr.colour_profile_on_display())
         except Exception:                               # noqa: BLE001
             per_file = False
-        for rel in (colour_profile.stock_video_rels(
-                staged_changes.load(assets_dir)) if per_file else ()):
-            if rel in slots_by_rel and not assignments.get(rel):
+        stock = [rel for rel in (colour_profile.stock_video_rels(
+                    staged_changes.load(assets_dir)) if per_file else ())
+                 if rel in slots_by_rel and not assignments.get(rel)]
+        baked = colour_profile.asset_map(assets_dir, "videos", stock)             if stock else {}
+        for rel in stock:
+            if rel in baked or staged_originals.has_snapshot(assets_dir, rel):
                 assignments[rel] = STOCK_SOURCE
         if not assignments:
             return None
@@ -4433,8 +5043,12 @@ class App:
             exts = mfr.image_slot_exts(assets_dir)
         except Exception:                               # noqa: BLE001
             exts = None
+        try:
+            keep = mfr.slot_keep_dirs(assets_dir)
+        except Exception:                               # noqa: BLE001
+            keep = ()
         slots = scan_image_slots(assets_dir, roots=roots, exts=exts,
-                                 probe=False)
+                                 probe=False, keep_dirs=keep)
         return ({sl.rel_path: sl for sl in slots}, {}, frozenset())
 
     def _colour_assets_scope(self):
@@ -4454,7 +5068,8 @@ class App:
                 else contextlib.nullcontext())
 
     def stage_pending_replacements(self, assets_dir, cancel_cb=None,
-                                   progress_cb=None, confirm_cb=None):
+                                   progress_cb=None, confirm_cb=None,
+                                   leave_out=()):
         """Apply every assigned Replace-tab replacement into *assets_dir* now.
 
         The three ``_stage_pending_*`` calls a Write makes, in the same order,
@@ -4483,9 +5098,17 @@ class App:
         and returns ``None``.  *progress_cb(kind, i, total, rel)* is the
         video, then the picture staging's own progress (*kind* ``"videos"``
         / ``"pictures"``).
+
+        PAD-1197: *leave_out* is the Emulate tab's "Leave out of this run"
+        (``"sounds"``, ``"videos"``, ``"pictures"``...): a kind it names is
+        not staged, its picks stay assigned for the next Start or build
+        that carries it.
         """
-        video = self._video_staging(assets_dir) or {}
-        image = self._image_staging(assets_dir) or {}
+        skip = set(leave_out or ())
+        video = ({} if "videos" in skip
+                 else self._video_staging(assets_dir) or {})
+        image = ({} if "pictures" in skip
+                 else self._image_staging(assets_dir) or {})
         if confirm_cb is not None and not confirm_cb(
                 self._staging_work(assets_dir, video, image)):
             return None
@@ -4495,12 +5118,15 @@ class App:
                 return None
             return lambda i, total, rel="": progress_cb(name, i, total, rel)
 
-        pend_a = self._stage_pending_audio(assets_dir)
-        pend_v = self._stage_pending_video(assets_dir, cancel_cb=cancel_cb,
-                                           progress_cb=kind("videos"),
-                                           staging=video)
+        pend_a = ((0, 0, []) if "sounds" in skip
+                  else self._stage_pending_audio(assets_dir))
+        pend_v = ((0, 0, []) if "videos" in skip else
+                  self._stage_pending_video(assets_dir, cancel_cb=cancel_cb,
+                                            progress_cb=kind("videos"),
+                                            staging=video))
         # cancelled during the videos: the pictures are not begun at all
-        pend_i = ((0, 0, []) if cancel_cb is not None and cancel_cb() else
+        pend_i = ((0, 0, []) if "pictures" in skip
+                  or (cancel_cb is not None and cancel_cb()) else
                   self._stage_pending_image(assets_dir, cancel_cb=cancel_cb,
                                             progress_cb=kind("pictures"),
                                             staging=image))
@@ -4617,10 +5243,53 @@ class App:
             target=self._run_revert, args=(assets_dir, instant),
             daemon=True).start()
 
-    def _run_revert(self, assets_dir, instant_count):
+    def _start_reset(self, assets_dir, kinds):
+        """PAD-569: the project menu's Reset… (PAD-576) (asked in its own dialog): the kinds of change
+        ticked (:mod:`core.project_reset`) back the way the project was extracted.  Every
+        kind is Revert all changes plus the Scenes edits and the project's own modes."""
+        from .core import history_log, project_reset
+
+        kinds = project_reset.normalise(kinds)
+        if not kinds or not assets_dir or not os.path.isdir(assets_dir)                 or self.window._running:
+            return False
+        everything = len(kinds) == len(project_reset.KEYS)
+        labels = ", ".join(project_reset.LABELS[k] for k in kinds)
+        self.msg_queue.put(LogMsg(
+            "Resetting %s in %s…" % ("everything" if everything else labels, assets_dir),
+            "info"))
+        self.window.begin_revert_view()
+        history_log.record(assets_dir, "reset  %s back as extracted"
+                           % ("everything" if everything else labels))
+        # the tabs' own picks first: a tab writes what it holds over the sidecar
+        self.window.forget_reset(assets_dir, kinds)
+        said = project_reset.drop_records(assets_dir, kinds)
+        if everything:
+            # as Revert all: every Replace tab drops what else it holds of the sidecar
+            self.window.clear_replace_assignments(assets_dir)
+        try:
+            instant = len(project_reset.restore_snapshots(assets_dir, kinds))
+        except Exception:
+            instant = 0
+        for line in said:
+            self.msg_queue.put(LogMsg("Reset: " + line, "info"))
+        self._active_mode = "write"
+        self._revert_active = True
+        self._reset_run = True
+        self._cancel_requested = False
+        self.window.set_running(True, mode="write")
+        self.window.reset_steps(mode="write")
+        self.window.set_status("Resetting…")
+        threading.Thread(
+            target=self._run_revert,
+            args=(assets_dir, instant, project_reset.rel_filter(kinds)),
+            daemon=True).start()
+        return True
+
+    def _run_revert(self, assets_dir, instant_count, keep=None):
         """Worker: find edits with no snapshot (legacy / hand-edited) and, if a
         source card + a plugin fallback are available, re-derive them; otherwise
-        report them as needing a re-extract.  Posts a DoneMsg either way."""
+        report them as needing a re-extract.  Posts a DoneMsg either way.
+        *keep* (PAD-569's Reset…): ``rel -> bool``, the changed files to put back."""
         from .core.checksums import all_changed
 
         log = lambda t, l="info": self.msg_queue.put(LogMsg(t, l))
@@ -4632,12 +5301,14 @@ class App:
                 progress=lambda c, t: prog(c, t, "Checking files…"),
                 cancel=lambda: self._cancel_requested,
                 quick=True))
+            if keep is not None:
+                remaining = [rel for rel in remaining if keep(rel)]
         except Exception as e:
             log("Change scan failed (%s); restored snapshots only." % e,
                 "warning")
             remaining = []
         if self._cancel_requested:
-            self.msg_queue.put(DoneMsg(False, "Revert cancelled."))
+            self.msg_queue.put(DoneMsg(False, "Revert canceled."))
             return
         if not remaining:
             self.msg_queue.put(DoneMsg(
@@ -4692,7 +5363,7 @@ class App:
         if self._cancel_requested:
             return                       # one press is enough
         self._cancel_requested = True
-        self.window.append_log("Cancelling...", "error")
+        self.window.append_log("Canceling...", "error")
         # Disable the Cancel button + show feedback so the user knows the press
         # registered and doesn't have to keep mashing it; the action button is
         # re-enabled only when the (whole) job actually stops, via set_running.
@@ -4720,34 +5391,41 @@ class App:
             self.window.set_running(False, mode="write")
             if self._cancel_requested:
                 self._cancel_requested = False
-                self.window.set_status("Cancelled")
+                self.window.set_status("Canceled")
                 self.window.append_log(summary, "info")
-            elif success:
-                self.window.set_status("Ported")
-                self.window.append_log(summary, "success")
-                messagebox.showinfo("Port Complete", summary)
             else:
-                self.window.set_status("Port finished with problems")
-                self.window.append_log(summary, "error")
-                messagebox.showwarning("Port finished with problems", summary)
+                verb, done = getattr(self, "_port_words", ("Port", "Ported"))
+                if success:
+                    self.window.set_status(done)
+                    self.window.append_log(summary, "success")
+                    messagebox.showinfo(
+                        "Port Complete" if verb == "Port"
+                        else "%s: done" % verb, summary)
+                else:
+                    self.window.set_status("%s finished with problems" % verb)
+                    self.window.append_log(summary, "error")
+                    messagebox.showwarning("%s finished with problems" % verb,
+                                           summary)
             return
 
         # Revert runs reuse the write run-state but have their own messaging +
         # a post-run rescan (on-disk asset bytes changed under the tabs).
         if getattr(self, "_revert_active", False):
             self._revert_active = False
+            word = "Reset" if getattr(self, "_reset_run", False) else "Revert"
+            self._reset_run = False
             self.window.set_running(False, mode="write")
             if self._cancel_requested:
                 self._cancel_requested = False
-                self.window.set_status("Cancelled")
-                self.window.append_log("Revert cancelled.", "info")
+                self.window.set_status("Canceled")
+                self.window.append_log("Revert canceled.", "info")
             elif success:
                 self.window.set_status("Reverted")
                 self.window.append_log(summary, "success")
-                messagebox.showinfo("Revert Complete", summary)
+                messagebox.showinfo("%s Complete" % word, summary)
             else:
                 self.window.set_status("Failed")
-                messagebox.showerror("Revert Failed", summary)
+                messagebox.showerror("%s Failed" % word, summary)
             self.window.refresh_after_revert()
             return
 
@@ -4765,8 +5443,8 @@ class App:
             self.window.set_running(False, mode="extract")
             if self._cancel_requested:
                 self._cancel_requested = False
-                self.window.set_status("Cancelled")
-                self.window.append_log("Card read cancelled.", "info")
+                self.window.set_status("Canceled")
+                self.window.append_log("Card read canceled.", "info")
             elif success:
                 # Past the last chip, so every step shows green rather than
                 # leaving the final one stuck on "active" (same trick the
@@ -4797,8 +5475,8 @@ class App:
             self.window.invalidate_asset_scans()
             if self._cancel_requested:
                 self._cancel_requested = False
-                self.window.set_status("Cancelled")
-                self.window.append_log("Auto-name cancelled.", "info")
+                self.window.set_status("Canceled")
+                self.window.append_log("Auto-name canceled.", "info")
             elif success:
                 self.window.set_phase(
                     len(getattr(self.window, "_phases", {}).get(
@@ -4830,6 +5508,13 @@ class App:
                       else self._current_mfr.write_phases)
             if phases:
                 self.window.set_phase(len(phases), mode=self._active_mode)
+        # PAD-754: the first card written on this install opens the Animal
+        # shelters window once - the moment the app has just paid off is
+        # the one time to ask people to give some of that to a shelter.
+        if success and self._active_mode == "write":
+            note = getattr(self.window, "note_card_written", None)
+            if note is not None:
+                note()
         # Empirical FDA proof: if a Direct-SSD run just completed
         # successfully on macOS, Full Disk Access must be in order
         # for every helper involved.  Auto-dismiss the banner so the
@@ -4949,8 +5634,8 @@ class App:
             # User cancelled — don't dress it up as a failure with a scary
             # error modal; just note it and reset.
             self._cancel_requested = False
-            self.window.set_status("Cancelled")
-            self.window.append_log("Cancelled.", "info")
+            self.window.set_status("Canceled")
+            self.window.append_log("Canceled.", "info")
         elif success:
             # "Completed at 2:45 PM" beats a bare "Complete!" — the status
             # persists across tab switches, and a timestamp reads as a
@@ -5023,12 +5708,15 @@ class App:
                     # completion) — the log carries the hand-off.  after(0,…)
                     # lets this _on_done fully unwind (set_running state,
                     # queue drain) before the flash re-arms the run state.
-                    device_path, image_path, verify = chain_flash
+                    device_path, image_path, verify = chain_flash[:3]
+                    # a 4th: keep the card's settings and scores (PAD-736)
+                    keep = ({"keep_data": True} if chain_flash[3:4] == (True,)
+                            else {})
                     self.window.append_log(
                         "Build complete — writing the fresh image onto the "
                         "card...", "info")
                     self.root.after(0, lambda: self._start_flash_image(
-                        image_path, device_path, verify=verify))
+                        image_path, device_path, verify=verify, **keep))
         else:
             self.window.set_status("Failed")
             title = "Extract Failed" if is_extract else "Write Failed"
@@ -5061,7 +5749,8 @@ class App:
                                    cs.offer_question(current, fits)):
             self.window.append_log(
                 "Not built: the SD card size stays %s. To fit it, use fewer "
-                "or smaller replacements." % cs.words(current), "info")
+                "or smaller replacements."
+                % (cs.words(current) or "the original's own"), "info")
             return True
         # From the smaller 16 GB card of a 16 GB original (PAD-465), the size
         # that fits is the original's own: that is "Same as the original",
@@ -5078,9 +5767,11 @@ class App:
             "SD card size is now %s; building again." % said, "info")
         device = chain_flash[0] if chain_flash else None
         verify = chain_flash[2] if chain_flash else True
+        keep = ({"chain_flash_keep_data": True}
+                if chain_flash and chain_flash[3:4] == (True,) else {})
         self.root.after(0, lambda: self._start_write(
             chain_flash_device=device, again=True,
-            chain_flash_verify=verify))
+            chain_flash_verify=verify, **keep))
         return True
 
     # ------------------------------------------------------------------
@@ -5157,6 +5848,110 @@ class App:
             "Automatic update check: %s." % label.lower(), "info")
         self._schedule_update_recheck()
 
+    def _on_old_versions_change(self, keep):
+        """Persist the ⚙ Updates > Old versions pick and apply it now
+        (PAD-937)."""
+        from .core.old_versions import (OLD_VERSIONS_CHOICES,
+                                        normalize_old_versions)
+        keep = normalize_old_versions(keep)
+        self._settings["old_versions_keep"] = keep
+        self._save_settings()
+        label = dict(OLD_VERSIONS_CHOICES).get(keep, str(keep))
+        self.window.append_log(
+            "Old versions of PAD: %s." % label.lower(), "info")
+        self._prune_old_versions()
+
+    def _prune_old_versions(self, installers=False):
+        """Delete what earlier updates left behind (PAD-937): old AppImages
+        past the ⚙ Old versions pick and, with ``installers`` (at startup),
+        the temp folder's old setup exes and disk images.  Off the main
+        thread (a slow home folder); each deleted file is logged."""
+        from .core import old_versions
+        keep = old_versions.normalize_old_versions(
+            self._settings.get("old_versions_keep"))
+        current = old_versions.running_appimage()
+
+        def _run():
+            deleted, failed = [], []
+            jobs = [lambda: old_versions.prune_old_appimages(
+                current, __version__, keep)]
+            if installers:
+                jobs.append(
+                    lambda: old_versions.prune_old_installers(__version__))
+                # PAD-1024: the version a blue-green swap replaced
+                app_dir = update_slots.installed_app_dir()
+                if app_dir:
+                    jobs.append(lambda: update_slots.clear_leftovers(
+                        app_dir, __version__))
+            for fn in jobs:
+                try:
+                    d, f = fn()
+                except Exception as e:                  # noqa: BLE001
+                    d, f = [], [("", str(e))]
+                deleted += d
+                failed += f
+
+            def _report():
+                for path in deleted:
+                    self.window.append_log(
+                        "Deleted an old version of PAD: %s" % path, "info")
+                for path, err in failed:
+                    self.window.append_log(
+                        "Couldn't delete an old version of PAD%s: %s" % (
+                            " (%s)" % path if path else "", err), "warning")
+            if deleted or failed:
+                try:
+                    self.root.after(0, _report)
+                except RuntimeError:
+                    pass                   # window gone
+        threading.Thread(target=_run, daemon=True,
+                         name="prune-old-versions").start()
+
+    def _schedule_autosave(self):
+        """(Re-)arm the ⚙ "Save automatically" timer (PAD-541).
+
+        What it saves is :meth:`_save_session_state`, the quit's save: the
+        open project's anchor (only the fields that changed) and the
+        settings.  Edits to the files themselves never waited for it.  Re-armed
+        after each save and when the setting changes; ``0`` leaves it off.
+        """
+        after_id = getattr(self, "_autosave_after", None)
+        self._autosave_after = None
+        if after_id:
+            try:
+                self.root.after_cancel(after_id)
+            except ValueError:
+                pass
+        try:
+            minutes = int(self.window.autosave_interval_var.get())
+        except (AttributeError, ValueError):
+            return
+        if minutes <= 0:
+            return
+        try:
+            self._autosave_after = self.root.after(
+                minutes * 60 * 1000, self._autosave)
+        except RuntimeError:
+            pass                       # window gone
+
+    def _autosave(self):
+        """The timer firing: the quit's save, then the next one armed."""
+        self._autosave_after = None
+        self._save_session_state()
+        self._schedule_autosave()
+
+    def _on_autosave_interval_change(self, minutes):
+        """Persist the ⚙ "Save automatically" pick and re-arm the timer."""
+        from .webui.autosave_interval import (AUTOSAVE_INTERVAL_CHOICES,
+                                              normalize_autosave_interval)
+        minutes = normalize_autosave_interval(minutes)
+        self._settings["autosave_minutes"] = minutes
+        self._save_settings()
+        label = dict(AUTOSAVE_INTERVAL_CHOICES).get(minutes, str(minutes))
+        self.window.append_log("Save automatically: %s." % (
+            label[0].lower() + label[1:]), "info")
+        self._schedule_autosave()
+
     def _check_for_update_now(self):
         """User-triggered "Check for updates" button click.
 
@@ -5214,7 +6009,7 @@ class App:
         self._schedule_update_recheck()
         if result:
             version, url, _notes, installer = result
-            self.window.show_update_banner(version, url, installer=installer)
+            self._offer_update(version, url, installer)
             self.window.append_log(
                 f"Update available: v{version} (you're on v{__version__}).",
                 "success")
@@ -5251,6 +6046,437 @@ class App:
             if show_up_to_date_toast:
                 self.window.show_up_to_date_toast()
 
+    # ------------------------------------------------------------------
+    # Background download (PAD-1024)
+    #
+    # daveyvandy: "One button push to restart the app and it quickly loads the
+    # new version.  Background downloads / installs to speed things up.
+    # Opt-out controls for the nerds."  The install itself was already one
+    # silent step (_launch_downloaded_installer); what made an update slow was
+    # the download window it sat behind - a few hundred MB, watched.  So the
+    # check now fetches the update as soon as it finds one, while the user
+    # works, and the banner's one button becomes Restart to update.  ⚙
+    # Updates > Download and install updates in the background turns it off,
+    # and the update then waits for Install update as before.
+    #
+    # And installs it in the background too, blue-green (David: "can we do
+    # like a blue-green where it installs in the background as well").  On an
+    # installed Windows copy the setup exe installs the new version into a
+    # sibling folder while this one runs, and Restart to update only swaps the
+    # two folders (core/update_slots.py); on macOS the new bundle is copied
+    # out of the disk image beside this one and Restart only swaps bundles.
+    # Either one failing leaves Restart to update running the downloaded
+    # installer as before.
+    # ------------------------------------------------------------------
+
+    def _auto_download_on(self):
+        return bool(self._settings.get(AUTO_DOWNLOAD_KEY,
+                                       AUTO_DOWNLOAD_DEFAULT))
+
+    def _offer_update(self, version, url, installer):
+        """The check found *version*: banner it, and with the background
+        switch on, start fetching it."""
+        self._update_offer = (version, url, installer)
+        bg = getattr(self, "_bg_update", None)
+        if bg and bg["version"] == version:
+            # a re-check finding the same version: the download already
+            # running (or done) is the answer
+            self._show_background_update(bg)
+            return
+        if bg:
+            # a newer release since: the older one is not worth finishing
+            bg["cancel"].set()
+            self._bg_update = None
+        if installer is None or not self._auto_download_on():
+            self.window.show_update_banner(version, url, installer=installer)
+            return
+        self._start_background_update(version, url, installer)
+
+    def _show_background_update(self, bg):
+        self.window.show_update_banner(
+            bg["version"], bg["url"], installer=bg["installer"],
+            stage=bg["stage"], pct=bg["pct"],
+            pending=getattr(self, "_restart_pending", None))
+
+    def _start_background_update(self, version, url, installer):
+        """Fetch *installer* off the main thread into the place the Install
+        click would have put it.  A whole copy already there (an earlier run
+        downloaded it and the user quit instead of restarting) is used as it
+        is, once its digest checks out."""
+        dest = os.path.join(self._update_download_dir(installer),
+                            installer["name"])
+        bg = {"version": version, "url": url, "installer": installer,
+              "path": dest, "stage": "downloading", "pct": None,
+              "cancel": threading.Event(), "staged": None,
+              "how": self._staging_for(installer)}
+        self._bg_update = bg
+        self._show_background_update(bg)
+        total = int(installer.get("size") or 0)
+        last = [-5]
+
+        def _post(fn, *args):
+            try:
+                self.root.after(0, fn, *args)
+            except RuntimeError:
+                pass                       # window gone
+
+        def _progress(done):
+            if not total:
+                return
+            pct = min(100, int(done * 100 / total))
+            if pct >= last[0] + 5:         # the banner redraws every 5 %
+                last[0] = pct
+                _post(self._background_update_progress, bg, pct)
+
+        def _run():
+            reused = False
+            try:
+                if staged_update_ok(dest, installer):
+                    reused = True
+                else:
+                    download_installer(
+                        installer["url"], dest,
+                        expected_sha256=installer.get("sha256"),
+                        progress_cb=_progress, cancel_cb=bg["cancel"].is_set)
+            except InterruptedError:
+                return                     # replaced, or switched off
+            except Exception as e:                      # noqa: BLE001
+                _post(self._background_update_failed, bg,
+                      f"{type(e).__name__}: {e}")
+                return
+            staged = err = None
+            if bg["how"]:
+                _post(self._background_update_installing, bg)
+
+                def _installed(pct):
+                    _post(self._background_update_progress, bg, pct,
+                          "installing")
+                try:
+                    staged, err = self._stage_update(bg, _installed)
+                except InterruptedError:
+                    return
+                except Exception as e:                  # noqa: BLE001
+                    staged, err = None, f"{type(e).__name__}: {e}"
+            _post(self._background_update_ready, bg, reused, staged, err)
+        threading.Thread(target=_run, daemon=True,
+                         name="update-download").start()
+        self.window.append_log(
+            f"Downloading v{version} in the background...", "info")
+
+    def _background_update_progress(self, bg, pct, stage="downloading"):
+        """How far the background download - or, with *stage*
+        ``"installing"``, the background install (PAD-1029) - is."""
+        if getattr(self, "_bg_update", None) is not bg or bg["stage"] != stage:
+            return
+        bg["pct"] = pct
+        self._show_background_update(bg)
+
+    def _staging_for(self, installer):
+        """How this copy can install *installer* in the background:
+        ``"windows"`` (an installed copy and the setup exe), ``"macos"``
+        (the disk image), or None - the download is all there is to do
+        ahead (an AppImage, a source checkout)."""
+        kind = (installer or {}).get("kind")
+        if kind == "windows-installer" and update_slots.installed_app_dir():
+            return "windows"
+        if kind == "macos-dmg" and sys.platform == "darwin":
+            return "macos"
+        return None
+
+    def _stage_update(self, bg, progress_cb=None):
+        """Worker thread: install the downloaded update beside the running
+        app.  Returns ``(staged, None)`` or ``(None, reason)``.
+        *progress_cb* is told how far the Windows install is, 0-100."""
+        if bg["how"] == "windows":
+            app_dir = update_slots.installed_app_dir()
+            if update_slots.staged_install_ok(app_dir, bg["version"]):
+                return update_slots.next_dir(app_dir), None
+            ok, info = update_slots.stage_install(
+                bg["path"], app_dir, bg["version"],
+                cancel_cb=bg["cancel"].is_set, progress_cb=progress_cb)
+            return (update_slots.next_dir(app_dir), None) if ok \
+                else (None, info)
+        ok, info = stage_update_macos(bg["path"])
+        return (info, None) if ok else (None, info)
+
+    def _background_update_installing(self, bg):
+        if getattr(self, "_bg_update", None) is not bg:
+            return
+        bg["stage"], bg["pct"] = "installing", None
+        self.window.append_log(
+            f"Installing v{bg['version']} in the background...", "info")
+        self._show_background_update(bg)
+
+    def _background_update_ready(self, bg, reused=False, staged=None,
+                                 err=None):
+        if getattr(self, "_bg_update", None) is not bg:
+            return
+        bg["stage"], bg["pct"], bg["staged"] = "ready", None, staged
+        if err:
+            self.window.append_log(
+                f"Couldn't install v{bg['version']} in the background "
+                f"({err}). Restart to update will run its installer instead.",
+                "warning")
+        self.window.append_log(
+            f"Update v{bg['version']} is "
+            + ("installed" if staged
+               else "already downloaded" if reused else "downloaded")
+            + (" - restarting into it." if getattr(
+                self, "_restart_pending", None)
+               else " - press Restart to update whenever you're ready."),
+            "success")
+        self._show_background_update(bg)
+        if getattr(self, "_restart_pending", None):
+            # the user already asked to restart: look once more for an even
+            # newer release, then go
+            self._recheck_then_restart(bg)
+
+    def _background_update_failed(self, bg, err):
+        """Fall back to the update waiting for Install update, which
+        downloads it again with the progress window."""
+        if getattr(self, "_bg_update", None) is not bg:
+            return
+        self._bg_update = None
+        self._restart_pending = None       # nothing to restart into by itself
+        self.window.append_log(
+            f"Couldn't download v{bg['version']} in the background ({err}). "
+            "Press Install update to try again.", "warning")
+        self.window.show_update_banner(bg["version"], bg["url"],
+                                       installer=bg["installer"])
+
+    def _on_update_auto_download_change(self, on):
+        """Persist ⚙ Updates > Download updates in the background and act on
+        it now: on starts fetching an update already on offer, off stops one
+        mid-download (a finished one stays ready - it costs nothing more)."""
+        self._settings[AUTO_DOWNLOAD_KEY] = bool(on)
+        self._save_settings()
+        self.window.append_log(
+            "Download and install updates in the background: %s."
+            % ("on" if on else "off"), "info")
+        offer = getattr(self, "_update_offer", None)
+        bg = getattr(self, "_bg_update", None)
+        if not on and bg and bg["stage"] in ("downloading", "installing"):
+            bg["cancel"].set()
+            self._bg_update = None
+            self._restart_pending = None
+            self.window.show_update_banner(bg["version"], bg["url"],
+                                           installer=bg["installer"])
+        elif on and offer and not bg and offer[2] is not None:
+            self._start_background_update(*offer)
+
+    def _install_staged_update(self, version):
+        """Restart to update: the update is ready, so - once the release feed
+        says nothing newer has come out - go straight to it, no download
+        window.  Returns False when there is nothing staged for *version* to
+        use."""
+        bg = getattr(self, "_bg_update", None)
+        if not bg or bg["version"] != version:
+            return False
+        if bg["stage"] in ("downloading", "installing"):
+            self.window.append_log(
+                f"v{version} is still {bg['stage']} - Restart to update "
+                "appears when it's done.", "info")
+            return True
+        self._recheck_then_restart(bg)
+        return True
+
+    # How long Restart to update waits for a newer release whose installers
+    # are still uploading before it settles for the one it has (seconds), and
+    # how often it looks again meanwhile.
+    PUBLISHING_WAIT_S = 600
+    PUBLISHING_POLL_MS = 30000
+
+    def _recheck_then_restart(self, bg):
+        """Restart to update, step one: is the ready version still the newest?
+
+        David: "if I deploy multiple updates, and the user has the app open
+        while they are releasing, what happens when they restart? they should
+        get the LATEST one, not have to restart multiple times."  The ready
+        update is whatever the last automatic check found, and that check
+        runs every few hours, so a window left open across two releases had
+        the older one ready - restarting into it only for that version's own
+        startup check to find the newer one and ask for a second restart.
+
+        So the click asks the release feed first (one request, capped at
+        a few seconds, off the loop).  Something newer is fetched and
+        installed in the background instead, and the app restarts into it by
+        itself when it is ready (re-checking again then, so a third release
+        is caught the same way).  A newer release whose installers are still
+        uploading is waited for, up to :attr:`PUBLISHING_WAIT_S`.  No answer
+        (offline) restarts into what is ready - never a reason to refuse it.
+        """
+        if bg.get("rechecking"):
+            return
+        bg["rechecking"] = True
+        mfr_repo = (self._current_mfr.update_repo
+                    if self._current_mfr else None)
+        self.window.append_log(
+            "Checking whether v%s is still the newest release before "
+            "restarting..." % bg["version"], "info")
+
+        def _run():
+            publishing = []
+            try:
+                fresh = check_for_update(__version__, repo=mfr_repo,
+                                         not_ready_cb=publishing.append)
+                failed = None
+            except Exception as e:                      # noqa: BLE001
+                fresh, failed = None, f"{type(e).__name__}: {e}"
+            try:
+                self.root.after(0, self._after_restart_recheck, bg, fresh,
+                                failed, publishing[0] if publishing else None)
+            except RuntimeError:
+                pass                       # window gone
+        threading.Thread(target=_run, daemon=True,
+                         name="update-recheck").start()
+
+    def _after_restart_recheck(self, bg, fresh, failed, publishing):
+        bg["rechecking"] = False
+        if getattr(self, "_bg_update", None) is not bg:
+            return                         # replaced or switched off meanwhile
+        from .core.updater import _parse_version
+        have = _parse_version(bg["version"])
+        if (fresh and fresh[3] is not None
+                and _parse_version(fresh[0]) > have):
+            newest, url, _notes, installer = fresh
+            self.window.append_log(
+                f"v{newest} has been released since v{bg['version']} was got "
+                f"ready - getting v{newest} instead. PAD restarts into it by "
+                "itself as soon as it's ready.", "info")
+            self._restart_pending = {"version": newest, "publishing": False}
+            bg["cancel"].set()
+            self._bg_update = None
+            self._update_offer = (newest, url, installer)
+            self._start_background_update(newest, url, installer)
+            return
+        if publishing and _parse_version(publishing) > have:
+            since = bg.setdefault("waiting_since", time.time())
+            if time.time() - since < self.PUBLISHING_WAIT_S:
+                if not (getattr(self, "_restart_pending", None) or {}).get("publishing"):
+                    self.window.append_log(
+                        f"v{publishing} is being published right now - PAD "
+                        "restarts into it as soon as its download is up.",
+                        "info")
+                self._restart_pending = {"version": publishing,
+                                         "publishing": True}
+                self._show_background_update(bg)
+                try:
+                    self.root.after(self.PUBLISHING_POLL_MS,
+                                    self._publishing_poll, bg)
+                except RuntimeError:
+                    pass
+                return
+            self.window.append_log(
+                f"v{publishing} is still being published after "
+                f"{self.PUBLISHING_WAIT_S // 60} minutes - restarting into "
+                f"v{bg['version']} now.", "warning")
+        if failed:
+            self.window.append_log(
+                f"Couldn't check for a newer release ({failed}) - restarting "
+                f"into v{bg['version']}.", "warning")
+        self._restart_pending = None
+        self._restart_into(bg)
+
+    def _publishing_poll(self, bg):
+        """The wait for a release still being published: look again, unless
+        the user said Don't restart (or restarted) meanwhile."""
+        if (getattr(self, "_bg_update", None) is bg
+                and (getattr(self, "_restart_pending", None) or {}).get("publishing")):
+            self._recheck_then_restart(bg)
+
+    def _cancel_pending_restart(self):
+        """Banner: Don't restart.  The update carries on getting ready and
+        waits for Restart to update like any other."""
+        if not getattr(self, "_restart_pending", None):
+            return
+        self._restart_pending = None
+        self.window.append_log("Restart canceled - the update will wait for "
+                               "Restart to update.", "info")
+        bg = getattr(self, "_bg_update", None)
+        if bg:
+            bg.pop("waiting_since", None)
+            self._show_background_update(bg)
+
+    def _restart_with_ready_now(self):
+        """Banner, while a newer release is being published: Restart with
+        the ready version now rather than wait for it."""
+        bg = getattr(self, "_bg_update", None)
+        if not bg or bg["stage"] != "ready":
+            return
+        self._restart_pending = None
+        self._restart_into(bg)
+
+    def _restart_into(self, bg):
+        """Restart to update, step two: switch to *bg*'s version - the
+        staged swap, else its downloaded installer."""
+        version = bg["version"]
+        if bg.get("staged") and self._swap_in_staged(bg):
+            return True
+        if not staged_update_ok(bg["path"], bg["installer"],
+                                check_digest=False):
+            # gone from under us (a temp-folder cleaner): the Install update
+            # route downloads it again
+            self._bg_update = None
+            self._install_update(version, bg["installer"])
+            return
+        self.window.append_log(f"Restarting to update to v{version}...",
+                               "info")
+        self._update_downloaded(_NO_DIALOG, bg["path"], version,
+                                bg["installer"].get("kind"), ask=False)
+
+    def _swap_in_staged(self, bg):
+        """Restart to update with the new version already installed beside
+        this one: hand the swap to its helper and close.  False (nothing
+        done) when the staged copy is not usable any more, so the caller
+        runs the installer instead."""
+        version = bg["version"]
+        if getattr(self, "_swap_started", False):
+            # PAD-1034: a second click while the app closes must not start a
+            # second helper - two renaming the same folders lost the install
+            self._close_for_update()
+            return True
+        if bg["how"] == "windows":
+            app_dir = update_slots.installed_app_dir()
+            if not app_dir or not update_slots.staged_install_ok(app_dir,
+                                                                 version):
+                return False
+            # the helper only renames once this process is gone, so the
+            # state is written first, as for the installer (PAD-188)
+            self._save_session_state()
+            ok, info = update_slots.start_swap(app_dir, version, bg["path"])
+        else:
+            self._save_session_state()
+            ok, info = commit_update_macos(bg["staged"])
+        if not ok:
+            self.window.append_log(
+                f"Couldn't switch to v{version} in place ({info}) - running "
+                "its installer instead.", "warning")
+            return False
+        self._swap_started = True
+        self.window.append_log(
+            f"Restarting into v{version} - the app will close and reopen "
+            "updated.", "info")
+        self._restart_wsl_on_close = True
+        self._show_update_splash(version)
+        self._close_for_update()
+        return True
+
+    def _show_update_splash(self, version):
+        """PAD-1036: the window the user watches from the Restart click to
+        the new version's window (core/update_splash), opened BEFORE the
+        app closes down - the emulator and WSL shutdowns in _on_close are
+        the first part of the wait.  Best effort: the restart never waits
+        on it."""
+        tr = None
+        ctx = getattr(self, "ctx", None)
+        try:
+            tr = translator(ctx.store.get("shell", "lang"))
+        except Exception:                                   # noqa: BLE001
+            pass
+        ok, info = update_splash.start_splash(version, tr=tr)
+        if not ok:
+            log.debug("no update splash: %s", info)
+
     def _install_update(self, version, installer):
         """Banner/gear "Install update" / "Download update" click.
 
@@ -5267,7 +6493,12 @@ class App:
         download machinery, different ending, because an AppImage isn't
         installed anywhere.  See core/updater._pick_installer_asset for
         why Linux stopped going through a browser at all.
+
+        With the update already downloaded in the background (PAD-1024) the
+        click is Restart to update and skips all of that.
         """
+        if self._install_staged_update(version):
+            return
         version, installer = self._freshest_update(version, installer)
         if installer is None:
             return
@@ -5336,10 +6567,11 @@ class App:
             return d
         return tempfile.gettempdir()
 
-    def _update_downloaded(self, dialog, path, version, kind):
-        """Main-thread continuation once the update file is on disk."""
+    def _update_downloaded(self, dialog, path, version, kind, ask=True):
+        """Main-thread continuation once the update file is on disk.
+        ``ask=False`` is Restart to update: the click was the yes."""
         if kind == "appimage":
-            self._finish_appimage_update(dialog, path, version)
+            self._finish_appimage_update(dialog, path, version, ask=ask)
         elif kind == "macos-dmg":
             self._finish_macos_update(dialog, path, version)
         else:
@@ -5376,9 +6608,9 @@ class App:
             return
         self.window.append_log(
             f"Installing v{version} and restarting…", "success")
-        self._on_close()
+        self._close_for_update()
 
-    def _finish_appimage_update(self, dialog, path, version):
+    def _finish_appimage_update(self, dialog, path, version, ask=True):
         """Linux: the download IS the new app — make it runnable and offer
         to start it.
 
@@ -5398,12 +6630,24 @@ class App:
                 f"({e}) — run `chmod +x` on it before starting it.", "warning")
         self.window.append_log(f"Update v{version} downloaded to {path}.",
                                "success")
-        if not messagebox.askyesno(
+        # PAD-937: with ⚙ Updates > Old versions set, the new one clears the
+        # old ones away when it starts, so don't hand the user the chore
+        from .core.old_versions import normalize_old_versions
+        if normalize_old_versions(self._settings.get("old_versions_keep")) < 0:
+            old_note = ("The version you're running now is untouched — "
+                        "delete its AppImage whenever you're happy with the "
+                        "new one, or pick Settings > Updates > Old versions "
+                        "to have PAD do it.")
+        else:
+            old_note = ("The version you're running now is untouched; the "
+                        "new one clears old versions away when it starts "
+                        "(Settings > Updates > Old versions).")
+        if not ask:
+            self.window.append_log(old_note, "info")
+        elif not messagebox.askyesno(
                 "Update downloaded",
                 f"Version {version} has been saved to:\n\n{path}\n\n"
-                "Start it now?  This window will close.\n\n"
-                "The version you're running now is untouched — delete its "
-                "AppImage whenever you're happy with the new one.",
+                "Start it now?  This window will close.\n\n" + old_note,
                 default="yes"):
             return
         # BEFORE THE SUCCESSOR IS STARTED, not on the way out behind it: the
@@ -5421,7 +6665,7 @@ class App:
             return
         self.window.append_log(f"Started v{version} — closing this window.",
                                "info")
-        self._on_close()
+        self._close_for_update()
 
     def _freshest_update(self, version, installer):
         """``(version, installer)`` to actually install, re-checked now.
@@ -5469,7 +6713,7 @@ class App:
             # Declining means "not that one" — installing the stale build over
             # the top would be the one thing he did not ask for.
             self.window.append_log(
-                "Update cancelled — %s was left in place." % __version__,
+                "Update canceled — %s was left in place." % __version__,
                 "info")
             return version, None
         return newest, newest_installer
@@ -5518,7 +6762,8 @@ class App:
             f"Installing v{version} — the app will close and reopen "
             f"updated.", "info")
         self._restart_wsl_on_close = True
-        self._on_close()
+        self._show_update_splash(version)
+        self._close_for_update()
 
     def _restart_wsl_for_update(self):
         """Quit-time half of an in-app update: shut WSL down so the updated
@@ -5604,6 +6849,12 @@ class App:
         x = int(m.group(3)) if m.group(3) is not None else None
         y = int(m.group(4)) if m.group(4) is not None else None
         return (w, h, x, y, bool(self._settings.get("window_maximized")))
+
+    def _on_language_change(self, code):
+        """The app's language (gear menu > Language, PAD-458), kept in
+        settings."""
+        self._settings["ui_language"] = code
+        self._save_settings()
 
     def _on_ui_zoom_change(self, zoom):
         """The page's zoom (Ctrl +/-), kept in settings."""
@@ -5732,8 +6983,7 @@ class App:
             pass
         try:
             os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
-            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self._settings, f, indent=2)
+            write_json_atomic(SETTINGS_FILE, self._settings)
         except OSError:
             pass
 
@@ -6168,6 +7418,11 @@ class App:
         self._settings["scenes_own_colours"] = bool(on)
         self._save_settings()
 
+    def _on_agent_access_change(self, on):
+        """Persist the ⚙ "Let AI agents control PAD" toggle (PAD-844)."""
+        self._settings["agent_access"] = bool(on)
+        self._save_settings()
+
     def _on_look_switches_change(self, switches):
         """Persist the Scenes and Video previews' overlay / files / screen switches
         (PAD-348: they came back all on at every launch)."""
@@ -6218,33 +7473,53 @@ class App:
         self._settings["flashed_images"] = digests
         self._save_settings()
 
+    def _on_donations_change(self, blob):
+        """Persist the Animal shelters window's memory (PAD-754): that its
+        once-only prompt has been shown, and the currency and name the form
+        last used."""
+        self._settings["donations"] = dict(blob or {})
+        self._save_settings()
+
+    def _on_report_change(self, blob):
+        """Persist the Report a problem window's memory (PAD-780): the name
+        and address the form last used, and the paths choice."""
+        self._settings["report"] = dict(blob or {})
+        self._save_settings()
+
     def _on_default_presets_change(self, blob):
         """Persist the Default Settings presets + which one auto-applies.
         *blob* = ``{"presets": {name: {AD_name: value}}, "active": name}``."""
         self._settings["default_settings_presets"] = blob
         self._save_settings()
 
-    def _apply_spike1_default_settings(self, out, vals, source):
+    def _apply_spike1_default_settings(self, out, vals, source, ranges=None):
         """Bake staged/preset Spike 1 adjustment defaults into the built card's
         game ELF.  *vals* is ``{AD_<id>: value}`` (the same store both eras
-        stage into); Spike 1 has no high-score board or menu widening, so only
-        the numeric defaults apply.  Returns True when *out* is a Spike 1 card
-        (handled here), False to fall through to the Spike 2 path."""
+        stage into) and *ranges* ``{AD_<id>: (min, max)}`` (PAD-750); Spike 1
+        has no high-score board or menu widening, so only the numeric
+        settings apply.  Returns True when *out* is a Spike 1 card (handled
+        here), False to fall through to the Spike 2 path."""
         from .plugins.stern.formats import detect_spike1_game
         if detect_spike1_game(out) is None:
             return False
         from .plugins.stern import spike1
-        overrides = {}
-        for name, v in (vals or {}).items():
-            if isinstance(name, str) and name.startswith("AD_"):
-                try:
-                    overrides[int(name[3:])] = int(v)
-                except ValueError:
-                    pass
-        if overrides:
+
+        def by_id(d, conv):
+            got = {}
+            for name, v in (d or {}).items():
+                if isinstance(name, str) and name.startswith("AD_"):
+                    try:
+                        got[int(name[3:])] = conv(v)
+                    except (TypeError, ValueError, IndexError):
+                        pass
+            return got
+        overrides = by_id(vals, int)
+        ranges = by_id(ranges, lambda p: (int(p[0]), int(p[1])))
+        if overrides or ranges:
             try:
                 n = spike1.write_game_elf_defaults(
-                    out, overrides, log=self.window.append_log)
+                    out, overrides, log=self.window.append_log,
+                    ranges_by_id=ranges)
                 self.window.append_log(
                     "Applied %s (%d setting(s)) to the built Spike 1 image."
                     % (source, n), "success")
@@ -6264,10 +7539,13 @@ class App:
         if mfr is None or not getattr(mfr.capabilities, "settings_editor",
                                       False):
             return
+        from .plugins.stern.adjustments import PRESET_RANGES_KEY
         blob = self._settings.get("default_settings_presets") or {}
         active = blob.get("active")
-        vals = (blob.get("presets") or {}).get(active)
-        if not vals:
+        vals = dict((blob.get("presets") or {}).get(active) or {})
+        # PAD-750: a preset's changed ranges ride in the same record
+        ranges = vals.pop(PRESET_RANGES_KEY, None) or {}
+        if not vals and not ranges:
             return
         try:
             out = self.window._target_write_path()
@@ -6276,21 +7554,21 @@ class App:
         if not out or not os.path.isfile(out):
             return
         if self._apply_spike1_default_settings(
-                out, vals, "Default Settings preset \"%s\"" % active):
+                out, vals, "Default Settings preset \"%s\"" % active,
+                ranges=ranges):
             return
         try:
+            from .plugins.stern.adjustments import resolve_overrides
             from .plugins.stern.explorer import CardImage
             with CardImage(out) as c:
                 table, part, path = c.adjustment_table()
-                overrides = {}
-                for name, v in vals.items():
-                    if name in table.by_name:
-                        e = table.get(name)
-                        overrides[name] = max(e["min"], min(e["max"], int(v)))
-                if overrides:
+                overrides, ranges = resolve_overrides(
+                    lambda n: table.get(n) if n in table.by_name else None,
+                    vals, ranges)
+                if overrides or ranges:
                     n, _ref = c.write_adjustment_defaults(
                         part, path, table, overrides,
-                        log=self.window.append_log)
+                        log=self.window.append_log, ranges=ranges)
                     self.window.append_log(
                         "Applied Default Settings preset \"%s\" (%d setting(s)) "
                         "to the built image." % (active, n), "success")
@@ -6315,9 +7593,26 @@ class App:
         if not assets_dir or not os.path.isdir(assets_dir):
             return
         vals = self.window.staged_default_settings(assets_dir)
+        ranges = self.window.staged_setting_ranges(assets_dir)
         names = self.window.staged_high_scores(assets_dir)
         expose = self.window.staged_menu_expose(assets_dir)
-        if not vals and not names and not expose:
+        # PAD-755: give a Home Edition its coin door
+        try:
+            coin = bool(self.window.staged_coin_door(assets_dir))
+        except AttributeError:
+            coin = False
+        # PAD-786: a final wizard that does not end the game
+        try:
+            wizard = bool(self.window.staged_final_wizard(assets_dir))
+        except AttributeError:
+            wizard = False
+        # PAD-1010: unlock the topper-only features without the topper
+        try:
+            topper = bool(self.window.staged_topper(assets_dir))
+        except AttributeError:
+            topper = False
+        if not vals and not ranges and not names and not expose and not coin \
+                and not wizard and not topper:
             return
         try:
             out = self.window._target_write_path()
@@ -6326,17 +7621,18 @@ class App:
         if not out or not os.path.isfile(out):
             return
         if self._apply_spike1_default_settings(
-                out, vals, "staged default setting(s)"):
+                out, vals, "staged default setting(s)", ranges=ranges):
             return
         try:
+            from .plugins.stern.adjustments import resolve_overrides
             from .plugins.stern.explorer import CardImage
             with CardImage(out) as c:
                 table, part, path = c.adjustment_table()
-                overrides = {}
-                for name, v in vals.items():
-                    if name in table.by_name:
-                        e = table.get(name)
-                        overrides[name] = max(e["min"], min(e["max"], int(v)))
+                # PAD-750: a changed range is written with the defaults, and
+                # each value is pulled into the range it will have
+                overrides, ranges = resolve_overrides(
+                    lambda n: table.get(n) if n in table.by_name else None,
+                    vals, ranges)
                 # Item 145: a timer the Modes tab staged is in the build already
                 # (the Write puts it in the game program on every path).
                 # Writing it again would only change the file, so the next
@@ -6398,12 +7694,14 @@ class App:
                             "\"%s\" (it isn't one of this build's hidden "
                             "settings) — the rest of the staged defaults were "
                             "still applied." % expose, "warning")
-                if overrides or name_overrides or menu_last_id is not None:
+                if (overrides or ranges or name_overrides
+                        or menu_last_id is not None or coin or wizard or topper):
                     n, _ref = c.write_adjustment_defaults(
                         part, path, table, overrides,
                         high_scores=hstd, name_overrides=name_overrides,
                         menu_last_id=menu_last_id, menu_plan=menu_plan,
-                        log=self.window.append_log)
+                        log=self.window.append_log, ranges=ranges,
+                        coin_door=coin, final_wizard=wizard, topper=topper)
                     if n:
                         self.window.append_log(
                             "Applied %d staged default setting(s) to the built "
@@ -6429,19 +7727,14 @@ class App:
     # for the Spike 2 trigger-pop hunt: each maps to a PAD_STERN_* env var the
     # Stern encoder reads, and a value at its default clears the var so the
     # engine baseline stays authoritative.
-    # The blip-free key is deliberately NOT the old "blip_free".  While the cave
-    # was the default build, a settings.json got "blip_free": true written into
-    # it by anyone who opened this dialog and pressed OK for some unrelated knob
-    # -- that value records the shipped default, not a decision.  Reading it
-    # under the new opt-in default would re-arm a firmware patch that has now
-    # boot-looped a real machine on three separate releases, for users who never
-    # chose it.  A fresh key means the old one is ignored and everybody starts
-    # from off; a deliberate ON has to be ticked once more, which is the safe
-    # direction to be wrong in.
+    # Blip-free callouts are not here any more: they are always on (PAD-523),
+    # so a "blip_free" / "blip_free_optin" left in an older settings.json is
+    # ignored and never reaches PAD_STERN_BLIP_FREE.  Longer and shorter
+    # replacements went the same way (PAD-843): always on, so an "audio_grow"
+    # left in an older settings.json is ignored too.
     _AUDIO_ADV_DEFAULTS = {
         "head_mode": "encode", "leadout": "silence", "previews": False,
         "experiment_idxs": "", "slot_seed": False, "slot_seed_db": 65,
-        "blip_free_optin": False, "audio_grow": False,
         "loudness": "match", "loudness_db": 0,
     }
 
@@ -6491,20 +7784,9 @@ class App:
             setenv("PAD_STERN_SLOT_SEED_DB", -max(min(mag, 90), 40))
         else:
             setenv("PAD_STERN_SLOT_SEED_DB", None)
-        # Blip-free callouts: OFF is the engine baseline now, so only the ON
-        # case sets a var and the engine requires an explicit "1".  The polarity
-        # matters beyond tidiness: spawned encode workers and headless callers
-        # inherit os.environ without ever going through this dialog, so whatever
-        # "unset" means is what they build.  Unset now means the standard build,
-        # which touches no game code at all.
-        setenv("PAD_STERN_BLIP_FREE",
-               "1" if d.get("blip_free_optin", False) else None)
-        # Replacements longer than their slot.  Same polarity rule and the same
-        # reason: unset means the build every headless caller and every spawned
-        # encode worker already makes, which trims a long clip to fit.  Only an
-        # explicit "1" grows the sound bank.
-        setenv("PAD_STERN_AUDIO_GROW",
-               "1" if d.get("audio_grow", False) else None)
+        # Replacements longer or shorter than their slot are always on
+        # (PAD-843): the engine's default with PAD_STERN_AUDIO_GROW unset, so
+        # nothing here sets it, and a support-set "0" is left alone.
 
     def _on_audio_advanced_change(self, cfg):
         """Persist + apply the Advanced audio options."""

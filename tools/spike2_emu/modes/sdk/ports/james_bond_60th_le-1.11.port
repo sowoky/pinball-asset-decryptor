@@ -16,6 +16,8 @@ site tick             0x00188738 0xe92d4038 0xe3a00037
 # site ball_end               NOT PLACED: absent in the target (the function changed); no caller could be lined up; 0 of the reference's handlers of event 0x34 line up with one here
 #   sound_lookup: located (strict) [Godzilla Premium/LE 1.16, Godzilla Pro 1.15, The Beatles 1.29, Deadpool LE 1.14, Deadpool Pro 1.16, Jaws LE 1.02, TMNT Pro 1.59]
 site sound_lookup     0x00287fd0 0xe92d4038 0xe1a05000
+# PAD-494/724 music modes: get_asset_descriptor, WRAPPED (sounds.cfg)
+site sound_resolve    0x001edc7c 0xe92d41f0 0xe1a05820
 #   score_add: located (strict) [Godzilla Premium/LE 1.16, Godzilla Pro 1.15, Deadpool LE 1.14, Deadpool Pro 1.16, Jaws LE 1.02, TMNT Pro 1.59]
 site score_add        0x001926bc 0xe306149e 0xe3401062
 #   callout: through the handler of hook 0x95, as in the reference [The Beatles 1.29, Deadpool LE 1.14, Deadpool Pro 1.16, Jaws LE 1.02, TMNT Pro 1.59]
@@ -337,6 +339,13 @@ site surface_find     0x00488eb8 0xe92d4070 0xe24dd008
 site surface_set_video 0x0048059c 0xe5d030d4 0xe92d4ff0
 site surface_play     0x0047e3a8 0xe5d030d4 0xe92d43f0
 site surface_stop     0x0047db58 0xe5d030d4 0xe92d40f0
+# PAD-725: the surface's own seek, length and position (PAD-530's, from Bond 1.06): a mode's clip the game's own
+# clip took the surface from comes back where it would be by then. Placed by the James Bond LE 1.06 recipe at
+# its distances from surface_play (-0x36c / -0x6b4 / -0x510), each proven by its call: the player function it
+# calls calls gst_element_seek / query_duration / query_position.
+site surface_seek     0x0047e03c 0xe92d43f0 0xe1a07003
+site surface_duration 0x0047dcf4 0xe5d030d4 0xe92d40f0
+site surface_position 0x0047de98 0xe5d030d4 0xe92d40f0
 
 # ---- callouts and text: a start shot for a template mode ----
 text example_start_shot     Target a
@@ -554,3 +563,46 @@ site show_6               0x00041b50 0xe92d4010 0xe3a00028   # 67 lights in its 
 text show_name_6          Small chase
 text show_kind_6          accent
 value show_secs_6         2
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x001ca984 0xe92d4ff0 0xe24dd0bc
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x004b3a74 0xe5d13000 0xe3530008
+site coil_off              0x004afb60 0xe3510008 0xe1a02001
+data sw_struct             0x005f5ce8
+
+# ---- PAD-1017: co-op play (portcoop.py, read off this build's program) ----
+site  coop_player_change 0x00373f34 0xe92d41f0 0xe24dd008
+site  coop_add_player    0x00373d74 0xe92d4038 0xe3a00051
+data  coop_player        0x0059fa14
+data  coop_players       0x00626f6c
+site  coop_first_ball    0x0034324c 0xeb00c305 0xe1a04000
+site  coop_icon_draw         0x0034c4c8 0xebfffdf3 0xe1560004
+
+# ---- PAD-1316: co-op play - the game start's adds of the Insider lobby's players, made while ball 1 waits (portcoop.py) ----
+site  coop_start_game        0x0034346c 0xe92d47f0 0xe30549e1
+site  coop_lobby_add         0x00343594 0xebfffea3 0xe2506000
+
+# ---- PAD-1028: co-op awards - the game's audit add (portcoop.py, read off this build's program) ----
+site  audit_add              0x0039e3ac 0xe92d43f0 0xe2505000
+# PAD-1041: the game's flags (Prolonged Competition sets FG_PLAYER_COMPETITION_MODE_ACTIVE)
+data  game_flags          0x00626cdc
+value game_flags_at       4
+data  game_flag_count     0x004f6ad4
+# PAD-1041: the start menu is an object (a vector of 24-byte entries); Prolonged Competition's entry is
+# added by the game's own add after its last one, and Start's pick of it is noted
+site  comp_menu_obj_built    0x0005d0dc 0xe5953204 0xe5952208   # after the builder's last add (the menu in r5)
+site  comp_menu_obj_pick     0x0005c4a8 0xe5943210 0xe5942204   # Start: the selected entry's callback (the menu in r4)
+site  comp_menu_obj_add_fn   0x0005cdd4 0xe92d47f0 0xe24dd020   # add(menu, enabled, kind, flag, flag2, caption, name)
+value comp_menu_obj_reg      5
+value comp_menu_obj_pick_reg 4
+value comp_menu_obj_vec      516   # +0x204: the entries' begin, +0x208 their end
+value comp_menu_obj_index    528   # +0x210: the selected entry
+value comp_menu_obj_kind     2     # COMPETITION's kind (flag 17)
+value comp_menu_obj_end_kind 1     # STANDARD's

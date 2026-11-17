@@ -199,3 +199,87 @@ text block_name_51      Neutrinos
 site block_start_53     0x00110450 0xe92d4010 0xe1a04000
 data block_obj_53       0x0060ff78
 text block_name_53      Test
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+data  game_flags          0x006c7164
+value game_flags_at       4
+data  game_flag_count     0x004de2b0
+value challenge_on_flag   16
+site  challenge_balls     0x003e15e4 0xe92d4030 0xe1a05000
+site  challenge_balls_2   0x001e29f4 0xe92d4038 0xe1a04000
+site  challenge_extra_ball 0x003b07a4 0xe3043ab8 0xe340306c
+site  challenge_menu      0x000a8db4 0xe1a07000 0xe3170080
+site  challenge_menu_pick 0x000a9f30 0xe5132124 0xe5133134
+value challenge_menu_pick_back 308
+value challenge_menu_list_at   688
+value challenge_menu_count_at  56
+value challenge_menu_cap       13
+value challenge_menu_entry     24
+value challenge_menu_kind_at   4
+value challenge_menu_caption_at 8
+value challenge_menu_caption2_at 10
+value challenge_menu_name_at   12
+value challenge_menu_kind      0
+value challenge_menu_slot      -1
+value challenge_menu_sets_on   1
+value challenge_menu_caption   1901
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x00188b38 0xe30625c2 0xe3402061
+
+# ---- events: the framework's event bus (PAD-619), each seen firing in the emulator 2026-10-20 ----
+# The dispatch is 1.59's (cmp r0 ; push {r3,r4,r5,lr} ; bgt ; movw/movt the handler table ; ldr r4, [r3, r0, lsl #2]),
+# bounded at 0xbf where 1.59's is 0xcf, and these five ids are 1.59's less 4: a stock game on the rig (batch_r38, every
+# id 0x20-0x4f named) fired 0x49 and 0x21 once at its start, 0x30 at the ball's end, 0x23 then 0x24 after it, and 0x21
+# again at the next ball's start. 1.59's tilt ids (0xc8 / 0xc6) were not seen and are left out.
+site hook_dispatch    0x00183e08 0xe35000bf 0xe92d4038
+event game_start     0x49
+event ball_start     0x21
+event ball_end       0x30
+event bonus_start    0x23
+event bonus_end      0x24
+
+# ---- PAD-645: the framework's switch drain, for the flipper buttons' sounds in attract (portswitch.py; no `switch` lines: the shots keep their own route) ----
+#   switch_edge: the framework's per-switch call in its switch drain (generation A: r0 = the switch id, called for every edge the game acts on, before the level is stored) - press the switches to prove it
+site switch_edge      0x00252c80 0xe92d4010 0xe1a04000
+#   switch_drain: the drain itself, never hooked: an edge counts only when switch_edge is called from it
+site switch_drain     0x002533d8 0xe92d4ff0 0xe30892f0
+data switch_records         0x005bfa70
+data switch_count           0x006c4aec
+value switch_drain_size     456
+value switch_record_size    44
+value switch_level_at       1
+value switch_level_via      0
+value switch_level_before   1
+value switch_flags_at       30
+value switch_polarity_at    32
+#   sound_play: located (strict) from TMNT Pro 1.59 and LE 1.59 (loose from The Beatles 1.29), the same place
+site sound_play       0x002ae830 0xe92d4010 0xe303e3f8
+#   the drain's edges are not this port's shots (they keep their own route): only the flipper buttons' sounds in attract use it
+value switch_edge_shots     0
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x00184b24 0xe92d4010 0xe30449d0
+value ball_launch_flag       11
+value ball_launch_wait_flag  12
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x0021e084 0xe92d4ff0 0xe24dd0c4
+
+# PAD-710: the game's own mode framework (mode_framework.py, from this build's program): what one of its
+# modes writes as it starts and stops, so a mode of ours in one's place counts as it
+data  mode_player_at         0x005c1288
+value mode_slot_stop         42
+value mode_stopped_at        0x37
+value mode_starts_at         0x48
+value mode_wins_at           0x64
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x004a2a9c 0xe5d13000 0xe3530008
+data sw_listen             0x006782f0
+data sw_boards             0x006c3ff4
+site coil_used             0x0034f170 0xe92d43f8 0xe30781e8

@@ -161,6 +161,10 @@ class _App:
     _save_session_state = app_mod.App._save_session_state
     _launch_downloaded_installer = app_mod.App._launch_downloaded_installer
     _restart_wsl_for_update = app_mod.App._restart_wsl_for_update
+    _close_for_update = app_mod.App._close_for_update
+
+    def _show_update_splash(self, version):
+        pass                # a real window (PAD-1036): not from a test
 
     def __init__(self):
         self.order = []

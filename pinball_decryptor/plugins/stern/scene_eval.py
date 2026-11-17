@@ -29,6 +29,7 @@ A transform here is the 2-D affine ``(a, b, c, d, tx, ty)``: ``x' = a x + c y + 
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 
@@ -154,6 +155,27 @@ def manifest(scene, tex2rel=None, font_of=None, asset2rel=None):
     if fonts:
         out["fonts"] = fonts
     return out
+
+
+def picture_fills(man):
+    """``({image: [(w, h), ...]}, {image, ...})`` of a scene's manifest: the size of every
+    Shape that fills with each picture, and every picture a Bitmap names.  A Shape draws its
+    fill into its own fixed rect, so such a picture cannot take a new size in that scene
+    (PAD-857, the engine's ``radium_grow.drawn_by``)."""
+    objs = man.get("objects") or {}
+    fills, named = {}, set()
+    for o in objs.values():
+        if not o:
+            continue
+        if o.get("kind") == "Bitmap" and o.get("image"):
+            named.add(o["image"])
+        elif o.get("kind") == "Shape" and o.get("fill") is not None:
+            bm = objs.get(str(o["fill"])) or {}
+            if bm.get("image"):
+                left, top, right, bottom = o["rect"]
+                fills.setdefault(bm["image"], []).append(
+                    (int(round(right - left)), int(round(bottom - top))))
+    return fills, named
 
 
 def font_sizes(scene, data, images, tables, off2rel):
@@ -325,6 +347,10 @@ def draw_list(man, frame=None, pins=None, hidden=(), origin=(0.0, 0.0), matrix=N
     def emit(n, o, w, t, path, f, only=None):
         k = o["kind"]
         common = {"node": n["id"], "path": path, "m": w, "mul": t[0], "add": t[1]}
+        if n.get("own"):
+            common["own"] = True            # a kept picture laid out at its own size (PAD-981)
+            if n.get("own_box"):
+                common["own_box"] = n["own_box"]    # ... over a picture since replaced (PAD-1301)
         if only is not None and k not in ("Sprite", "StreamingFlipbook"):
             return                                  # only the way through to *show*
         if k in ("Sprite", "StreamingFlipbook"):
@@ -336,14 +362,32 @@ def draw_list(man, frame=None, pins=None, hidden=(), origin=(0.0, 0.0), matrix=N
                     out.append(dict(common, kind="flip", m=compose(w, tuple(fr["m"])),
                                     image=fr.get("image"), w=fr["w"], h=fr["h"]))
             run(o.get("kids") or (), lf, w, t, path, only)
+        elif k == "Bitmap" and n.get("loop"):
+            # PAD-1278: an added picture's own loop (a nested Sprite on the card), drawn as
+            # the one layer it is: its picture of the moment, at its pulse's alpha
+            lp = n["loop"]
+            lf = (f - first_visible(n)) % max(1, int(lp["frames"])) + 1
+            ims = lp.get("images") or [{"image": o.get("image"), "w": o["w"], "h": o["h"]}]
+            im = ims[((lf - 1) // max(1, int(lp["every"]))) % len(ims)]
+            mul = list(common["mul"])
+            if lp.get("alpha"):
+                mul[3] = mul[3] * lp["alpha"][(lf - 1) % len(lp["alpha"])]
+            out.append(dict(common, kind="bitmap", mul=tuple(mul), image=im.get("image"),
+                            w=im.get("w") or o["w"], h=im.get("h") or o["h"]))
         elif k == "Bitmap":
             out.append(dict(common, kind="bitmap", image=o.get("image"), w=o["w"], h=o["h"]))
         elif k == "Shape":
             fill = objects.get(str(o.get("fill"))) if o.get("fill") is not None else None
-            x, y, rw, rh = o["rect"]
+            # left, top, right, bottom: Godzilla's attract title fills (422, 4, 939, 664)
+            # with a 517x660 Bitmap, and the game squeezes the fill into that box (PAD-857)
+            x, y, right, bottom = o["rect"]
+            rw, rh = right - x, bottom - y
             if fill is not None and fill.get("w") and fill.get("h"):
                 sx, sy = rw / float(fill["w"]), rh / float(fill["h"])
-                out.append(dict(common, kind="bitmap", image=fill.get("image"),
+                # the Write fits a kept picture into a Shape's box whoever laid it out
+                # (radium_grow.keep_boxes), so PAD-981's own size is not for a fill (PAD-1301)
+                fcommon = {k_: v for k_, v in common.items() if k_ not in ("own", "own_box")}
+                out.append(dict(fcommon, kind="bitmap", image=fill.get("image"),
                                 w=fill["w"], h=fill["h"],
                                 m=compose(w, (sx, 0.0, 0.0, sy, x, y))))
         elif k == "Text":
@@ -527,6 +571,19 @@ def apply(m, x, y):
     return a * x + c * y + tx, b * x + d * y + ty
 
 
+def turn_of(m):
+    """``(degrees clockwise, mirrored)`` the affine *m* turns what it draws by (PAD-534,
+    DragonRR: Planet X's bridge pointer is a south-pointing picture the game draws turned
+    48 degrees).  A mirrored draw is read as flipped left to right, then turned."""
+    a, b, c, d = m[:4]
+    mirrored = a * d - b * c < 0
+    deg = math.degrees(math.atan2(-b, -a) if mirrored else math.atan2(b, a))
+    deg = round(deg, 1)
+    if deg <= -180:
+        deg += 360
+    return (0.0 if deg == 0 else deg), mirrored
+
+
 def to_parent(parent, dx, dy):
     """A move of (dx, dy) on the glass in the units of a node whose parent is drawn by
     *parent*: the parent's linear part inverted (its translation cancels)."""
@@ -569,6 +626,74 @@ def seekable(man):
                     run(o.get("kids") or (), here)
 
     run(man["root"]["kids"], [])
+    return out
+
+
+def sections(labels, frames):
+    """A seekable sprite's looks, ``[(label, first frame, last frame)]``: each label runs to
+    the next, and an ``X_End`` label closes ``X`` (Godzilla's map icons: ``PowerLoop`` 1,
+    ``PowerLoop_End`` 48, ``PowerSelect`` 49, ``PowerSelect_End`` 69, ``Power_Destroyed`` 70
+    are three looks)."""
+    labels = sorted(((n, int(f)) for n, f in labels), key=lambda x: x[1])
+    names = {n.lower() for n, _f in labels}
+    heads = [(n, f) for n, f in labels
+             if not (n.lower().endswith("_end") and n[:-4].lower() in names)]
+    out = []
+    for i, (n, f) in enumerate(heads):
+        end = heads[i + 1][1] - 1 if i + 1 < len(heads) else max(f, int(frames or 1))
+        out.append((n, f, max(f, end)))
+    return out
+
+
+def _short_looks(names):
+    """*names* without the part's own name in front (``Bridge_Destroyed`` -> ``Destroyed``),
+    cut only where a word starts."""
+    if len(names) < 2:
+        return {n: n for n in names}
+    pre = os.path.commonprefix(list(names))
+    while pre and not all(len(n) > len(pre) and (n[len(pre)] == "_" or n[len(pre)].isupper())
+                          for n in names):
+        pre = pre[:-1]
+    return {n: n[len(pre):].lstrip("_") or n for n in names} if pre else {n: n for n in names}
+
+
+def looks(man):
+    """Which look of a switchable part each layer belongs to (DragonRR, PAD-531: "multiple
+    icons in each of the three locations and it is hard to know why"): ``{node id: {"part":
+    sprite node id, "part_name", "looks": [label], "short": [label without the part's name],
+    "frame": the frame of the part that shows it best}}``.  A layer the part draws in every
+    one of its looks is left out; one inside a look's layer has that look too, unless a part
+    nested deeper names its own."""
+    objects = man["objects"]
+    out = {}
+
+    def visit(n, look):
+        for _s, oid in n["comps"]:
+            o = objects.get(str(oid)) or {}
+            if o.get("kind") not in ("Sprite", "StreamingFlipbook"):
+                continue
+            secs = sections(o.get("labels") or (), o.get("frames", 1))
+            short = _short_looks([s[0] for s in secs])
+            for k in o.get("kids") or ():
+                mine = look
+                got, best = [], None
+                for name, a, b in (secs if len(secs) > 1 else ()):
+                    on = [f for f in range(a, b + 1) if visible_at(k, f)]
+                    if not on:
+                        continue
+                    got.append(name)
+                    if best is None:
+                        # the frame it is most opaque at: a look that fades in starts clear
+                        best = max(on, key=lambda f: (tint_at(k, f)[0][3], -f))
+                if got and len(got) < len(secs):
+                    mine = {"part": n["id"], "part_name": n["name"], "looks": got,
+                            "short": [short[g] for g in got], "frame": best}
+                if mine is not None:
+                    out[k["id"]] = mine
+                visit(k, mine)
+
+    for n in man["root"]["kids"]:
+        visit(n, None)
     return out
 
 

@@ -13,6 +13,8 @@
 const Q = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
 const TOKEN = Q.get("t") || "";
 const PAGE = Q.get("page") || "main";
+// PAD-668: rings inserts on the field view's picture (set by fieldView)
+let markInserts = null;
 
 // ---------------------------------------------------------------- transport
 function api(m, ...a) {
@@ -78,6 +80,15 @@ function showTip(text, x, y) {
   tipEl.style.top = ty + "px";
 }
 function hideTip() { tipEl.hidden = true; }
+// PAD-1237: words in the bottom bar give way to its controls, cut with an
+// ellipsis; hovering `host` then shows them whole. Uncut words carry no
+// tooltip (they are all there already).
+function tipWhenCut(host, words) {
+  host.addEventListener("pointerenter", () => {
+    if (words.scrollWidth > words.clientWidth + 1) host.title = words.textContent;
+    else host.removeAttribute("title");
+  });
+}
 // hold something for as long as the mouse button is down, wherever the
 // pointer goes meanwhile (the release opens what was HELD)
 function holdWith(target, ev, down, up) {
@@ -136,6 +147,126 @@ function pfHit(view, fx, scale, px, py) {
   return null;
 }
 
+// ------------------------------------------------------- the cabinet column
+// PAD-500: where every one of the cabinet's own lights goes in a W x H column
+// beside the artwork. The sections come from playfield.py in column order
+// (topper, speakers, back panel, blades): a topper or back panel on its own
+// drawing keeps that drawing's shape in at most a third of the column (lamps
+// with no place on it in a row beneath), the speakers are a ring (they ring
+// the backbox speakers; pixel 1 at the top, clockwise in chain order), any
+// other strip wraps in chain order, and the blades stand in whatever height is
+// left, one bar a side with pixel 1 at the BOTTOM - where King Kong's picture
+// puts it. PURE, so Node can test it: marks are {cid, x, y, r} (a dot) or
+// {cid, x, y, w, h} (a bar segment), centred; labels {text, sub, x, y};
+// switches {k, id, name, x, y, r, h} - a ring at x, y and its name after it,
+// h the row's height (PAD-1179: the back panel's, Iron Maiden's bullseye).
+const CAB_PAD = 6, CAB_LABEL = 26;
+function cabLayout(sections, W, H) {
+  const inner = Math.max(10, W - 2 * CAB_PAD);
+  const marks = [], labels = [], switches = [];
+  let y = CAB_PAD;
+  for (const s of sections) {
+    labels.push({ text: s.label, sub: (s.where || "node " + s.node) + (s.board ? " · " + s.board : ""), x: CAB_PAD, y });
+    y += CAB_LABEL;
+    if (s.bars) {
+      const n = Math.max(1, ...s.bars.map((b) => b.length));
+      const avail = Math.max(20, H - CAB_PAD - y);
+      const pitch = avail / n;
+      const nb = s.bars.length;
+      const bw = Math.max(3, Math.min(14, inner / (2 * nb + 1)));
+      const gap = (inner - nb * bw) / (nb + 1);
+      s.bars.forEach((bar, j) => {
+        const x = CAB_PAD + gap + j * (bw + gap) + bw / 2;
+        bar.forEach((cid, i) => marks.push({ cid, x, y: y + avail - (i + 0.5) * pitch, w: bw, h: Math.max(1, pitch - 1) }));
+      });
+      y += avail + 8;
+    } else if (s.pos) {
+      const xs = s.pos.map((p) => p[1]), ys = s.pos.map((p) => p[2]);
+      const x0 = Math.min(...xs), y0 = Math.min(...ys);
+      const bw = Math.max(1, Math.max(...xs) - x0), bh = Math.max(1, Math.max(...ys) - y0);
+      const r = Math.max(1.5, Math.min(4, inner / 40));
+      const k = Math.min((inner - 2 * r) / bw, Math.max(10, H / 3 - 2 * r) / bh);
+      const ox = CAB_PAD + (inner - bw * k) / 2;
+      for (const [cid, px, py] of s.pos) marks.push({ cid, x: ox + (px - x0) * k, y: y + r + (py - y0) * k, r });
+      y += bh * k + 2 * r + 10;
+    } else if (s.ring) {
+      const n = Math.max(1, s.ring.length);
+      const R = Math.max(8, Math.min(inner / 2 - 6, H / 8));
+      const r = Math.max(1.5, Math.min(5, 0.8 * Math.PI * R / n));
+      const cx = CAB_PAD + inner / 2, cy = y + R + r;
+      s.ring.forEach((cid, i) => {
+        const a = -Math.PI / 2 + 2 * Math.PI * i / n;
+        marks.push({ cid, x: cx + R * Math.cos(a), y: cy + R * Math.sin(a), r });
+      });
+      y += 2 * (R + r) + 10;
+    }
+    // any other strip is a row in chain order; a positioned section's lamps
+    // with no place on its picture (PAD-705: the BACKPANEL GI) go under it
+    if (s.row && !s.bars && !s.ring) {
+      const p = Math.max(6, Math.min(11, inner / 10));
+      const per = Math.max(1, Math.floor(inner / p));
+      s.row.forEach((cid, i) => marks.push({ cid, x: CAB_PAD + p / 2 + (i % per) * p, y: y + p / 2 + Math.floor(i / per) * p, r: p * 0.38 }));
+      y += Math.ceil(s.row.length / per) * p + 10;
+    }
+    // the back panel's switches, a labelled row each: on its picture they
+    // sit too close to tell apart at the column's size
+    if (s.sw && s.sw.length) {
+      const h = Math.max(13, Math.min(18, inner / 7));
+      const r = Math.max(3.5, h * 0.3);
+      s.sw.forEach(([k, name, id], i) => switches.push({ k, id, name, x: CAB_PAD + r + 2, y: y + h / 2 + i * h, r, h }));
+      y += s.sw.length * h + 10;
+    }
+  }
+  return { marks, labels, switches };
+}
+
+// the switch row under a point: anywhere along its row, ring or name
+function cabSwHit(switches, W, px, py) {
+  for (const s of switches) {
+    if (Math.abs(py - s.y) <= s.h / 2 && px >= s.x - s.r - 2 && px <= W) return s;
+  }
+  return null;
+}
+
+// The switch list's swatch grid gives the same two boards the same shapes: the
+// speakers' block a ring of round cells, pixel 1 at the top and clockwise, and
+// the blades' block a column a side, pixel 1 at the bottom. Slots are grid
+// cell keys in order, null where the wire has not shown that pixel yet (it
+// gets no cell, and the others keep their places). PURE: {w, h, at: [{k, x,
+// y, w, h}]}, top-left corners inside a w x h box. CELL is .pf-grid .c's size.
+const CELL = 12, GRID_W = 152;
+function gridRing(slots) {
+  const n = Math.max(1, slots.length);
+  const R = Math.min((GRID_W - CELL) / 2, Math.max(24, n * (CELL + 4) / (2 * Math.PI)));
+  const c = Math.max(5, Math.min(CELL, 2 * Math.PI * R / n - 3));
+  const at = [];
+  slots.forEach((k, i) => {
+    if (k == null) return;
+    const a = -Math.PI / 2 + 2 * Math.PI * i / n;
+    at.push({ k, x: R + R * Math.cos(a) + (CELL - c) / 2, y: R + R * Math.sin(a) + (CELL - c) / 2, w: c, h: c });
+  });
+  return { w: 2 * R + CELL, h: 2 * R + CELL, at };
+}
+function gridBars(bars) {
+  const n = Math.max(1, ...bars.map((b) => b.length));
+  const pitch = n <= 60 ? 8 : Math.max(4, Math.floor(480 / n));
+  const GAP = 14, at = [];
+  bars.forEach((bar, j) => bar.forEach((k, i) => {
+    if (k != null) at.push({ k, x: j * (CELL + GAP), y: (n - 1 - i) * pitch, w: CELL, h: pitch - 2 });
+  }));
+  return { w: bars.length * CELL + (bars.length - 1) * GAP, h: n * pitch - 2, at };
+}
+
+// the mark under a point, for the tooltip: a dot is hit a little past its
+// edge, a bar segment anywhere across its bar's width
+function cabHit(marks, px, py) {
+  for (const m of marks) {
+    if (m.w ? Math.abs(px - m.x) <= m.w / 2 + 2 && Math.abs(py - m.y) <= m.h / 2 + 0.5
+      : Math.hypot(px - m.x, py - m.y) <= m.r + 2) return m.cid;
+  }
+  return null;
+}
+
 // report where this window is, for the next open (the native host knows it
 // itself; a browser window only knows it from here)
 let lastGeom = "";
@@ -167,6 +298,7 @@ function startMain() {
   on("frame", (f) => view && view.frame(f));
   on("slots", (s) => { if (S) { S.slots = s.values; S.state_busy = s.busy; } if (view) view.slots(s); });
   on("run", (r) => { if (S) S.run = r; if (view) view.run(r); });
+  on("clips", (c) => { if (S) S.clips = c; if (view) view.clips(c); });
 
   function render() {
     app.textContent = "";
@@ -180,7 +312,7 @@ function startMain() {
     // unlabelled run in the ordinary rig - David's own, from main.
     const rig = S.rig || {};
     if (rig.slot || rig.label) {
-      app.dataset.rig = String(Math.min(rig.slot || 0, 4));
+      app.dataset.rig = String(Math.min(rig.slot || 0, 5));   // the rigs with a colour (pf.css --rig-N; 5 since PAD-649)
       const chip = el("span", "pf-rig",
         rig.slot ? ("rig " + rig.slot + (rig.label ? " \u00b7 " + rig.label : "")) : rig.label);
       chip.title = rig.slot
@@ -190,38 +322,77 @@ function startMain() {
     } else {
       delete app.dataset.rig;
     }
-    const stxt = el("div", "txt", S.status || "");
-    status.append(stxt);
+    // PAD-1237: the bar is the run's controls alone, on one row. What the
+    // last press said (a ball, a helper) is the BALLS section's, and the save
+    // states are a side-panel section of their own, below.
+    const msg = el("div", "pf-msg", S.status || "");
+    status.append(el("span", "sp"));
     const run = runCluster(S.run);
+    // PAD-1198: Stop emulator on its own at the far left, away from Pause
+    if (run.stop) status.prepend(run.stop);
     status.append(run.el);
-    const states = S.savestates ? stateCluster() : null;
-    if (states) status.append(states.el);
     let v;
     if (S.kind === "field") v = fieldView(main);
     else if (S.kind === "schematic") v = schematicView(main);
     else v = waitingView(main);
     let panel = null;
     if (S.panel) { panel = keyPanel(S.panel); body.append(panel.el); }
+    // before padbinds brings the key panel, the side panel is the window's own:
+    // the ball controls (PAD-668: never over the playfield) under the info
+    let side = panel ? panel.el : null;
+    if (!side && ((S.view && S.view.info) || v.side || S.savestates)) { side = el("aside", "pf-panel"); body.append(side); }
     // the extra information (PAD-238) sits at the head of the side panel,
-    // folded away, never over the playfield; before padbinds brings the key
-    // panel the side panel holds only this
+    // folded away, never over the playfield
     let info = null;
     if (S.view && S.view.info) {
       info = infoPanel(S.view.info, S.live || []);
-      if (panel) panel.el.prepend(info.el);
-      else { const side = el("aside", "pf-panel"); side.append(info.el); body.append(side); }
+      side.prepend(info.el);
     }
+    // the ball controls right under it, where the key panel's BALLS section sits
+    if (v.side) { if (info) info.el.after(v.side); else side.prepend(v.side); }
+    const top = v.side && info ? { el: v.side } : info;
     // the cabinet's shaker motor (PAD-424): open under the info, because it
     // is the one coil the artwork has no place for
     let shaker = null;
     if (info && S.view.shaker) {
       shaker = shakerPanel(S.view.shaker, (S.dyn || {}).shaker);
-      info.el.after(shaker.el);
+      top.el.after(shaker.el);
     }
-    app.append(body, status);
+    // the cabinet's own lighting (PAD-500): what the column holds, and the
+    // "Expression lights" tick box on a title that has blades or speakers
+    let cabp = null;
+    if (info && S.view.cab_panel) { cabp = cabPanel(S.view.cab_panel); (shaker || top).el.after(cabp.el); }
+    // the single-colour inserts' colours (PAD-668), last in the column
+    if (info && S.view.lens && S.view.lens.length) (cabp || shaker || top).el.after(lensPanel(S.view.lens).el);
+    // PAD-827: the clips the game plays, right under the info, where a shot's
+    // clip is read off as it starts
+    let clips = null;
+    if (side && S.clips) {
+      clips = clipsPanel(S.clips);
+      if (top) top.el.after(clips.el); else side.prepend(clips.el);
+    }
+    // PAD-1237: SAVE STATES, under the clips (off the bottom bar)
+    let states = null;
+    if (side && S.savestates) {
+      states = statesPanel();
+      const after = clips || top;
+      if (after) after.el.after(states.el); else side.prepend(states.el);
+    }
+    // the last press's answer, in the BALLS section (or atop the side panel;
+    // in the bar only for a window with no side panel at all)
+    const ballSec = (panel && panel.ballSec) || v.side;
+    if (ballSec) {
+      const nt = ballSec.querySelector(".kp-note");
+      if (nt) nt.before(msg); else ballSec.append(msg);
+    } else if (side) side.prepend(msg);
+    else { msg.className = "txt"; tipWhenCut(msg, msg); status.querySelector(".sp").replaceWith(msg); }
+    // PAD-1090: the boot progress bar rides the top rig strip (David)
+    const loadBar = el("i", "pf-load");
+    loadBar.hidden = true;
+    app.append(loadBar, body, status);
     view = {
       frame(f) {
-        if (f.status != null) stxt.textContent = f.status;
+        if (f.status != null) msg.textContent = f.status;
         if (f.live && info) info.live(f.live);
         if (f.shaker && shaker) shaker.update(f.shaker);
         if (v.frame) v.frame(f);
@@ -229,7 +400,49 @@ function startMain() {
       },
       slots(s) { if (states) states.update(s); },
       run(r) { run.update(r); },
+      clips(c) { if (clips) clips.update(c); },
     };
+  }
+
+  // ================================================== the clips (PAD-827)
+  // Each clip the game plays, newest first: its name (the Video tab row's),
+  // the switch made just before it started, and whether the game loops it.
+  // Rows are {name, sw, loop, n, now}. Open unless it was folded.
+  function clipsPanel(rows) {
+    const acc = el("details", "kp-acc pf-clips");
+    let open = true;
+    try { open = localStorage.getItem("pf-acc-clips") !== "0"; } catch (e) { /* no storage */ }
+    acc.open = open;
+    const sum = el("summary", null, "CLIPS");
+    // never keep the keyboard: a focused summary would eat the space bar
+    sum.tabIndex = -1;
+    sum.addEventListener("mousedown", (ev) => ev.preventDefault());
+    const list = el("div", "cl-list");
+    const foot = el("div", "cl-foot", "Newest first, with the switch made just before each. The Video tab shows them too.");
+    acc.append(sum, list, foot);
+    acc.title = "The clips the game plays, as it plays them. \"after\" is the switch made just before the clip "
+      + "started; \"loops\" means the game starts it again each time it ends. The words the game draws over a clip "
+      + "are on the game's screen while it plays.";
+    acc.addEventListener("toggle", () => {
+      try { localStorage.setItem("pf-acc-clips", acc.open ? "1" : "0"); } catch (e) { /* no storage */ }
+    });
+    function update(data) {
+      list.textContent = "";
+      if (!data.length) { list.append(el("div", "cl-none", "No clip yet")); return; }
+      for (const r of data) {
+        const row = el("div", "cl-row" + (r.now ? " now" : ""));
+        const head = el("div", "cl-name", r.name);
+        if (r.n > 1) head.append(el("span", "cl-n", " ×" + r.n));
+        row.append(head);
+        const bits = [];
+        if (r.sw) bits.push("after " + r.sw);
+        if (r.loop) bits.push("loops");
+        if (bits.length) row.append(el("div", "cl-why", bits.join(" · ")));
+        list.append(row);
+      }
+    }
+    update(rows);
+    return { el: acc, update };
   }
 
   // ---- the run's own controls (PAD-204): Pause, and the PC-side volume -------
@@ -244,6 +457,49 @@ function startMain() {
     const pause = btn("Pause", () => { pause.blur(); api("pause"); }, "sm");
     pause.title = "Freeze the game where it is, and carry on from there (Pause or F9)";
     box.append(pause);
+    // PAD-1198: Stop emulator - asked of the app that launched the run (its
+    // Stop, Spike 2 or Spike 3), so only a run with an app. The window closes
+    // itself when the run has gone; closing it (X) asks the same. Red-outlined
+    // like the app's own Stop emulator (danger), and handed back on its own:
+    // the status bar puts it at the far left, apart from Pause and the rest.
+    // Greyed as "Stopping…" once asked.
+    let stop = null;
+    const showStopping = (on) => {
+      stop.textContent = on ? "Stopping…" : "Stop emulator";
+      stop.disabled = !!on;
+    };
+    if (R && R.stop) {
+      stop = btn("Stop emulator", () => {
+        stop.blur();
+        api("stop").then((ok) => { if (ok) showStopping(true); });
+      }, "sm danger");
+      stop.title = "End the emulator run, as Stop emulator in the app does (closing this window does too)";
+    }
+    // PAD-735: the app that launched the run has the game boot again; only a
+    // run with an app. This window stays open (PAD-738), so the button follows
+    // the run's `restarting` (PAD-744): back the moment the request is taken.
+    // PAD-744: how far the game has booted (bootprog.py), while it boots
+    // the bar itself is the top rig strip (.pf-load, set in update); the
+    // bottom cluster keeps only the % and the step words (PAD-1090)
+    const boot = el("span", "boot");
+    const bootN = el("span", "n mono"), bootW = el("span", "w");
+    boot.append(bootN, bootW);
+    boot.hidden = true;
+    tipWhenCut(boot, bootW);
+    box.append(boot);
+    let restart = null;
+    const showRestarting = (on) => {
+      restart.textContent = on ? "Restarting…" : "Restart game";
+      restart.disabled = !!on;
+    };
+    if (R && R.restart) {
+      restart = btn("Restart game", () => {
+        restart.blur();
+        api("restart").then((ok) => showRestarting(ok));
+      }, "sm");
+      restart.title = "Stop the game and start it again, as switching the machine off and on does";
+      box.append(restart);
+    }
     let vol = null, pct = null, mute = null, sliding = false, sent = 0, timer = null;
     if (R && R.audio) {
       const lab = el("span", "lab", "VOL");
@@ -262,13 +518,30 @@ function startMain() {
       mute.type = "checkbox";
       mute.addEventListener("change", () => { api("mute", mute.checked); mute.blur(); });
       mbox.append(mute, el("span", null, "Mute"));
-      box.append(lab, vol, pct, mbox);
+      // one unit, so a wrapping bar (PAD-1237) never parts Mute from its slider
+      const grp = el("span", "volgrp");
+      grp.append(lab, vol, pct, mbox);
+      box.append(grp);
     }
     const update = (r) => {
       if (!r) return;
       pause.textContent = r.paused ? "Resume" : "Pause";
       pause.classList.toggle("primary", !!r.paused);
       box.classList.toggle("paused", !!r.paused);
+      if (restart) showRestarting(r.restarting);
+      if (stop) showStopping(r.stopping);
+      // the top rig strip is the progress bar (PAD-1090)
+      const loadBar = app.querySelector(".pf-load");
+      app.classList.toggle("booting", !!r.boot);
+      if (loadBar) {
+        loadBar.hidden = !r.boot;
+        if (r.boot) loadBar.style.width = r.boot.pct + "%";
+      }
+      boot.hidden = !r.boot;
+      if (r.boot) {
+        bootN.textContent = r.boot.pct + "%";
+        bootW.textContent = r.boot.words;
+      }
       if (vol && r.audio) {
         if (!sliding) {
           vol.value = String(Math.round(r.audio.gain * 100));
@@ -278,13 +551,29 @@ function startMain() {
       }
     };
     update(R || {});
-    return { el: box, update };
+    return { el: box, stop, update };
   }
 
-  // ---- the save-state cluster (item 13) --------------------------------------
-  function stateCluster() {
-    const box = el("div", "pf-states");
+  // ---- the save states (item 13): a side-panel section since PAD-1237 -------
+  // The slot list, Save state and Load state, and their own line: "saving
+  // state...", the helper's answer, an empty slot. Folded until opened.
+  function statesPanel() {
+    const acc = el("details", "kp-acc pf-sts");
+    // folded until opened (David), then as it was left
+    let open = false;
+    try { open = localStorage.getItem("pf-acc-states") === "1"; } catch (e) { /* no storage */ }
+    acc.open = open;
+    const sum = el("summary", null, "SAVE STATES");
+    // never keep the keyboard: a focused summary would eat the space bar
+    sum.tabIndex = -1;
+    sum.addEventListener("mousedown", (ev) => ev.preventDefault());
+    acc.addEventListener("toggle", () => {
+      try { localStorage.setItem("pf-acc-states", acc.open ? "1" : "0"); } catch (e) { /* no storage */ }
+    });
+    acc.title = "Snapshot the running game, mid-ball, into a slot and come back to it later";
+    const body = el("div", "body");
     const sel = el("select", "sel");
+    sel.addEventListener("change", () => sel.blur());
     const fill = (vals) => {
       const keep = sel.selectedIndex;
       sel.textContent = "";
@@ -292,12 +581,24 @@ function startMain() {
       sel.selectedIndex = keep >= 0 ? keep : 0;
     };
     fill(S.slots || []);
-    const save = btn("Save state", () => saveDialog(sel.selectedIndex));
-    const loadB = btn("Load state", () => api("load", sel.selectedIndex));
+    const save = btn("Save state", () => { save.blur(); saveDialog(sel.selectedIndex); }, "sm");
+    const loadB = btn("Load state", () => { loadB.blur(); api("load", sel.selectedIndex); }, "sm");
+    const bs = el("div", "kp-btns");
+    bs.append(save, loadB);
+    const line = el("div", "pf-msg");
+    let timer = null;
+    const say = (m) => {
+      if (!m) return;
+      clearTimeout(timer);
+      line.textContent = m[0] || "";
+      if (m[0] && m[1] != null) timer = setTimeout(() => { line.textContent = ""; }, m[1] * 1000);
+    };
     const setBusy = (b) => { save.disabled = loadB.disabled = !!b; };
     setBusy(S.state_busy);
-    box.append(sel, save, loadB);
-    return { el: box, update(s) { fill(s.values || []); setBusy(s.busy); } };
+    say(S.slot_msg);
+    body.append(sel, bs, line);
+    acc.append(sum, body);
+    return { el: acc, update(s) { fill(s.values || []); setBusy(s.busy); say(s.msg); } };
   }
   function saveDialog(idx) {
     const scrim = el("div", "pf-scrim");
@@ -326,11 +627,26 @@ function startMain() {
   }
 
   // ---- the action row (only without a key panel: PAD-134) ---------------------
-  function actionRow() {
-    if (!S.acts || !S.acts.length) return null;
-    const row = el("div", "pf-acts");
-    for (const [i, label] of S.acts) row.append(btn(label, () => api("action", i)));
-    return row;
+  // ---- the ball controls before the key panel comes (PAD-668) ---------------
+  // Until the game's key bindings arrive (the first seconds of a run, or never
+  // on a replay) the window still offers the trough and the actions - in the
+  // side panel, where the key panel's BALLS section puts them once it comes,
+  // never over the playfield picture. null when there is nothing to offer.
+  function ballsBox(V, D) {
+    const acts = S.acts && S.acts.length ? S.acts : [];
+    if (!V.trough && !acts.length) return null;
+    const sec = el("div", "kp-sec pf-balls");
+    const h = el("div", "kp-head");
+    h.append(el("span", "kp-group", "BALLS"));
+    sec.append(h);
+    let trough = null;
+    if (V.trough) { trough = troughStrip(V.trough, D.trough); sec.append(trough.el); }
+    if (acts.length) {
+      const bs = el("div", "kp-btns");
+      for (const [i, label] of acts) bs.append(btn(label, () => api("action", i)));
+      sec.append(bs);
+    }
+    return { el: sec, trough };
   }
 
   // ---- a trough strip that IS the control (the fallback) ----------------------
@@ -361,41 +677,97 @@ function startMain() {
     const V = S.view, D = S.dyn || {};
     const wrap = el("div", "pf-stagewrap");
     const stage = el("div", "pf-stage" + (V.art ? "" : " noart"));
+    // PAD-628: the picture X-ray (the Modes tab's look) or as the drawing ships
+    let look = V.look === "drawing" ? "drawing" : "xray";
+    let lookBox = null;
     if (V.art) {
       const img = el("img", "art");
       img.src = "/file/art?t=" + encodeURIComponent(TOKEN);
       img.draggable = false;
       stage.append(img);
+      lookBox = el("div", "pf-look");
+      const pick = {};
+      for (const [k, label, words] of [
+        ["xray", "X-ray", "The playfield picture as light lines on dark, the lights glowing on it"],
+        ["drawing", "Drawing", "The playfield picture as the game ships it: its test menu's black-on-white drawing"],
+      ]) {
+        pick[k] = btn(label, () => {
+          pick[k].blur();               // never keep the keyboard: the space bar is the Action Button
+          if (look === k) return;
+          look = k;
+          shown();
+          dirty = true;
+          api("art_look", k);
+        });
+        pick[k].title = words;
+        lookBox.append(pick[k]);
+      }
+      const shown = () => {
+        stage.classList.toggle("xray", look === "xray");
+        for (const k in pick) pick[k].classList.toggle("on", k === look);
+      };
+      shown();
+    }
+    // PAD-668: how inserts take a mode's colours - as the machine has its LEDs,
+    // or as if every insert were RGB (what the Modes tab's preview shows)
+    let insLook = V.insert_look === "rgb" ? "rgb" : "real";
+    const insBox = el("div", "pf-look pf-inslook");
+    const insPick = {};
+    for (const [k, label, words] of [
+      ["real", "Real LEDs", "As the machine: an RGB insert in the colour the game gives it; a single-colour "
+        + "insert only gets brighter or dimmer and glows in its own colour (INSERT COLOURS in the side panel; "
+        + "white = not set)"],
+      ["rgb", "All RGB", "As if every insert were RGB: a single-colour insert is drawn in the colour it was "
+        + "asked for, where the view knows it - the machine cannot show that"],
+    ]) {
+      insPick[k] = btn(label, () => {
+        insPick[k].blur();              // never keep the keyboard: the space bar is the Action Button
+        if (insLook === k) return;
+        insLook = k;
+        for (const q in insPick) insPick[q].classList.toggle("on", q === insLook);
+        api("insert_look", k);
+      });
+      insPick[k].title = words;
+      insPick[k].classList.toggle("on", k === insLook);
+      insBox.append(insPick[k]);
     }
     const cv = el("canvas");
     stage.append(cv);
-    const overlay = el("div", "pf-overlay");
-    let trough = null;
-    if (V.trough) { trough = troughStrip(V.trough, D.trough); overlay.append(trough.el); }
-    const acts = actionRow();
-    if (acts) overlay.append(acts);
-    stage.append(overlay);
+    if (lookBox) stage.append(lookBox);
+    stage.append(insBox);
+    // the ball controls before the key panel comes: in the side panel, never
+    // over the picture (PAD-668)
+    const balls = ballsBox(V, D);
+    const trough = balls ? balls.trough : null;
+    // the cabinet column (PAD-500), left of the artwork at its scale
+    const made = Object.assign({}, D.sw || {});
+    const cab = V.cab ? cabColumn(V.cab, D.cab, made) : null;
+    if (cab) wrap.append(cab.el);
     wrap.append(stage);
     main.append(wrap);
 
     const [BW, BH] = V.base;
+    const CW = cab ? V.cab.w : 0, GAP = cab ? 10 : 0;
     const fx = {}; for (const k in (D.fx || {})) fx[k] = D.fx[k];
     const coilHot = Object.assign({}, D.coil || {});
-    const made = Object.assign({}, D.sw || {});
     let held = null;      // ["switch"|"coil", k]
     let ripping = null;
     let shakeLvl = D.shaker ? D.shaker[0] : 0, jiggled = false;
     let scale = 1, dirty = true;
+    // PAD-668: the inserts the INSERT COLOURS row under the mouse names
+    let marked = null;
+    markInserts = (fids) => { marked = fids && fids.length ? fids : null; dirty = true; };
 
     function fit() {
       const r = wrap.getBoundingClientRect();
-      const s = Math.max(0.2, Math.min((r.width - 16) / BW, (r.height - 16) / BH));
+      const s = Math.max(0.2, Math.min((r.width - 16 - GAP) / (BW + CW), (r.height - 16) / BH));
       scale = s;
       stage.style.width = Math.round(BW * s) + "px";
       stage.style.height = Math.round(BH * s) + "px";
       const dpr = window.devicePixelRatio || 1;
       cv.width = Math.round(BW * s * dpr);
       cv.height = Math.round(BH * s * dpr);
+      if (cab) cab.fit(Math.round(CW * s), Math.round(BH * s));
       dirty = true;
     }
     new ResizeObserver(fit).observe(wrap);
@@ -408,31 +780,53 @@ function startMain() {
       const g = cv.getContext("2d");
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
       g.clearRect(0, 0, cv.width, cv.height);
-      // every glow before any core marker: fixtures overlap on this picture
+      // every glow before any core marker: fixtures overlap on this picture.
+      // PAD-658: THE MODES TAB'S LOOK - a lit insert glows in its own colour, as
+      // the light-show preview draws it (modes.css .ls-ins.lit: drop-shadow 5px
+      // and 10px of the colour itself), so a mode's show reads on this picture
+      // as it does in the editor. The glow was half the colour at half opacity,
+      // which left a show's dim steps as dark smudges on the X-ray.
       for (const [fid, x, y] of V.fixtures) {
         const v = fx[fid];
         if (!v) continue;
         const [r, gg, b, a, rad] = v;
         const cx = x * scale, cy = y * scale, gr = GLOW_R * (rad / LED_R);
-        const grad = g.createRadialGradient(cx, cy, 0, cx, cy, gr);
-        grad.addColorStop(0, `rgba(${r >> 1},${gg >> 1},${b >> 1},${a * 0.55})`);
-        grad.addColorStop(1, `rgba(${r >> 1},${gg >> 1},${b >> 1},0)`);
+        const grad = g.createRadialGradient(cx, cy, 0, cx, cy, gr * 1.4);
+        grad.addColorStop(0, `rgba(${r},${gg},${b},${a * 0.9})`);
+        grad.addColorStop(0.45, `rgba(${r},${gg},${b},${a * 0.45})`);
+        grad.addColorStop(1, `rgba(${r},${gg},${b},0)`);
         g.fillStyle = grad;
-        g.beginPath(); g.arc(cx, cy, gr, 0, Math.PI * 2); g.fill();
+        g.beginPath(); g.arc(cx, cy, gr * 1.4, 0, Math.PI * 2); g.fill();
       }
       for (const [fid, x, y] of V.fixtures) {
         const v = fx[fid];
         const cx = x * scale, cy = y * scale;
         g.beginPath();
         if (!v) {
+          // a dark insert: the drawing's own dark grey, ringed light on the X-ray's dark ground
           g.arc(cx, cy, LED_R, 0, Math.PI * 2);
           g.fillStyle = "#1a1a1a"; g.fill();
-          g.lineWidth = 1; g.strokeStyle = "#3a3a3a"; g.stroke();
+          g.lineWidth = 1; g.strokeStyle = look === "xray" ? "#6d7680" : "#3a3a3a"; g.stroke();
         } else {
           const [r, gg, b, a, rad] = v;
           g.arc(cx, cy, rad, 0, Math.PI * 2);
-          g.fillStyle = `rgba(${r},${gg},${b},${a})`; g.fill();
+          g.save();                     // the preview's drop-shadows, 5 px and 10 px of the colour
+          g.fillStyle = `rgba(${r},${gg},${b},${a})`;
+          g.shadowColor = `rgba(${r},${gg},${b},${a})`;
+          g.shadowBlur = 10 * dpr; g.fill();
+          g.shadowBlur = 5 * dpr; g.fill();
+          g.restore();
+          g.lineWidth = 1; g.strokeStyle = "rgba(0,0,0,.4)"; g.stroke();
         }
+      }
+      if (marked) {
+        g.save();
+        g.lineWidth = 2; g.strokeStyle = "#ffd400"; g.setLineDash([3, 2]);
+        for (const [fid, x, y] of V.fixtures) {
+          if (!marked.includes(fid)) continue;
+          g.beginPath(); g.arc(x * scale, y * scale, LED_R + 6, 0, Math.PI * 2); g.stroke();
+        }
+        g.restore();
       }
       for (const [k, x, y, key] of V.coils) {
         const cx = x * scale, cy = y * scale, h = 7;
@@ -470,7 +864,7 @@ function startMain() {
         jiggled = false;
       }
     }
-    (function loop() { draw(); jiggle(); requestAnimationFrame(loop); })();
+    (function loop() { draw(); jiggle(); if (cab) cab.draw(); requestAnimationFrame(loop); })();
 
     // Tk's hit test, kept - pfHit() above says how.
     function hit(px, py) { return pfHit(V, fx, scale, px, py); }
@@ -514,12 +908,235 @@ function startMain() {
     return {
       frame(f) {
         if (f.fx) { for (const k in f.fx) fx[k] = f.fx[k]; dirty = true; }
+        if (f.cab && cab) cab.update(f.cab);
         if (f.coil) { Object.assign(coilHot, f.coil); dirty = true; }
         if (f.shaker) shakeLvl = f.shaker[0];
-        if (f.sw) { Object.assign(made, f.sw); dirty = true; }
+        if (f.sw) { Object.assign(made, f.sw); dirty = true; if (cab) cab.touch(); }
         if (f.trough && trough) trough.update(f.trough);
       },
+      side: balls ? balls.el : null,
     };
+  }
+
+  // ================================================== the cabinet column (PAD-500)
+  // The topper, the speaker lights and the expression-lighting blades, left of
+  // the artwork and at its scale - cabLayout() above says where each goes.
+  // A lit pixel is its colour at its level's alpha with a soft glow, a dark one
+  // the artwork's own dark-insert grey. Redrawn only when something changed.
+  function cabColumn(spec, dyn, made) {
+    const box = el("div", "pf-cab");
+    const cv = el("canvas");
+    box.append(cv);
+    const px = Object.assign({}, dyn || {});
+    made = made || {};
+    let W = 0, H = 0, L = { marks: [], labels: [], switches: [] }, dirty = true;
+    let held = null, ripping = null;     // the back-panel switch row down (PAD-1179)
+    function fit(w, h) {
+      W = w; H = h;
+      box.style.width = w + "px";
+      box.style.height = h + "px";
+      const dpr = window.devicePixelRatio || 1;
+      cv.width = Math.round(w * dpr);
+      cv.height = Math.round(h * dpr);
+      L = cabLayout(spec.sections, w, h);
+      dirty = true;
+    }
+    // a label as big as the column has room for, down to 8 px, then cut
+    function fitText(g, text, font, size, max) {
+      let s = size;
+      g.font = font.replace("@", s);
+      while (s > 8 && g.measureText(text).width > max) { s -= 0.5; g.font = font.replace("@", s); }
+      let t = text;
+      while (t.length > 1 && g.measureText(t).width > max) t = t.slice(0, -2) + "…";
+      return t;
+    }
+    function draw() {
+      if (!dirty || !W) return;
+      dirty = false;
+      const dpr = window.devicePixelRatio || 1;
+      const g = cv.getContext("2d");
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, W, H);
+      const cs = getComputedStyle(cv);
+      g.textBaseline = "top";
+      g.textAlign = "left";
+      for (const lb of L.labels) {
+        const max = W - 2 * lb.x;
+        g.fillStyle = "#7ecbff";
+        g.fillText(fitText(g, lb.text.toUpperCase(), "600 @px " + cs.getPropertyValue("--cond"), 11, max), lb.x, lb.y + 2);
+        g.fillStyle = "#8b9196";
+        g.fillText(fitText(g, lb.sub, "@px " + cs.getPropertyValue("--mono"), 10, max), lb.x, lb.y + 14);
+      }
+      for (const m of L.marks) {
+        const v = px[m.cid];
+        g.shadowBlur = 0;
+        if (v) {
+          const [r, gg, b, a] = v;
+          g.fillStyle = `rgba(${r},${gg},${b},${a})`;
+          g.shadowColor = `rgba(${r},${gg},${b},${a * 0.7})`;
+          g.shadowBlur = m.w ? 5 : 4;
+        } else {
+          g.fillStyle = "#1a1a1a";
+        }
+        g.beginPath();
+        if (m.w) g.rect(m.x - m.w / 2, m.y - m.h / 2, m.w, m.h);
+        else g.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+        g.fill();
+        if (!v) { g.shadowBlur = 0; g.lineWidth = 1; g.strokeStyle = "#333"; g.stroke(); }
+      }
+      g.shadowBlur = 0;
+      // the back panel's switches: the playfield's ring, its green dot when
+      // made, and the name after it
+      g.textBaseline = "middle";
+      for (const s of L.switches) {
+        const isHeld = held === s.k, isRip = ripping === s.k;
+        g.beginPath(); g.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        g.lineWidth = isHeld || isRip ? 2.5 : 1.5;
+        g.strokeStyle = isHeld ? "#ffd400" : isRip ? "#ff9500" : "#2a8cff";
+        g.stroke();
+        if (made[String(s.id)]) {
+          g.beginPath(); g.arc(s.x, s.y, s.r * 0.5, 0, Math.PI * 2);
+          g.fillStyle = "#00c853"; g.fill();
+        }
+        const tx = s.x + s.r + 5;
+        g.fillStyle = "#c9d1d9";
+        g.fillText(fitText(g, s.name, "@px " + cs.getPropertyValue("--mono"), 10, W - tx - CAB_PAD), tx, s.y);
+      }
+    }
+    // the pixel under the pointer says what it is, as an insert does
+    let tipFor = null, tipText = "";
+    const swAt = (e) => { const r = cv.getBoundingClientRect(); return cabSwHit(L.switches, W, e.clientX - r.left, e.clientY - r.top); };
+    cv.addEventListener("pointermove", (e) => {
+      const r = cv.getBoundingClientRect();
+      const s = swAt(e);
+      cv.style.cursor = s ? "pointer" : "default";
+      const ask = s ? ["panelsw", s.k] : ["cab", cabHit(L.marks, e.clientX - r.left, e.clientY - r.top)];
+      if (ask[1] == null) { tipFor = null; hideTip(); return; }
+      const key = ask.join(":");
+      if (key !== tipFor) {
+        tipFor = key;
+        api("tip", ask[0], ask[1]).then((t) => { if (tipFor === key) { tipText = t || ""; showTip(tipText, e.clientX, e.clientY); } });
+      }
+      showTip(tipText, e.clientX, e.clientY);
+    });
+    cv.addEventListener("pointerleave", () => { tipFor = null; hideTip(); });
+    cv.addEventListener("contextmenu", (e) => e.preventDefault());
+    // a back-panel switch is pressed as a playfield one is: hold, right-hold rips
+    cv.addEventListener("pointerdown", (e) => {
+      const s = swAt(e);
+      if (!s) return;
+      if (e.button === 0) {
+        holdWith(cv, e, () => { held = s.k; dirty = true; api("hold", s.id); },
+          () => { held = null; dirty = true; api("unhold"); });
+      } else if (e.button === 2) {
+        holdWith(cv, e, () => { ripping = s.k; dirty = true; api("rip", s.id, true); },
+          () => { ripping = null; dirty = true; api("rip", s.id, false); });
+      }
+    });
+    return { el: box, fit, draw, update(c) { for (const k in c) px[k] = c[k]; dirty = true; },
+      touch() { dirty = true; } };
+  }
+
+  // The side panel's CABINET LIGHTS box (PAD-500): which boards the column
+  // holds, and the "Expression lights" tick box - the blades and the speaker
+  // lights in or out of this window, kept for the next run by playfield.py.
+  // It folds like GAME HARDWARE (PAD-532), and playfield.py keeps whether it
+  // was left open too: the page's own storage does not outlive the run.
+  function cabPanel(spec) {
+    const acc = el("details", "kp-acc pf-cabp");
+    acc.open = spec.open !== false;
+    const sum = el("summary", null, "CABINET LIGHTS");
+    // never keep the keyboard: a focused summary would eat the space bar
+    sum.tabIndex = -1;
+    sum.addEventListener("mousedown", (ev) => ev.preventDefault());
+    // setting `open` above queues a toggle of its own: only a change is kept
+    let was = acc.open;
+    acc.addEventListener("toggle", () => {
+      if (acc.open !== was) { was = acc.open; api("cab_open", was); }
+    });
+    const box = el("div", "body");
+    acc.append(sum, box);
+    const rows = el("div", "kp-kv");
+    for (const [k, v, n] of spec.lines) {
+      const row = el("div", "r");
+      row.append(el("span", "k", k), el("span", "v", v));
+      if (n) row.append(el("span", "n", n));
+      rows.append(row);
+    }
+    if (spec.lines.length) box.append(rows);
+    if (spec.has_expression) {
+      const opt = el("label", "opt");
+      const cb = el("input");
+      cb.type = "checkbox";
+      cb.checked = !!spec.expression;
+      // never keep the keyboard: a focused box would eat the space bar
+      cb.addEventListener("change", () => { api("expression", cb.checked); cb.blur(); });
+      opt.append(cb, el("span", null, "Expression lights (blades and speakers)"));
+      opt.title = "Untick to leave the cabinet's expression lighting - the light blades and the "
+        + "speaker lights - out of this window. Only what this window shows: the game is not changed.";
+      box.append(opt);
+    }
+    return { el: acc };
+  }
+
+  // The side panel's INSERT COLOURS table (PAD-668). A single-colour insert
+  // has one brightness and no colour on the wire: on the machine it glows in
+  // its own LED's and lens's colour, which no table in the game names. So it
+  // is drawn white until the user gives it its colour here; playfield.py
+  // keeps the table per title, for the next run. Hovering a row rings that
+  // insert on the picture.
+  function lensPanel(rows) {
+    const acc = el("details", "kp-acc pf-lens");
+    try { acc.open = localStorage.getItem("pf-acc-lens") === "1"; } catch (e) { /* no storage */ }
+    const sum = el("summary", null, "INSERT COLOURS");
+    const cnt = el("span", "cnt", "");
+    sum.append(cnt);
+    // never keep the keyboard: a focused summary would eat the space bar
+    sum.tabIndex = -1;
+    sum.addEventListener("mousedown", (ev) => ev.preventDefault());
+    acc.addEventListener("toggle", () => {
+      try { localStorage.setItem("pf-acc-lens", acc.open ? "1" : "0"); } catch (e) { /* no storage */ }
+    });
+    const box = el("div", "body");
+    box.append(el("div", "note", "One-colour inserts: the game sets only how bright they are, and each glows "
+      + "in its own colour, which the card does not say (only a lamp named for its colour, like GI-BLU, has "
+      + "one). White = not set. Give each its colour here; kept for this title."));
+    const list = el("div", "list");
+    box.append(list);
+    acc.append(sum, box);
+    const count = () => {
+      const n = rows.filter((r) => r[1] || r[3]).length;
+      cnt.textContent = `${n} of ${rows.length} set`;
+    };
+    for (const r of rows) {
+      // PAD-1144: r[3], the colour the lamp's NAME says ("TOP GI-BLU (x10)"),
+      // is its colour until the user sets another
+      const [name, hex, fids, own] = r;
+      const row = el("div", "r");
+      const pick = el("input");
+      pick.type = "color";
+      pick.value = hex || own || "#ffffff";
+      pick.title = own ? "The colour this insert glows on the machine (from its name until you set one)"
+        : "The colour this insert glows on the machine";
+      const lab = el("span", "k", name);
+      const clr = btn("\u00d7", () => {
+        api("lens", name, null).then((v) => { r[1] = v || ""; pick.value = own || "#ffffff"; show(); });
+      }, "x");
+      clr.title = own ? "Back to the colour its name says" : "Back to white (not set)";
+      clr.tabIndex = -1;
+      function show() { clr.style.visibility = r[1] ? "" : "hidden"; row.classList.toggle("set", !!(r[1] || own)); count(); }
+      pick.addEventListener("change", () => {
+        api("lens", name, pick.value).then((v) => { r[1] = v || ""; show(); });
+        // never keep the keyboard: a focused picker would eat the flipper keys
+        pick.blur();
+      });
+      row.addEventListener("pointerenter", () => { if (markInserts) markInserts(fids); });
+      row.addEventListener("pointerleave", () => { if (markInserts) markInserts(null); });
+      row.append(pick, lab, clr);
+      list.append(row);
+      show();
+    }
+    return { el: acc };
   }
 
   // ================================================== the schematic view
@@ -527,16 +1144,9 @@ function startMain() {
     const V = S.view, D = S.dyn || {};
     const bar = el("div", "pf-bar");
     bar.append(el("div", "txt", V.bar));
-    const acts = actionRow();
-    if (acts) bar.append(acts);
     main.append(bar);
-    let trough = null;
-    if (V.trough) {
-      const strip = el("div", "pf-strip");
-      trough = troughStrip(V.trough, D.trough);
-      strip.append(trough.el);
-      main.append(strip);
-    }
+    const balls = ballsBox(V, D);
+    const trough = balls ? balls.trough : null;
     const body = el("div", "pf-schem");
     const grid = el("div", "pf-grid");
     const rows = el("div", "pf-rows");
@@ -552,15 +1162,32 @@ function startMain() {
     for (const blk of V.grid.blocks) {
       const b = el("div", "blk");
       b.append(el("div", "hdr", "node " + blk.node + "  (" + blk.cells.length + ")"));
-      const cs = el("div", "cells");
+      const made = {};
       for (const c of blk.cells) {
         const d = el("div", "c");
         d.addEventListener("pointermove", (e) => showTip(c.tip, e.clientX, e.clientY));
         d.addEventListener("pointerleave", hideTip);
-        cells[c.k] = d;
-        cs.append(d);
+        cells[c.k] = made[c.k] = d;
       }
-      b.append(cs);
+      // the speakers' ring and the blades' columns (PAD-500), as gridRing()
+      // and gridBars() place them; what they leave goes in the grid below
+      const shape = blk.ring ? gridRing(blk.ring) : blk.bars ? gridBars(blk.bars) : null;
+      if (shape) {
+        const sh = el("div", "shape" + (blk.ring ? " ring" : ""));
+        sh.style.width = shape.w + "px";
+        sh.style.height = shape.h + "px";
+        for (const a of shape.at) {
+          const d = made[a.k];
+          if (!d) continue;
+          Object.assign(d.style, { left: a.x + "px", top: a.y + "px", width: a.w + "px", height: a.h + "px" });
+          sh.append(d);
+          delete made[a.k];
+        }
+        b.append(sh);
+      }
+      const cs = el("div", "cells");
+      for (const c of blk.cells) if (made[c.k]) cs.append(made[c.k]);
+      if (cs.childNodes.length) b.append(cs);
       grid.append(b);
     }
     const paintCell = (k) => {
@@ -606,6 +1233,7 @@ function startMain() {
         if (f.grid) { for (const k in f.grid) { gridData[k] = f.grid[k]; paintCell(k); } }
         if (f.trough && trough) trough.update(f.trough);
       },
+      side: balls ? balls.el : null,
     };
   }
 
@@ -685,7 +1313,9 @@ function startMain() {
     box.title = "What the game drives the cabinet's shaker motor at (" + spec.addr + "), "
       + "over the last " + SPAN / 1000 + " s: the height is the power, n/255 of the board's PWM duty, "
       + "up to the scale in the corner";
-    box.append(head, cv, now, note, opt);
+    // the switch list has no picture to shake (PAD-551)
+    box.append(head, cv, now, note);
+    if (S.kind === "field") box.append(opt);
     const hist = [];        // [performance.now(), power] at each change
     let st = null, peak = 0;
     function update(d) {
@@ -794,7 +1424,38 @@ function startMain() {
     kb.append(el("div", "kp-hint", "green dot = switch made"));
     kb.append(el("div", "kp-hint", "Pause or F9 = freeze / resume the game"));
     if (spec.rows.some((r) => r.click != null)) kb.append(el("div", "kp-hint", "click Start Button or Left Coin to press it"));
-    root.append(kb);
+
+    // the BALLS section (PAD-134)
+    let ball = null, drain = null, note = null, dots = null, ballSec = null;
+    if (spec.balls) {
+      const sec = el("div", "kp-sec");
+      ballSec = sec;
+      const h = el("div", "kp-head");
+      h.append(el("span", "kp-group", "BALLS"));
+      if (spec.trough_keys) { const t = el("span", "ks mono", spec.trough_keys); t.style.color = "var(--key)"; t.style.fontSize = "10.5px"; h.append(t); }
+      sec.append(h);
+      ball = el("div", "kp-ball", "");
+      sec.append(ball);
+      dots = troughStrip(Object.assign({}, spec.balls, { clickable: false }), null);
+      sec.append(dots.el);
+      const bs = el("div", "kp-btns");
+      bs.append(btn("Plunge", () => api("ball", "plunge")));
+      drain = btn("Drain", () => api("ball", "drain"));
+      bs.append(drain, btn("Reset balls", () => api("ball", "reset")));
+      // PAD-259: a spinning disc has no position on the artwork; holding
+      // this rips its angle sensor, which turns the disc
+      if (spec.disc != null) {
+        const disc = btn("Spin disc (hold)", () => {});
+        disc.addEventListener("pointerdown", (e) =>
+          holdWith(disc, e, () => api("rip", spec.disc, true),
+            () => api("rip", spec.disc, false)));
+        bs.append(disc);
+      }
+      sec.append(bs);
+      note = el("div", "kp-note");
+      sec.append(note);
+      root.append(sec);
+    }
 
     // the service cluster, drawn as the real coin-door panel
     let svcEls = [];
@@ -836,36 +1497,10 @@ function startMain() {
       root.append(door);
     }
 
-    // the BALLS section (PAD-134)
-    let ball = null, drain = null, note = null, dots = null;
-    if (spec.balls) {
-      const sec = el("div", "kp-sec");
-      const h = el("div", "kp-head");
-      h.append(el("span", "kp-group", "BALLS"));
-      if (spec.trough_keys) { const t = el("span", "ks mono", spec.trough_keys); t.style.color = "var(--key)"; t.style.fontSize = "10.5px"; h.append(t); }
-      sec.append(h);
-      ball = el("div", "kp-ball", "");
-      sec.append(ball);
-      dots = troughStrip(Object.assign({}, spec.balls, { clickable: false }), null);
-      sec.append(dots.el);
-      const bs = el("div", "kp-btns");
-      bs.append(btn("Plunge", () => api("ball", "plunge")));
-      drain = btn("Drain", () => api("ball", "drain"));
-      bs.append(drain, btn("Reset balls", () => api("ball", "reset")));
-      // PAD-259: a spinning disc has no position on the artwork; holding
-      // this rips its angle sensor, which turns the disc
-      if (spec.disc != null) {
-        const disc = btn("Spin disc (hold)", () => {});
-        disc.addEventListener("pointerdown", (e) =>
-          holdWith(disc, e, () => api("rip", spec.disc, true),
-            () => api("rip", spec.disc, false)));
-        bs.append(disc);
-      }
-      sec.append(bs);
-      note = el("div", "kp-note");
-      sec.append(note);
-      root.append(sec);
-    }
+    // the keyboard list goes LAST (PAD-672): it is a reference, read now and
+    // then, and above the controls it pushed Plunge out of sight - the BALLS
+    // buttons, used all the time, lead instead
+    root.append(kb);
 
     function fitNote(msgs) {
       // WHOLE MESSAGES ARE DROPPED, OLDEST FIRST - never the head of one; a
@@ -908,7 +1543,7 @@ function startMain() {
       if (note) fitNote(d.note || []);
     }
     update(P.dyn || {});
-    return { el: root, update };
+    return { el: root, update, ballSec };
   }
 
   // ---- the keyboard, with THIS window focused (item 39) -----------------------
@@ -1052,4 +1687,4 @@ function startLcd() {
 }
 
 // Node (the tests) takes the pure part; a browser has no `module`.
-if (typeof module !== "undefined") module.exports = { pfHit };
+if (typeof module !== "undefined") module.exports = { pfHit, cabLayout, cabHit, cabSwHit, gridRing, gridBars };

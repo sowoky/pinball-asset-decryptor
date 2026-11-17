@@ -81,43 +81,28 @@ def _said(msgs, needle):
 # --------------------------------------------------------------------------
 # the gate
 # --------------------------------------------------------------------------
-def test_gate_is_off_unless_asked_for(monkeypatch):
-    """Growing changes the build (an image build), so it is opt-in: a build
-    must never produce a grown bank unless the user asked for it by name."""
+def test_gate_is_on_unless_switched_off(monkeypatch):
+    """PAD-843: a grown bank is confirmed on a real machine, so it is always
+    on (the Advanced checkbox is gone): unset opens the gate, and only the
+    engine-level PAD_STERN_AUDIO_GROW=0 closes it, naming itself."""
+    monkeypatch.setattr(ext4_grow, "available", lambda: (True, "test"))
     monkeypatch.delenv("PAD_STERN_AUDIO_GROW", raising=False)
+    assert engine._audio_grow_gate(False) == (True, "")
+    monkeypatch.setenv("PAD_STERN_AUDIO_GROW", "0")
     ok, why = engine._audio_grow_gate(False)
     assert not ok
-    assert "longer replacements are off" in why
-
-
-def test_the_off_reason_names_the_option_the_dialog_really_has(monkeypatch):
-    """Off is the default, so this is the reason nearly every trim gives, and
-    it is the only place a Write tells the user the option exists (PAD-174:
-    a whole song cut to its slot's 38 s loop, found by extracting the card).
-    It quotes the checkbox, so the quote has to be the checkbox's text."""
-    import pinball_decryptor.webui as webui_pkg
-
+    assert "longer and shorter replacements are switched off" in why
+    assert "PAD_STERN_AUDIO_GROW=0" in why
+    # a direct-SD write still can't grow, with the option on
     monkeypatch.delenv("PAD_STERN_AUDIO_GROW", raising=False)
-    _ok, why = engine._audio_grow_gate(False)
-    label = "Allow replacements longer than the original"
-    assert '"%s"' % label in why and "Advanced" in why
-    js = os.path.join(os.path.dirname(webui_pkg.__file__),
-                      "static", "js", "tabs", "audio.js")
-    with open(js, encoding="utf-8") as f:
-        src = f.read()
-    assert 'label="%s' % label in src
-    assert 'title="Advanced Audio Options"' in src
+    ok, why = engine._audio_grow_gate(True)
+    assert not ok and "direct-SD" in why
 
 
-@pytest.mark.usefixtures("not_macos")
-def test_longer_sound_texts_name_both_limits():
-    """PAD-176: every text about longer sounds quoted only the game's 2 GB
-    sound-bank limit ("roughly 45 minutes per build").  On a stock 8 GB
-    Godzilla card the games partition has 368 MB free, less than the bank's
-    headroom, and overrunning it fails the whole build instead of trimming.
-    So each text names the games partition, points at SD card size, and says
-    that size does not lift the 2 GB limit; 45 minutes is one title's figure
-    (Godzilla 1.16), so it is never promised without the title."""
+def test_the_dialog_has_no_checkbox_and_says_always_on():
+    """PAD-843: the checkbox is replaced by an always-on line, the way
+    blip-free callouts went (PAD-523), and no text still tells the user to
+    tick it."""
     import pinball_decryptor.webui as webui_pkg
     from pinball_decryptor.plugins.stern.manufacturer import SternManufacturer
     from pinball_decryptor.webui.help_content import HELP_CONTENT
@@ -126,23 +111,54 @@ def test_longer_sound_texts_name_both_limits():
                       "static", "js", "tabs", "audio.js")
     with open(js, encoding="utf-8") as f:
         src = f.read()
-    start = src.index('label="Allow replacements longer than the original')
+    assert "audio_grow" not in src
+    assert "<b>Longer and shorter replacements: always on.</b>" in src
+    label = "Allow replacements longer or shorter than the original"
+    texts = [src, SternManufacturer().audio_length_note()]
+    texts += [body for _t, body in HELP_CONTENT["Replace Audio"]
+              if isinstance(body, str)]
+    for text in texts:
+        assert label not in text
+    assert "always on" in SternManufacturer().audio_length_note()
+
+
+@pytest.mark.usefixtures("not_macos")
+def test_longer_sound_texts_name_both_limits():
+    """PAD-176: every text about longer sounds quoted only the game's 2 GB
+    sound-bank limit ("roughly 45 minutes per build").  On a stock 8 GB
+    Godzilla card the games partition has 368 MB free, less than the bank's
+    headroom, and overrunning it fails the whole build instead of trimming.
+    So each text names the games partition and points at SD card size; 45
+    minutes is one title's figure (Godzilla 1.16), so it is never promised
+    without the title.  PAD-606: the 2 GB no longer trims what an extra sound
+    bank can hold, and each text says so instead of "a bigger card does not
+    raise the 2 GB limit"."""
+    import pinball_decryptor.webui as webui_pkg
+    from pinball_decryptor.plugins.stern.manufacturer import SternManufacturer
+    from pinball_decryptor.webui.help_content import HELP_CONTENT
+
+    js = os.path.join(os.path.dirname(webui_pkg.__file__),
+                      "static", "js", "tabs", "audio.js")
+    with open(js, encoding="utf-8") as f:
+        src = f.read()
+    start = src.index("<b>Longer and shorter replacements: always on.</b>")
     advanced = src[start:src.index("</p>", start)]
     help_ = dict(HELP_CONTENT["Replace Audio"])[
-        "Longer replacements (Advanced Audio Options)"]
+        "Longer and shorter replacements (always on)"]
     note = SternManufacturer().audio_length_note()
     for text in (advanced, help_, note):
         assert "games partition" in text, text
         assert "SD card size" in text, text
-        assert "not raise the 2 GB limit" in text, text
+        assert "2 GB" in text and "extra sound banks" in text, text
+        assert "not raise the 2 GB limit" not in text, text
         assert "roughly 45 minutes" not in text, text
         if "45 minutes" in text:
             assert "Godzilla 1.16" in text, text
-    # and the SD card size tip says what a bigger card does NOT lift, so
-    # 32 GB never reads as "unlimited songs", and that a build too big for
-    # the games partition is refused before the card image is written
+    # and the SD card size tip says what is past the 2 GB one sound bank holds
+    # (PAD-606: extra banks), and that a build too big for the games partition
+    # is refused before the card image is written
     tip = dict(HELP_CONTENT["Write"])["SD card size (Stern Spike 2)"]
-    assert "sound bank over about 2 GB" in tip
+    assert "2 GB the game can open in one sound bank go into extra banks" in tip
     assert "Before anything is written to the card image" in tip
     assert "refused" in tip
 
@@ -428,6 +444,8 @@ def _grow_card(monkeypatch, tmp_path, params, grown_rows=None, places=None):
 
     staged_seen["repointed"] = repointed
     monkeypatch.setattr(engine, "_descriptor_sites", sites)
+    # every sound's codec re-encodes (an emulator step, PAD-636)
+    monkeypatch.setattr(engine, "_grows_reencodable", lambda gr, img, grows, byidx, log: grows)
     monkeypatch.setattr(engine, "_repoint_descriptors", repoint)
     monkeypatch.setattr(engine, "_locate",
                         lambda f, p: (reader, reader.fw_node, reader.img_node))
@@ -526,6 +544,11 @@ def test_the_bank_is_queued_before_the_firmware(monkeypatch, tmp_path,
     fw.write_bytes(b"\x7fELF" + b"\x00" * 0x2000)
     monkeypatch.setattr(engine, "_build_derive_redirect_cave",
                         lambda *a, **k: (str(fw), 0x2004))
+    # a patch the cave redirects (a sound replaced in place beside the grown
+    # one): with every patch an appended body there is no cave and no
+    # firmware job at all (PAD-800)
+    monkeypatch.setattr(engine, "_appended_body_offsets",
+                        lambda *a, **k: set())
     assets, _w = _edits(tmp_path, 2.0)
     _msgs, log = _capture()
     _writes, _c, plan, _m, _v = _run(monkeypatch, assets, params, 0x40000, log)
@@ -534,9 +557,37 @@ def test_the_bank_is_queued_before_the_firmware(monkeypatch, tmp_path,
     assert plan["audio_job"] == rels.index(IMG_PATH.lstrip("/"))
 
 
+def test_a_build_of_appended_records_only_needs_no_redirect(monkeypatch, tmp_path,
+                                                            _grow_on):
+    """PAD-800: every replaced sound a record of its own, encoded along the chain,
+    holds its own audio in every window.  The cave used to be tried anyway, found
+    "no master-directory windows" and the card was reported as one with the
+    original's scrap; now it is not tried and the card is blip-free."""
+    params = _params(4)
+    grown = [dict(p) for p in params]
+    grown[0].update(body_off=0x40000, length=2 * 44100 + BLOCK, grown=True,
+                    shadows=4)
+    _reader, staged = _grow_card(monkeypatch, tmp_path, params,
+                                 grown_rows=grown)
+    monkeypatch.setenv("PAD_STERN_BLIP_FREE", "1")
+    monkeypatch.delenv("PAD_STERN_SKIP_KEYPATCH", raising=False)
+    monkeypatch.setattr(engine, "_pathA_preflight", lambda d: None)
+    monkeypatch.setattr(engine, "_mode_family_on", lambda: True)
+
+    def _no_cave(*a, **k):
+        raise AssertionError("the cave was built for appended records only")
+    monkeypatch.setattr(engine, "_build_derive_redirect_cave", _no_cave)
+    assets, _w = _edits(tmp_path, 2.0)
+    msgs, log = _capture()
+    _writes, _c, plan, mode, _v = _run(monkeypatch, assets, params, 0x40000, log)
+    assert mode == ("blip-free", "")
+    assert _said(msgs, "no scrap of the original plays")
+    assert not _said(msgs, "Blip-free callouts not applied")
+
+
 @pytest.mark.parametrize("device,flag,needle", [
     (True, "1", "direct-SD"),
-    (False, None, "longer replacements are off"),
+    (False, "0", "longer and shorter replacements are switched off"),
 ])
 def test_a_closed_gate_trims_and_says_why(monkeypatch, tmp_path, device, flag,
                                           needle):
@@ -762,10 +813,11 @@ def _sidx_size(reader, writes, path):
 # --------------------------------------------------------------------------
 # the GUI option
 # --------------------------------------------------------------------------
-def test_the_gui_option_is_the_only_thing_that_opens_the_gate(monkeypatch):
-    """Unset must mean the build every headless caller and every spawned encode
-    worker already makes — they inherit os.environ without ever seeing the
-    dialog, so whatever "unset" means is what they build."""
+def test_the_app_never_closes_the_gate(monkeypatch):
+    """PAD-843: always on, and unset is what every headless caller and every
+    spawned encode worker builds, so the app sets nothing: an "audio_grow"
+    an older settings.json carries is ignored, and neither defaults table
+    has the key any more."""
     from pinball_decryptor.app import App
     from pinball_decryptor.webui.tabs import audio as audio_tab
 
@@ -773,20 +825,13 @@ def test_the_gui_option_is_the_only_thing_that_opens_the_gate(monkeypatch):
     monkeypatch.setattr(ext4_grow, "available", lambda: (True, "test"))
     app = object.__new__(App)
 
-    App._apply_audio_advanced_env(app, {})                 # defaults
-    assert "PAD_STERN_AUDIO_GROW" not in os.environ
-    assert engine._audio_grow_gate(False)[0] is False
+    for cfg in ({}, {"audio_grow": False}, {"audio_grow": True}):
+        App._apply_audio_advanced_env(app, cfg)
+        assert "PAD_STERN_AUDIO_GROW" not in os.environ
+        assert engine._audio_grow_gate(False)[0] is True
 
-    App._apply_audio_advanced_env(app, {"audio_grow": True})
-    assert os.environ["PAD_STERN_AUDIO_GROW"] == "1"
-    assert engine._audio_grow_gate(False)[0] is True
-
-    App._apply_audio_advanced_env(app, {"audio_grow": False})
-    assert "PAD_STERN_AUDIO_GROW" not in os.environ
-
-    # Both defaults tables agree, so the dialog and the engine can't drift.
-    assert App._AUDIO_ADV_DEFAULTS["audio_grow"] is False
-    assert audio_tab.ADV_DEFAULTS["audio_grow"] is False
+    assert "audio_grow" not in App._AUDIO_ADV_DEFAULTS
+    assert "audio_grow" not in audio_tab.ADV_DEFAULTS
 
 
 @pytest.mark.parametrize("grow,seconds", [(True, 3.0), (False, 1.0)])

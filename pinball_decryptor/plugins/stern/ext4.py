@@ -38,6 +38,11 @@ class Ext4Reader:
         self.f = fileobj
         self.base = part_offset
         self.size = part_size
+        # group -> inode table block.  Group descriptors never change under this
+        # reader (it has no write path, and every writer in the app opens a fresh
+        # reader afterwards), so each is read from the card once, not once per
+        # inode: a tree walk reads thousands of inodes (PAD-795).
+        self._inode_tables = {}
         self._read_super()
         self._read_group_desc_layout()
 
@@ -92,11 +97,16 @@ class Ext4Reader:
         return (compat, incompat, ro, jc, ji, jr)
 
     def _group_desc_inode_table(self, group):
+        it = self._inode_tables.get(group)
+        if it is not None:
+            return it
         off = self.gdt_block * self.block_size + group * self.desc_size
         gd = self._read(off, self.desc_size)
         it_lo = struct.unpack_from("<I", gd, 8)[0]
         it_hi = struct.unpack_from("<I", gd, 0x28)[0] if self.desc_size >= 0x2c else 0
-        return it_lo | (it_hi << 32)
+        it = it_lo | (it_hi << 32)
+        self._inode_tables[group] = it
+        return it
 
     # ---- inodes -------------------------------------------------------------
     def read_inode(self, ino):
@@ -303,6 +313,52 @@ class Ext4Reader:
                 out.append((start, self.base + phys * bs, n))
         return out
 
+    def place(self, inode, file_off, data):
+        """Where *data* written at ``file_off`` of a regular file goes on the
+        disk: ``(writes, held)``.
+
+        *writes* is ``[(disk_offset, bytes), ...]``, what :meth:`disk_ranges`
+        places for the stretches that have blocks.  A stretch with none - a
+        HOLE, or an unwritten extent, which reads as zeros whatever its
+        blocks hold - can't be written on the disk.  Where *data* is zeros
+        there too it needs no write (the file already reads as them); the rest
+        comes back in *held* as ``[(file_off, bytes), ...]``.
+
+        PAD-505: a custom Godzilla card copied with a tool that leaves blocks
+        of zeros out of a file has a hole in the middle of a font atlas in one
+        of its scenes, and three glyphs edited in that atlas stopped Emulate
+        with "file offset 0x4a0000 not allocated".  The atlas is written
+        whole, but the hole is its empty space, so the bytes for it are the
+        same zeros."""
+        bs = self.block_size
+        end = file_off + len(data)
+        writes, held = [], []
+
+        def gap(lo, hi):
+            piece = bytes(data[lo - file_off:hi - file_off])
+            if piece.count(0) != len(piece):
+                held.append((lo, piece))
+
+        pos = file_off
+        for log, phys, cnt, unwritten in sorted(self._runs_flagged(inode)):
+            start = log * bs
+            lo, hi = max(pos, start), min(end, start + cnt * bs)
+            if lo >= hi:
+                continue
+            if lo > pos:
+                gap(pos, lo)
+            if unwritten:
+                gap(lo, hi)
+            else:
+                writes.append((self.base + phys * bs + (lo - start),
+                               data[lo - file_off:hi - file_off]))
+            pos = hi
+            if pos >= end:
+                break
+        if pos < end:
+            gap(pos, end)
+        return writes, held
+
     def read_range(self, inode, file_off, length):
         """Bytes ``[file_off, file_off+length)`` of a regular file.
 
@@ -329,16 +385,26 @@ class Ext4Reader:
         return bytes(out)
 
     # ---- file content -------------------------------------------------------
-    def read_file_bytes(self, inode):
-        buf = bytearray(inode["size"])
+    def read_file_bytes(self, inode, chunk=1 << 20):
+        """The whole of a regular file in memory.  Each extent run is read in as few
+        calls as possible (pieces of at most ``chunk`` bytes, 1 MiB by default: the
+        read size that is fast on every path, see :meth:`read_file_chunks`) rather
+        than one block at a time; a 50 MB radium was 12,800 reads (PAD-795).  The
+        tail is cut at the inode's size and a run beyond it is skipped, as before."""
+        size = inode["size"]
+        buf = bytearray(size)
         bs = self.block_size
         for log, phys, cnt in self._runs(inode):
-            for j in range(cnt):
-                fo = (log + j) * bs
-                if fo >= inode["size"]:
-                    break
-                n = min(bs, inode["size"] - fo)
-                buf[fo:fo + n] = self._read((phys + j) * bs, n)
+            fo = log * bs
+            if fo >= size:
+                continue
+            n = min(cnt * bs, size - fo)
+            disk = phys * bs
+            done = 0
+            while done < n:
+                take = min(chunk, n - done)
+                buf[fo + done:fo + done + take] = self._read(disk + done, take)
+                done += take
         return bytes(buf)
 
     def extract_file(self, inode, out_path, chunk_blocks=2048, progress=None):

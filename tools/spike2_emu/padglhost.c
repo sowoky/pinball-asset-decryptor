@@ -98,6 +98,8 @@ static void (*p_glUniform4fv)(int,int,const float*);
 static void (*p_glUniformMatrix4fv)(int,int,unsigned char,const float*);
 static void (*p_glGenFramebuffers)(int,unsigned*);
 static void (*p_glBindFramebuffer)(unsigned,unsigned);
+/* PAD-1090: PADGL_PRESENTTEX, Spike 3's frame boundary, blits a texture */
+static void (*p_glBlitFramebuffer)(int,int,int,int,int,int,int,int,unsigned,unsigned);
 static void (*p_glFramebufferTexture2D)(unsigned,unsigned,unsigned,unsigned,int);
 static unsigned (*p_glCheckFramebufferStatus)(unsigned);
 static void (*p_glDrawArrays)(unsigned,int,int);
@@ -141,6 +143,7 @@ static void load_gl(void)
     LOAD(glUniform2f); LOAD(glUniform3f); LOAD(glUniform4f); LOAD(glUniform4fv);
     LOAD(glUniformMatrix4fv); LOAD(glGenFramebuffers); LOAD(glBindFramebuffer);
     LOAD(glFramebufferTexture2D); LOAD(glCheckFramebufferStatus);
+    LOAD(glBlitFramebuffer);
     LOAD(glDrawArrays); LOAD(glDrawElements); LOAD(glReadPixels);
     LOAD(glFinish); LOAD(glGetError); LOAD(glGetIntegerv);
     LOAD(glGetVertexAttribiv); LOAD(glGetAttribLocation);
@@ -152,7 +155,9 @@ static void load_gl(void)
 
 /* ---- guest name -> real GL name ---- */
 #define MAXNAME 4096
+#ifndef MAXPROG                  /* overridable; glbridge.c must agree (PAD-1090) */
 #define MAXPROG 128
+#endif
 #define MAXUNI  32
 static unsigned map_tex[MAXNAME], map_buf[MAXNAME], map_obj[MAXNAME];
 /* ★ ITEM 51: which guest textures have STORAGE. A texture the game defines
@@ -208,6 +213,64 @@ static int attr_resolve(unsigned tok)
     slot = tok % PADGL_ATTR_PER_PROG;
     if (g >= MAXPROG || slot >= PADGL_ATTR_PER_PROG) return -1;
     return attr_loc[g][slot];
+}
+
+/* ---- PAD-1090, Spike 3: the GLES 3 calls Godot 4 uses (padgl.h, the ops
+ * after PADGL_PRESENTTEX). Loaded on first use, so a Spike 2 run that never
+ * sends them never looks them up. */
+static void (*p_glDrawArraysInstanced)(unsigned,int,int,int);
+static void (*p_glDrawElementsInstanced)(unsigned,int,unsigned,const void*,int);
+static void (*p_glVertexAttribDivisor)(unsigned,unsigned);
+static void (*p_glVertexAttribIPointer)(unsigned,int,unsigned,int,const void*);
+static void (*p_glVertexAttrib4f)(unsigned,float,float,float,float);
+static void (*p_glVertexAttribI4ui)(unsigned,unsigned,unsigned,unsigned,unsigned);
+static unsigned (*p_glGetUniformBlockIndex)(unsigned,const char*);
+static void (*p_glUniformBlockBinding)(unsigned,unsigned,unsigned);
+static void (*p_glBindBufferBase)(unsigned,unsigned,unsigned);
+static void (*p_glBindBufferRange)(unsigned,unsigned,unsigned,long,long);
+static void (*p_glUniformNf[4])(int,int,const float*);
+static void (*p_glUniformNi[4])(int,int,const int*);
+static void (*p_glUniformNui[4])(int,int,const unsigned*);
+static void (*p_glUniformMN[3])(int,int,unsigned char,const float*);
+static void (*p_glDepthMask)(unsigned char);
+static void (*p_glCullFace)(unsigned);
+static void (*p_glFrontFace)(unsigned);
+static void (*p_glDepthFunc)(unsigned);
+static void (*p_glClearDepthf)(float);
+static void (*p_glBlendColor)(float,float,float,float);
+static void (*p_glTexImage3D)(unsigned,int,int,int,int,int,int,unsigned,unsigned,const void*);
+static void (*p_glTexSubImage3D)(unsigned,int,int,int,int,int,int,int,unsigned,unsigned,const void*);
+static void (*p_glGenerateMipmap)(unsigned);
+static void (*p_glTexStorage2D)(unsigned,int,unsigned,int,int);
+static int s3gl_loaded;
+
+static void s3gl_load(void)
+{
+    static const char *nf[4] = { "glUniform1fv", "glUniform2fv", "glUniform3fv", "glUniform4fv" };
+    static const char *ni[4] = { "glUniform1iv", "glUniform2iv", "glUniform3iv", "glUniform4iv" };
+    static const char *nu[4] = { "glUniform1uiv", "glUniform2uiv", "glUniform3uiv", "glUniform4uiv" };
+    static const char *nm[3] = { "glUniformMatrix2fv", "glUniformMatrix3fv", "glUniformMatrix4fv" };
+    int i;
+    if (s3gl_loaded) return;
+    s3gl_loaded = 1;
+#define LOAD3(n) (*(void **)&p_##n = (void *)eglGetProcAddress(#n))
+    LOAD3(glDrawArraysInstanced); LOAD3(glDrawElementsInstanced);
+    LOAD3(glVertexAttribDivisor); LOAD3(glVertexAttribIPointer);
+    LOAD3(glVertexAttrib4f); LOAD3(glVertexAttribI4ui);
+    LOAD3(glGetUniformBlockIndex); LOAD3(glUniformBlockBinding);
+    LOAD3(glBindBufferBase); LOAD3(glBindBufferRange);
+    LOAD3(glDepthMask); LOAD3(glCullFace); LOAD3(glFrontFace); LOAD3(glDepthFunc);
+    LOAD3(glClearDepthf); LOAD3(glBlendColor);
+    LOAD3(glTexImage3D); LOAD3(glTexSubImage3D); LOAD3(glGenerateMipmap);
+    LOAD3(glTexStorage2D);
+#undef LOAD3
+    for (i = 0; i < 4; i++) {
+        *(void **)&p_glUniformNf[i] = (void *)eglGetProcAddress(nf[i]);
+        *(void **)&p_glUniformNi[i] = (void *)eglGetProcAddress(ni[i]);
+        *(void **)&p_glUniformNui[i] = (void *)eglGetProcAddress(nu[i]);
+    }
+    for (i = 0; i < 3; i++)
+        *(void **)&p_glUniformMN[i] = (void *)eglGetProcAddress(nm[i]);
 }
 
 static char *shader_src[MAXNAME];
@@ -379,6 +442,41 @@ static int vid_note_offset(unsigned off, unsigned bytes, unsigned w, unsigned h)
             "(ch%u serving %ux%u, write_idx=%u)\n",
             w, h, ch, slot, ch, c->width, c->height, c->write_idx);
     return 1;
+}
+
+/* PAD-617: VIDEO SHOWN OUT OF ORDER, counted where it is read. This process
+ * reads a frame's pixels out of the ring when it gets to the upload command,
+ * which is later than the moment the game named the slot - and the decoder
+ * refills a slot as soon as the guest's read_idx frees it. The frame a slot
+ * holds right now is the newest one written into it, so it can be inferred
+ * from write_idx alone. Within one request (same req_gen) that number must
+ * never go down; when it does, the screen just ran backwards, which is what a
+ * tester described ("frames will even run back slightly"). A jump forward of
+ * more than one frame is the other half of the same read - the frame from the
+ * future that came before the run back. */
+static long vid_back, vid_skip;
+static struct { unsigned gen, f, have; } vid_order[PADVID_CHANNELS];
+
+static void vid_order_note(unsigned off)
+{
+    unsigned chan_span = (unsigned)PADVID_SLOTS * PADVID_SLOT_BYTES;
+    unsigned ch = off / chan_span;
+    unsigned slot = (off % chan_span) / PADVID_SLOT_BYTES;
+    const volatile struct padvid_chan *c;
+    unsigned wi, gen, f;
+    if (!vid_hdr || ch >= PADVID_CHANNELS) return;
+    c = &vid_hdr->ch[ch];
+    gen = c->req_gen;
+    wi = c->write_idx;
+    if (wi <= slot) return;                 /* the slot holds nothing yet */
+    f = wi - 1 - ((wi - 1 - slot) % PADVID_SLOTS);
+    if (vid_order[ch].have && vid_order[ch].gen == gen) {
+        if (f < vid_order[ch].f) vid_back++;
+        else if (f > vid_order[ch].f + 1) vid_skip++;
+    }
+    vid_order[ch].gen = gen;
+    vid_order[ch].f = f;
+    vid_order[ch].have = 1;
 }
 
 /* Every distinct size the game has asked to upload, and how often. Eight is
@@ -848,6 +946,7 @@ static int win_w, win_h;                 /* current drawable size            */
 static int win_reported_panel;
 static int win_flip;                     /* 0 = correct here; see win_present() */
 static int win_every = 1;                /* present every Nth frame          */
+static void disp_open(unsigned long w);  /* PAD-811, the display setting     */
 
 /* THE GAME'S OWN TASKBAR BUTTON. Under WSLg every X window is drawn by
  * msrdc.exe, and one with no WM_CLASS gets no app id, so Windows files it in
@@ -2142,6 +2241,38 @@ static void key_log(int b, int press, unsigned long xt)
                             : (press ? "DOWN " : "UP   "), ids);
 }
 
+/* ★ PAD-891: A KEY THAT WENT DOWN HERE AND CAME UP SOMEWHERE ELSE.
+ *
+ * X sends the KeyRelease to whichever window has the focus WHEN THE KEY
+ * COMES UP. A key pressed in one of these windows and let go after the focus
+ * moved on never comes back up here, so its switch stayed made for the rest
+ * of the run. A Visual Pinball run does exactly that to a cabinet: the game
+ * window takes the foreground as it opens, the controller hands it back to
+ * the table (padcontroller _keep_player_front), and a button the player held
+ * across the swap was held in the game for good. On Deadpool that was '=',
+ * Service Plus, and the game's own auto-repeat ran the volume to the top
+ * with nobody touching anything (reproduced: + without - in the [sw] log,
+ * VOLUME 62, 63 on the screen). So losing the focus lets go of every key
+ * this process holds. Latched rows (C, B) are the user's state, not a held
+ * key, and stay as they are. */
+static void keys_let_go(const char *why)
+{
+    int i, n = 0, cab = 0;
+    for (i = 0; i < nbinds; i++)
+        if (!binds[i].toggle && key_down[i]) {
+            key_down[i] = 0;
+            key_log(i, 0, 0);
+            n++;
+        }
+    if (n) sw_publish();
+    /* the boot menu's copy of the same keys (cab_key) */
+    for (i = 0; i < NCAB_KEYS; i++)
+        if (cab_key_down[i]) { cab_key_down[i] = 0; cab = 1; }
+    if (cab) cab_publish();
+    if (n || cab)
+        fprintf(stderr, "[padglhost] %s: let go of %d held key(s)\n", why, n);
+}
+
 static void sw_shm_open(void)
 {
     const char *path = getenv("PAD_SW_SHM");
@@ -2234,8 +2365,9 @@ static void legend_open(int scr)
     }
     win_brand(legend_win);
     /* KeyPress | KeyRelease | Exposure | StructureNotify. Keys are selected on
-     * this window too, so whichever of the two has focus can drive the game. */
-    XSelectInput(xdpy, legend_win, 1L | 2L | (1L << 15) | (1L << 17));
+     * this window too, so whichever of the two has focus can drive the game.
+     * FocusChange (1<<21): losing the focus lets go of held keys (PAD-891). */
+    XSelectInput(xdpy, legend_win, 1L | 2L | (1L << 15) | (1L << 17) | (1L << 21));
     XSetWMProtocols(xdpy, legend_win, &wm_delete, 1);
     XMapWindow(xdpy, legend_win);
     legend_gc = XCreateGC(xdpy, legend_win, 0, 0);
@@ -2419,9 +2551,16 @@ static int win_open(void)
         XStoreName(xdpy, xwin, win_title);
     }
     win_brand(xwin);
+    disp_open(xwin);        /* PAD-811: borderless from the first map */
     /* StructureNotifyMask (1<<17) gives ConfigureNotify for resizes;
      * KeyPressMask (1) and KeyReleaseMask (2) are what make the keyboard work. */
-    XSelectInput(xdpy, xwin, (1L << 17) | 1L | 2L);
+    /* ButtonPress/ButtonRelease/Button1Motion (1<<2, 1<<3, 1<<8): PAD-811's
+     * drag to move / resize a borderless window and double-click for full
+     * screen (disp_button, disp_motion); PointerMotion (1<<6, PAD-845) for
+     * the resize arrows over the edges (disp_hover); FocusChange (1<<21) so
+     * losing the focus lets go of held keys (PAD-891, keys_let_go) */
+    XSelectInput(xdpy, xwin, (1L << 17) | (1L << 2) | (1L << 3) | (1L << 6) | (1L << 8) | 1L | 2L |
+                 (1L << 21));
     wm_delete = XInternAtom(xdpy, "WM_DELETE_WINDOW", 0);
     XSetWMProtocols(xdpy, xwin, &wm_delete, 1);
     XMapWindow(xdpy, xwin);
@@ -2642,6 +2781,382 @@ static void win_raise_all(const char *why)
                     "(item 22; PAD_GL_RAISE=0 to skip)\n", why);
 }
 
+/* ★ PAD-811: THE DISPLAY SETTING - borderless, and on the monitor the user
+ * named, full screen or a rectangle, changed WHILE THE GAME RUNS. David,
+ * 2026-10-29: "make the emulated display borderless ... simple to place on a
+ * specified monitor. think virtual pinball and desktop ... on a cabinet it
+ * should have its own designated monitor ... ideally on the fly".
+ *
+ * PAD_DISPLAY_CONF (watch.sh: display.conf on the rig board, visible runs
+ * only) holds one line per window, written by the Windows side (the app's
+ * Emulate tab, padvpx display), which alone knows the monitors:
+ *
+ *     game monitor=2 x=3840 y=0 w=1920 h=1080 fs=1 border=0
+ *
+ * x y w h are the target in X root coordinates, which under WSLg ARE Windows'
+ * physical desktop pixels (measured: root 3840x2160 on a 3840x2160 screen,
+ * a fullscreen window read back 0,0,3840,2160 from GetWindowRect). No line,
+ * or no file: the window is free - opened where it was left, as before.
+ *
+ * What the compositor does with each piece, measured on WSLg 2026-10-29:
+ *   - _MOTIF_WM_HINTS decorations 0 drops Weston's title bar and frame, but
+ *     only for a window MAPPED with it: set on a live window it is ignored
+ *     until an unmap/map, so a live border change remaps the window (the
+ *     EGL surface survives it; the picture carried on).
+ *   - _NET_WM_STATE_FULLSCREEN fills exactly the monitor the window is on,
+ *     no shadow margin, so fs=1 first moves the window inside the target
+ *     rectangle and then asks for full screen.
+ *   - a plain move lands the CLIENT near, not at, the aim (insets differ by
+ *     border state), so a rectangle is moved, read back and corrected, the
+ *     same verify-and-retry the remembered-position restore uses above.
+ * The file is checked twice a second; a change is applied at once, no
+ * restart. Placement waits for the compositor's own first placement, like
+ * the restore (2.5 s after mapping). */
+extern int XSendEvent(XDisplay *, unsigned long, int, long, void *);
+extern int XMoveResizeWindow(XDisplay *, unsigned long, int, int, unsigned, unsigned);
+
+struct disp_set { int set, x, y, w, h, fs, border, rx, ry; };
+static struct disp_set disp_want;
+static int disp_placed;                  /* the wanted setting is applied     */
+static int disp_cur_border = 1;          /* what the window HAS now           */
+static int disp_cur_fs;
+static int disp_fixups;                  /* rectangle corrections left        */
+static double disp_check_s, disp_fix_s;
+static struct timespec disp_mtim;
+
+static const char *disp_path(void)
+{
+    const char *p = getenv("PAD_DISPLAY_CONF");
+    return (p && *p) ? p : NULL;
+}
+
+/* The "game" line of the file, or set=0. Unknown keys are skipped, so a
+ * newer writer's extra fields cannot break an older renderer. */
+static struct disp_set disp_read(void)
+{
+    struct disp_set d = { 0, 0, 0, 0, 0, 0, 1, 0, 0 };
+    const char *p = disp_path();
+    char line[512];
+    FILE *f;
+    if (!p || !(f = fopen(p, "r"))) return d;
+    while (fgets(line, sizeof line, f)) {
+        char *tok, *save = NULL;
+        if (strncmp(line, "game ", 5) != 0) continue;
+        d.set = 1;
+        for (tok = strtok_r(line + 5, " \t\r\n", &save); tok;
+             tok = strtok_r(NULL, " \t\r\n", &save)) {
+            char *eq = strchr(tok, '=');
+            int v;
+            if (!eq) continue;
+            *eq = 0; v = atoi(eq + 1);
+            if (!strcmp(tok, "x")) d.x = v;
+            else if (!strcmp(tok, "y")) d.y = v;
+            else if (!strcmp(tok, "w")) d.w = v;
+            else if (!strcmp(tok, "h")) d.h = v;
+            else if (!strcmp(tok, "fs")) d.fs = v != 0;
+            else if (!strcmp(tok, "border")) d.border = v != 0;
+            else if (!strcmp(tok, "rx")) d.rx = v;
+            else if (!strcmp(tok, "ry")) d.ry = v;
+        }
+        break;
+    }
+    fclose(f);
+    /* a rectangle no screen could hold is no setting: free, and say so */
+    if (d.set && (d.w < 160 || d.h < 120 || d.w > 16384 || d.h > 16384)) {
+        fprintf(stderr, "[padglhost] display: %s has a game line with no usable "
+                "size (%dx%d); the window stays free\n", p, d.w, d.h);
+        d.set = 0;
+    }
+    return d;
+}
+
+static void disp_border(unsigned long w, int border)
+{
+    /* MWM_HINTS_DECORATIONS (1<<1); decorations 0 = none, 1 = all. Format-32
+     * data is an array of C longs (see win_brand). */
+    long hints[5] = { 2, 0, border ? 1 : 0, 0, 0 };
+    unsigned long a = XInternAtom(xdpy, "_MOTIF_WM_HINTS", 0);
+    XChangeProperty(xdpy, w, a, a, 32, 0, (const unsigned char *)hints, 5);
+}
+
+static void disp_fullscreen(unsigned long w, int on)
+{
+    /* the EWMH request: a ClientMessage to the root, _NET_WM_STATE
+     * add/remove _NET_WM_STATE_FULLSCREEN, source 1 (an application) */
+    union { long l[24]; struct {
+        int type; unsigned long serial; int send_event; void *display;
+        unsigned long window, message_type; int format; long data[5];
+    } c; } ev;
+    memset(&ev, 0, sizeof ev);
+    ev.c.type = 33;                               /* ClientMessage */
+    ev.c.window = w;
+    ev.c.message_type = XInternAtom(xdpy, "_NET_WM_STATE", 0);
+    ev.c.format = 32;
+    ev.c.data[0] = on ? 1 : 0;
+    ev.c.data[1] = (long)XInternAtom(xdpy, "_NET_WM_STATE_FULLSCREEN", 0);
+    ev.c.data[3] = 1;
+    /* SubstructureRedirectMask | SubstructureNotifyMask */
+    XSendEvent(xdpy, XRootWindow(xdpy, XDefaultScreen(xdpy)), 0,
+               (1L << 20) | (1L << 19), &ev);
+}
+
+static void disp_set_border(int border)
+{
+    if (border == disp_cur_border) return;
+    disp_border(xwin, border);
+    XUnmapWindow(xdpy, xwin); XSync(xdpy, 0); XMapWindow(xdpy, xwin);
+    disp_cur_border = border;
+}
+
+static void disp_apply(void)
+{
+    struct disp_set d = disp_want;
+    if (!xwin) return;
+    if (!d.set) {
+        /* back to free: frame on, out of full screen, where it is */
+        if (disp_cur_fs) { disp_fullscreen(xwin, 0); disp_cur_fs = 0; }
+        disp_set_border(1);
+        XFlush(xdpy);
+        fprintf(stderr, "[padglhost] display: free (no setting)\n");
+    } else {
+        int left_fs = disp_cur_fs && !d.fs;
+        disp_set_border(d.border);
+        if (left_fs) { disp_fullscreen(xwin, 0); disp_cur_fs = 0; }
+        /* into the target first: full screen fills the monitor the window
+         * is ON, and a rectangle is the target itself */
+        XMoveResizeWindow(xdpy, xwin, d.x, d.y, (unsigned)d.w, (unsigned)d.h);
+        if (d.fs) { disp_fullscreen(xwin, 1); disp_cur_fs = 1; }
+        XFlush(xdpy);
+        disp_fixups = d.fs ? 0 : 4;
+        /* leaving full screen, the window reads 0,0 for a moment before the
+         * compositor restores it: checking at 0.7 s "corrected" that stale
+         * spot and bounced the window once (measured 2026-10-29) */
+        disp_fix_s = now_s() + (left_fs ? 2.0 : 0.7);
+        fprintf(stderr, "[padglhost] display: %s at %d,%d %dx%d, %s\n",
+                d.fs ? "full screen" : "window", d.x, d.y, d.w, d.h,
+                d.border ? "with its frame" : "borderless");
+    }
+    disp_placed = 1;
+}
+
+/* At window creation, before it is mapped: the border has to be right from
+ * the first map, and a setting replaces the remembered position. */
+static void disp_open(unsigned long w)
+{
+    struct stat st;
+    const char *p = disp_path();
+    disp_want = disp_read();
+    if (p && stat(p, &st) == 0) disp_mtim = st.st_mtim;
+    if (!disp_want.set) return;
+    disp_border(w, disp_want.border);
+    disp_cur_border = disp_want.border;
+    disp_placed = 0;             /* placement still owed: disp_poll does it */
+    game_want_pos = 0;           /* the setting, not the remembered spot */
+}
+
+/* ★ MOVED AND RESIZED BY HAND (David, 2026-10-29: "i need to be able to move
+ * and reposition the display and make it borderless and resize it with the
+ * mouse cursor while it's up"). A borderless window has no title bar to drag,
+ * so a left press inside it asks the compositor to MOVE it, and one within
+ * DISP_EDGE px of an edge or corner to RESIZE from there (_NET_WM_MOVERESIZE,
+ * the request a client-drawn title bar makes). The pointer's implicit grab
+ * from the press is released first, or the compositor cannot take it. When
+ * the window has been still for a second after, its place and size go back
+ * into display.conf (disp_writeback), so the setting, the Emulate tab and the
+ * next run all agree with where the user put it. */
+#define DISP_EDGE 16
+extern int XUngrabPointer(XDisplay *, unsigned long);
+static double disp_cfg_s;                /* last ConfigureNotify of xwin      */
+static int disp_dragged;                 /* a hand move/resize to write back  */
+
+/* A press only REMEMBERS where it was; the move/resize starts when the
+ * pointer then travels DISP_SLOP px with the button down (disp_motion), so a
+ * click stays a click - and two of them within DISP_DCLICK_S, close together,
+ * are a double-click: full screen on the monitor the window is on, and the
+ * next double-click puts it back (David, 2026-10-29). That toggle is this
+ * run's only; the saved setting is what the next run opens with. */
+#define DISP_SLOP 4
+#define DISP_DCLICK_S 0.4
+static int disp_down, disp_down_x, disp_down_y, disp_down_xr, disp_down_yr;
+static double disp_last_click_s;
+static int disp_last_click_xr, disp_last_click_yr;
+static void disp_press(int x, int y, int xr, int yr, unsigned long t);
+
+static void disp_button(int x, int y, int xr, int yr)
+{
+    double t = now_s();
+    if (t - disp_last_click_s < DISP_DCLICK_S &&
+        abs(xr - disp_last_click_xr) < 8 && abs(yr - disp_last_click_yr) < 8) {
+        disp_down = 0;
+        disp_last_click_s = 0;
+        if (!disp_cur_fs) {
+            disp_fullscreen(xwin, 1); disp_cur_fs = 1;
+            fprintf(stderr, "[padglhost] display: double-click, full screen\n");
+        } else {
+            disp_fullscreen(xwin, 0); disp_cur_fs = 0;
+            fprintf(stderr, "[padglhost] display: double-click, back to the window\n");
+        }
+        XFlush(xdpy);
+        return;
+    }
+    disp_last_click_s = t; disp_last_click_xr = xr; disp_last_click_yr = yr;
+    disp_down = 1;
+    disp_down_x = x; disp_down_y = y; disp_down_xr = xr; disp_down_yr = yr;
+}
+
+/* EWMH direction of a point in the window: 0 top-left 1 top 2 top-right
+ * 3 right 4 bottom-right 5 bottom 6 bottom-left 7 left 8 move */
+static long disp_dir(int x, int y)
+{
+    int l = x < DISP_EDGE, r = x >= win_w - DISP_EDGE;
+    int top = y < DISP_EDGE, bot = y >= win_h - DISP_EDGE;
+    return top ? (l ? 0 : r ? 2 : 1) : bot ? (l ? 6 : r ? 4 : 5) : l ? 7 : r ? 3 : 8;
+}
+
+/* ★ THE RESIZE ARROWS (PAD-845, David: "can we show the cursor for resizing
+ * on the display too when we are at the border?"). Over the DISP_EDGE band
+ * the pointer is the X font cursor for that edge or corner, the same band
+ * disp_press resizes from; inside it, and whenever the window is not ours to
+ * move (no setting, a border, full screen), the default arrow. Set only when
+ * the band changes. */
+extern unsigned long XCreateFontCursor(XDisplay *, unsigned int);
+extern int XDefineCursor(XDisplay *, unsigned long, unsigned long);
+static unsigned long disp_cursor[8];
+static long disp_cursor_dir = 8;
+
+static void disp_hover(int x, int y)
+{
+    /* XC_top_left_corner, top_side, top_right_corner, right_side,
+     * bottom_right_corner, bottom_side, bottom_left_corner, left_side */
+    static const unsigned shape[8] = { 134, 138, 136, 96, 14, 16, 12, 70 };
+    long dir = (!disp_want.set || disp_cur_border || disp_cur_fs) ? 8 : disp_dir(x, y);
+    if (dir == disp_cursor_dir) return;
+    disp_cursor_dir = dir;
+    if (dir < 8 && !disp_cursor[dir]) disp_cursor[dir] = XCreateFontCursor(xdpy, shape[dir]);
+    XDefineCursor(xdpy, xwin, dir < 8 ? disp_cursor[dir] : 0);   /* 0: None, the default */
+    XFlush(xdpy);
+}
+
+static void disp_motion(int xr, int yr, unsigned long t)
+{
+    if (!disp_down) return;
+    if (abs(xr - disp_down_xr) < DISP_SLOP && abs(yr - disp_down_yr) < DISP_SLOP) return;
+    disp_down = 0;
+    disp_last_click_s = 0;               /* a drag is not half a double-click */
+    disp_press(disp_down_x, disp_down_y, disp_down_xr, disp_down_yr, t);
+}
+
+static void disp_press(int x, int y, int xr, int yr, unsigned long t)
+{
+    union { long l[24]; struct {
+        int type; unsigned long serial; int send_event; void *display;
+        unsigned long window, message_type; int format; long data[5];
+    } c; } ev;
+    long dir = disp_dir(x, y);
+    if (!disp_want.set || disp_cur_border || disp_cur_fs) return;
+    XUngrabPointer(xdpy, t);
+    memset(&ev, 0, sizeof ev);
+    ev.c.type = 33;
+    ev.c.window = xwin;
+    ev.c.message_type = XInternAtom(xdpy, "_NET_WM_MOVERESIZE", 0);
+    ev.c.format = 32;
+    ev.c.data[0] = xr; ev.c.data[1] = yr; ev.c.data[2] = dir;
+    ev.c.data[3] = 1;                    /* button 1 */
+    ev.c.data[4] = 1;                    /* source: an application */
+    XSendEvent(xdpy, XRootWindow(xdpy, XDefaultScreen(xdpy)), 0,
+               (1L << 20) | (1L << 19), &ev);
+    XFlush(xdpy);
+    disp_dragged = 1;
+    disp_fixups = 0;                     /* the user's place, not ours */
+}
+
+/* The game line again with this place and size: x y w h, and rx ry moved by
+ * as much (the monitor's corner is x - rx). Every other line is kept. */
+static void disp_writeback(void)
+{
+    const char *p = disp_path();
+    char lines[16][512], tmp[1100], line[512];
+    int n = 0, i, ax, ay;
+    FILE *f;
+    struct stat st;
+    if (!p || !winpos_read(xwin, &ax, &ay)) return;
+    if ((f = fopen(p, "r"))) {
+        while (n < 16 && fgets(lines[n], sizeof lines[n], f)) n++;
+        fclose(f);
+    }
+    snprintf(tmp, sizeof tmp, "%s.tmp", p);
+    if (!(f = fopen(tmp, "w"))) return;
+    for (i = 0; i < n; i++) {
+        if (strncmp(lines[i], "game ", 5) == 0) {
+            int mon = 1, border = disp_cur_border;
+            char mode[32] = "window", *tok, *save = NULL;
+            snprintf(line, sizeof line, "%s", lines[i] + 5);
+            for (tok = strtok_r(line, " \t\r\n", &save); tok;
+                 tok = strtok_r(NULL, " \t\r\n", &save)) {
+                if (!strncmp(tok, "monitor=", 8)) mon = atoi(tok + 8);
+            }
+            fprintf(f, "game monitor=%d mode=%s border=%d rx=%d ry=%d x=%d y=%d "
+                    "w=%d h=%d fs=0\n", mon, mode, border,
+                    ax - (disp_want.x - disp_want.rx), ay - (disp_want.y - disp_want.ry),
+                    ax, ay, win_w, win_h);
+        } else {
+            fputs(lines[i], f);
+        }
+    }
+    fclose(f);
+    rename(tmp, p);
+    disp_want.rx = ax - (disp_want.x - disp_want.rx);
+    disp_want.ry = ay - (disp_want.y - disp_want.ry);
+    disp_want.x = ax; disp_want.y = ay; disp_want.w = win_w; disp_want.h = win_h;
+    if (stat(p, &st) == 0) disp_mtim = st.st_mtim;   /* ours: not a change */
+    fprintf(stderr, "[padglhost] display: moved by hand to %d,%d %dx%d; saved\n",
+            ax, ay, win_w, win_h);
+}
+
+static void disp_poll(void)
+{
+    double t = now_s();
+    const char *p = disp_path();
+    if (!p || !xwin || t - win_mapped_s < 2.5) return;
+    if (disp_dragged && t - disp_cfg_s > 1.0) {
+        disp_dragged = 0;
+        disp_writeback();
+    }
+    if (t >= disp_check_s) {
+        struct stat st;
+        int changed = 0;
+        disp_check_s = t + 0.5;
+        if (stat(p, &st) == 0) {
+            changed = st.st_mtim.tv_sec != disp_mtim.tv_sec ||
+                      st.st_mtim.tv_nsec != disp_mtim.tv_nsec;
+            disp_mtim = st.st_mtim;
+        } else if (disp_mtim.tv_sec) {
+            changed = 1;                        /* the file went: free */
+            disp_mtim.tv_sec = disp_mtim.tv_nsec = 0;
+        }
+        if (changed) disp_want = disp_read();
+        if (changed || (!disp_placed && disp_want.set)) disp_apply();
+    }
+    /* a rectangle: read back, shift the aim by the miss (see the restore) */
+    if (disp_fixups > 0 && t >= disp_fix_s) {
+        int ax, ay;
+        disp_fix_s = t + 1.0;
+        disp_fixups--;
+        if (winpos_read(xwin, &ax, &ay) &&
+            (ax != disp_want.x || ay != disp_want.y)) {
+            static int aim_x, aim_y;
+            if (disp_fixups == 3) { aim_x = disp_want.x; aim_y = disp_want.y; }
+            aim_x += disp_want.x - ax; aim_y += disp_want.y - ay;
+            XMoveWindow(xdpy, xwin, aim_x, aim_y);
+            XFlush(xdpy);
+            fprintf(stderr, "[padglhost] display: window at %d,%d, want %d,%d "
+                    "-> aim %d,%d\n", ax, ay, disp_want.x, disp_want.y, aim_x, aim_y);
+        } else {
+            disp_fixups = 0;
+        }
+    }
+}
+
 static void win_pump(void)
 {
     /* sizeof(XEvent) is 192 on this LP64 build; 256 bytes is a safe
@@ -2805,6 +3320,8 @@ static void win_pump(void)
         }
     }
 
+    disp_poll();            /* PAD-811: the display setting, live */
+
     /* ITEM 22: retry the raise across the boot. The schedule is deliberately
      * over by 30 s, which is before the game has a picture on any run measured
      * here (~15-20 s to the first picture, and the raise wants to have won by
@@ -2878,7 +3395,7 @@ static void win_pump(void)
         case 22:                       /* ConfigureNotify: width/height ints at 56/60 */
             /* The GAME window drives the drawable size; the legend window
              * resizing must not be mistaken for it. */
-            if (ev.ul[4] == xwin) { win_w = ev.i[14]; win_h = ev.i[15]; }
+            if (ev.ul[4] == xwin) { win_w = ev.i[14]; win_h = ev.i[15]; disp_cfg_s = now_s(); }
             else if (xwin2 && ev.ul[4] == xwin2) {
                 win2_w = ev.i[14]; win2_h = ev.i[15];
                 break;             /* item 44: not the game window; no save */
@@ -2893,8 +3410,28 @@ static void win_pump(void)
              * re-save it. */
             save_pending = 1;
             break;
+        case 4:                        /* ButtonPress: x y x_root y_root at
+                                          ints 16-19, button at 21, time ul[7] */
+            if (ev.ul[4] == xwin && ev.i[21] == 1)
+                disp_button(ev.i[16], ev.i[17], ev.i[18], ev.i[19]);
+            break;
+        case 5:                        /* ButtonRelease */
+            if (ev.ul[4] == xwin && ev.i[21] == 1) disp_down = 0;
+            break;
+        case 6:                        /* MotionNotify: x y at ints 16-17,
+                                          x_root y_root at 18-19 */
+            if (ev.ul[4] == xwin) {
+                disp_hover(ev.i[16], ev.i[17]);
+                disp_motion(ev.i[18], ev.i[19], ev.ul[7]);
+            }
+            break;
         case 12:                       /* Expose */
             legend_dirty = 1;
+            break;
+        case 10:                       /* FocusOut: detail at int 11; the
+                                          focus moving into a child of ours
+                                          (NotifyInferior, 2) keeps the keys */
+            if (ev.i[11] != 2) keys_let_go("focus left the window");
             break;
         case 2:                        /* KeyPress   */
         case 3: {                      /* KeyRelease */
@@ -3182,8 +3719,9 @@ static void win2_open(int disp)
     }
     win_brand(xwin2);
     /* Keys selected here too, legend-style: whichever window has focus can
-     * drive the game. StructureNotify for resize. */
-    XSelectInput(xdpy, xwin2, (1L << 17) | 1L | 2L);
+     * drive the game. StructureNotify for resize, FocusChange for
+     * keys_let_go (PAD-891). */
+    XSelectInput(xdpy, xwin2, (1L << 17) | 1L | 2L | (1L << 21));
     XSetWMProtocols(xdpy, xwin2, &wm_delete, 1);
     XMapWindow(xdpy, xwin2);
     /* MEASURED, and it is why this window is not created the way the main
@@ -4542,11 +5080,106 @@ static void pic2_check(void)
     }
 }
 
+/* item 44's first sighting of a second display, shared by PADGL_TARGET
+ * (Spike 2) and PADGL_PRESENTTEX's display word (Spike 3, PAD-1199): size
+ * its render target and panel from the env, open its window, create the
+ * target. Runs once; tgt2_disp says which display index holds the slot. */
+static void disp2_setup(int d)
+{
+    tgt2_disp = d;
+    fb2_w = fb_w; fb2_h = fb_h;
+    {   /* BOTH or NEITHER, matching the guest's
+         * fbGetDisplayGeometry exactly: with only one set, the
+         * host would size the texture the game was never told
+         * about, and the scene and its target would disagree on
+         * one axis. */
+        const char *ew = getenv("PAD_GL2_W");
+        const char *eh = getenv("PAD_GL2_H");
+        int w2 = ew ? atoi(ew) : 0, h2 = eh ? atoi(eh) : 0;
+        if (w2 > 0 && h2 > 0) { fb2_w = w2; fb2_h = h2; }
+    }
+    {   /* THE PANEL, host side only - watch.sh reads it out of
+         * the title's own framebuffer timing record. BOTH or
+         * NEITHER for the same reason as above: one axis from the
+         * panel and one from the render size is a shape neither
+         * machine nor game ever has. Bounded because this is a
+         * window size and a typo here is a window nobody can
+         * find; out of range falls back to the render size. */
+        const char *er = getenv("PAD_GL2_ROT");
+        int r = er ? atoi(er) : 0;
+        r = ((r % 360) + 360) % 360;
+        win2_rot = (r % 90) ? 0 : r;   /* only quarter turns */
+    }
+    {
+        const char *ew = getenv("PAD_GL2_WIN_W");
+        const char *eh = getenv("PAD_GL2_WIN_H");
+        int w2 = ew ? atoi(ew) : 0, h2 = eh ? atoi(eh) : 0;
+        if (w2 >= 160 && h2 >= 120 && w2 <= 7680 && h2 <= 4320) {
+            win2_want_w = w2; win2_want_h = h2;
+        } else if (w2 || h2) {
+            fprintf(stderr, "[padglhost] display %d: ignoring "
+                    "PAD_GL2_WIN_%s=%dx%d - out of range; its "
+                    "window opens at the render size\n",
+                    d, (w2 && h2) ? "W/H" : "W or H", w2, h2);
+        }
+    }
+    fprintf(stderr, "[padglhost] display %d targeted by the "
+            "guest; routing it to its own %dx%d texture and "
+            "window\n", d, fb2_w, fb2_h);
+    if (win2_want_w > 0)
+        fprintf(stderr, "[padglhost] display %d: its panel is "
+                "%dx%d, so the window opens at that and the "
+                "%dx%d render is scaled into it\n",
+                d, win2_want_w, win2_want_h, fb2_w, fb2_h);
+    win2_open(d);
+    if (!tgt2_create() && win2_on) {
+        /* Window up, render target failed: hide the window
+         * rather than let it swap a texture nothing can ever
+         * render into (the review's finding - undefined
+         * contents, oracle silent). The unmap makes the degrade
+         * VISIBLE on the desktop as well as in the log. */
+        fprintf(stderr, "[padglhost] display %d: render target "
+                "failed, hiding its window; its feed decodes "
+                "but is not presented\n", d);
+        XUnmapWindow(xdpy, xwin2);
+        XFlush(xdpy);
+        win2_on = 0;
+    }
+}
+
+/* PAD-1199: what display 2 shows, for a headless run (PAD_GL_DUMP), on the
+ * same schedule as the main screen's frames - ONE file, display2.png,
+ * overwritten, so it never grows a run's frames dir and never reads as a
+ * main-screen frame_*.png to the tools that walk those. */
+static void dump2(void)
+{
+    static long dumped2;
+    unsigned char *px;
+    char path[600];
+    int prev = 0;
+    if (!dump_dir || !fbo_screen2 || fb2_w <= 0 || fb2_h <= 0) return;
+    if (frames2_done % dump_every) return;
+    if (dumped2 >= dump_max) return;
+    px = malloc((size_t)fb2_w * fb2_h * 4);
+    if (!px) return;
+    dumped2++;
+    p_glGetIntegerv(0x8CA6, &prev);
+    p_glBindFramebuffer(0x8D40, fbo_screen2);
+    p_glReadPixels(0, 0, fb2_w, fb2_h, 0x1908, 0x1401, px);
+    p_glBindFramebuffer(0x8D40, (unsigned)prev);
+    snprintf(path, sizeof path, "%s/display2.png", dump_dir);
+    write_png(path, px, fb2_w, fb2_h);
+    free(px);
+    if (dumped2 == 1)
+        fprintf(stderr, "[padglhost] display 2: writing %s\n", path);
+}
+
 static void present2(void)
 {
     frames2_done++;
     win2_present();
     pic2_check();
+    dump2();
 }
 
 static void present(void)
@@ -4641,7 +5274,7 @@ static void dump_op_histogram(void)
     nm[PADGL_BINDFBO]="BINDFBO"; nm[PADGL_BINDTEX]="BINDTEX";
     nm[PADGL_VERTEXATTRIB]="VERTEXATTRIB"; nm[PADGL_ENABLEATTRIB]="ENABLEATTRIB";
     nm[PADGL_BINDVAO]="BINDVAO"; nm[PADGL_COMPILESHADER]="COMPILESHADER";
-    nm[PADGL_TEXDIRECT]="TEXDIRECT";
+    nm[PADGL_TEXDIRECT]="TEXDIRECT"; nm[PADGL_PRESENTTEX]="PRESENTTEX";
     fprintf(stderr, "[padglhost] ops:");
     for (i = 0; i < PADGL_OP_MAX; i++)
         if (op_count[i]) fprintf(stderr, " %s=%ld", nm[i] ? nm[i] : "?", op_count[i]);
@@ -5134,6 +5767,181 @@ static void dispatch(unsigned op, const unsigned char *pl, unsigned len)
         }
     }
     switch (op) {
+    case PADGL_PRESENTTEX: {    /* PAD-1090, Spike 3: the frame is the guest
+                                 * texture the page-flipped GBM bo stands for
+                                 * (padgl.h). Blit it into the screen fbo,
+                                 * leave the game's own framebuffer bindings
+                                 * as they were, then everything SWAP does. A
+                                 * KMS buffer's row 0 is the TOP of the screen,
+                                 * GL's is the bottom, hence the flip -
+                                 * PAD_S3_FLIPY=0 turns it off. */
+        static unsigned rfbo;
+        static int flipy = -1;
+        int keep_draw = 0, keep_read = 0;
+        unsigned t = u[0] < MAXNAME ? map_tex[u[0]] : 0;
+        int w = (int)u[1], h = (int)u[2];
+        /* PAD-1199: the fourth word is the screen (0 = main). A second screen
+         * (Fallout's Pip-Boy) goes to display 2's own texture and window -
+         * the one PADGL_TARGET opens - instead of taking turns with the
+         * main screen in the main window. */
+        int d = len >= 16 ? (int)u[3] : 0;
+        unsigned dst = fbo_screen;
+        int dw = fb_w, dh = fb_h;
+        if (d) {
+            if (tgt2_disp < 0) disp2_setup(d);
+            dst = fbo_screen2; dw = fb2_w; dh = fb2_h;
+        }
+        if (flipy < 0) { const char *e = getenv("PAD_S3_FLIPY"); flipy = !(e && e[0] == '0'); }
+        if (d && !dst) {
+            /* display 2's target failed (logged when it did): drop its
+             * frames rather than mix them into the main window */
+        } else if (t && p_glBlitFramebuffer && w > 0 && h > 0) {
+            if (!rfbo) p_glGenFramebuffers(1, &rfbo);
+            p_glGetIntegerv(0x8CA6, &keep_draw);       /* DRAW_FRAMEBUFFER_BINDING */
+            p_glGetIntegerv(0x8CAA, &keep_read);       /* READ_FRAMEBUFFER_BINDING */
+            p_glBindFramebuffer(0x8CA8, rfbo);         /* READ_FRAMEBUFFER */
+            p_glFramebufferTexture2D(0x8CA8, 0x8CE0, 0x0DE1, t, 0);
+            p_glBindFramebuffer(0x8CA9, dst);          /* DRAW_FRAMEBUFFER */
+            p_glBlitFramebuffer(0, 0, w, h, 0, flipy ? dh : 0, dw, flipy ? 0 : dh,
+                                0x4000, 0x2601);       /* COLOR, LINEAR */
+            p_glBindFramebuffer(0x8CA8, (unsigned)keep_read);
+            p_glBindFramebuffer(0x8CA9, (unsigned)keep_draw);
+        } else {
+            static int said;
+            if (said++ < 4)
+                fprintf(stderr, "[padglhost] PRESENTTEX: guest texture %u has no host "
+                        "texture (or no glBlitFramebuffer) - frame not shown\n", u[0]);
+        }
+        if (d) { present2(); swap2_total++; }
+        else   { present();  swap_total++;  }
+        hdr->frame_ack++;
+        swap_vidmask = 0; swap_draws = 0;
+        jgl_poll(0, 0);
+        break;
+    }
+    /* ---- PAD-1090, Spike 3: the rest of GLES 3 (padgl.h) ---------------- */
+    case PADGL_DRAWARRAYSINST:
+        s3gl_load();
+        if (p_glDrawArraysInstanced) p_glDrawArraysInstanced(u[0], (int)u[1], (int)u[2], (int)u[3]);
+        break;
+    case PADGL_DRAWELEMSINST:
+        s3gl_load();
+        if (p_glDrawElementsInstanced)
+            p_glDrawElementsInstanced(u[0], (int)u[1], u[2], (const void *)(unsigned long)u[3], (int)u[4]);
+        break;
+    case PADGL_ATTRIBDIVISOR: {
+        int idx = attr_resolve(u[0]);
+        s3gl_load();
+        if (idx >= 0 && p_glVertexAttribDivisor) p_glVertexAttribDivisor((unsigned)idx, u[1]);
+        break;
+    }
+    case PADGL_VERTEXATTRIBI: {
+        int idx = attr_resolve(u[0]);
+        s3gl_load();
+        if (idx >= 0 && p_glVertexAttribIPointer) {
+            if (idx < 16) {
+                if (cur_array_buf) vao_backed[cur_vao_g] |=  (unsigned short)(1u << idx);
+                else               vao_backed[cur_vao_g] &= (unsigned short)~(1u << idx);
+            }
+            p_glVertexAttribIPointer((unsigned)idx, (int)u[1], u[2], (int)u[3],
+                                     (const void *)(unsigned long)u[4]);
+        }
+        break;
+    }
+    case PADGL_VERTEXATTRIBC: {
+        int idx = attr_resolve(u[0]);
+        const float *f = (const float *)(pl + 8);
+        s3gl_load();
+        if (idx < 0 || len < 24) break;
+        if (u[1] == 0 && p_glVertexAttrib4f) p_glVertexAttrib4f((unsigned)idx, f[0], f[1], f[2], f[3]);
+        else if (u[1] == 1 && p_glVertexAttribI4ui) p_glVertexAttribI4ui((unsigned)idx, u[2], u[3], u[4], u[5]);
+        break;
+    }
+    case PADGL_UBOBINDING: {
+        unsigned g = u[0], n = len > 8 ? len - 8 : 0, idx;
+        char name[96];
+        s3gl_load();
+        if (g >= MAXNAME || !map_obj[g] || !p_glGetUniformBlockIndex || !p_glUniformBlockBinding) break;
+        if (n > sizeof name - 1) n = sizeof name - 1;
+        memcpy(name, pl + 8, n); name[n] = 0;
+        idx = p_glGetUniformBlockIndex(map_obj[g], name);
+        if (idx != 0xFFFFFFFFu) p_glUniformBlockBinding(map_obj[g], idx, u[1]);
+        else {
+            static int said;
+            if (said++ < 8) fprintf(stderr, "[padglhost] program %u has no uniform block '%s'\n", g, name);
+        }
+        break;
+    }
+    case PADGL_BINDBUFBASE:
+        s3gl_load();
+        if (p_glBindBufferBase) p_glBindBufferBase(u[0], u[1], u[2] < MAXNAME ? map_buf[u[2]] : 0);
+        break;
+    case PADGL_BINDBUFRANGE:
+        s3gl_load();
+        if (p_glBindBufferRange)
+            p_glBindBufferRange(u[0], u[1], u[2] < MAXNAME ? map_buf[u[2]] : 0, (long)u[3], (long)u[4]);
+        break;
+    case PADGL_UNIFORMN: {
+        unsigned g = u[0], slot = u[1], kind = u[2];
+        int cnt = (int)u[3], loc;
+        const void *d = pl + 16;
+        s3gl_load();
+        if (g >= MAXPROG || slot >= MAXUNI || cnt <= 0) break;
+        loc = uni_loc[g][slot];
+        if (loc < 0) break;
+        if (kind <= PADGL_UN_4FV && p_glUniformNf[kind])
+            p_glUniformNf[kind](loc, cnt, (const float *)d);
+        else if (kind >= PADGL_UN_1IV && kind <= PADGL_UN_4IV && p_glUniformNi[kind - PADGL_UN_1IV])
+            p_glUniformNi[kind - PADGL_UN_1IV](loc, cnt, (const int *)d);
+        else if (kind >= PADGL_UN_1UIV && kind <= PADGL_UN_4UIV && p_glUniformNui[kind - PADGL_UN_1UIV])
+            p_glUniformNui[kind - PADGL_UN_1UIV](loc, cnt, (const unsigned *)d);
+        else if (kind >= PADGL_UN_M2FV && kind <= PADGL_UN_M4FV && p_glUniformMN[kind - PADGL_UN_M2FV])
+            p_glUniformMN[kind - PADGL_UN_M2FV](loc, cnt, 0, (const float *)d);
+        break;
+    }
+    case PADGL_COLORMASK:
+        p_glColorMask((unsigned char)u[0], (unsigned char)u[1], (unsigned char)u[2], (unsigned char)u[3]);
+        break;
+    case PADGL_DEPTHMASK:
+        s3gl_load();
+        if (p_glDepthMask) p_glDepthMask((unsigned char)u[0]);
+        break;
+    case PADGL_PIXELSTORE:      p_glPixelStorei(u[0], (int)u[1]); break;
+    case PADGL_STATE1:
+        s3gl_load();
+        switch (u[0]) {
+        case PADGL_S1_CULLFACE:   if (p_glCullFace)  p_glCullFace(u[1]);  break;
+        case PADGL_S1_FRONTFACE:  if (p_glFrontFace) p_glFrontFace(u[1]); break;
+        case PADGL_S1_DEPTHFUNC:  if (p_glDepthFunc) p_glDepthFunc(u[1]); break;
+        case PADGL_S1_CLEARDEPTH: if (p_glClearDepthf) { float f; memcpy(&f, &u[1], 4); p_glClearDepthf(f); } break;
+        }
+        break;
+    case PADGL_BLENDCOLOR: {
+        const float *f = (const float *)pl;
+        s3gl_load();
+        if (p_glBlendColor && len >= 16) p_glBlendColor(f[0], f[1], f[2], f[3]);
+        break;
+    }
+    case PADGL_TEXIMAGE3D:
+        s3gl_load();
+        if (p_glTexImage3D && len >= 32)
+            p_glTexImage3D(u[0], (int)u[1], (int)u[2], (int)u[3], (int)u[4], (int)u[5], 0,
+                           u[6], u[7], len > 32 ? pl + 32 : 0);
+        break;
+    case PADGL_TEXSUBIMAGE3D:
+        s3gl_load();
+        if (p_glTexSubImage3D && len > 40)
+            p_glTexSubImage3D(u[0], (int)u[1], (int)u[2], (int)u[3], (int)u[4], (int)u[5],
+                              (int)u[6], (int)u[7], u[8], u[9], pl + 40);
+        break;
+    case PADGL_GENMIPMAP:
+        s3gl_load();
+        if (p_glGenerateMipmap) p_glGenerateMipmap(u[0]);
+        break;
+    case PADGL_TEXSTORAGE2D:
+        s3gl_load();
+        if (p_glTexStorage2D) p_glTexStorage2D(u[0], (int)u[1], u[2], (int)u[3], (int)u[4]);
+        break;
     case PADGL_SWAP:            /* item 44: the swap belongs to whichever
                                  * display the ops since the last TARGET drew.
                                  * frame_ack counts BOTH - the guest's
@@ -5165,65 +5973,7 @@ static void dispatch(unsigned op, const unsigned char *pl, unsigned len)
         int d = (int)u[0];
         if (d != 0) {
             if (tgt2_disp < 0) {
-                tgt2_disp = d;
-                fb2_w = fb_w; fb2_h = fb_h;
-                {   /* BOTH or NEITHER, matching the guest's
-                     * fbGetDisplayGeometry exactly: with only one set, the
-                     * host would size the texture the game was never told
-                     * about, and the scene and its target would disagree on
-                     * one axis. */
-                    const char *ew = getenv("PAD_GL2_W");
-                    const char *eh = getenv("PAD_GL2_H");
-                    int w2 = ew ? atoi(ew) : 0, h2 = eh ? atoi(eh) : 0;
-                    if (w2 > 0 && h2 > 0) { fb2_w = w2; fb2_h = h2; }
-                }
-                {   /* THE PANEL, host side only - watch.sh reads it out of
-                     * the title's own framebuffer timing record. BOTH or
-                     * NEITHER for the same reason as above: one axis from the
-                     * panel and one from the render size is a shape neither
-                     * machine nor game ever has. Bounded because this is a
-                     * window size and a typo here is a window nobody can
-                     * find; out of range falls back to the render size. */
-                    const char *er = getenv("PAD_GL2_ROT");
-                    int r = er ? atoi(er) : 0;
-                    r = ((r % 360) + 360) % 360;
-                    win2_rot = (r % 90) ? 0 : r;   /* only quarter turns */
-                }
-                {
-                    const char *ew = getenv("PAD_GL2_WIN_W");
-                    const char *eh = getenv("PAD_GL2_WIN_H");
-                    int w2 = ew ? atoi(ew) : 0, h2 = eh ? atoi(eh) : 0;
-                    if (w2 >= 160 && h2 >= 120 && w2 <= 7680 && h2 <= 4320) {
-                        win2_want_w = w2; win2_want_h = h2;
-                    } else if (w2 || h2) {
-                        fprintf(stderr, "[padglhost] display %d: ignoring "
-                                "PAD_GL2_WIN_%s=%dx%d - out of range; its "
-                                "window opens at the render size\n",
-                                d, (w2 && h2) ? "W/H" : "W or H", w2, h2);
-                    }
-                }
-                fprintf(stderr, "[padglhost] display %d targeted by the "
-                        "guest; routing it to its own %dx%d texture and "
-                        "window\n", d, fb2_w, fb2_h);
-                if (win2_want_w > 0)
-                    fprintf(stderr, "[padglhost] display %d: its panel is "
-                            "%dx%d, so the window opens at that and the "
-                            "%dx%d render is scaled into it\n",
-                            d, win2_want_w, win2_want_h, fb2_w, fb2_h);
-                win2_open(d);
-                if (!tgt2_create() && win2_on) {
-                    /* Window up, render target failed: hide the window
-                     * rather than let it swap a texture nothing can ever
-                     * render into (the review's finding - undefined
-                     * contents, oracle silent). The unmap makes the degrade
-                     * VISIBLE on the desktop as well as in the log. */
-                    fprintf(stderr, "[padglhost] display %d: render target "
-                            "failed, hiding its window; its feed decodes "
-                            "but is not presented\n", d);
-                    XUnmapWindow(xdpy, xwin2);
-                    XFlush(xdpy);
-                    win2_on = 0;
-                }
+                disp2_setup(d);
             } else if (d != tgt2_disp) {
                 static int said;
                 if (!said++)
@@ -5403,6 +6153,7 @@ static void dispatch(unsigned op, const unsigned char *pl, unsigned len)
                     vid_dropped++;
                     break;
                 }
+                vid_order_note(u[4]);              /* PAD-617 */
             }
         } else if (len >= 24 + u[5]) {
             yuv = pl + 24;
@@ -6242,8 +6993,24 @@ int main(int argc, char **argv)
                         nf ? conv_us / nf / 1000.0 : 0.0,
                         nf ? up_us / nf / 1000.0 : 0.0,
                         nf ? swap_us / nf / 1000.0 : 0.0, vid_texsub);
+                /* PAD-1201: a second screen's own rate beside the main one's
+                 * (Fallout's Pip-Boy), so a run says which screen the frames
+                 * went to - "fps" above is the main window only. */
+                {
+                    static long last_f2;
+                    if (frames2_done != last_f2)
+                        fprintf(stderr, "[padglhost] display 2: %.1f fps (%ld frames total)\n",
+                                (frames2_done - last_f2) / dt, frames2_done);
+                    last_f2 = frames2_done;
+                }
                 last_up = vid_uploads; last_dist = vid_distinct;
                 conv_us = up_us = swap_us = 0;
+                if (vid_back || vid_skip) {
+                    fprintf(stderr, "[padglhost] video OUT OF ORDER: %ld frame"
+                            "(s) shown after a later one, %ld jump(s) ahead "
+                            "(PAD-617)\n", vid_back, vid_skip);
+                    vid_back = vid_skip = 0;
+                }
                 if (vid_swaphist[1] + vid_swaphist[2] + vid_swaphist[3] +
                     vid_swaphist[4] + vid_swaphist[5]) {
                     long h = vid_swaphist[3] + vid_swaphist[4] + vid_swaphist[5];

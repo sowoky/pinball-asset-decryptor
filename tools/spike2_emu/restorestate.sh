@@ -112,6 +112,33 @@ while read -r kind a b c; do
     fi
 done < "$DDIR/restore.env"
 
+# PAD-559: a file of your edits (the app's override set) the save had bound
+# over the card. It is re-bound from where it was, so it has to still be
+# there - a run started without those edits has no staged set to bind from.
+while read -r kind a b c; do
+    [ "$kind" = bind ] || continue
+    c=$(unesc "$c")
+    if [ ! -e "$c" ]; then
+        echo "[restore] this save was made with your edits applied, and the"
+        echo "[restore] edited file behind $b is gone ($c)."
+        echo "[restore] start the emulator with the same edits and load again"
+        exit 1
+    fi
+done < "$DDIR/restore.env"
+# ...and the layers of a new-files overlay (savestate.sh's `ovl`), the same way.
+while read -r kind a b c; do
+    [ "$kind" = ovl ] || continue
+    IFS=: read -ra layers <<<"$c"
+    for l in "${layers[@]}"; do
+        l=$(unesc "$l")
+        [ -d "$l" ] && continue
+        echo "[restore] this save was made with your edits applied, and the"
+        echo "[restore] new files behind $b are gone ($l)."
+        echo "[restore] start the emulator with the same edits and load again"
+        exit 1
+    done
+done < "$DDIR/restore.env"
+
 # THE GUEST'S OWN LIBRARIES MUST STILL BE THE ONES THE SAVE WAS TAKEN
 # AGAINST, and this check exists because the alternative is a wall of criu
 # and a broken rootfs. criu validates every file-backed mapping by size and
@@ -315,6 +342,9 @@ fi
 
 # --- build the restore externals from restore.env ------------------------
 REST_EXT=(); INHERIT=(); TTYFD=""
+# Every host mount a bind external lives on, one per line, for nsclean.
+NSKEEP=$DDIR/nskeep; : > "$NSKEEP"
+OVL_BASE=""
 while read -r kind a b c; do
     case "$kind" in
     mnt)
@@ -344,6 +374,34 @@ while read -r kind a b c; do
         # criu cannot resolve the external it was just handed (the ladder's
         # rung E kept its card mount for the same reason).
         CARD_KEEP=$(findmnt -no TARGET --target "$src" 2>/dev/null)
+        ;;
+    bind)
+        # a=key b=guest mountpoint c=the host file (PAD-559, your edits).
+        # Checked by the pre-flight; its mount is kept through nsclean.
+        src=$(unesc "$c")
+        REST_EXT+=(--external "mnt[$a]:$src")
+        findmnt -no TARGET --target "$src" 2>/dev/null >> "$NSKEEP"
+        ;;
+    ovl)
+        # a=key b=guest mountpoint c=the overlay's layers as HOST paths
+        # (PAD-559, new files of your edits). The guest's own overlay died
+        # with it and its recorded lowerdirs only meant something inside its
+        # namespace, so the same overlay is built HERE and bound in like any
+        # other external. Its host-side mount is dropped when this script
+        # ends: by then the restored guest holds its own reference.
+        # On the root fs, NOT /run: nsclean unmounts every tmpfs, and the
+        # overlay went with /run ("Failed to open_tree ... No such file").
+        if [ -z "$OVL_BASE" ]; then
+            OVL_BASE=$(mktemp -d /var/tmp/pad_ovl.XXXXXX)
+            trap 'umount -l "$OVL_BASE"/* 2>/dev/null; rm -rf "$OVL_BASE"' EXIT
+        fi
+        mkdir -p "$OVL_BASE/$a"
+        if ! mount -t overlay overlay -o "ro,lowerdir=$(unesc "$c")" "$OVL_BASE/$a"; then
+            echo "[restore] could not rebuild the new-files overlay for $b"
+            exit 1
+        fi
+        REST_EXT+=(--external "mnt[$a]:$OVL_BASE/$a")
+        echo "$OVL_BASE/$a" >> "$NSKEEP"
         ;;
     tty)
         # a=old fd number  b=tty[key]  c=old slave path. The NEW slave carries
@@ -548,6 +606,7 @@ awk '\$5 != "/" && \$5 != "/proc" && \$5 != "/dev" && \$5 != "/dev/pts" { print 
     mp=\$(printf '%b' "\$mp")
     [ -n "\$PAD_NS_KEEP" ] && [ "\$mp" = "\$PAD_NS_KEEP" ] && continue
     [ -n "\$PAD_NS_KEEP_ROOT" ] && [ "\$mp" = "\$PAD_NS_KEEP_ROOT" ] && continue
+    grep -qxF -- "\$mp" "$NSKEEP" 2>/dev/null && continue
     umount -l "\$mp" 2>/dev/null
 done
 umount -l /proc 2>/dev/null
@@ -613,7 +672,7 @@ fi
 
 do_restore() {
     unshare -m bash "$NSCLEAN" ${SETPRIV[@]+"${SETPRIV[@]}"} \
-        "$CRIU" restore -D "$DDIR" -v4 -o restore.log -d \
+        "$CRIU" restore -D "$DDIR" -v4 -o restore.log -d --leave-stopped \
             --pidfile "$DDIR/restored.pid" \
             --root "$R" ${COMPAT[@]+"${COMPAT[@]}"} \
             ${REST_EXT[@]+"${REST_EXT[@]}"} ${INHERIT[@]+"${INHERIT[@]}"}
@@ -638,6 +697,9 @@ do_restore() {
 rm -f "$DDIR/restored.pid"
 echo "[restore] restoring...${COMPAT:+ (compat engine)}"
 for _attempt in 1 2 3 4 5 6; do
+    # when THIS attempt began (monotonic ms), for an older slot's clock
+    # credit below - only the attempt that succeeds counts
+    REST0=$(python3 -c 'import time; print(int(time.monotonic() * 1000))' 2>/dev/null)
     do_restore
     RC=$?
     { [ "$RC" = 0 ] && ! grep -aq 'Restoring FAILED' "$DDIR/restore.log"; } && break
@@ -719,6 +781,94 @@ if [ -n "$NEWPID" ] && kill -0 "$NEWPID" 2>/dev/null; then
 else
     echo "[restore] restore reported ok but the guest is not alive"; exit 1
 fi
+
+# --- THE GAME'S CLOCK PICKS UP WHERE THE SAVE STOPPED IT (PAD-559) --------
+# A Bond LE owner's save, loaded twice - once over a running game, once from
+# a fresh Launch - came back and ended itself at once: GAME EXIT DISPATCH
+# TIMEOUT, the game's 10 s watchdog (exit 5, PAD-200), on v1.187.5. The
+# restored game's first video line said why, the same both times: "worst gap
+# 10392 ms". It was woken 10.4 s after the instant it was saved in.
+#
+# NOT the time the slot sat on disk. criu restores the guest into a time
+# namespace of its own whose monotonic offset hides that (measured: the
+# restored game's /proc/PID/timens_offsets read "monotonic -24 166914377"
+# after a 26.6 s save-to-load), so its clock resumes from the moment criu
+# READ the clock during the dump - which is after the seize by however long
+# the dump took. A big game in a busy mode takes a while to dump, and a dump
+# over 10 s makes a slot whose every load trips the watchdog.
+#
+# So the restored game's clock is credited, through paused_ms - the switch
+# ring rewind above has just put the save's own value there - with exactly
+# the time IT perceives since the seize: its own monotonic now (ours plus its
+# namespace's offset) less the save's `frozen_at`. hwshim takes paused_ms off
+# every clock the game reads and adds it to every deadline it waits on, the
+# way Pause works. The guest is still stopped (criu restored it with
+# --leave-stopped), both ends of the measurement err towards a SHORTER
+# credit, and a ms is taken off besides, so the game's clock steps forward a
+# hair at the thaw, never backwards. Without a time namespace (an older
+# criu) the offset is 0 and the gap is real time, which only means anything
+# on the boot the save was made on.
+#
+# A SLOT FROM BEFORE THIS has no `frozen_at` - the owner's own "diamonds"
+# slot is one. Its restored game is still credited, with what can be
+# measured safely: how long this restore took, from the start of the criu
+# attempt that worked. criu reads the clock it restores from near the END of
+# the dump, so what such a game perceives is the dump's own seconds plus the
+# restore's, and the restore's alone is a credit that can only fall short of
+# it - the dump's seconds still show, as they always did. Then the thaw, for
+# every task of the restored tree (its own pid namespace).
+read -r FZ_MS FZ_BOOT <<<"$(awk '$1 == "frozen_at" {print $2, $3; exit}' "$DDIR/restore.env")"
+python3 - "$R/dump/padsw" "${FZ_MS:--}" "${FZ_BOOT:--}" "$NEWPID" "$RIG" "${REST0:--}" <<'PYEOF'
+import os, struct, sys, time
+path, fz, fz_boot, pid, rest0 = (sys.argv[1], sys.argv[2], sys.argv[3],
+                                 sys.argv[4], sys.argv[6])
+sys.path.insert(0, sys.argv[5])
+import padsw
+off_ms = 0
+own_ns = os.readlink("/proc/self/ns/time") if os.path.exists("/proc/self/ns/time") else ""
+try:
+    guest_ns = os.readlink("/proc/%s/ns/time" % pid)
+except OSError:
+    guest_ns = own_ns
+own_timens = guest_ns != own_ns
+if own_timens:
+    with open("/proc/%s/timens_offsets" % pid) as f:
+        for line in f:
+            p = line.split()
+            if p and p[0] == "monotonic":
+                off_ms = int(p[1]) * 1000 + int(p[2]) // 1000000
+now = int(time.monotonic() * 1000)
+if fz != "-":
+    if not own_timens and fz_boot != open("/proc/sys/kernel/random/boot_id").read().strip():
+        print("[restore] NOTE: this save is from before WSL last restarted and the"
+              " game is in no time namespace, so the time since it cannot be measured")
+        sys.exit(0)
+    ms = now + off_ms - int(fz) - 1
+    said = "the game wakes %.1f s after it was saved"
+elif own_timens and rest0 != "-":
+    ms = now - int(rest0) - 1
+    said = ("the restore took %.1f s (an older save: it does not say when the"
+            " game was stopped, so only this part is skipped)")
+else:
+    sys.exit(0)
+if ms <= 0:
+    sys.exit(0)
+with open(path, "r+b") as f:
+    head = f.read(padsw.SIZE)
+    if len(head) < padsw.SIZE or struct.unpack_from("<I", head, padsw.OFF_MAGIC)[0] != padsw.MAGIC:
+        print("[restore] NOTE: no switch block to credit the game's %.1f s to" % (ms / 1000.0))
+        sys.exit(0)
+    total = struct.unpack_from("<I", head, padsw.OFF_PAUSED_MS)[0] + ms
+    f.seek(padsw.OFF_PAUSED_MS)
+    f.write(struct.pack("<I", total & 0xffffffff))
+print("[restore] " + (said % (ms / 1000.0)) + "; its clock skips that, as for Pause")
+PYEOF
+GUEST_NS=$(readlink "/proc/$NEWPID/ns/pid" 2>/dev/null)
+for d in /proc/[0-9]*; do
+    [ -n "$GUEST_NS" ] && [ "$(readlink "$d/ns/pid" 2>/dev/null)" = "$GUEST_NS" ] \
+        && kill -CONT "${d#/proc/}" 2>/dev/null
+done
+kill -CONT "$NEWPID" 2>/dev/null
 
 # What should the picture look like?  With the journal replayed, complete:
 # the renderer holds the save's whole GL world whatever session it came

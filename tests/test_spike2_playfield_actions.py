@@ -286,9 +286,9 @@ def test_a_machine_with_no_tables_still_opens_the_window():
 # off the canvas, a control simply missing. And v0.207.0 was yanked because a
 # test asserted a row COUNT that is really a font measurement.
 #
-# pf.css makes the action row a flex-wrap row (.pf-acts, wrap-reverse so the
-# overflow climbs upward the way the Tk wrap did) beside a separate state
-# cluster. A flex container lays every child out in flow: two buttons cannot
+# The actions are a grid of buttons in the side panel's BALLS box (pf.js
+# ballsBox, PAD-668: never over the playfield picture), apart from the state
+# cluster on the bottom bar. Grid and flex lay every child out in flow: two buttons cannot
 # overlap and none can land off the left edge, BY CONSTRUCTION, at any window
 # width and in any font, so there is no geometry left in Python to measure.
 # What stays checkable here is the half Python still owns - that the page is
@@ -441,3 +441,23 @@ def test_a_trough_dot_click_also_says_what_it_did(offline, monkeypatch):
     # ...and run_plunge itself, the one both callers share.
     pf.run_plunge("drain")
     assert pf.drv.ran == [("plunge.py", ("drain",))] * 2
+
+
+def test_the_macs_box_reaches_the_save_state_scripts_through_sudo(monkeypatch):
+    """PAD-835: in the Mac's emulator box this window runs as pad, criu needs
+    root, and the box lets pad run the three save-state scripts as root with
+    `sudo -n` (docker/Dockerfile's sudoers rule names /bin/bash). Only where
+    the box has said so with PAD_STATE_SUDO=1, and never as root already."""
+    import playfield
+    if not hasattr(os, "geteuid"):
+        monkeypatch.setattr(os, "geteuid", lambda: 1000, raising=False)
+    else:
+        monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    cmd = ["bash", "/pad/rig/savegame.sh", "slot1"]
+    monkeypatch.delenv("PAD_STATE_SUDO", raising=False)
+    assert playfield._as_root(cmd) == cmd
+    monkeypatch.setenv("PAD_STATE_SUDO", "1")
+    assert playfield._as_root(cmd) == ["sudo", "-n", "/bin/bash",
+                                       "/pad/rig/savegame.sh", "slot1"]
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    assert playfield._as_root(cmd) == cmd

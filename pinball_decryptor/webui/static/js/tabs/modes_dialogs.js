@@ -1,9 +1,9 @@
 // The Modes tab's dialogs: the game's own modes (the stock timers and awards table), the
-// video cutter ("Cut from a video"), a mode in C's name, and a clip's preview.
+// video cutter ("Cut from a video") and a clip's preview.
 // Python owns the state (modes.stock, modes.film); these only render it and call back.
 
-import { html, useEffect, useRef, useState, Modal, Button, Field, Check, Radio, Select, Table, Note,
-         tip, cx, call, mediaUrl } from "../core/ui.js";
+import { html, useEffect, useState, Modal, Button, Field, Check, Radio, Select, Seg, Table, Note,
+         Spinner, tip, cx, call, mediaUrl } from "../core/ui.js";
 
 const STOCK_TIP = "The timers, awards and shots of the modes the game shipped with. Pick a row, type a new value (or pick a shot) and press Set. Changes are saved with this project and put on the card by Write, like the Defaults tab. A timer that is an operator setting is the same number the Defaults tab shows (a machine still on the game's default takes the new one when it boots). A number the game works out in code, or one the game never uses in play, can't be changed here; the row says why. To rename a mode, edit its title on the Text tab.";
 
@@ -82,7 +82,7 @@ export function FilmDialog({ film }) {
       <div class="row">
         <${Field} value=${v.film} onChange=${put("film")} mono cls="grow" placeholder="A video file on this computer"
           onCommit=${(x) => call("modes.film_probe", Object.assign({}, v, { film: x }))} />
-        <${Button} onClick=${() => call("modes.film_choose", v)}>Choose…<//>
+        <${Button} drop onClick=${() => call("modes.film_choose", v)}>Choose…<//>
       </div>
       <span></span><div class="small muted wrap">${film.info}</div>
 
@@ -136,39 +136,57 @@ export function FilmDialog({ film }) {
   <//>`;
 }
 
-// ---------------------------------------------------------------- New code mode
-export function NewCodeDialog({ onClose, blocks }) {
-  const [name, setName] = useState("");
-  const ok = () => { const n = name.trim(); if (!n) return; call(blocks ? "modes.new_blocks_mode" : "modes.new_code_mode", n); onClose(); };
-  return html`<${Modal} title=${blocks ? "New mode from blocks" : "New code mode"} icon=${blocks ? "blocks" : "edit"} onClose=${onClose}
-    footer=${html`<${Button} onClick=${onClose}>Cancel<//><${Button} kind="primary" disabled=${!name.trim()} onClick=${ok}>OK<//>`}>
-    <label class="lbl" for="modes-code-name">What is the mode called?</label>
-    <${Field} id="modes-code-name" value=${name} onChange=${setName} autoFocus onCommit=${(v) => { if (v.trim()) { setName(v); } }} />
-    <div class="small muted">${blocks
-      ? "A mode built from blocks, starting from a small working one on this card's shots to change: what starts it, what scores, what it says and lights. Try it builds it in with the others."
-      : "A mode written in C, for what the form cannot do: a copy of the Mode SDK's template in this project's modes folder. Try it builds it in with the others."}</div>
-    <${EnterKey} onEnter=${ok} />
-  <//>`;
-}
-
-function EnterKey({ onEnter }) {
-  const ref = useRef(onEnter);
-  ref.current = onEnter;
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ref.current(); } };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, []);
-  return null;
-}
-
 // ------------------------------------------------------------------ a clip's preview
-export function ClipDialog({ path, title, onClose }) {
-  return html`<${Modal} title=${title || "Clip"} icon="video" wide onClose=${onClose}
-    footer=${html`<span class="small mono muted grow ellip">${path}</span><${Button} onClick=${onClose}>Close<//>`}>
-    <div class="thumb" style="height:min(56vh, 480px)">
-      <video src=${mediaUrl(path)} controls autoplay style="width:100%;height:100%"></video>
+// PAD-1274: one clip, or one of a list (the game's own mode's "Clips it plays"): Previous / Next and a pick of
+// the list switch clips in place, "Open on the Video tab" shows its slot there; a clip the page's engine can't
+// play is played from the Video tab's preview copy (modes.clip_proxy).
+const H264 = 'video/mp4; codecs="avc1.42E01E"';
+const proxyFormat = () => (document.createElement("video").canPlayType(H264) ? "mp4" : "webm");
+
+export function ClipDialog({ path, title, onClose, list, at = 0, proxy }) {
+  const items = list && list.length ? list : [{ key: path, path, text: title || "Clip" }];
+  const [i, setI] = useState(Math.min(Math.max(at, 0), items.length - 1));
+  const [failed, setFailed] = useState(false);
+  const cur = items[i] || items[0];
+  const many = items.length > 1;
+  const px = proxy && proxy.path === cur.path ? proxy : null;
+  const src = px && px.proxy ? px.proxy : failed ? "" : cur.path;
+  useEffect(() => setFailed(false), [cur.path]);
+  const go = (d) => setI((n) => (n + d + items.length) % items.length);
+  useEffect(() => {
+    if (!many) return undefined;
+    const onKey = (e) => {
+      if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+      if (e.key === "ArrowLeft") { e.preventDefault(); go(-1); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); go(1); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [many, items.length]);
+  const onError = () => {
+    if (px && px.proxy) return;
+    setFailed(true);
+    call("modes.clip_proxy", cur.path, proxyFormat());
+  };
+  const toVideo = () => { call("modes.how_clip_video", cur.rel); onClose(); };
+  let hint = null;
+  if (!src && px && px.err) hint = html`<div class="hint err-ink">This clip can't be played here: ${px.err}</div>`;
+  else if (!src) hint = html`<div class="hint"><${Spinner} /><span>Preparing a preview copy…</span></div>`;
+  return html`<${Modal} title=${many ? cur.text : (title || cur.text || "Clip")} icon="video" wide onClose=${onClose}
+    footer=${html`<span class="small mono muted grow ellip">${cur.rel || cur.path}</span>
+      ${many ? html`<${Button} icon="prev" title="The clip before (Left arrow)" onClick=${() => go(-1)}>Previous<//>
+        <span class="small muted">${i + 1} of ${items.length}</span>
+        <${Button} icon="next" title="The clip after (Right arrow)" onClick=${() => go(1)}>Next<//>` : null}
+      ${cur.rel ? html`<${Button} icon="external" title="Show this clip on the Video tab, picked in its list."
+        onClick=${toVideo}>Open on the Video tab<//>` : null}
+      <${Button} onClick=${onClose}>Close<//>`}>
+    <div class="thumb modes-clip-player" style="height:min(56vh, 480px)">
+      ${src ? html`<video key=${src} src=${mediaUrl(src)} controls autoplay playsinline onError=${onError}
+        aria-label=${cur.text} style="width:100%;height:100%"></video>` : hint}
     </div>
+    ${many ? html`<div class="modes-how-clips modes-clip-pick" role="listbox" aria-label="Clips">${items.map((c, n) =>
+      html`<button type="button" key=${c.key} role="option" aria-selected=${n === i}
+        class=${cx("modes-how-clip mono", n === i && "on")} onClick=${() => setI(n)}>${c.text}</button>`)}</div>` : null}
   <//>`;
 }
 
@@ -187,4 +205,389 @@ export function PlayButton({ path, label = "Play" }) {
     setOn(true);
   };
   return html`<${Button} size="xs" kind="ghost" icon=${on ? "stop" : "play"} title=${on ? "Stop" : label + ": " + path} onClick=${toggle}>${on ? "Stop" : label}<//>`;
+}
+
+// ------------------------------------------------------------------ co-op awards (PAD-1028)
+// What the machine shows after a co-op game: one award a row, ticked or not, its words as the page's title.
+// Python reads the rows off the project's card (modes.coop_aw) and keeps the choices in the project.
+/* PAD-1033: what each handicap level does on the card's game (read off its program) */
+export function HandicapLevelsDialog({ s, onClose }) {
+  const lv = s.hand_levels || {};
+  const grid = lv.grid || [];
+  const levels = lv.levels || [];
+  useEffect(() => { call("modes.handicap_levels_refresh"); }, []);
+  // a cell: the app's default (its words), the game's own value, or any value the game's own setting offers
+  const opts = (r, c) => [{ value: "", label: `app: ${c.default}` }, { value: "own", label: "game's own" },
+    ...Array.from({ length: r.hi - r.lo + 1 }, (_, k) => ({ value: String(r.lo + k), label: String(r.lo + k) }))];
+  const ink = (l) => (l.startsWith("-") ? "warn-ink" : "ok-ink");
+  return html`<${Modal} title="Handicap levels" icon="list" xwide onClose=${onClose}
+    footer=${html`<span class="small muted">${lv.changed ? `${lv.changed} setting(s) changed from the app's.` : "Every level as the app worked it out."}</span>
+      <span class="grow"></span>
+      <${Button} size="sm" kind="ghost" disabled=${!lv.changed} onClick=${() => call("modes.handicap_defaults")}
+        title="Every level as the app worked it out for this game again.">Defaults<//>
+      <${Button} onClick=${onClose}>Close<//>`}>
+    <div class="small dim wrap">Each column is a level, each row one of the game's own difficulty settings. "app:" is the app's choice; pick the game's own value or any value the setting offers in the service menu instead. Level 0 is always the game's own settings.</div>
+    ${lv.why ? html`<${Note} kind="info">${lv.why}<//>` : null}
+    ${grid.length ? html`<div class="modes-hand-grid" style=${`grid-template-columns: minmax(170px, 1fr) repeat(${levels.length}, 136px)`}>
+      <span></span>${levels.map((l) => html`<b key=${l} class=${cx("modes-hand-lv", ink(l))}>${l}</b>`)}
+      ${grid.map((r) => html`
+        <span class="small wrap modes-hand-name" key=${r.name} title=${`${r.name}: ${r.lo} to ${r.hi}`}>${r.label}</span>
+        ${r.cells.map((c) => html`<${Select} key=${r.name + c.level} sm value=${c.value} options=${opts(r, c)}
+          cls=${cx(c.custom && "modes-hand-custom")} title=${`${r.label} at ${c.level}: the app's choice is ${c.default}`}
+          onChange=${(v) => call("modes.handicap_cell", c.level, r.name, v)} />`)}`)}
+    </div>` : lv.why ? null : html`<div class="small muted">Reading the game program on the card…</div>`}
+    ${(lv.said || []).length ? html`<div class="modes-hand-levels">
+      ${lv.said.map((r) => html`<div class="modes-hand-row" key=${r.level}><b class=${ink(r.level)}>${r.level}</b>
+        <span class="small wrap">${r.words}</span></div>`)}
+    </div>` : null}
+  <//>`;
+}
+
+export function CoopAwardsDialog({ s, onClose }) {
+  const aw = s.coop_aw || {};
+  const rows = aw.rows || [];
+  useEffect(() => { call("modes.coop_awards_refresh"); }, []);
+  const every = rows.filter((r) => r.kind !== "champion");
+  const own = rows.filter((r) => r.kind === "champion");
+  const row = (r) => html`<div class="modes-coop-aw-row" key=${r.key}>
+    <${Check} checked=${r.on} title=${`Counts ${r.counts}.`}
+      onChange=${(v) => call("modes.coop_award_set", r.key, v, null)} />
+    <${Field} value=${r.words} sm maxLength=${aw.max_words || 27} width=${260} disabled=${!r.on}
+      title=${`The page's title. The game's own words: ${r.stock_words}`}
+      onCommit=${(v) => { if (v !== r.words) call("modes.coop_award_set", r.key, null, v); }} />
+    <span class="small dim wrap">${r.counts}</span>
+  </div>`;
+  return html`<${Modal} title="Co-op awards" icon="star" wide onClose=${onClose}
+    footer=${html`<span class="small muted">${aw.note}</span><span class="grow"></span>
+      <${Button} size="sm" kind="ghost" disabled=${!rows.length} onClick=${() => call("modes.coop_awards_defaults")}
+        title="Every award ticked and worded as the app first had it for this game.">Defaults<//>
+      <${Button} onClick=${onClose}>Close<//>`}>
+    <div class="small dim wrap">${s.coop_awards_tip}</div>
+    ${aw.why ? html`<${Note} kind="info">${aw.why}<//>` : null}
+    ${rows.length ? html`<div class="modes-coop-aw" style="max-height:min(56vh, 520px)">
+      <div class="modes-list-grp">Every game</div>
+      ${every.map(row)}
+      ${own.length ? html`<div class="modes-list-grp">This game's own counts</div>` : null}
+      ${own.map(row)}
+    </div>` : null}
+  <//>`;
+}
+
+// ------------------------------------------------------------------ co-op characters (PAD-1031)
+// Each teammate picks one at the start of their first ball; its ability holds while they are up. One row a character:
+// its name (the top line shows it) with a smaller sub header under it on its cards (PAD-1056),
+// its ability (only the ones this game's program can have are offered), what that
+// does. Python reads the abilities off the project's card (modes.coop_ch) and keeps the characters in the project.
+// Round 6 (David: the end user customizes the abilities in the app): a character is a list of powers, each one thing
+// the game does differently while its teammate is up; the row shows its badge (its powers' words, or a header of its
+// own) and Powers... opens the list, grouped, with a tick per power this game can have. The set abilities of before
+// are starting points (Start from...). Python composes the list and refuses what the runtime has no room for.
+// PAD-1079 (DoomWalrus666: change the colours of certain text, other customizations): Look... opens the pick screen's
+// look - its title, a colour for each text and the panel, a background picture behind every card - and each row has
+// a colour of its own for its card's frame. Python keeps them with the characters and redraws the preview.
+
+// a colour well that sends the colour once it is picked (the native picker's change, not every drag)
+function Well({ value, title, onPick }) {
+  const v = /^#[0-9a-fA-F]{6}$/.test(value || "") ? value : "#000000";
+  return html`<label class="modes-swatch" ...${tip(title)}>
+    <input type="color" value=${v} aria-label=${title} onChange=${(e) => onPick(e.target.value)} />
+    <span class="chip-c" style=${`background:${v}`}></span>
+  </label>`;
+}
+
+function CoopLook({ look }) {
+  return html`<div class="modes-coop-look">
+    <div class="row" style="gap:8px">
+      <span class="small dim">Title</span>
+      <${Field} value=${look.title} sm maxLength=${40} width=${300}
+        title="The words across the top of every pick card (capitals)."
+        onCommit=${(v) => { if (v !== look.title) call("modes.coop_chars_look", "title", v); }} />
+      <span class="grow"></span>
+      <${Button} size="sm" kind="ghost" onClick=${() => call("modes.coop_chars_look_default")}
+        title="The game's set's own title and colors again, and no background picture.">Default look<//>
+    </div>
+    <div class="modes-coop-look-grid">
+      ${look.colours.map((c) => html`<span class="modes-coop-look-c" key=${c.key}>
+        <${Well} value=${c.value} title=${`${c.label}${c.hint ? `: ${c.hint}` : ""}`}
+          onPick=${(v) => call("modes.coop_chars_look", c.key, v)} />
+        <span class="small">${c.label}</span>
+        ${c.own ? html`<${Button} size="xs" kind="ghost" icon="x" title="Its default color again."
+          onClick=${() => call("modes.coop_chars_look", c.key, "")} />` : null}
+      </span>`)}
+    </div>
+    <div class="row" style="gap:8px">
+      <${Button} size="sm" kind="ghost" icon="image" onClick=${() => call("modes.coop_chars_backdrop", false)}
+        title=${look.backdrop ? "The picture behind every pick card and award card: choose another." : "A picture of your own behind every pick card and award card, in place of the panel (the panel's color then goes unused)."}>
+        ${look.backdrop ? "Background ✓" : "Background…"}<//>
+      ${look.backdrop ? html`<${Button} size="xs" kind="ghost" icon="x" title="Back to the panel."
+        onClick=${() => call("modes.coop_chars_backdrop", true)} />` : null}
+      <span class="small dim" style="margin-left:8px">Darken it</span>
+      <${Select} sm value=${String(look.dim)} width=${110} disabled=${!look.backdrop}
+        options=${look.dims.map((d) => ({ value: String(d), label: d ? `${d}%` : "Not at all" }))}
+        title="How much darker the background picture is drawn, so the words over it stay easy to read."
+        onChange=${(v) => call("modes.coop_chars_look", "dim", v)} />
+    </div>
+  </div>`;
+}
+
+export function CoopCharsDialog({ s, onClose }) {
+  const ch = s.coop_ch || {};
+  const rows = ch.rows || [];
+  const abil = ch.abilities || [];
+  const powers = ch.powers || [];
+  const groups = ch.groups || [];
+  const [open, setOpen] = useState(-1);
+  const [looking, setLooking] = useState(false);
+  const [picking, setPicking] = useState(-1);          // PAD-1123: the row whose When picked panel is open
+  useEffect(() => { call("modes.coop_chars_refresh"); }, []);
+  const opts = [{ value: "", label: "Start from..." }, { value: "-", label: "No powers" }].concat(abil.map((a) => (
+    { value: a.key, label: a.ok ? a.words : `${a.words} (not on this game)`, disabled: !a.ok })));
+  const powerTitle = (p, has) => p.ok ? `${p.does}${has ? "" : " Tick to give this character the power."}`
+    : `${p.why} Not on this game: a character with it has it left off its card here.`;
+  const powersOf = (r, i) => html`<div class="modes-coop-ch-powers">
+    ${groups.map((g) => {
+      const list = powers.filter((p) => p.group === g);
+      return list.length ? html`<div class="modes-coop-ch-grp" key=${g}>
+        <div class="modes-list-grp">${g}</div>
+        ${list.map((p) => html`<div class="modes-coop-ch-pw" key=${p.key}><${Check} checked=${r.powers.includes(p.key)} disabled=${!p.ok && !r.powers.includes(p.key)}
+          label=${p.ok ? p.words : `${p.words} (not on this game)`} title=${powerTitle(p, r.powers.includes(p.key))}
+          onChange=${(v) => call("modes.coop_char_power", i, p.key, v)} />
+          ${(p.timed || []).length && r.powers.includes(p.key) ? html`<div class="modes-coop-ch-time">
+            <${Select} sm value=${String((r.times || {})[p.key])} width=${150}
+              options=${p.timed.map((t) => ({ value: String(t.value), label: t.label }))}
+              title="How much time this power gives this character. The words on its card follow."
+              onChange=${(v) => call("modes.coop_char_time", i, p.key, Number(v))} />
+          </div>` : null}</div>`)}
+      </div>` : null;
+    })}
+    <div class="row" style="gap:8px;margin-top:6px">
+      <${Field} value=${r.header || ""} sm maxLength=${ch.max_header || 96} width=${320} placeholder=${r.words || "Header: the badge's words (optional)"}
+        title="The badge on its cards, in your own words. Empty: its powers' words (a set ability's name when the list is exactly one); words too long for the card are cut short there."
+        onCommit=${(v) => { if (v !== (r.header || "")) call("modes.coop_char_set", i, null, null, null, v); }} />
+      <${Select} sm value="" options=${opts} width=${260}
+        title="Put one of the set abilities' powers on this character in place of its list, as a starting point (No powers: an empty list)."
+        onChange=${(v) => { if (v) call("modes.coop_char_set", i, null, v === "-" ? "" : v); }} />
+    </div>
+    <div class="row" style="gap:8px;margin-top:6px">
+      <${Field} value=${r.text || ""} sm maxLength=${ch.max_text || 240} width=${588} placeholder=${r.powers_line || "Card text: what it does, in your own words (optional)"}
+        title="The words under the badge on its pick card, in your own words. Empty: its powers' own lines. The card wraps them to three lines at most; past that it stops with ..."
+        onCommit=${(v) => { if (v !== (r.text || "")) call("modes.coop_char_set", i, null, null, null, null, v); }} />
+    </div>
+  </div>`;
+  // PAD-1123: what plays full screen once a teammate picks it, and the sound with it
+  const pickedOf = (r, i) => html`<div class="modes-coop-ch-picked">
+    <div class="row" style="gap:8px">
+      <${Button} size="xs" kind="ghost" icon="film" onClick=${() => call("modes.coop_char_picked", i, false)}
+        title=${r.picked_clip ? "What it shows full screen once picked: choose another." : "A short video, or a picture (a movie poster), shown full screen once a teammate picks it."}>
+        ${r.picked_clip ? `Clip: ${r.picked_clip}` : "Clip…"}<//>
+      ${r.picked_clip ? html`<${Button} size="xs" kind="ghost" icon="x" title="No clip once picked." onClick=${() => call("modes.coop_char_picked", i, true)} />` : null}
+      <${Button} size="xs" kind="ghost" icon="wave" onClick=${() => call("modes.coop_char_picked_sound", i, false)}
+        title=${r.picked_sound ? "The sound it plays once picked: choose another." : "A sound of your own (a roar), played once a teammate picks it."}>
+        ${r.picked_sound ? `Sound: ${r.picked_sound}` : "Sound…"}<//>
+      ${r.picked_sound ? html`<${Button} size="xs" kind="ghost" icon="x" title="No sound of its own once picked." onClick=${() => call("modes.coop_char_picked_sound", i, true)} />` : null}
+    </div>
+    <span class="small dim wrap">${r.picked_clip || r.picked_sound
+      ? `Once a teammate picks ${r.name}, ${r.picked_clip ? (r.picked_still ? `its picture shows full screen for ${ch.still_s || 3} seconds (or as long as its sound, up to ${ch.picked_max || 10})` : `its clip plays full screen (up to ${ch.picked_max || 10} seconds)`) : "its card stays on the glass"}${r.picked_sound ? ", with its sound" : r.picked_clip && !r.picked_still ? ", with the clip's own sound" : ""}. Both flipper buttons cut it short.`
+      : `Give ${r.name} a short video or a picture to show full screen once picked, and a sound to play then. A video plays its own sound when it has no sound of its own here.`}</span>
+  </div>`;
+  const row = (r, i) => html`<div class="modes-coop-ch-row" key=${i + ":" + r.name}>
+    <span class="small dim">${i + 1}</span>
+    <div class="modes-coop-ch-names">
+    <${Field} value=${r.name} sm maxLength=${ch.max_name || 27} width=${210}
+      title="Its name, as the machine's top line shows it at the pick."
+      onCommit=${(v) => { if (v !== r.name) call("modes.coop_char_set", i, v, null); }} />
+    <${Field} value=${r.sub || ""} sm maxLength=${ch.max_sub || 48} width=${210} placeholder="Sub header (optional)"
+      title="A smaller line under its name on its pick and award cards, as typed (Godzilla vs Biollante (1989)). Empty: none."
+      onCommit=${(v) => { if (v !== (r.sub || "")) call("modes.coop_char_set", i, null, null, v); }} />
+    </div>
+    <${Button} size="sm" kind=${open === i ? "" : "ghost"} icon="list" onClick=${() => setOpen(open === i ? -1 : i)}
+      title=${r.lost ? "None of this character's powers is on this game yet." : "Its powers: what it does while its teammate is up. Click to tick them on and off."}>
+      ${r.powers.length ? `Powers (${r.powers.length})` : "Powers…"}<//>
+    <span class=${cx("small wrap modes-coop-ch-does", r.lost ? "warn-ink" : "dim")}>${r.lost ? "Its powers are not on this game yet: none on the card."
+      : r.powers.length || r.text ? html`<b>${r.words}</b> ${r.line}${r.missing.length ? html` <span class="warn-ink">(${r.missing.length} not on this game, left off the card)</span>` : null}`
+      : "Plays as the game always does."}${r.badge_cut ? html` <span class="warn-ink">Too long for its card, which shows
+      "${r.badge_cut}". <a href="#" onClick=${(e) => { e.preventDefault(); setOpen(i); }}
+      title="Opens its powers, where the box under them takes the badge's own words.">Write shorter badge words</a>.</span>` : null}${r.text_cut ? html` <span class="warn-ink">Its card text is too long for its card, which stops at
+      "${r.text_cut}". <a href="#" onClick=${(e) => { e.preventDefault(); setOpen(i); }}
+      title="Opens its powers, where the bottom box takes its card text.">Write shorter card text</a>.</span>` : null}</span>
+    <span class="modes-coop-ch-acts">
+      <${Well} value=${r.colour || (ch.look ? ch.look.colours[0].value : "")}
+        title=${r.colour ? "Its own frame color on its cards: pick another." : "The frame color on its cards (the look's): pick one of its own."}
+        onPick=${(v) => call("modes.coop_char_colour", i, v)} />
+      ${r.colour ? html`<${Button} size="xs" kind="ghost" icon="x" title="The look's frame color again." onClick=${() => call("modes.coop_char_colour", i, "")} />` : null}
+      <${Button} size="xs" kind="ghost" icon="image" onClick=${() => call("modes.coop_char_picture", i, false)}
+        title=${r.picture ? "Its picture on the pick screen: choose another." : "Choose a picture of your own for its pick screen (without one it gets a panel with its name)."}>${r.picture ? "Picture ✓" : "Picture…"}<//>
+      ${r.picture ? html`<${Button} size="xs" kind="ghost" icon="x" title="Back to the panel with its name." onClick=${() => call("modes.coop_char_picture", i, true)} />` : null}
+      <${Button} size="xs" kind="ghost" icon="film" onClick=${() => call("modes.coop_char_video", i, false)}
+        title=${r.video ? "Its video, playing in its picture's frame on the pick screen: choose another." : "A video of your own, played over and over in its picture's frame while the pick is on it."}>${r.video ? "Video ✓" : "Video…"}<//>
+      ${r.video ? html`<${Button} size="xs" kind="ghost" icon="x" title="No video: its picture again." onClick=${() => call("modes.coop_char_video", i, true)} />` : null}
+      <${Button} size="xs" kind=${picking === i ? "" : "ghost"} icon="play" onClick=${() => setPicking(picking === i ? -1 : i)}
+        title="When picked: a clip and a sound that play once a teammate picks it.">${r.picked_clip || r.picked_sound ? "When picked ✓" : "When picked…"}<//>
+      <${Button} size="xs" kind="ghost" icon="eye" title="Show its pick screen in the preview below." onClick=${() => call("modes.coop_chars_show", i)} />
+      <${Button} size="xs" kind="ghost" icon="trash" title="Take this character out." onClick=${() => call("modes.coop_char_remove", i)} />
+    </span>
+  </div>`;
+  return html`<${Modal} title="Co-op characters" icon="list" wide onClose=${onClose}
+    footer=${html`<span class="small muted">${ch.note}</span><span class="grow"></span>
+      ${ch.preset ? html`<${Button} size="sm" kind="ghost" onClick=${() => call("modes.coop_chars_preset")}
+        title=${`The app's set for ${ch.preset}, in place of these: a character for each ability, named after the game's eras. Rename them as you like.`}>Load ${ch.preset}'s set<//>` : null}
+      ${rows.length ? html`<${Button} size="sm" kind="ghost" icon="image" onClick=${() => call("modes.coop_chars_pictures")}
+        title="A folder of pictures, one per character, named after it (godzilla_1954.png): each becomes that character's picture.">Pictures from folder…<//>` : null}
+      <${Button} size="sm" icon="plus" disabled=${rows.length >= (ch.max || 16)} onClick=${() => call("modes.coop_char_add")}
+        title=${`One more character (up to ${ch.max || 16}).`}>Add<//>
+      <${Button} onClick=${onClose}>Close<//>`}>
+    <div class="small dim wrap">${s.coop_chars_tip}</div>
+    ${ch.why ? html`<${Note} kind="info">${ch.why}<//>` : null}
+    <div class="row" style="margin-top:8px">
+      <${Check} checked=${ch.pick} label="Each teammate picks a character at their first ball"
+        disabled=${!rows.length} title="Off: the card plays co-op as before, with no characters."
+        onChange=${(v) => call("modes.coop_chars_pick", v)} />
+      <span class="small dim" style="margin-left:16px">Time to pick</span>
+      <${Select} sm value=${String(ch.time ?? 30)} width=${130} disabled=${!rows.length || !ch.pick}
+        options=${(ch.times || [30]).map((t) => ({ value: String(t), label: t ? `${t} seconds` : "No time limit" }))}
+        title="How long each teammate has to pick; the machine counts the seconds down, and when they run out the one shown is taken. No time limit: the pick waits for the Action button."
+        onChange=${(v) => call("modes.coop_chars_time", Number(v))} />
+      <span class="grow"></span>
+      <${Button} size="sm" kind=${looking ? "" : "ghost"} icon="image" disabled=${!rows.length || !ch.look}
+        title="The pick screen's look: its title, the color of each of its words, a background picture."
+        onClick=${() => setLooking(!looking)}>Look…<//>
+    </div>
+    <div class="row" style="margin-top:8px; gap:8px">
+      <${Button} size="sm" kind="ghost" icon="film" onClick=${() => call("modes.coop_intro", false)}
+        title=${ch.intro ? "The video that opens each co-op and team game: choose another." : "A video of your own, with its own sound, that opens each co-op and team game."}>
+        ${ch.intro ? "Intro video ✓" : "Intro video…"}<//>
+      ${ch.intro ? html`<${Button} size="xs" kind="ghost" icon="x" title="No intro: co-op and team games start as the game's own do."
+        onClick=${() => call("modes.coop_intro", true)} />` : null}
+      <span class="small dim wrap">${ch.intro ? `${ch.intro} opens each co-op and team game, with its own sound. While it plays the flippers choose the language (when the game's Player Language Select is on), and both flipper buttons together skip it. Then the character pick opens, and the ball comes to the shooter lane once a character is taken.` : "Open each co-op and team game with a video of your own, with its own sound. Both flipper buttons skip it."}</span>
+    </div>
+    <div class="row" style="margin-top:8px; gap:8px">
+      <${Button} size="sm" kind="ghost" icon="film" disabled=${!rows.length || !ch.pick} onClick=${() => call("modes.coop_ceremony", false)}
+        title=${ch.ceremony ? "The video behind the award cards at a co-op game's end: choose another." : "A video of your own that plays behind the award cards at a co-op game's end, in place of the game's End of Ball Bonus loop."}>
+        ${ch.ceremony ? "Awards video ✓" : "Awards video…"}<//>
+      ${ch.ceremony ? html`<${Button} size="xs" kind="ghost" icon="x" title="No video of your own: the game's End of Ball Bonus loop plays behind the award cards."
+        onClick=${() => call("modes.coop_ceremony", true)} />` : null}
+      <span class="small dim wrap">${ch.ceremony ? `${ch.ceremony} plays behind the award cards at a co-op game's end, looped and silent, with the final score along the bottom and the score panels, power-up meter and credits line off the screen.` : "At a co-op game's end the award cards show over the game's End of Ball Bonus loop, with the final score along the bottom and the score panels, power-up meter and credits line off the screen. Choose a video of your own to play there instead."}</span>
+    </div>
+    <div class="row" style="margin-top:8px; gap:8px">
+      <${Button} size="sm" kind="ghost" icon="wave" disabled=${!rows.length || !ch.pick} onClick=${() => call("modes.coop_ceremony_sound", false)}
+        title=${ch.ceremony_sound ? "The music that plays while the award cards show at a co-op or team game's end: choose another." : "A music track of your own (a sound file, or a video's sound) that plays while the award cards show at a co-op or team game's end."}>
+        ${ch.ceremony_sound ? "Awards music ✓" : "Awards music…"}<//>
+      ${ch.ceremony_sound ? html`<${Button} size="xs" kind="ghost" icon="x" title="No music of your own: the award cards show with the game's own sounds."
+        onClick=${() => call("modes.coop_ceremony_sound", true)} />` : null}
+      <span class="small dim wrap">${ch.ceremony_sound ? `${ch.ceremony_sound} plays as the award cards come up at a co-op or team game's end, the game's own sounds faded under it, and fades out when the last card is done (up to ${ch.ceremony_max || 60} seconds of it).` : "Play a music track of your own while the award cards show at a co-op or team game's end."}</span>
+    </div>
+    <div class="row" style="margin-top:8px; gap:8px">
+      <${Check} checked=${!!ch.bonus} label="Show each teammate's character on their End of Ball Bonus" disabled=${!rows.length}
+        title="Its picture (or video) in a big lit frame in the bottom-right corner, its name across the bottom of the picture, while that teammate's bonus counts."
+        onChange=${(v) => call("modes.coop_chars_bonus", v)} />
+      <span class="small dim wrap">${ch.bonus ? "Its video plays in the frame bottom-right, or its picture shows when it has no video, with its name across the bottom of it. A character with neither keeps the game's own bonus." : ""}</span>
+    </div>
+    ${looking && ch.look ? html`<${CoopLook} look=${ch.look} />` : null}
+    ${ch.preview ? html`<div class="modes-coop-ch-pv">
+      <img src=${mediaUrl(ch.preview.path) + "&v=" + ch.preview.seq} alt="The machine's pick screen" />
+      <span class="small dim wrap">What the machine shows while the pick is on ${ch.preview.at < rows.length ? rows[ch.preview.at].name : "RANDOM"}. Give each character a picture of your own with Picture... or a video with Video..., the screen colors and a background with Look..., and see it here; Write puts the cards on the machine.</span>
+    </div>` : null}
+    ${ch.refused ? html`<${Note} kind="warn">${ch.refused}<//>` : null}
+    ${ch.videos && rows.some((r) => r.video) ? html`<${Note} kind="info">${ch.videos}<//>` : null}
+    ${rows.length ? html`<div class="modes-coop-ch" style="max-height:min(50vh, 520px)">${rows.map((r, i) => html`${row(r, i)}${open === i ? powersOf(r, i) : null}${picking === i ? pickedOf(r, i) : null}`)}</div>`
+      : html`<div class="small muted" style="margin-top:8px">No characters yet: press Add${ch.preset ? `, or load ${ch.preset}'s set` : ""}.</div>`}
+  <//>`;
+}
+
+// ------------------------------------------------------------------ records of your own on the high scores (PAD-1280)
+// Peanutsfr: custom high-score entries, including for the machine's own modes - a name, a description, the mode it
+// belongs to, points or a count of the shots and goals picked. Python keeps them in the project
+// (plugins/stern/mode_records.py) and reads what this card's game offers (modes.recs: its modes, the audits and
+// champion counts it keeps); this lists them, edits one, and calls back.
+const REC_BLANK = { key: "", name: "", description: "", mode: "", measure: "points", counts: [], per: "run" };
+
+function RecordEditor({ rs, draft, setDraft, onCancel, onSave }) {
+  const [find, setFind] = useState("");
+  const set = (k, v) => setDraft({ ...draft, [k]: v });
+  const counts = rs.counts || [];
+  const picked = new Set(draft.counts || []);
+  const toggle = (k, on) => set("counts", on ? [...(draft.counts || []), k] : (draft.counts || []).filter((c) => c !== k));
+  const q = find.trim().toLowerCase();
+  const shown = counts.filter((c) => picked.has(c.key) || !q || c.label.toLowerCase().includes(q));
+  const groups = [];
+  for (const c of shown) {
+    const g = groups.find((x) => x.name === c.group);
+    if (g) g.items.push(c); else groups.push({ name: c.group, items: [c] });
+  }
+  const inMode = !!draft.mode;
+  return html`<div class="modes-rec-edit">
+    <div class="modes-rec-grid">
+      <span class="lbl">Name</span>
+      <${Field} value=${draft.name} sm maxLength=${rs.max_words || 27} autoFocus
+        placeholder="KING OF THE MONSTERS" title="The title its champion shows under, on the machine (capitals)."
+        onChange=${(v) => set("name", v.toUpperCase())} />
+      <span class="lbl">Description</span>
+      <${Field} value=${draft.description} sm maxLength=${rs.max_desc || 160}
+        placeholder="Most points in one King of the Monsters" title="A note for you about what it is. The machine does not show it."
+        onChange=${(v) => set("description", v)} />
+      <span class="lbl">Counts during</span>
+      <${Select} sm value=${draft.mode} options=${rs.modes || []}
+        title="The game's own mode, one of your modes, or the whole game: it counts only while that mode runs for the player."
+        onChange=${(v) => setDraft({ ...draft, mode: v, per: v ? draft.per : "game" })} />
+      <span class="lbl">Record of</span>
+      <${Seg} value=${draft.measure} onChange=${(v) => set("measure", v)}
+        options=${[{ value: "points", label: "Points", title: "The points the player scores while it counts." },
+                   { value: "count", label: "Shots and goals", title: "How many of the shots and goals you tick the player makes while it counts." }]} />
+      ${inMode ? html`<span class="lbl">Each player's</span>
+        <${Seg} value=${draft.per} onChange=${(v) => set("per", v)}
+          options=${[{ value: "run", label: "Best single play", title: "The most in one play of the mode, start to end." },
+                     { value: "game", label: "Whole game total", title: "All of it in one game, every play of the mode added up." }]} />` : null}
+    </div>
+    ${draft.measure === "count" ? html`<div class="modes-rec-counts">
+      <div class="row" style="gap:8px">
+        <span class="lbl">Count these</span><span class="small dim">${picked.size} ticked</span><span class="grow"></span>
+        <${Field} value=${find} sm width=${220} placeholder="Find a shot or goal" onChange=${setFind} />
+      </div>
+      <div class="modes-rec-list" style="max-height:min(38vh, 340px)">
+        ${groups.map((g) => html`<div key=${g.name}>
+          <div class="modes-list-grp">${g.name}</div>
+          <div class="modes-rec-checks">${g.items.map((c) => html`<${Check} key=${c.key} checked=${picked.has(c.key)}
+            label=${c.label} onChange=${(v) => toggle(c.key, v)} />`)}</div>
+        </div>`)}
+        ${!groups.length ? html`<div class="small muted">${counts.length ? "Nothing matches." : "The app could not read what this game counts."}</div>` : null}
+      </div>
+    </div>` : null}
+    ${rs.error ? html`<${Note} kind="err">${rs.error}<//>` : null}
+    <div class="row" style="gap:8px; justify-content:flex-end">
+      <${Button} onClick=${onCancel}>Cancel<//>
+      <${Button} kind="primary" icon="save" disabled=${!draft.name.trim()} onClick=${onSave}>Save record<//>
+    </div>
+  </div>`;
+}
+
+export function RecordsDialog({ s, onClose }) {
+  const rs = s.recs || {};
+  const rows = rs.rows || [];
+  const [draft, setDraft] = useState(null);
+  useEffect(() => { call("modes.records_refresh"); }, []);
+  const save = () => call("modes.record_save", draft.key, draft).then((k) => { if (k) setDraft(null); });
+  const full = rows.length >= (rs.max || 12);
+  return html`<${Modal} title=${draft ? (draft.key ? `Edit ${draft.name || "record"}` : "New record") : "High scores of your own"}
+    icon="star" wide onClose=${onClose}
+    footer=${draft ? null : html`<span class="small muted">${rows.length} of ${rs.max || 12}</span><span class="grow"></span>
+      <${Button} icon="plus" disabled=${full || !!rs.why} title=${full ? "A card takes at most " + (rs.max || 12) + " records." : "Make a new record."}
+        onClick=${() => setDraft({ ...REC_BLANK })}>New record<//>
+      <${Button} onClick=${onClose}>Close<//>`}>
+    ${draft ? html`<${RecordEditor} rs=${rs} draft=${draft} setDraft=${setDraft}
+        onCancel=${() => setDraft(null)} onSave=${save} />`
+      : html`<div class="small dim wrap">${rs.how}</div>
+      ${rs.why ? html`<${Note} kind="info">${rs.why}<//>` : null}
+      ${rows.length ? html`<div class="modes-rec-rows">${rows.map((r) => html`<div class="modes-rec-row" key=${r.key}>
+          <div class="modes-rec-main">
+            <b class="mono">${r.name}</b>
+            <span class="small">${r.what}${r.counts_words && r.counts_words.length ? ": " + r.counts_words.join(", ") : ""}</span>
+            ${r.description ? html`<span class="small dim">${r.description}</span>` : null}
+            ${r.note ? html`<span class="small err-ink">${r.note}</span>` : null}
+          </div>
+          <${Button} size="sm" icon="edit" onClick=${() => setDraft({ ...REC_BLANK, ...r })}>Edit<//>
+          <${Button} size="sm" kind="ghost" icon="trash" title="Take this record out of the project."
+            onClick=${() => call("modes.record_delete", r.key)}>Delete<//>
+        </div>`)}</div>`
+        : html`<div class="small muted modes-rec-none">No records of your own yet. New record makes one.</div>`}`}
+  <//>`;
 }

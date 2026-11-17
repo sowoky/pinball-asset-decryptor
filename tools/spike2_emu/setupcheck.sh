@@ -75,6 +75,10 @@
 #                              meaningful on WSL, where it is the difference
 #                              between fixing this once and fixing it weekly.
 #   iswsl                      1 = WSL, 0 = a Linux machine or a container
+#   hassystemd                 0 = this WSL distro has no systemd installed
+#                              at all (the app's own PAD-Runtime, by design),
+#                              so turning it on in wsl.conf cannot help and
+#                              nothing may offer to (PAD-1132)
 
 . "$(dirname "$0")/padpath.sh"
 . "$(dirname "$0")/ensurebuild.sh"
@@ -308,7 +312,8 @@ fi
 entry=$(_pad_binfmt_arm)
 if [ -z "$entry" ]; then
     echo "binfmt=0"
-elif [ "$(head -1 "$entry" 2>/dev/null)" = disabled ]; then
+elif [ "$entry" != exec ] &&
+     [ "$(head -1 "$entry" 2>/dev/null)" = disabled ]; then
     echo "binfmt=disabled"
     echo "entry=$entry"
 else
@@ -328,6 +333,11 @@ if pad_is_wsl; then
         echo "wslconf=1"
     else
         echo "wslconf=0"
+    fi
+    if [ -x /lib/systemd/systemd ] || [ -x /usr/lib/systemd/systemd ]; then
+        echo "hassystemd=1"
+    else
+        echo "hassystemd=0"
     fi
 else
     echo "iswsl=0"

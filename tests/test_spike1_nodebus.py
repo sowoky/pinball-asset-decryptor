@@ -40,6 +40,97 @@ def poll_body(cmd):
     return bytes([cmd, 0x00])       # body = [cmd, checksum] (checksum unused here)
 
 
+def test_encoder_motor_homes_moves_signed_counts_and_preserves_other_inputs():
+    import struct
+    now = [0.0]
+    motors = nodebus.EncoderMotors(clock=lambda: now[0])
+    # Ghostbusters Slimer: node 8, motor 0, home input 5, encoders 3/4.
+    motors.note(8, bytes([0x51, 0, 0x45, 0, 0, 0x43, 0x44, 0]))
+    assert motors.status(8, 0) == struct.pack("<hH", 0, 0)
+    motors.note(8, bytes([0x53, 0, 40, 32, 232, 3, 0]))
+    assert motors.status(8, 0) == struct.pack("<hH", 0, 1)
+    now[0] = .7
+    assert motors.status(8, 0) == struct.pack("<hH", 0, 8)
+    switches = bytearray(nodebus.SW_IDLE)
+    switches[2] = 0xfe
+    assert motors.switches(8, switches) == b"\xdf\xff\xfe" + b"\xff" * 5
+    motors.note(8, bytes([0x55, 0]) + struct.pack("<h", -120) + b"\0")
+    now[0] = 1.0
+    pos, flags = struct.unpack("<hH", motors.status(8, 0))
+    assert -61 <= pos <= -59 and flags == 1
+    assert motors.switches(8, switches)[0] == 0xff
+    assert motors.switches(8, switches)[2] == 0xfe
+    now[0] = 1.4
+    assert motors.status(8, 0) == struct.pack("<hH", -120, 8)
+    reply = nodebus.build_response(0x88, b"\x52\x00\x00", 6, motor_status=motors.status(8, 0))
+    assert gates_pass(reply, 6) == (True, "ok")
+    assert reply[:4] == struct.pack("<hH", -120, 8)
+    assert motors.switches(9, switches) == bytes(switches)
+
+
+def test_repeated_encoder_commands_do_not_restart_a_move():
+    import struct
+    now = [0.0]
+    motors = nodebus.EncoderMotors(clock=lambda: now[0])
+    motors.note(8, b"\x51\x00\x45\x00\x00\x43\x44\x00")
+    move = b"\x55\x00" + struct.pack("<h", 60) + b"\0"
+    motors.note(8, move)
+    now[0] = .4
+    motors.note(8, move)
+    now[0] = .7
+    assert motors.status(8, 0) == struct.pack("<hH", 60, 0)
+    motors.note(8, move)
+    assert motors.status(8, 0) == struct.pack("<hH", 60, 0)
+    # A home command at the same target as a position move still homes it.
+    motors.note(8, b"\x55\x00\x00\x00\x00")
+    motors.note(8, b"\x53\x00\x00")
+    now[0] = 1.4
+    assert motors.status(8, 0) == struct.pack("<hH", 0, 8)
+
+
+def test_encoder_protocol_leaves_unconfigured_and_end_stop_motors_alone():
+    motors = nodebus.EncoderMotors()
+    motors.note(8, b"\x51\x00\x45\x46\x00\x00\x00\x00")  # no encoders
+    for body in (b"", b"\x51", b"\x51\x00\0", b"\x55\x00\x05\0"):
+        motors.note(8, body)
+    assert motors.status(8, 0) is None
+    assert motors.switches(8, nodebus.SW_IDLE) == nodebus.SW_IDLE
+    assert nodebus.build_response(0x88, b"\x52\x00\x00", 6) == bytes(6)
+
+
+def test_motor_position_publication_is_optional_and_data_driven():
+    import struct
+    class Hardware:
+        def __init__(self):
+            self.calls = []
+        def lamp_level(self, *args):
+            self.calls.append(args)
+    hw = Hardware()
+    outputs = nodebus.encoder_lamp_outputs("8,0:15,63;9,1:14,62")
+    publish = nodebus.motor_lamp_publisher(hw, outputs)
+    publish(8, 0, 71)
+    publish(9, 1, 300)
+    publish(9, 1, -20)
+    publish(10, 0, 99)
+    assert hw.calls == [(15, 63, 71), (14, 62, 255), (14, 62, 0)]
+    now = [0.0]
+    motor = nodebus.EncoderMotors(clock=lambda: now[0], position=publish)
+    motor.note(8, b"\x51\x00\x45\x00\x00\x43\x44\x00")
+    motor.note(8, b"\x55\x00" + struct.pack("<h", -120) + b"\0")
+    now[0] = .7
+    assert motor.status(8, 0) == struct.pack("<hH", -120, 0)  # protocol keeps signed counts
+    assert hw.calls[-1] == (15, 63, 0)                       # only the adapter clamps
+    nodebus.motor_lamp_publisher(None, outputs)(8, 0, 10)
+    assert nodebus.encoder_lamp_outputs("") == {}
+    for bad in ("8,0:16,0", "8,0:15,64", "8,256:15,63", "broken"):
+        try:
+            nodebus.encoder_lamp_outputs(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid encoder wiring accepted: " + bad)
+
+
 def test_presence_reply_passes_all_gates():
     for node in (1, 8, 9, 10, 11, 12):
         addr = 0x80 | node
@@ -104,6 +195,20 @@ def test_status_poll_is_zero_payload_present():
     ok, why = gates_pass(reply, 10)
     assert ok, why
     assert reply[:8] == bytes(8)            # zero payload = present, no faults
+
+
+def test_status_poll_reports_the_frames_the_board_received():
+    # Word A is the board's received-frame count: the game compares its change
+    # with the frames it sent, and a zero answer re-initialised every board on
+    # every poll, which restarted Ghostbusters' Slimer homing (PAD-1160).
+    import struct
+    for count in (1, 300, 0x1_0000_0005):
+        reply = nodebus.build_response(0x88, poll_body(0xFF), 10, rx_count=count)
+        assert gates_pass(reply, 10) == (True, "ok")
+        assert reply[:4] == struct.pack("<I", count & 0xFFFFFFFF)
+        assert reply[4:8] == bytes(4)       # word B: no faults
+    # only the status poll carries it
+    assert nodebus.build_response(0x88, poll_body(0x52), 6, rx_count=7) == bytes(6)
 
 
 def test_input_poll_active_low_closed_switch():
@@ -288,3 +393,114 @@ def test_wireparser_split_feeds():
     evs = list(p.feed(f[3:]))
     assert len(evs) == 1 and evs[0][0] == "frame"
     assert evs[0][2][:3] == bytes([0x40, 2, 0xFF])
+
+
+# ---- the DMD era's s1hw.state (PAD-943) ------------------------------------
+# The frames are GOT LE 1.37's own, as a run's ttyS4.cap carries them (the
+# command byte first, the checksum last); the shapes are the ELF's senders
+# (NODEBUS_SetLED @0xc1530, NODEBUS_SetLEDMultiple @0xc1428).
+
+class _Hw:
+    def __init__(self):
+        self.lamps, self.coils, self.offs = {}, [], []
+
+    def lamp_level(self, node, ch, level):
+        self.lamps[(node, ch)] = level
+
+    def coil_on(self, node, coil, seconds):
+        self.coils.append((node, coil, seconds))
+
+    def coil_off(self, node, coil):
+        self.offs.append((node, coil))
+
+
+def test_dmd_single_lamp_write_is_time_then_level():
+    hw = _Hw()
+    d = nodebus.DmdFrames(hw)
+    d.frame(8, bytes.fromhex("a900ffcc"))        # SetLED(8, 41, 0xff, time 0)
+    d.frame(10, bytes.fromhex("903e891b"))       # SetLED(10, 16, 0x89, ramp 0x3e)
+    assert hw.lamps == {(8, 41): 0xFF, (10, 16): 0x89}
+
+
+def test_dmd_multiple_lamps_run_from_the_index():
+    hw = _Hw()
+    nodebus.DmdFrames(hw).frame(9, bytes([0x85, 0x00, 0x10, 0x20, 0x30, 0x00]))
+    assert hw.lamps == {(9, 5): 0x10, (9, 6): 0x20, (9, 7): 0x30}
+
+
+def test_dmd_wide_index_form_and_base_layer_write():
+    hw = _Hw()
+    d = nodebus.DmdFrames(hw)
+    d.frame(8, bytes([0xC0, 0x45, 0x00, 0x00, 0x7F, 0x00]))      # idx 69 (> 63)
+    d.frame(10, bytes.fromhex("70050001fb"))                    # cmd 70, v16 0x0100
+    assert hw.lamps[(8, 69)] == 0x7F
+    assert hw.lamps[(10, 5)] == nodebus.level70(0x00, 0x01) == 0x100 * 255 // 0x800
+
+
+def test_dmd_coil_drive_pulse_hold_rule_and_off():
+    hw = _Hw()
+    d = nodebus.DmdFrames(hw)
+    d.frame(8, bytes.fromhex("4100ff00001e0000000000000000000000000000004200004000000000000000000500006f"))
+    d.frame(8, bytes([0x40, 0x00, 0x00]))                       # short 40: the rule's 0x1e ticks
+    d.frame(8, bytes.fromhex("4004ff6400ff3200000000"))         # pulse 100 + hold 50 ticks
+    d.frame(1, bytes.fromhex("4002ff0000ff0000000034"))         # hold with no end
+    d.frame(1, bytes([0x4D, 0x02, 0x00]))
+    assert d.rules[(8, 0)] == 0x1E
+    assert hw.coils == [(8, 0, nodebus.DMD_COIL_MIN_S), (8, 4, 0.15), (1, 2, nodebus.DMD_COIL_HOLD_S)]
+    assert hw.offs == [(1, 2)]
+
+
+def test_dmd_frames_ignore_what_they_do_not_know():
+    hw = _Hw()
+    d = nodebus.DmdFrames(hw)
+    d.frame(8, bytes.fromhex("430400050607010403020801"))
+    d.frame(8, bytes.fromhex("72ffffffffffffffffffffffff04"))
+    d.frame(8, bytes([0x11, 0x6C]))
+    d.frame(8, b"")
+    assert not hw.lamps and not hw.coils and not hw.offs
+
+
+# PAD-979: frames Ghostbusters LE 1.17's own NODEBUS_SetLEDMultiple2 built
+# (run under Unicorn) for these runs, one per way it packs them. The last
+# byte is the checksum slot.
+_LED2_FRAMES = [
+    ("940b0800", [11], [0], [8]),                               # one index, all off
+    ("a603a8ff0000", [3, 40], [255, 0], [0, 0]),                # an index list
+    ("99c004ff3fb66ddbb62dffc900", list(range(38)), [255] * 38,  # short mask, two times
+     [255 if i % 3 == 0 else 201 for i in range(38)]),
+    ("a28f0bde020202401010108001800a141e28323c46505a64"         # long mask + extra byte
+     "0102030405060708090a00", [1, 9, 17, 30, 44, 52, 60, 71, 80, 95],
+     [10, 20, 30, 40, 50, 60, 70, 80, 90, 100], list(range(1, 11))),
+    ("9f8012ffff2184070532373c4100", list(range(8, 24)), [7] * 16,  # times listed
+     [5 if i % 5 else 50 + i for i in range(16)]),
+]
+
+
+def test_led2_frames_read_back_to_what_the_game_packed():
+    for hexbody, idx, levels, times in _LED2_FRAMES:
+        assert nodebus.led2_frame(bytes.fromhex(hexbody)) == list(zip(idx, levels, times)), hexbody
+
+
+def test_led2_frames_are_read_only_for_a_game_that_sends_them():
+    hw = _Hw()
+    nodebus.DmdFrames(hw, led2=True).frame(9, bytes.fromhex("8a8067ffff0e8000ffffff0000000000000000000000ff0a5c"))
+    # off the rig's wire: 0x8a = a short mask over bytes 6-7 (48-63), levels each
+    levels = bytes.fromhex("00ffffff0000000000000000000000ff")
+    assert hw.lamps == {(9, 48 + i): v for i, v in enumerate(levels)}
+    old = _Hw()
+    nodebus.DmdFrames(old).frame(9, bytes([0x85, 0x00, 0x10, 0x20, 0x30, 0x00]))
+    assert old.lamps == {(9, 5): 0x10, (9, 6): 0x20, (9, 7): 0x30}
+
+
+def test_a_garbled_led2_frame_is_dropped():
+    hw = _Hw()
+    d = nodebus.DmdFrames(hw, led2=True)
+    d.frame(8, bytes.fromhex("8ac0"))
+    d.frame(8, bytes.fromhex("95ffff0000"))
+    d.frame(8, bytes.fromhex("70050001fb"))                    # the base layer still reads
+    assert hw.lamps == {(8, 5): nodebus.level70(0x00, 0x01)}
+
+
+def test_closed_indexes_reads_active_low_bytes():
+    assert nodebus.closed_indexes(nodebus.SW_IDLE) == []
+    assert nodebus.closed_indexes(bytes([0xFF, 0xF7, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F])) == [11, 63]

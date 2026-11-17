@@ -93,6 +93,7 @@ LAYOUT = {
     "jjp": (".iso", True, [], True, True, False, False),
     "pb": (".upd", False, [], False, False, False, False),
     "sega": (".zip", False, [], False, False, True, True),
+    "capcom": (".zip", False, [], False, False, True, False),
     "spooky": (".pkg", False, [], False, False, False, False),
     "stern": ("Card image", True, ["audio", "video", "images", "text"],
               False, False, False, False),
@@ -140,6 +141,7 @@ def test_layout_per_manufacturer(tmp_path, key):
     ("spike2", "Card image", 4, False),
     ("spike1", "Card image", 0, False),
     ("whitestar", "ROM zip", 0, True),
+    ("sam", "Game file", 0, True),
 ])
 def test_stern_eras(tmp_path, era, label, cats, capture):
     with web_app(tmp_path, mfr="stern", era=era) as w:
@@ -329,7 +331,7 @@ def test_not_recognised_and_looks_like_switch(tmp_path, monkeypatch):
         w.call("ui.set", "extract", "input", str(f))
         _settle(w)
         assert w.state("extract")["badge"]["text"] == \
-            "Not recognised as %s" % jjp.display
+            "Not recognized as %s" % jjp.display
         monkeypatch.setattr(stern, "detect", lambda p: types.SimpleNamespace(
             display="Godzilla (Spike 2)", era=""))
         w.call("ui.set", "extract", "input", str(f))
@@ -821,7 +823,7 @@ def test_another_games_card_picked_over_a_project_offers_a_new_one(tmp_path, mon
         props = offers[0]
         assert props["stock"] == str(bond)
         assert props["mfr"] == "stern"
-        assert props["name"] == "james_bond_le-1_06_0.Release.16G.sdcard"
+        assert props["name"] ==             "Stern Pinball, james_bond_le-1_06_0.Release.16G.sdcard - Extracted"
         assert os.path.normcase(props["parent"]) == os.path.normcase(str(tmp_path))
         assert props["why"]["project"] == "Godzilla LE"
         assert props["why"]["card"] == bond.name
@@ -902,17 +904,73 @@ def test_no_new_project_offer_without_a_pick(tmp_path, monkeypatch):
 
 def test_new_project_name_for_a_card(tmp_path):
     """PAD-435: the name New project suggests is the card's game as the title bar names it,
-    made a usable folder name, else the card file's name, never a folder already there."""
+    made a usable folder name, else the card file's name, never a folder already there.
+    PAD-1319 (DragonRR): "Manufacturer, Machine Name - Extracted"."""
     from pinball_decryptor.webui.tabs.extract import _project_name_for
     card = str(tmp_path / "james_bond_le-1_06_0.Release.16G.sdcard.raw")
-    assert _project_name_for("James Bond 007 v1.06.0 LE", card, str(tmp_path)) \
-        == "James Bond 007 v1.06.0 LE"
-    assert _project_name_for("AC/DC v1.00 Pro", card, "") == "AC-DC v1.00 Pro"
-    assert _project_name_for("", card, "") == "james_bond_le-1_06_0.Release.16G.sdcard"
-    (tmp_path / "James Bond 007 v1.06.0 LE").mkdir()
-    (tmp_path / "James Bond 007 v1.06.0 LE (2)").mkdir()
-    assert _project_name_for("James Bond 007 v1.06.0 LE", card, str(tmp_path)) \
-        == "James Bond 007 v1.06.0 LE (3)"
+    assert _project_name_for("James Bond 007 v1.06.0 LE", card, str(tmp_path))         == "James Bond 007 v1.06.0 LE - Extracted"
+    assert _project_name_for("Godzilla", card, "", "Stern Pinball")         == "Stern Pinball, Godzilla - Extracted"
+    assert _project_name_for("AC/DC v1.00 Pro", card, "", "A/B")         == "A-B, AC-DC v1.00 Pro - Extracted"
+    assert _project_name_for("", card, "")         == "james_bond_le-1_06_0.Release.16G.sdcard - Extracted"
+    (tmp_path / "James Bond 007 v1.06.0 LE - Extracted").mkdir()
+    (tmp_path / "James Bond 007 v1.06.0 LE - Extracted (2)").mkdir()
+    assert _project_name_for("James Bond 007 v1.06.0 LE", card, str(tmp_path))         == "James Bond 007 v1.06.0 LE - Extracted (3)"
+
+
+def test_new_project_for_a_card_goes_in_the_cards_folder(tmp_path, monkeypatch):
+    """PAD-1319 (DragonRR): "Location - I think this should default to the folder raw
+    file is in and not the folder previously used."  The note names the card by its
+    whole file name."""
+    prev = tmp_path / "GZ HEISEI V2.2B"
+    prev.mkdir()
+    stock = prev / "godzilla_le-1_16_0.raw"
+    stock.write_bytes(b"\0" * 32)
+    cards = tmp_path / "GZ 1.16 HEISEI 2.3 PREMIUM"
+    cards.mkdir()
+    card = cards / "Godzilla Premium 1.16 Heisei Custom V2.3 Kaiju Edition.raw"
+    card.write_bytes(b"\0" * 48)
+    proj = _anchored_project(prev, "EXTRACTED", stock)
+    with web_app(tmp_path, mfr="stern") as w:
+        w.app._settings["project_dir"] = str(prev)
+        offers = _new_project_dialogs(w, monkeypatch)
+        w.call("ui.set", "extract", "output", str(proj))
+        w.call("ui.set", "extract", "input", str(card))
+        _settle(w)
+        assert w.call("extract.new_card_project") is True
+        props = offers[-1]
+        assert os.path.normcase(props["parent"]) == os.path.normcase(str(cards))
+        assert props["why"]["card"] == card.name
+        assert props["name"].startswith("Stern Pinball, ")
+        assert props["name"].endswith(" - Extracted")
+        # a card whose folder is gone falls back to where New project last made one
+        w.window.extract_input_var.set(str(tmp_path / "gone" / card.name))
+        assert w.call("extract.new_card_project") is True
+        assert os.path.normcase(offers[-1]["parent"]) == os.path.normcase(str(prev))
+
+
+def test_new_project_browse_for_the_folder_itself(tmp_path, monkeypatch):
+    """PAD-1319: Browse... by Folder name picks the project folder; the window gets its
+    parent as the location and its name as the folder name."""
+    from pinball_decryptor.webui import shellx_projects
+    made = tmp_path / "Stern, Godzilla - Extracted"
+    made.mkdir()
+    picked = []
+
+    class _FD:
+        @staticmethod
+        def askdirectory(**kw):
+            picked.append(kw.get("initialdir"))
+            return str(made)
+    monkeypatch.setattr(shellx_projects, "_fd", lambda: _FD)
+    with web_app(tmp_path, mfr="stern") as w:
+        r = w.call("shellx.browse_project_folder", str(tmp_path), "nope")
+        assert os.path.normcase(r["parent"]) == os.path.normcase(str(tmp_path))
+        assert r["name"] == made.name
+        assert os.path.normcase(picked[-1]) == os.path.normcase(str(tmp_path))
+        w.call("shellx.browse_project_folder", str(tmp_path), made.name)
+        assert os.path.normcase(picked[-1]) == os.path.normcase(str(made))
+        monkeypatch.setattr(_FD, "askdirectory", staticmethod(lambda **kw: ""))
+        assert w.call("shellx.browse_project_folder", str(tmp_path), "") == {}
 
 
 def test_project_game_without_an_anchor_uses_the_current_plugin(
@@ -1021,8 +1079,11 @@ def test_page_project_game(tmp_path):
     (tmp_path / "tabs").mkdir()
     (tmp_path / "core").mkdir()
     (tmp_path / "tabs" / "extract.js").write_text(src, encoding="utf-8")
-    for mod, frm in (("ui", "../core/ui.js"), ("store", "../core/store.js")):
-        m = re.search(r"import \{([^}]*)\} from \"%s\"" % re.escape(frm), src)
+    # every ../core module the page imports gets a stub (spike3_guide.js
+    # joined ui and store; a fixed list went red on main when it did)
+    for m in re.finditer(r"import \{([^}]*)\} from \"\.\./core/(\w+)\.js\"",
+                         src):
+        mod = m.group(2)
         names = [n.strip() for n in m.group(1).split(",") if n.strip()]
         body = "".join("export const %s = () => null;\n" % n
                        for n in names if n != "html")

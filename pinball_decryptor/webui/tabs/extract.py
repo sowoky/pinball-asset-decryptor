@@ -101,15 +101,24 @@ def _same(path):
     return os.path.normcase(os.path.normpath(path)) if path else ""
 
 
-def _project_name_for(caption, card, parent):
+def _project_name_for(caption, card, parent, maker=""):
     """The folder name New project suggests for *card* (PAD-435): the game the title bar
     names for it ("James Bond 007 v1.06.0 LE"), else the card file's own name, never one
-    already in *parent*."""
+    already in *parent*.  PAD-1319 (DragonRR): with the manufacturer in front and
+    " - Extracted" after it ("Stern Pinball, Godzilla - Extracted"), so the folder says
+    what it holds next to the card it came from."""
     from ..shellx_projects import _BAD_NAME_CHARS
-    name = "".join("-" if ch in _BAD_NAME_CHARS else ch for ch in (caption or ""))
-    name = name.strip().rstrip(". ")
+
+    def clean(text):
+        return "".join("-" if ch in _BAD_NAME_CHARS else ch
+                       for ch in (text or "")).strip().rstrip(". ")
+    name = clean(caption)
     if not name:
         name = os.path.splitext(os.path.basename(card or ""))[0].rstrip(". ") or "New project"
+    maker = clean(maker)
+    if maker:
+        name = "%s, %s" % (maker, name)
+    name += " - Extracted"
     base, n = name, 2
     while parent and os.path.exists(os.path.join(parent, name)) and n < 100:
         name, n = "%s (%d)" % (base, n), n + 1
@@ -235,6 +244,7 @@ class ExtractTab(TabService):
                  badge=None, detected=None, extensions=[],
                  asset_filters=False, dongle_cap=False,
                  capture_cap=False, capture_primary=False,
+                 basic_label="", gameplay_cap=True,
                  capture_help="", capture_help_kind="",
                  decode_show=False, decode_label="",
                  deltas_show=False, deltas_help=H.DEFAULT_DELTAS_HELP,
@@ -290,6 +300,9 @@ class ExtractTab(TabService):
             capture_cap=bool(getattr(caps, "capture", False)),
             capture_primary=bool(getattr(caps, "capture", False)
                                  and not getattr(caps, "extract", False)),
+            basic_label=getattr(mfr, "capture_basic_label", "") or "",
+            gameplay_cap=bool(getattr(mfr, "capture_simulates_gameplay",
+                                      True)),
             badge=None, detected=None, card_line="",
             # game-aware rows wait for the input probe below
             decode_show=False, deltas_show=False,
@@ -306,6 +319,7 @@ class ExtractTab(TabService):
 
         if not getattr(caps, "dongle_extract", False):
             self.extract_dongle_var.set(False)
+        self._show_dongle_where()
 
         # the per-type categories, rebuilt default-on, then the saved state
         self._extract_category_vars = {}
@@ -402,7 +416,7 @@ class ExtractTab(TabService):
             self.set(capture_help="", capture_help_kind="")
             return
         text, kind = H.capture_help(caps, self.static_extract_var.get(),
-                                    self.capture_mode_var.get())
+                                    self.capture_mode_var.get(), self.mfr)
         self.set(capture_help=text, capture_help_kind=kind)
 
     def _update_option_visibility(self):
@@ -554,6 +568,9 @@ class ExtractTab(TabService):
                 recheck = self.window.cb.get("on_recheck_prereqs")
                 if recheck is not None:
                     recheck()
+                # the era just became spike3 here on first detection; show the
+                # self-extractor panel now instead of waiting for a re-probe
+                self._refresh_spike3_unlock(res)
                 return
             self._notify_detected_game(res["caption"])
             if hasattr(mfr, "set_era") and not caps.write and not (
@@ -581,10 +598,14 @@ class ExtractTab(TabService):
                 names = ", ".join(m.display for m, _ in others)
                 badge = {"text": f"Matches multiple manufacturers: {names}",
                          "kind": "warn", "switch": False}
+            elif res.get("backup"):
+                badge = {"text": res["backup"], "kind": "warn",
+                         "switch": False}
             else:
-                badge = {"text": f"Not recognised as {mfr.display}",
+                badge = {"text": f"Not recognized as {mfr.display}",
                          "kind": "warn", "switch": False}
         self.set(badge=badge, detected=detected)
+        self._refresh_spike3_unlock(res)
 
         # audio-export support (_refresh_extract_audio_support)
         supported = bool(res["audio_supported"])
@@ -606,6 +627,159 @@ class ExtractTab(TabService):
             cb(m)
         self.extract_input_var.set(path)
         return True
+
+    # ------------------------------------------------------------------
+    # Spike 3: read the OTP key on your own board (self-extractor, PAD-1086)
+    # ------------------------------------------------------------------
+    def _spike3_key_present(self, path):
+        """True if a Spike 3 key is already discoverable for *path* (env
+        $PAD_SPIKE3_KEYFILE or a padkeys.json sidecar)."""
+        try:
+            from ...plugins.stern.spike3_keys import Spike3KeySource
+            src = Spike3KeySource.discover(image_path=path)
+            return bool(src and src.has_any())
+        except Exception:                               # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _spike3_is_spk(path):
+        try:
+            from ...plugins.stern.spike3_spk import is_spk_input
+            return bool(path) and is_spk_input(path)
+        except Exception:                               # noqa: BLE001
+            return False
+
+    def _refresh_spike3_unlock(self, res):
+        """Show the self-extractor panel when a locked Spike 3 card is the
+        input (detected Spike 3, no key yet); hide it otherwise.  Never for
+        a ``.spk`` package (PAD-1077): that is unlocked by the fleet update
+        key, not a board's OTP key, so an extractor card can't help it."""
+        path = self.extract_input_var.get()
+        refresh = getattr(self.window, "refresh_spike3_key", None)
+        if refresh:                     # the other Spike 3 tabs' key gate
+            refresh()
+        locked = (res and res.get("era") == "spike3" and res.get("game")
+                  and res.get("exists")
+                  and not self._spike3_is_spk(path)
+                  and not self._spike3_key_present(path))
+        if not locked:
+            if self.get("spike3_unlock"):
+                self.set(spike3_unlock=None)
+            return
+        cur = self.get("spike3_unlock") or {}
+        # keep any build instructions / status already shown for this card
+        same = cur.get("path") == path
+        self.set(spike3_unlock={
+            "path": path,
+            "caption": res.get("caption") or "",
+            "busy": False,
+            "status": cur.get("status", "") if same else "",
+            "instructions": cur.get("instructions", "") if same else "",
+            "verified": False,
+        })
+
+    def _set_spike3(self, **kw):
+        """Merge fields into the Spike 3 unlock panel state (UI thread)."""
+        cur = dict(self.get("spike3_unlock") or {})
+        cur.update(kw)
+        self.set(spike3_unlock=cur)
+
+    @rpc
+    def spike3_build_card(self):
+        """Build the OTP-key extractor card from the selected Spike 3 image
+        into a folder the user picks; show the deploy/read-back steps."""
+        path = (self.extract_input_var.get() or "").strip()
+        if not path or not os.path.exists(path):
+            return False
+        outdir = self.window.ask_folder(
+            "spike3_card_out", "Where to write the extractor card files",
+            initialdir=self.window._initialdir_for(
+                self.extract_output_var.get(), path))
+        if not outdir:
+            return False
+        self._set_spike3(busy=True, status="Building the extractor card…",
+                         instructions="")
+
+        def _work():
+            from ...plugins.stern import spike3_selfextract as SX
+            try:
+                res = SX.build_extractor_card(path, outdir)
+                msg = ("Extractor card written to %s. Follow the steps below "
+                       "on a board that does NOT enforce secure boot; if the "
+                       "card will not boot, that board is locked - see the "
+                       "note." % outdir)
+                steps = res.instructions
+                self.ctx.loop.post(lambda: self._set_spike3(
+                    busy=False, status=msg, instructions=steps))
+            except Exception as e:                      # noqa: BLE001
+                self.ctx.loop.post(lambda e=e: self._set_spike3(
+                    busy=False, status="Could not build the card: %s" % e,
+                    instructions=""))
+
+        threading.Thread(target=_work, daemon=True,
+                         name="spike3-build-card").start()
+        return True
+
+    @rpc
+    def spike3_ingest_key(self):
+        """Take the OTP_KEY.TXT read back from the card, verify it against
+        the selected image, and - if good - save a padkeys.json and unlock
+        the card for extraction."""
+        path = (self.extract_input_var.get() or "").strip()
+        if not path or not os.path.exists(path):
+            return False
+        keyfile = self.window.ask_open(
+            "spike3_otp_key", "Select OTP_KEY.TXT read back from the card",
+            [("Key files", "*.txt *.bin"), ("All files", "*.*")],
+            initialdir=self.window._initialdir_for(
+                self.extract_output_var.get(), path))
+        if isinstance(keyfile, (list, tuple)):
+            keyfile = keyfile[0] if keyfile else ""
+        if not keyfile:
+            return False
+        self._set_spike3(busy=True, status="Verifying the key against this "
+                         "card…")
+
+        def _work():
+            from .. import spike3_key
+            try:
+                # the same check and the same words as the key field
+                ok, msg, _kept = spike3_key.save_key(keyfile, path)
+                if ok:
+                    self.ctx.loop.post(self._spike3_unlocked, msg)
+                else:
+                    self.ctx.loop.post(lambda: self._set_spike3(
+                        busy=False, status=msg))
+            except Exception as e:                      # noqa: BLE001
+                self.ctx.loop.post(lambda e=e: self._set_spike3(
+                    busy=False, status="Could not read that key: %s" % e))
+
+        threading.Thread(target=_work, daemon=True,
+                         name="spike3-ingest-key").start()
+        return True
+
+    def _spike3_padkeys_path(self):
+        """Where a verified key is kept: the ONE per-user padkeys.json every
+        Spike 3 tab looks in (webui/spike3_key.py) - not the project folder,
+        which forgot it for every other project and tab (PAD-1090); never
+        next to the image, which may be on read-only media."""
+        from ..spike3_key import user_keyfile
+        out = user_keyfile()
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        return out
+
+    def _spike3_unlocked(self, message):
+        """A verified key: mark the panel unlocked. The key is now discoverable
+        ($PAD_SPIKE3_KEYFILE), so Extract will use it; the confirmation stays
+        until the input changes rather than being wiped by an immediate
+        re-probe."""
+        self._set_spike3(busy=False, verified=True,
+                         status=message or "Key verified. This card is "
+                         "unlocked - you can Extract now.")
+        # every other Spike 3 tab waits on the same key (PAD-1090)
+        refresh = getattr(self.window, "refresh_spike3_key", None)
+        if refresh:
+            refresh()
 
     # ------------------------------------------------------------------
     # the source toggle and the card row
@@ -780,7 +954,7 @@ class ExtractTab(TabService):
             self.set(card_line="Card: needs Administrator to read — see "
                                "below")
         else:
-            self.set(card_line="Card: not recognised as a %s card"
+            self.set(card_line="Card: not recognized as a %s card"
                                % mfr.display)
 
     # -- the red panels -------------------------------------------------
@@ -916,8 +1090,25 @@ class ExtractTab(TabService):
                 self._dmd_tick(rearm=False)
                 self._stop_dmd_pump()
 
+    def _show_dongle_where(self):
+        """Where a dongle decrypt takes the key from (PAD-529): the PC it is
+        plugged into, or a key server set on the Emulate tab."""
+        if not self.cap("dongle_extract"):
+            self.set(dongle_where="")
+            return
+        from ...plugins.jjp import remote_key
+        remote = remote_key.current()
+        self.set(dongle_where=(
+            "Key: plugged into this PC. A key in another PC can be used "
+            "over the network instead: set it under Security key on the "
+            "Emulate tab." if remote is None else
+            "Key: %s, attached over the network for the extract and handed "
+            "back after. Change it under Security key on the Emulate tab."
+            % remote_key.describe(remote)))
+
     def on_show(self):
         self._refresh_recents()
+        self._show_dongle_where()
         # the card may have been replaced on disk while away
         self._refresh_gate()
 
@@ -1219,9 +1410,14 @@ class ExtractTab(TabService):
         self.set(info={"open": True, "path": path, "sections": [],
                        "loading": True, "status": "Reading image…"})
 
+        def _early(sections):
+            # the report but the video count (PAD-626)
+            self.ctx.loop.post(self._apply_info, seq, key, sections, True)
+
         def _work():
             try:
-                sections = _info_mod.collect(mfr, path, assets)
+                sections = _info_mod.collect(mfr, path, assets,
+                                             partial=_early)
             except Exception as e:                      # noqa: BLE001
                 sections = [("Error", [("Could not read", str(e))])]
             self.ctx.loop.post(self._apply_info, seq, key, sections)
@@ -1230,21 +1426,26 @@ class ExtractTab(TabService):
         self._info_thread = t
         t.start()
 
-    def _apply_info(self, seq, key, sections):
+    def _apply_info(self, seq, key, sections, early=False):
         if seq != self._info_seq:
             return
-        self._info_shown_key = key
+        if early and self._info_shown_key == key:
+            return                  # the full report beat it to the loop
+        if not early:
+            self._info_shown_key = key
         self._info_sections = list(sections or [])
         out = []
         for title, rows in self._info_sections:
             out.append({"title": str(title),
                         "rows": [[str(r[0]), str(r[1])] for r in rows]})
-        self._info_state(sections=out, loading=False, status="")
+        self._info_state(sections=out, loading=early,
+                         status="Counting the videos…" if early else "")
 
     @rpc
     def info_copy(self):
         from ...core import image_info as _info_mod
-        if not self._info_sections:
+        if not self._info_sections or (self.get("info") or {}).get(
+                "loading"):                     # not while it is half read
             return ""
         text = _info_mod.as_text(self._info_sections)
         self.ctx.bus.publish("clipboard", text=text)
@@ -1395,21 +1596,27 @@ class ExtractTab(TabService):
 
     def _open_card_project_form(self, d):
         """The New project window, filled in for the picked card: the card as its stock
-        image, the card's game as its name, where New project last made one (else beside
-        the open project), and a line saying why it came up."""
+        image, the card's game as its name, the card's own folder as where it goes, and a
+        line saying why it came up.  PAD-1319 (DragonRR): the folder the card sits in,
+        not where New project last made one ("I always organise the folder before I run
+        PAD"); that one, else beside the open project, only when the card's folder is
+        gone.  The line names the card by its whole file name."""
         card = (self.extract_input_var.get() or "").strip()
         if not card:
             return False
         folder = os.path.normpath(self._project_folder()) if self._project_folder() else ""
         settings = getattr(self.app, "_settings", None) or {}
-        parent = settings.get("project_dir") or (os.path.dirname(folder) if folder else "")
+        parent = os.path.dirname(os.path.abspath(card))
+        if not os.path.isdir(parent):
+            parent = settings.get("project_dir") or (os.path.dirname(folder) if folder else "")
         game = d.get("card_game") or ""
         self.ctx.bus.publish("open_dialog", name="project_new", props={
             "stock": card,
-            "name": _project_name_for(game, card, parent),
+            "name": _project_name_for(game, card, parent,
+                                      getattr(self.mfr, "display", "") or ""),
             "parent": parent,
             "mfr": getattr(self.mfr, "key", ""),
-            "why": {"card": game or os.path.basename(card),
+            "why": {"card": os.path.basename(card),
                     "project": os.path.basename(folder) if folder else "",
                     "project_card": d.get("game") or d.get("source_name") or ""}})
         return True

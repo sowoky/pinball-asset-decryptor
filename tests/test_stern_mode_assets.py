@@ -95,6 +95,54 @@ def test_convert_clip_letterboxes_to_the_bank_size_and_drops_audio(tmp_path):
     assert (streams[0]["width"], streams[0]["height"]) == (320, 180)
 
 
+def test_convert_clip_keeps_a_video_longer_than_30_s(tmp_path):
+    """PAD-530: a person's own video was cut at 30 s, so one made as long as its mode ran out mid-mode
+    (Jim-Beam's Bond mode: the clip ended at 30 000 ms and the game's own video played for the rest)."""
+    ff = _ffmpeg()
+    src = str(tmp_path / "long.mp4")
+    subprocess.run([ff, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x36:rate=5:duration=35", src],
+                   check=True, capture_output=True)
+    out = str(tmp_path / "out.asset")
+    MA.convert_clip(src, out, 64, 36, ff)
+    probe = audio.find_ffprobe()
+    if not probe:
+        pytest.skip("no ffprobe")
+    dur = float(subprocess.run([probe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", out],
+                               capture_output=True, text=True, check=True).stdout.strip())
+    assert 34.5 < dur < 35.5
+    assert MA.MODE_CLIP_MAX_SECONDS == 300          # the longest a mode's clock runs (the Modes tab's seconds)
+
+
+def test_convert_clip_makes_an_animated_gif_a_moving_clip(tmp_path):
+    """PAD-693: DragonRR asked for animated GIFs. A mode's clip may be one: ffmpeg reads every frame,
+    so the clip moves (not the GIF's first picture held), at the bank's size, and a block or the form
+    offers .gif in its picker."""
+    from PIL import Image
+    from pinball_decryptor.plugins.stern import block_modes as BM
+    from pinball_decryptor.webui.tabs.modes import ModesTab
+    assert ".gif" in BM.VIDEO_EXTS and "*.gif" in ModesTab.VIDEO_TYPES[0][1]
+    ff = _ffmpeg()
+    src = str(tmp_path / "spin.gif")
+    frames = [Image.new("RGB", (80, 60), (40 * i, 255 - 40 * i, 90)) for i in range(6)]
+    frames[0].save(src, save_all=True, append_images=frames[1:], duration=200, loop=0)
+    out = str(tmp_path / "out.asset")
+    MA.convert_clip(src, out, 160, 90, ff)
+    streams = _probe(out)
+    assert [s["codec_type"] for s in streams] == ["video"]
+    assert (streams[0]["width"], streams[0]["height"]) == (160, 90)
+    raw = subprocess.run([ff, "-v", "error", "-i", out, "-vf", "crop=40:40:60:25", "-f", "rawvideo",
+                          "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    pics = [raw[i:i + 40 * 40 * 3] for i in range(0, len(raw), 40 * 40 * 3)]
+    assert len(pics) >= 30                       # 1.2 s at 30 fps
+    reds = sorted({round(np.frombuffer(p, np.uint8).reshape(-1, 3)[:, 0].mean() / 40) for p in pics})
+    assert reds == list(range(6))                # every one of the GIF's pictures plays, in turn
+
+
+def test_the_space_estimate_sizes_a_long_video_by_its_own_length():
+    from pinball_decryptor.plugins.stern import engine
+    assert engine._MODE_CLIP_MAX_S == MA.MODE_CLIP_MAX_SECONDS
+
+
 # ---- the whole build --------------------------------------------------------------------
 def _mode(project, name, **kw):
     slug, spec = MP.new_mode(project, name)
@@ -212,6 +260,102 @@ def test_grafted_clips_go_in_the_hud_beside_the_screens(tmp_path, monkeypatch):
     new = written[prof.lcd("hud") + "/scene.radium"]
     assert SW.string(MP.asset_names(alpha)["clip"]) + struct.pack("<I", SW.FLAG | (_p.first_free_id + 7 + 5)) in new
     assert SW.string("PadMode_Clips") in new and SW.string("S") in new
+
+
+# ---- PAD-562 (luvthatapex, Bond LE): a clip at the size of the bank's own clips --------------------------
+def test_bond_clip_frame_is_its_tv_clips_not_its_video():
+    """Bond LE/Pro 1.06's bank says 1360x768, but its clips are 920x416 (the 2.2:1 TV the game stretches
+    every clip over); every other bank's clips are its Video's shape."""
+    assert VB.CLIP_FRAMES == {"63f6bc13a70ee6f16f24fa6ab6e908fa": (920, 416)}
+    stock = _synthetic_bank(3)
+    bank = VB.parse(stock)
+    assert VB.clip_frame(stock) == (bank.width, bank.height)
+    assert VB.clip_frame(stock, bank) == (bank.width, bank.height)
+    for key in ("james_bond_le_1_06", "james_bond_pro_1_06"):
+        assert MP.clip_frame(key) == (920, 416)
+    assert MP.clip_frame("godzilla_pro_1_15") == (1360, 768)
+    assert MP.clip_frame("no_such_title_1_00") == (1360, 768)
+
+
+def _clip_sizes(monkeypatch):
+    sizes = []
+
+    def encode(job, path, ffmpeg):
+        sizes.append((job.kind, job.w, job.h))
+        with open(path, "wb") as f:
+            f.write(b"\0" * 1234)
+    monkeypatch.setattr(MA, "_encode_clip", encode)
+    monkeypatch.setattr(MA, "make_clips", lambda jobs, ffmpeg, progress=None: ({}, None))
+    return sizes
+
+
+@pytest.mark.parametrize("frame", [None, (920, 416)])
+def test_every_clip_of_a_build_is_made_at_the_banks_clip_frame(tmp_path, monkeypatch, frame):
+    """A mode's own video, its title card and its second clip all at the bank's clip frame: Bond's
+    920x416 where the bank is in CLIP_FRAMES, the Video's size (as before) where it is not."""
+    stock = _synthetic_bank(3)
+    bank = VB.parse(stock)
+    if frame:
+        monkeypatch.setattr(VB, "CLIP_FRAMES", {hashlib.md5(stock).hexdigest(): frame})
+    sizes = _clip_sizes(monkeypatch)
+    project, out = str(tmp_path / "proj"), str(tmp_path / "out")
+    _mode(project, "Alpha", screen=False, clip="title", clip_seconds=1.0,
+          clip_both={"clip": "title", "title": "ALPHA OVER", "seconds": 1})
+    slug = _mode(project, "Beta", screen=False, clip="file", clip_file="mine.mp4")
+    open(os.path.join(MP.mode_folder(project, slug), "mine.mp4"), "wb").write(b"\0")
+    MA.build(project, b"", stock, out, ffmpeg="ffmpeg")
+    w, h = frame or (bank.width, bank.height)
+    assert sizes == [("title", w, h), ("title", w, h), ("file", w, h)]
+
+
+def _frame_rgb(ff, path, w, h, at=0.5):
+    raw = subprocess.run([ff, "-v", "error", "-ss", str(at), "-i", path, "-frames:v", "1", "-f", "rawvideo",
+                          "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3)
+
+
+def test_burned_in_bars_are_cut_off_so_the_picture_fills_the_tv(tmp_path):
+    """PAD-562 round 2 (luvthatapex): a 920x416 video that is a 16:9 letterboxed film fitted into 920x416
+    (its 740x314 picture in black on all four sides) fills the 920x416 clip, as From a film's cuts do."""
+    ff = _ffmpeg()
+    src, out = str(tmp_path / "barred.mp4"), str(tmp_path / "out.asset")
+    subprocess.run([ff, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=740x314:rate=30:duration=3",
+                    "-vf", "pad=920:416:90:51:black", "-pix_fmt", "yuv420p", src], check=True)
+    MA.convert_clip(src, out, 920, 416, ff)
+    px = _frame_rgb(ff, out, 920, 416).astype(int)
+    # the picture (2.36:1) is a hair wider than the TV (2.21:1): it reaches both sides, with thin
+    # bars above and below only
+    assert px[208, 4].max() > 40 and px[208, 915].max() > 40
+    assert px[60:356, 4].mean() > 40
+    assert px[2].max() < 30 and px[413].max() < 30
+    before = _frame_rgb(ff, src, 920, 416).astype(int)
+    assert before[208, 4].max() < 30                     # the source's own side bars
+
+
+def test_a_video_without_bars_is_converted_as_before(tmp_path):
+    ff = _ffmpeg()
+    src = str(tmp_path / "plain.mp4")
+    subprocess.run([ff, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=920x416:rate=30:duration=3",
+                    "-pix_fmt", "yuv420p", src], check=True)
+    assert MA.burned_picture(src, ff) is None
+    assert MA.burned_picture(str(tmp_path / "missing.mp4"), ff) is None
+
+
+def test_a_bond_sized_build_encodes_a_920x416_clip(tmp_path, monkeypatch):
+    """The real encoder: a 16:9 video given to a mode on a 920x416 bank comes out 920x416 (bars at its
+    sides only, where its shape differs), not 1360x768."""
+    ff = _ffmpeg()
+    stock = _synthetic_bank(3)
+    monkeypatch.setattr(VB, "CLIP_FRAMES", {hashlib.md5(stock).hexdigest(): (920, 416)})
+    project, out = str(tmp_path / "proj"), str(tmp_path / "out")
+    slug = _mode(project, "Alpha", screen=False, clip="file", clip_file="mine.mp4")
+    src = os.path.join(MP.mode_folder(project, slug), "mine.mp4")
+    subprocess.run([ff, "-v", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=30:duration=1",
+                    "-pix_fmt", "yuv420p", src], check=True)
+    res = MA.build(project, b"", stock, out, ffmpeg=ff)
+    (clip,) = res.new_files
+    v = [s for s in _probe(os.path.join(out, *clip.split("/"))) if s["codec_type"] == "video"][0]
+    assert (v["width"], v["height"]) == (920, 416)
 
 
 # ---- PAD-314 (Ales's Metallica picture): where a mode's screen goes on the glass ---------------------------

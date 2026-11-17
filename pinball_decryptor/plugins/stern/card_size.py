@@ -354,6 +354,22 @@ def read_layout(f, size=None, any_size=False):
     return Layout(int(size), laid_out, c3, s4, c4, logicals)
 
 
+def read_growing_layout(f, target):
+    """:func:`read_layout`, and also a card laid out like Stern's at no Stern size when a
+    build GROWS it to *target* (PAD-593): a card this app made as small as it can be
+    (:func:`fit_image`; a custom image someone shared after building it that way) is
+    Stern's table with a shorter games partition, and growing it is the same move of the
+    extended partition and the same ``resize2fs``.  Anything else about the table is still
+    checked, and a card at no Stern size is still refused when it would not grow."""
+    try:
+        return read_layout(f)
+    except CardSizeError:
+        layout = read_layout(f, any_size=True)
+        if not target or LAYOUT_SIZES.get(target, 0) <= layout.laid_out:
+            raise
+        return layout
+
+
 def plan(layout, target):
     """``(delta_sectors, new_layout)`` for growing *layout* to the *target*
     class; ``(0, layout)`` when the card is that size or bigger already.
@@ -401,7 +417,7 @@ def target_for(original_path, target=None):
         return None
     with open(_lp(original_path), "rb") as f:
         try:
-            layout = read_layout(f)
+            layout = read_growing_layout(f, target)
         except CardSizeError as e:
             raise CardSizeError(
                 "This card can't be built for a %s SD card: %s."
@@ -494,7 +510,7 @@ def output_parts(original_path, parts, target):
     if not target:
         return [(int(o), int(s)) for o, s in parts]
     with open(_lp(original_path), "rb") as f:
-        layout = read_layout(f)
+        layout = read_growing_layout(f, target)
     return linux_parts(plan(layout, target)[1])
 
 
@@ -898,7 +914,7 @@ def room_gained(path, target, route=ROUTE_MOUNT):
     when the card is grown to *target* (0 when it is that big already)."""
     from .ext4 import Ext4Reader
     with open(_lp(path), "rb") as f:
-        layout = read_layout(f)
+        layout = read_growing_layout(f, target)
         f.seek(0, os.SEEK_END)
         size = f.tell()
         space = p3_space(Ext4Reader(f, P3_START * SECTOR,
@@ -1045,7 +1061,14 @@ def bigger_card_offer(refusal):
     if not isinstance(refusal, WontFit) or refusal.fixed or not supported():
         return None
     cur, fits = refusal.current, refusal.fits
-    if cur not in LAYOUT_SIZES or fits not in CARD_SIZES:
+    if fits not in CARD_SIZES:
+        return None
+    if cur is None:
+        # PAD-1235: measured at its own size, which is no Stern size (a card
+        # made as small as it can be: only such a card has room at bigger
+        # sizes without a size of its own)
+        return None, fits
+    if cur not in LAYOUT_SIZES:
         return None
     if CARD_SIZES[fits] <= LAYOUT_SIZES[cur]:
         return None
@@ -1056,6 +1079,12 @@ def offer_question(current, fits):
     """The one-click question for :func:`bigger_card_offer`'s answer.  From
     the smaller 16 GB card the machine's card has to hold Stern's own image
     of that size, which some 16 GB cards don't: said in bytes."""
+    if current is None:
+        return ("Your assets no longer fit on this card image, which was made "
+                "as small as it can be. Would you like to change the size "
+                "requirement to %s so that you don't have to compress any "
+                "assets?\n\nThe SD card in the machine has to be %s or "
+                "bigger." % (words(fits), words(fits)))
     now = words(current)
     need = ("hold a %s image" % size_words(CARD_SIZES[fits])
             if current == SMALL else "be %s or bigger" % words(fits))
@@ -1109,6 +1138,13 @@ class _E2fs:
         if not out.rstrip().endswith("ok"):
             raise CardSizeError("the Linux this app uses can't attach the "
                                 "card image as a disk (no loop devices)")
+        # The probe above runs as the USER on a Linux desktop, where only
+        # asking for a free loop device works; attaching one needs root
+        # (PAD-1172).  Refused here, before anything is built, when there is
+        # no way to become root at all.
+        route = getattr(self.ex, "root_route", None)
+        if route is not None and route() is None:
+            raise CardSizeError(self.ex.NO_ROOT)
 
     def grow(self, image_path, offset, size, epoch=None, timeout=5400):
         """Check, grow to fill and re-check the ext4 at *offset*, the
@@ -1204,7 +1240,9 @@ def _run_script(ex, script, timeout):
     """Run *script* under bash in the executor's Linux, shipped as a base64
     temp FILE the way ext4_grow ships its own (wsl.exe mangles quoting on a
     command line).  Returns its output; an executor failure comes back as
-    the error's text, which carries no ``PAD_E2`` marker."""
+    the error's text, which carries no ``PAD_E2`` marker.  As ROOT
+    (``run_root``): ``losetup`` needs it, and on a Linux desktop the plain
+    executor is the user (PAD-1172)."""
     import base64
     import tempfile
     fd, tmp = tempfile.mkstemp(suffix=".b64", prefix="pad_card_size_")
@@ -1212,8 +1250,9 @@ def _run_script(ex, script, timeout):
         os.write(fd, base64.b64encode(script.encode("utf-8")))
         os.close(fd)
         try:
-            return ex.run("base64 -d < %s | bash" % shlex.quote(
-                ex.to_exec_path(tmp)), timeout=timeout)
+            return getattr(ex, "run_root", ex.run)(
+                "base64 -d < %s | bash" % shlex.quote(ex.to_exec_path(tmp)),
+                timeout=timeout)
         except Exception as e:  # noqa: BLE001 - CommandError / timeout
             return str(e)
     finally:
@@ -1374,7 +1413,7 @@ def expand_image(path, target, log=None, cancel=None, epoch=None):
     t0 = time.monotonic()
     e2 = _E2fs()
     with open(_lp(path), "r+b") as f:
-        old = read_layout(f)
+        old = read_growing_layout(f, target)
         delta, new = plan(old, target)
         if delta <= 0:
             return False
@@ -1764,9 +1803,11 @@ def check_blocks_unmoved(original_path, path, parts, log=None):
             got = after.get(p)
             if got is None or got.get("size") != node.get("size"):
                 return p
-            sz = int(node.get("size") or 0)
-            if sz and (list(ra.disk_ranges(node, 0, sz))
-                       != list(rb.disk_ranges(got, 0, sz))):
+            # mapped, not disk_ranges of the whole file: a file with a hole
+            # (a custom card's game program, PAD-491) has nothing to move
+            # there, and disk_ranges would refuse it (PAD-593)
+            if int(node.get("size") or 0) and (ra.mapped_ranges(node)
+                                               != rb.mapped_ranges(got)):
                 return p
     if log:
         log("All %d files on the games partition are in the blocks they had "

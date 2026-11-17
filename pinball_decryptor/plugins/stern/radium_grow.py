@@ -73,6 +73,33 @@ def image_record(data, data_off):
                 tex_h=tex_h, fmt=fmt, length=length)
 
 
+def drawn_by(scene):
+    """``{texture id: {"bitmaps": n, "fills": [(w, h), ...]}}`` for a parsed
+    :class:`scene_tree.Scene`: how many Bitmaps name each picture, and the
+    size of every Shape box that fills with one (PAD-857).
+
+    A Bitmap draws its picture at its own ``[w][h]``: the FIRST Bitmap of a
+    picture carries the picture's definition right after them, so its size
+    is the record's ``disp`` pair, and every later one is an
+    :func:`image_refs` triple; :func:`regrow` rewrites both.  A Shape squeezes
+    its fill Bitmap into its own box (``rect`` is left, top, right, bottom),
+    which regrow leaves alone: a bigger fill keeps its place and size on
+    screen and is sharper where the scene zooms in (emulator: Godzilla's
+    attract title, 517x660, drawn whole at 1034x1320 in the same box)."""
+    out = {}
+
+    def entry(tid):
+        return out.setdefault(tid, {"bitmaps": 0, "fills": []})
+    for o in scene.objects.values():
+        if o.kind == "Bitmap":
+            entry(o.body["tex"])["bitmaps"] += 1
+        elif o.kind == "Shape" and o.body.get("bitmap") is not None:
+            left, top, right, bottom = o.body["rect"]
+            entry(o.body["bitmap"].body["tex"])["fills"].append(
+                (int(round(right - left)), int(round(bottom - top))))
+    return out
+
+
 def image_refs(data, data_off, images=None):
     """File offsets of every sprite-instance triple that draws the image at
     *data_off* (``[dispW][dispH][handle & 0xFFFFFF]``, or the texture size in
@@ -187,6 +214,132 @@ def regrow(data, texts=None, images=None):
         return off + d
     return {"data": bytes(out), "texts": n_txt, "images": n_img,
             "shift": shift}
+
+
+def fit_box(w, h, bw, bh):
+    """The affine ``(a, b, c, d, tx, ty)`` that draws a *w* x *h* picture inside a *bw* x *bh*
+    box: scaled to fit whole (its shape kept) and centred in it (PAD-865)."""
+    s = min(bw / float(w), bh / float(h))
+    return (s, 0.0, 0.0, s, (bw - s * w) / 2.0, (bh - s * h) / 2.0)
+
+
+# PAD-1200: how many of a kept picture's pixels a Write keeps per pixel of the box the game
+# fits it into.  The game draws a scene picture from ONE texture level with a LINEAR filter
+# (no mipmaps, padglhost's MIN_FILTER record), so a texture many times bigger than where it
+# shows is sampled at scattered texels: DragonRR's 2020x3070 Battle Select grid, fitted into
+# its ~400x600 box, came out grainy and jagged in the emulator while PAD's preview (a proper
+# resize) looked clean.  Two pixels per box pixel keep PAD-865's extra detail for where a
+# scene zooms in, and a LINEAR filter at half size still averages neighbouring texels.
+KEEP_HEADROOM = 2.0
+
+
+def kept_texture_size(w, h, boxes, headroom=KEEP_HEADROOM):
+    """``(w, h)`` a *w* x *h* picture kept at its own size is written at, or None to write it
+    as it is: shrunk, its shape kept, to *headroom* times the biggest of *boxes* (``(bw, bh)``
+    pairs: the stock picture's own size and every Shape box it fills) it is fitted into
+    (:func:`fit_box`).  Where it shows on the glass does not change, since the fit is worked
+    out from the box, not the picture."""
+    boxes = [(bw, bh) for bw, bh in boxes or () if bw and bh]
+    if not (w and h and boxes):
+        return None
+    s = max(min(bw / float(w), bh / float(h)) for bw, bh in boxes) * headroom
+    if s >= 1.0:
+        return None
+    return max(1, int(round(w * s))), max(1, int(round(h * s)))
+
+
+def nodes_drawing(scene, tids):
+    """The ids of the nodes of *scene* (parsed) with a Bitmap of one of the textures *tids*."""
+    from .scene_edit import _tree_index
+    return {n.id for n, _sibs in _tree_index(scene).values()
+            if any(c.obj.kind == "Bitmap" and c.obj.body.get("tex") in tids
+                   for c in n.components)}
+
+
+def every_draw_fitted(scene, tids, own=()):
+    """True when every node of *scene* (parsed, stock) that draws one of the textures *tids*
+    has :func:`keep_boxes` fit it into its box: none draws it together with something else
+    (those are left drawing it at its own size) and none is in *own* (laid out over it at its
+    own size, PAD-981).  Only then can a Write shrink the texture without moving anything."""
+    from .scene_edit import _tree_index
+    for n, _sibs in _tree_index(scene).values():
+        mine = [c for c in n.components
+                if c.obj.kind == "Bitmap" and c.obj.body.get("tex") in tids]
+        if mine and (n.id in own or len(mine) != len(n.components)):
+            return False
+    return True
+
+
+def keep_boxes(stock, grown, offs, own=(), own_boxes=None):
+    """*grown* (a scene :func:`regrow` resized the pictures at the stock offsets *offs* in)
+    with each of those pictures shown in its stock place and size, fitted and centred:
+    ``(bytes, n nodes, n shapes, n left)``.  The nodes in *own* were moved or resized in the
+    Scenes window over the picture at its own size, before this fit (PAD-981,
+    :func:`scene_edit.own_size_nodes`), so they keep drawing it at that size.
+
+    The game draws a Bitmap's ``[w][h]`` texels 1:1 in its node's units from the node's
+    origin, and a bigger texture under a stock ``[w][h]`` is CROPPED to its top-left corner
+    (PAD-865, emulator: Godzilla LE's in-game tank icon).  So a picture kept at its own
+    size (DragonRR: "retain the original image's size ... keep the image centered") keeps
+    its new size, and every node that draws it has :func:`fit_box` multiplied into its
+    tracks on the right, inside whatever the Scenes window did to the node: the same
+    picture the Scenes preview draws.  A Shape's fill is squeezed into the Shape's box by
+    the game (PAD-857), so its box is narrowed to the picture's shape, centred.  A node
+    that also draws something else (another picture over its timeline, text, a group) is
+    left as it was and counted in *n left*.  A node of *own* that *own_boxes* (``{node: (w,
+    h)}``, :func:`scene_edit.own_boxes`) gives a box is fitted into that box instead: the size
+    of the picture its layout was made over, since replaced (PAD-1301)."""
+    from . import scene_tree
+    from .scene_edit import _composed, _m16_with, _m6_of16, _tree_index
+    sc0 = scene_tree.parse(stock)
+    sc = scene_tree.parse(grown)
+    tids = {tid for tid, t in sc0.textures.items() if t.get("data_off") in set(offs)}
+    if not tids:
+        return grown, 0, 0, 0
+
+    def box_of(o):
+        was = sc0.objects.get(o.id)
+        if was is None or was.kind != "Bitmap":
+            return None
+        w, h, bw, bh = o.body["w"], o.body["h"], was.body["w"], was.body["h"]
+        if not (w and h and bw and bh) or (w, h) == (bw, bh):
+            return None
+        return fit_box(w, h, bw, bh)
+    n_nodes = n_shapes = n_left = 0
+    for n, _sibs in _tree_index(sc).values():
+        mine = [c.obj for c in n.components
+                if c.obj.kind == "Bitmap" and c.obj.body.get("tex") in tids]
+        if not mine:
+            continue
+        fits = {box_of(o) for o in mine}
+        if len(fits) != 1 or len(mine) != len(n.components):
+            n_left += 1
+            continue
+        fit = fits.pop()
+        if n.id in own:
+            box = (own_boxes or {}).get(n.id)
+            w, h = mine[0].body["w"], mine[0].body["h"]
+            if not box or not (w and h) or (w, h) == tuple(box):
+                continue
+            fit = fit_box(w, h, box[0], box[1])
+        elif fit is None:
+            continue
+        tracks = n.tracks or [(1, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])]
+        n.tracks = [(f, _m16_with(m, _composed(_m6_of16(m), fit))) for f, m in tracks]
+        n_nodes += 1
+    for o in sc.objects.values():
+        bm = o.body.get("bitmap") if o.kind == "Shape" else None
+        if bm is None or bm.body.get("tex") not in tids:
+            continue
+        left, top, right, bottom = o.body["rect"]
+        a, _b, _c, d, tx, ty = fit_box(bm.body["w"], bm.body["h"], right - left, bottom - top)
+        rect = [left + tx, top + ty, left + tx + a * bm.body["w"], top + ty + d * bm.body["h"]]
+        if any(abs(x - y) > 0.01 for x, y in zip(rect, o.body["rect"])):
+            o.body["rect"] = rect
+            n_shapes += 1
+    if not (n_nodes or n_shapes):
+        return grown, 0, 0, n_left
+    return scene_tree.serialize(sc), n_nodes, n_shapes, n_left
 
 
 def grow(data, edits):

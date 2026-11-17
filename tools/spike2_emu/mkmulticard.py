@@ -244,8 +244,14 @@ SELECTOR_FILES = collections.OrderedDict([
     # card's python2.7); not required, because a card without a delta never calls it -
     # a build that MAKES a delta refuses a selector dir without it (need_materializer)
     ("materialize.py", ("materialize.py", 0o755, False)),
+    # PAD-1309: preloaded into the game by the multi-boot game_monitor hook (ensure_menu_hook):
+    # BACK held 3 s (Hold BACK, back_hold=) on the coin door restarts the machine into the menu.  Not required, so a
+    # selector dir built before it still makes a card (one without the way back).
+    ("padmenu.so", ("padmenu.so", 0o755, False)),
 ])
-FORBIDDEN_OUTPUT_PREFIXES = ("/mnt/d/Pinball/images", "D:/Pinball/images", "D:\\Pinball\\images")
+MENU_SO = SELECT_DIR + "/padmenu.so"
+FORBIDDEN_OUTPUT_PREFIXES = ("/mnt/d/Pinball/images", "D:/Pinball/images", "D:\\Pinball\\images",
+                             "/mnt/wsl/cards/library")       # the library on the card store (PAD-966)
 
 # ---- media (item 90 v2) --------------------------------------------------------------------
 MEDIA_DIR = SELECT_DIR + "/media"
@@ -290,6 +296,17 @@ GIF_MAX = (512, 288)
 GIF_MAX_FRAMES = 150
 GIF_MAX_BYTES = 10 << 20                      # 10 MiB
 WAV_RATE = 44100
+#: THE TEST PICTURES (PAD-1279): the card's own files for the menu's Settings > Test
+#: pictures, one test= line each (selectmedia.py's contract: a PNG up to the screen, a GIF
+#: under the menu's own GIF caps, a WAV).  No card owns them, so they count with the
+#: menu-wide sounds; at most TEST_MAX (codeselect conf.h CONF_MAX_TESTS).
+TEST_MAX = 64
+TEST_LABEL_MAX = 199
+#: THE TEST CARD's lists (PAD-1279): a test item with a kind is a test_<kind>= line
+TEST_KINDS = ("image", "video", "scene", "sound")
+#: where a TEST CARD's own files go: its p3, mounted at /games before the menu runs
+TESTCARD_TEST_SUBDIR = "testcard"
+PADV_MAGIC = b"PADVJPG1"
 P2_FREE_MARGIN = 8 << 20                      # never fill p2 to the last block
 #: images.conf v2: a device is '/dev/mmcblk0pN' (parts layout),
 #: '/dev/mmcblk0pN:<subdir>' (multi layout) or the emulator's 'pN' / 'pN:<subdir>' tokens.
@@ -318,8 +335,10 @@ CONF_LINE_MAX = 1000
 #: here for the same reason (the selector shrinks and then cuts it to the glass anyway,
 #: so this is about the file, not about how much fits on the LCD).
 CONF_STR_MAX = 199
+#: PAD-1309: images.conf back_hold= - the longest hold (seconds) the builders write
+BACK_HOLD_MAX = 60
 DEVICE_RE = re.compile(r"^(/dev/mmcblk0p|p)(\d+)(?::([A-Za-z0-9._-]+))?$")
-CONF_KEYS = ("default", "timeout", "heading", "text_size", "counter", "countdown_word", "footer", "font",
+CONF_KEYS = ("default", "timeout", "back_hold", "heading", "text_size", "counter", "countdown_word", "footer", "font",
              "sound_move", "sound_confirm", "volume",
              "mixer_volume", "media", "theme", "machine_volume")
 
@@ -1235,15 +1254,50 @@ def make_store_plan(primary, extras, size_class=None, store_sectors=None, subdir
     if size_class == "content":
         grow = int(sum(unique[1:]) * (1 + STORE_META_SLACK)) + STORE_HEADROOM
         cnt = c3 + align_up((grow + SECTOR - 1) // SECTOR)
-    elif size_class is None:
-        _cls, cnt = store_class_for(P, XG, primary, list(extras), subs, need, work_sectors)
     else:
-        if size_class not in STERN_SIZES:
+        if size_class is not None and size_class not in STERN_SIZES:
             raise Refused("--size %r: one of %s" % (size_class, "/".join(STORE_SIZES)))
-        cnt = store_sectors_for_class(P, XG, primary, list(extras), subs, size_class, work_sectors)
-        if cnt * SECTOR < need:
-            raise Refused("--size %s: the images' unique content needs %s of p3 and the class leaves %s"
-                          % (size_class, _gb(need), _gb(cnt * SECTOR)))
+
+        def fit(need_, work_):
+            if size_class is None:
+                return store_class_for(P, XG, primary, list(extras), subs, need_, work_)
+            cnt_ = store_sectors_for_class(P, XG, primary, list(extras), subs, size_class, work_)
+            if cnt_ * SECTOR < need_:
+                raise Refused("--size %s: the images' unique content needs %s of p3 and the class leaves %s"
+                              % (size_class, _gb(need_), _gb(cnt_ * SECTOR)))
+            return size_class, cnt_
+        try:
+            cls, cnt = fit(need, work_sectors)
+            refused = None
+        except Refused as exc:
+            cls, cnt, refused = None, None, exc
+        # PAD-1055: THE DELTAS' WORK PARTITION CAN COST A CARD SIZE.  The store can never be
+        # smaller than the primary's own p3, and a stock 16G image's p3 fills the 16G class
+        # to the last sector - so the p7 the deltas need puts the card over, though the same
+        # files stored whole fit in that p3's free space with gigabytes to spare (an X-Men
+        # stock card + a custom variant: 32G with deltas, 16G without).  Plan it both ways
+        # and keep the deltas only when they do not make the card bigger (or refused).
+        if work_sectors:
+            whole = [{} for _m in mans]
+            w_unique, w_shared = ts.dedup_costs(mans, whole)
+            w_need = int((meta + sum(w_unique)) * (1 + STORE_META_SLACK)) + STORE_HEADROOM
+            try:
+                w_cls, w_cnt = fit(w_need, None)
+            except Refused:
+                w_cls = None
+            order = list(STERN_SIZES)
+            if w_cls is not None and (cls is None or order.index(w_cls) < order.index(cls)):
+                saved = sum(w_unique) - sum(unique)
+                say("deltas: skipped - the %s work partition they need %s; every file "
+                    "stored whole (%s more in p3) fits %s"
+                    % (_gb(work_sectors * SECTOR),
+                       ("puts the card over %s" % size_class) if size_class else
+                       ("needs a %s card" % cls) if cls else "puts the card past the biggest size",
+                       _gb(saved), w_cls))
+                deltas, work_sectors, unique, shared, need = whole, None, w_unique, w_shared, w_need
+                cls, cnt, refused = w_cls, w_cnt, None
+        if refused is not None:
+            raise refused
     plan = Plan(P, XG, primary, list(extras), "store", multi_subdirs=subs, store_sectors=cnt, work_sectors=work_sectors)
     plan.manifests = mans
     plan.store_unique = unique
@@ -1624,6 +1678,40 @@ def has_hook(text):
 
 
 # ============================================================================= images.conf
+def test_parts(t):
+    """A test item as the code passes it - a name, or (file, label[, kind[, sound]]) -
+    -> (file, label, kind or None, sound or None)."""
+    if isinstance(t, str):
+        return t, "", None, None
+    t = tuple(t) + (None,) * 4
+    return t[0], t[1] or "", t[2] or None, t[3] or None
+
+
+def conf_test_lines(tests):
+    """[(file, label[, kind[, sound]])] -> the `test=<file>|<label>` lines (PAD-1279), or
+    `test_<kind>=` for a TEST CARD's own lists, refusing what the selector would drop: more
+    than TEST_MAX, a name that is not a flat media name, a label with a '|' or a line break
+    or longer than the selector keeps, a kind it has no list for."""
+    tests = list(tests or [])
+    if len(tests) > TEST_MAX:
+        raise Refused("images.conf: %d test pictures; the menu takes at most %d" % (len(tests), TEST_MAX))
+    out = []
+    for k, t in enumerate(tests):
+        name, label, kind, _sound = test_parts(t)
+        if kind is not None and kind not in TEST_KINDS:
+            raise Refused("images.conf: test item %d's kind %r is not one of %s" % (k, kind, ", ".join(TEST_KINDS)))
+        name = _media_name_ok(name, "test picture %d" % k)
+        if not name:
+            raise Refused("images.conf: test picture %d names no file" % k)
+        label = (label or "").strip()
+        if "|" in label or "\n" in label or "\r" in label or len(label.encode("utf-8")) > TEST_LABEL_MAX:
+            raise Refused("images.conf: test picture %d's label %r: one line, at most %d bytes, no '|'"
+                          % (k, label[:40], TEST_LABEL_MAX))
+        key = "test_%s" % kind if kind else "test"
+        out.append("%s=%s|%s" % (key, name, label) if label else "%s=%s" % (key, name))
+    return out
+
+
 def _media_name_ok(name, what):
     """A media file name as it goes into a conf field: flat, ^[A-Za-z0-9._-]+$ (so never a '|',
     a ':' or a '/'), or empty."""
@@ -1683,6 +1771,34 @@ def _int_range(val, key, lo, hi):
     if not (lo <= v <= hi):
         raise Refused("images.conf: %s=%d is outside %d..%d" % (key, v, lo, hi))
     return v
+
+
+#: EDITIONS, NO MENU (PAD-495; images.conf edition=<store>|<key>|<n>): every image is an edition
+#: of one game, in order, and the game's own EDITION setting (values 1..n, which each edition's
+#: Write put in its operator menu - plugins/stern/editions.py) picks the one that boots at the
+#: next power-up, read off the same /data/nv/<title>/NVM mirror as the machine's volume.  The
+#: menu never shows.  The first selector that reads the key:
+SELECTOR_EDITION_VERSION = (3, 2)
+
+
+def check_edition(ed, nimages=None):
+    """The edition contract for images.conf, validated: None, or {"store": str, "key": 40 hex,
+    "values": n} with n == the image count when that is given."""
+    if ed is None:
+        return None
+    if not isinstance(ed, dict):
+        raise Refused("edition must be a dict with store/key/values, not %r" % (ed,))
+    store = str(ed.get("store") or "").strip()
+    if not store or "|" in store or "\n" in store:
+        raise Refused("edition: the store %r is empty or holds '|' or a newline" % store)
+    key = str(ed.get("key") or "").strip().lower()
+    if not re.match(r"^[0-9a-f]{40}$", key):
+        raise Refused("edition: the key must be 40 hex digits (SHA1 of the caption), not %r" % key)
+    values = _int_range(ed.get("values"), "edition values", 2, MAX_IMAGES)
+    if nimages is not None and values != nimages:
+        raise Refused("edition: the game's EDITION offers %d editions and the card has %d images; "
+                      "every image is one edition, in order" % (values, nimages))
+    return dict(store=store, key=key, values=values)
 
 
 def check_machine_volume(mv):
@@ -1838,7 +1954,8 @@ def render_images_conf(devices, titles=None, subtitles=None, default=0, timeout=
                        media_dir=None, theme=None, colors=None, machine_volume=None, debug_log=False,
                        groups=None, default_card=None, heading=None, text_size=None,
                        counter=None, countdown_word=None, footer=None, scores=None,
-                       colours=None, settings=None):
+                       colours=None, settings=None, edition=None, hiscores=None, tests=None,
+                       testcard=False, back_hold=None, test_dir=None):
     """images.conf text.  v2 (item 90 media): `media` is one (art, anim, music, confirm) per image
     (names relative to the media dir, '' = none; a 3-tuple without the confirm is accepted).  The
     line is written only as wide as it needs to be: 7 fields when any image names a confirm of its
@@ -1856,7 +1973,11 @@ def render_images_conf(devices, titles=None, subtitles=None, default=0, timeout=
     only).  `colours` is {image index: {"name", "gamma", "gain", "lift", "saturation"}}, the colour
     profile each image's game was BUILT with in the shape the menu can adjust (PAD-307,
     :func:`tree_colour`): one `color_profile=` line each, which is what puts the SETTINGS tile in
-    the menu; `settings` ('on' / 'off', None = no key) is the tile's own switch."""
+    the menu; `settings` ('on' / 'off', None = no key) is the tile's own switch.  `edition`
+    (PAD-495, :func:`check_edition`) makes the card one of EDITIONS: no menu, the game's EDITION
+    setting picks the image; it takes no group and no image with high scores of its own.
+    `tests` (PAD-1279, :func:`conf_test_lines`) is [(media file, label)]: the card's own test
+    pictures, one `test=` line each, which also puts the SETTINGS tile in the menu."""
     devices = list(devices)
     if not devices:
         raise Refused("images.conf: no images")
@@ -1890,6 +2011,10 @@ def render_images_conf(devices, titles=None, subtitles=None, default=0, timeout=
         raise Refused("images.conf: default=%s is not an image index (0..%d)" % (default, len(devices) - 1))
     if int(timeout) < 0:
         raise Refused("images.conf: timeout must be >= 0")
+    # PAD-1309: seconds BACK held in a game restarts into the menu (0 = off); None = no key,
+    # which the selector reads as its own 3 s, so a card that never asked is what it was
+    if back_hold is not None:
+        back_hold = _int_range(back_hold, "back_hold", 0, BACK_HOLD_MAX)
     if volume is not None:
         volume = _int_range(volume, "volume", 0, 100)
     machine_volume = check_machine_volume(machine_volume)
@@ -1952,6 +2077,8 @@ def render_images_conf(devices, titles=None, subtitles=None, default=0, timeout=
         # their own, no image index resolves to the group
         out.append("default_card=%d" % int(default_card))
     out.append("timeout=%d" % int(timeout))
+    if back_hold is not None:
+        out.append("back_hold=%d" % back_hold)
     # THE HEADING.  None leaves the key out, so a card that never asked for one
     # is byte for byte what it always was and an older selector reads it; '' is
     # a CHOICE and writes 'heading=', which the selector reads as no line at all.
@@ -1977,6 +2104,13 @@ def render_images_conf(devices, titles=None, subtitles=None, default=0, timeout=
             raise Refused("scores: image %d is not on the card (%d images)" % (int(i), len(devices)))
         if name:
             out.append("scores=%d|%s" % (int(i), check_scores_name(name)))
+    # WHOSE HIGH-SCORE TABLE EACH IMAGE PLAYS INTO (PAD-1194): {index: group}, apart from where its
+    # settings are; none at all on a card where every image's scores go with its settings
+    for i, name in sorted((hiscores or {}).items()):
+        if not 0 <= int(i) < len(devices):
+            raise Refused("hiscores: image %d is not on the card (%d images)" % (int(i), len(devices)))
+        if name:
+            out.append("hiscores=%d|%s" % (int(i), check_scores_name(name, "hiscores")))
     # PAD-307: what each adjustable image's game was built with, in index order; none at all on a
     # card with no such image (byte for byte what it was)
     for i, col in sorted((colours or {}).items()):
@@ -1985,6 +2119,23 @@ def render_images_conf(devices, titles=None, subtitles=None, default=0, timeout=
         out.append(conf_colour_line(int(i), col))
     if settings is not None:
         out.append("settings=%s" % check_settings(settings))
+    if test_dir:
+        if "\n" in test_dir or not test_dir.startswith("/"):
+            raise Refused("images.conf: test_dir %r is not an absolute path" % test_dir)
+        out.append("test_dir=%s" % test_dir)
+    out.extend(conf_test_lines(tests))
+    if testcard:
+        out.append("testcard=on")
+    # PAD-495: an editions card - one line, none at all on any other card
+    edition = check_edition(edition, len(devices))
+    if edition:
+        if groups:
+            raise Refused("edition: an editions card has no menu, so it has no random card either")
+        if any(name for name in (scores or {}).values()):
+            raise Refused("edition: every edition shares the game's settings store, or the "
+                          "EDITION an operator sets under one is not the one the next power-up "
+                          "reads; take the images' own settings off (a high-score table of its own is fine)")
+        out.append("edition=%s|%s|%d" % (edition["store"], edition["key"], edition["values"]))
     if font:
         out.append("font=%s" % font)
     if sound_move:
@@ -2001,7 +2152,7 @@ def render_images_conf(devices, titles=None, subtitles=None, default=0, timeout=
         out.append("mixer_volume=%d" % mixer_volume)
     if media_dir:
         out.append("media=%s" % media_dir)
-    elif any_media or sound_move or sound_confirm:
+    elif any_media or sound_move or sound_confirm or tests:
         out.append("media=%s" % MEDIA_DIR)
     if theme:
         out.append("theme=%s" % theme)
@@ -2046,11 +2197,11 @@ def parse_images_conf(text):
     if isinstance(text, bytes):
         text = text.decode("utf-8", "replace")
     conf = {"images": [], "media": [], "groups": [], "default": 0, "default_card": None,
-            "timeout": 15, "heading": None, "text_size": None,
+            "timeout": 15, "back_hold": None, "heading": None, "text_size": None,
             "counter": None, "countdown_word": None, "footer": None, "font": None,
             "sound_move": None, "sound_confirm": None, "volume": None, "mixer_volume": None, "media_dir": None,
-            "theme": None, "colors": {}, "machine_volume": None, "debug_log": None, "scores": {},
-            "colours": {}, "settings": None}
+            "theme": None, "colors": {}, "machine_volume": None, "debug_log": None, "scores": {}, "hiscores": {},
+            "colours": {}, "settings": None, "edition": None, "tests": [], "testcard": False}
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -2090,7 +2241,7 @@ def parse_images_conf(text):
                 conf["default_card"] = int(val.strip())
             except ValueError:
                 raise Refused("images.conf: bad default_card=%r" % val)
-        elif key in ("default", "timeout"):
+        elif key in ("default", "timeout", "back_hold"):
             try:
                 conf[key] = int(val.strip())
             except ValueError:
@@ -2128,6 +2279,13 @@ def parse_images_conf(text):
                 conf["scores"][int(idx.strip())] = check_scores_name(name)
             except (ValueError, Refused):
                 pass
+        elif key == "hiscores":
+            # PAD-1194: dropped (its scores go with its settings) when select.sh would refuse it too
+            idx, _sep, name = val.partition("|")
+            try:
+                conf["hiscores"][int(idx.strip())] = check_scores_name(name, "hiscores")
+            except (ValueError, Refused):
+                pass
         elif key == "color_profile":
             # PAD-307: BEFORE the color_<role> theme keys below.  A line the selector would drop
             # is dropped here too (that image is then not adjustable)
@@ -2136,6 +2294,24 @@ def parse_images_conf(text):
                 conf["colours"][idx] = col
             except (ValueError, Refused):
                 pass
+        elif key == "edition":
+            # PAD-495: a line the selector would not read is dropped here too (the menu shows)
+            store, _sep, rest = val.strip().partition("|")
+            hexkey, _sep, n = rest.partition("|")
+            try:
+                conf["edition"] = check_edition({"store": store, "key": hexkey, "values": n})
+            except (ValueError, Refused):
+                pass
+        elif key == "testcard":
+            conf["testcard"] = val.strip().lower() == "on"
+        elif key == "test" or key[5:] in TEST_KINDS and key.startswith("test_"):
+            name, _sep, label = val.partition("|")
+            if name.strip() and MEDIA_NAME_RE.match(name.strip()):
+                kind = key[5:] if key != "test" else None
+                conf["tests"].append((name.strip(), label.strip(), kind) if kind
+                                     else (name.strip(), label.strip()))
+        elif key == "test_dir":
+            conf["test_dir"] = val.strip() or None
         elif key == "settings":
             conf["settings"] = val.strip().lower() or None
             if conf["settings"] not in SETTINGS_WORDS:
@@ -2241,6 +2417,26 @@ def wav_info(data):
     return None
 
 
+def padv_check(path, name):
+    """A TEST CARD video (codeselect video.h) by its header and index -> 'padv WxH N frames'."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        hd = f.read(32)
+        if len(hd) != 32 or hd[:8] != PADV_MAGIC:
+            raise Refused("media %s: not a test video (.padv)" % name)
+        w, h, fps1000, n, _a, _b = struct.unpack("<6I", hd[8:])
+        if not (0 < w <= 1360 and 0 < h <= 768) or not 0 < n <= 216000 or not 1000 <= fps1000 <= 120000:
+            raise Refused("media %s: %dx%d, %d frames at %.3f fps: not one the menu plays"
+                          % (name, w, h, n, fps1000 / 1000.0))
+        idx = f.read(4 * (n + 1))
+    if len(idx) != 4 * (n + 1):
+        raise Refused("media %s: the frame index is cut short" % name)
+    off = struct.unpack("<%dI" % (n + 1), idx)
+    if off[0] < 32 + 4 * (n + 1) or off[-1] > size or any(b <= a for a, b in zip(off, off[1:])):
+        raise Refused("media %s: the frame index is broken" % name)
+    return "padv %dx%d %d frames" % (w, h, n)
+
+
 def check_media_file(path, kind):
     """Refuse a media file the selector could not use; -> (kind word, size).  `kind` is
     'art' (PNG <= 1360x768), 'anim' (GIF <= 10 MB, 512x288, 150 frames) or 'wav' (RIFF
@@ -2251,6 +2447,8 @@ def check_media_file(path, kind):
     if not os.path.isfile(path):
         raise Refused("media %s: %s does not exist" % (name, path))
     size = os.path.getsize(path)
+    if kind == "test" and name.lower().endswith(".padv"):
+        return padv_check(path, name), size        # never read whole: hundreds of MB
     with open(path, "rb") as f:
         data = f.read()
     if kind == "art":
@@ -2282,6 +2480,11 @@ def check_media_file(path, kind):
             raise Refused("media %s: WAV is fmt %d / %d ch / %d Hz / %d-bit; the selector plays pcm_s16le %d Hz 1-2 ch only"
                           % (name, tag, ch, rate, bits, WAV_RATE))
         return "wav %d Hz %d ch" % (rate, ch), size
+    if kind == "test":
+        ext = name.lower().rsplit(".", 1)[-1]
+        if ext in ("png", "gif", "wav"):
+            return check_media_file(path, {"png": "art", "gif": "anim", "wav": "wav"}[ext])
+        raise Refused("media %s: a test picture is a .png, .gif, .padv or .wav" % name)
     raise Refused("media %s: unknown kind %r" % (name, kind))
 
 
@@ -2307,12 +2510,15 @@ def read_media_manifest(media_dir):
     return man
 
 
-def plan_media(media_dir, n_images):
+def plan_media(media_dir, n_images, tests_apart=False):
     """Validate DIR/media.json against a card with `n_images` images and check every referenced
     file -> {'rows': [(art, anim, music, confirm)], 'group_rows': [(art, anim)],
     'sound_move', 'sound_confirm', 'volume', 'mixer_volume',
     'files': OrderedDict name -> source path, 'total': bytes, 'kinds': {name: kind word}}.
-    Only referenced files are staged; a missing, misnamed, malformed or over-budget one refuses."""
+    Only referenced files are staged; a missing, misnamed, malformed or over-budget one refuses.
+    tests_apart (a TEST CARD, PAD-1279): the test items with a kind and their sounds are not
+    staged with the media nor counted in its budget - they are 'test_files' {name: path},
+    'test_bytes', for the card's own p3."""
     man = read_media_manifest(media_dir)
     imgs = man["images"]
     if len(imgs) != n_images:
@@ -2362,7 +2568,42 @@ def plan_media(media_dir, n_images):
                            take(e.get("anim"), "anim", "groups[%d].anim" % gi),
                            take(e.get("music"), "wav", "groups[%d].music" % gi),
                            take(e.get("confirm"), "wav", "groups[%d].confirm" % gi)))
-    out = {"rows": rows, "group_rows": group_rows,
+    # THE TEST PICTURES (PAD-1279): [{"file", "label"}], in the menu's order
+    tsrc = man.get("tests")
+    if tsrc is not None and not isinstance(tsrc, list):
+        raise Refused("%s: 'tests' must be a list" % MEDIA_MANIFEST)
+    tests = []
+    test_files = collections.OrderedDict()
+    test_bytes = 0
+    for k, e in enumerate(tsrc or []):
+        if not isinstance(e, dict):
+            raise Refused("%s: tests[%d] must be an object" % (MEDIA_MANIFEST, k))
+        kind = e.get("kind") or None
+        if kind is not None and kind not in TEST_KINDS:
+            raise Refused("%s: tests[%d].kind %r is not one of %s" % (MEDIA_MANIFEST, k, kind, ", ".join(TEST_KINDS)))
+        if tests_apart and kind:
+            names = []
+            for key, ck in (("file", "test"), ("sound", "wav")):
+                nm = e.get(key)
+                if not nm:
+                    names.append(None)
+                    continue
+                nm = _media_name_ok(nm, "tests[%d].%s" % (k, key))
+                src = os.path.join(media_dir, nm)
+                if nm not in test_files:
+                    _word, size = check_media_file(src, ck)
+                    test_files[nm] = src
+                    test_bytes += size
+                names.append(nm)
+            name, sound = names
+        else:
+            name = take(e.get("file"), "test", "tests[%d].file" % k)
+            sound = take(e.get("sound"), "wav", "tests[%d].sound" % k) or None
+        if not name:
+            raise Refused("%s: tests[%d] names no file" % (MEDIA_MANIFEST, k))
+        tests.append((name, str(e.get("label") or ""), kind, sound))
+    out = {"rows": rows, "group_rows": group_rows, "tests": tests,
+           "test_files": test_files, "test_bytes": test_bytes,
            "sound_move": take(man.get("sound_move"), "wav", "sound_move") or None,
            "sound_confirm": take(man.get("sound_confirm"), "wav", "sound_confirm") or None,
            "volume": None, "mixer_volume": None, "files": files, "total": total, "kinds": kinds,
@@ -2392,8 +2633,11 @@ def media_costs(media):
         names = [n for n in row if n and n in sizes]
         big = max(names, key=lambda n: sizes[n]) if names else None
         rows.append((i, sum(sizes[n] for n in names), big, sizes[big] if big else 0))
-    shared = sum(sizes[n] for n in (media.get("sound_move"), media.get("sound_confirm"))
-                 if n and n in sizes)
+    # the menu-wide sounds and (PAD-1279) the test pictures: no card owns them
+    shared_names = [media.get("sound_move"), media.get("sound_confirm")] + \
+        [n for t in (media.get("tests") or []) for n in (test_parts(t)[0], test_parts(t)[3])
+         if n not in (media.get("test_files") or {})]
+    shared = sum(sizes[n] for n in set(shared_names) if n and n in sizes)
     rows.sort(key=lambda r: -r[1])
     return rows, shared
 
@@ -2501,6 +2745,41 @@ def check_output_path(path, inputs, force=False, must_exist=False):
     elif os.path.exists(path) and not force:
         raise Refused("%s exists; pass --force to overwrite it" % path)
     return path
+
+
+def card_write_blocker(card):
+    """A sentence when the card exists but cannot be opened for writing, else None (PAD-776).
+    Asked before an in-place write does any work: otherwise the first open for writing comes
+    minutes in, as a bare PermissionError.  On a Windows drive under WSL both causes are
+    EACCES, and the mode bits tell them apart: the Windows Read-only attribute clears every
+    write bit; a file another Windows program holds open without sharing writes keeps them."""
+    try:
+        with open(card, "r+b"):
+            return None
+    except FileNotFoundError:
+        return None                     # check_output_path names that
+    except OSError as e:
+        name = os.path.basename(card)
+        try:
+            no_write = not (os.stat(card).st_mode & 0o222)
+        except OSError:
+            no_write = False
+        if no_write:
+            return ("%s is marked read-only, so it cannot be written in place; untick Read-only "
+                    "in the file's Properties and try again" % name)
+        if isinstance(e, PermissionError):
+            return ("%s is open in another program (an SD card writer, a disk image tool, "
+                    "an emulator?), which stops it being written; close that program and try "
+                    "again" % name)
+        return "%s cannot be opened for writing (%s)" % (name, e.strerror or e)
+
+
+def check_card_writable(card):
+    """Refused with :func:`card_write_blocker`'s sentence when the card cannot be written."""
+    why = card_write_blocker(card)
+    if why:
+        raise Refused(why)
+    return card
 
 
 # ============================================================================= copying
@@ -2762,7 +3041,80 @@ def debugfs_stat(ref, path):
     m = re.search(r'Fast link dest: "([^"]*)"', txt)
     if m:
         info["link"] = m.group(1)
+    m = re.search(r"Type:\s+(\w+)", txt)
+    if m:
+        info["type"] = m.group(1)
     return info
+
+
+# ---- links on p2 (PAD-742) ---------------------------------------------------------------------
+# Stern's own images carry /etc/init.d/game and game_monitor as plain files, but a card that has
+# been on a machine can carry either as a LINK to the real script.  debugfs's cat and stat do not
+# follow the last link of a path: cat reads the link's target text as block numbers and fails
+# with "short read", and rm + write would replace the link with a file.  So every read and write
+# of those scripts goes to the file the link leads to, and the link stays as the card had it.
+#: How many links one path may pass through before it is called a loop (the kernel's own cap).
+LINK_HOPS = 40
+
+
+def resolve_link_path(path, readlink):
+    """`path` (absolute) with every link along it followed, the way the machine's kernel would.
+    `readlink(p)` -> the link's target, or None when p is not a link (or not there).  Pure.
+    Refused when the links go round more than LINK_HOPS times."""
+    parts = [c for c in path.split("/") if c]
+    done, hops = [], 0
+    while parts:
+        c = parts.pop(0)
+        if c == ".":
+            continue
+        if c == "..":
+            if done:
+                done.pop()
+            continue
+        target = readlink("/" + "/".join(done + [c]))
+        if target is None:
+            done.append(c)
+            continue
+        hops += 1
+        if hops > LINK_HOPS:
+            raise Refused("%s: more than %d links on the way (a loop)" % (path, LINK_HOPS))
+        if target.startswith("/"):
+            done = []
+        parts = [x for x in target.split("/") if x] + parts
+    return "/" + "/".join(done)
+
+
+def _debugfs_stat_text(ref, path):
+    """debugfs's stat of `path`, or "" when it is not there (no exception: a missing path is an
+    answer here, not an error)."""
+    r = subprocess.run(["debugfs", "-R", "stat " + dq(path), ref], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    txt = r.stdout.decode("utf-8", "replace")
+    return txt if r.returncode == 0 and "Inode:" in txt else ""
+
+
+def debugfs_readlink(ref, path):
+    """The target of the link at `path`, or None when `path` is no link (or is not there).  A
+    fast link's target is in its inode; a longer one's is its data, which cat reads."""
+    txt = _debugfs_stat_text(ref, path)
+    if not re.search(r"Type:\s+symlink", txt):
+        return None
+    m = re.search(r'Fast link dest: "([^"]*)"', txt)
+    if m:
+        return m.group(1)
+    return debugfs_cat(ref, path).decode("utf-8", "replace")
+
+
+def p2_file(ref, path):
+    """The regular file on the rootfs that `path` IS: `path` itself on a stock card, or the file
+    its link leads to (PAD-742) - the one to read and rewrite.  Refused, naming the link, when
+    it leads to no file on p2 (into another partition's mount point, or nowhere)."""
+    real = resolve_link_path(path, lambda p: debugfs_readlink(ref, p))
+    if re.search(r"Type:\s+regular", _debugfs_stat_text(ref, real)):
+        return real
+    if real == path:
+        raise Refused("%s is missing from the rootfs (p2), or is not a file" % path)
+    raise Refused("%s on this card is a link to %s, which is not a file on the rootfs (p2) - the "
+                  "boot menu can only change a script that is on p2" % (path, real))
 
 
 def dq(path):
@@ -2800,7 +3152,12 @@ def debugfs_write_script(image, commands):
 def e2fsck(ref):
     """-> (rc, output); rc 0 is clean."""
     r = subprocess.run(["e2fsck", "-fn", ref], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return r.returncode, r.stdout.decode("utf-8", "replace")
+    txt = r.stdout.decode("utf-8", "replace")
+    if "The physical size of the device is" in txt:
+        # -n answers "Abort? no" and can go on to call the filesystem clean (rc 0); every block
+        # past the partition's end then fails to read later as a bare "short read" (PAD-742)
+        return max(r.returncode, 4), "the filesystem is bigger than its partition:\n" + txt
+    return r.returncode, txt
 
 
 def e2fsck_blocks(txt):
@@ -2873,6 +3230,16 @@ def check_selector_reads_conf(binary, conf_text):
     the selector or ignored by one that does not know it, which is what "unknown keys are
     ignored so the file can grow" buys.  A group is different because dropping it does not
     degrade the menu, it changes which images the card offers at all."""
+    if "\nedition=" in "\n" + conf_text:
+        # PAD-495: an older menu ignores the key and shows itself, so the card would not be the
+        # editions card that was asked for
+        ver = selector_file_version(binary)
+        if ver is None or ver < SELECTOR_EDITION_VERSION:
+            raise Refused("this card needs codeselect %s or later to boot by the game's EDITION "
+                          "setting, and %s is %s; rebuild the selector with %s"
+                          % (".".join(str(x) for x in SELECTOR_EDITION_VERSION), binary,
+                             "unversioned" if ver is None else ".".join(str(x) for x in ver),
+                             os.path.join(HERE, "buildselect.sh")))
     if "\ngroup=" not in "\n" + conf_text:
         return
     ver = selector_file_version(binary)
@@ -2886,7 +3253,8 @@ def check_selector_reads_conf(binary, conf_text):
                          ".".join(str(x) for x in ver), os.path.join(HERE, "buildselect.sh")))
 
 
-def stage_selector(selector_dir, stage, conf_text, hooked_game, media_files=None, manifests=None):
+def stage_selector(selector_dir, stage, conf_text, hooked_game, media_files=None, manifests=None,
+                   game_path=GAME_SCRIPT):
     """Copy the selector files into `stage` with their FINAL modes (debugfs write copies the source
     mode).  `media_files` ({name: source path}, from plan_media) go to stage/media/<name> and
     MEDIA_DIR/<name> on the card, 0644.  `manifests` ({name: text or bytes}, from
@@ -2945,11 +3313,11 @@ def stage_selector(selector_dir, stage, conf_text, hooked_game, media_files=None
     with open(game, "wb") as f:
         f.write(hooked_game.encode("utf-8"))
     os.chmod(game, 0o755)
-    items.append((game, GAME_SCRIPT, 0o755))
+    items.append((game, game_path, 0o755))           # the script itself, past any link (PAD-742)
     return items
 
 
-def inject_commands(items, existing, times, existing_media=None):
+def inject_commands(items, existing, times, existing_media=None, game_path=GAME_SCRIPT):
     """The debugfs -w script for one injection (pure, so it is testable without debugfs).
 
     items           [(staged native path, card path, mode)] from stage_selector
@@ -2959,6 +3327,7 @@ def inject_commands(items, existing, times, existing_media=None):
     existing_media  the names inside MEDIA_DIR when that directory is to be REPLACED (each is
                     rm'd, then the directory rmdir'd - debugfs's rm cannot take a directory);
                     None leaves an existing media directory alone
+    game_path       where the game script really is (p2_file: past a link, PAD-742)
     MEDIA_DIR is mkdir'd (+ 040755 root:root) exactly when an item lands in it.
     Every path is double-quoted (dq): the staged path is a NATIVE path and may hold a space."""
     cmds = []
@@ -2971,7 +3340,7 @@ def inject_commands(items, existing, times, existing_media=None):
         for name in existing_media:
             cmds.append("rm " + dq(MEDIA_DIR + "/" + name))
         cmds.append("rmdir " + dq(MEDIA_DIR))
-    cmds.append("rm " + dq(GAME_SCRIPT))
+    cmds.append("rm " + dq(game_path))
     media_items = [it for it in items if it[1].startswith(MEDIA_DIR + "/")]
     if media_items:
         cmds.append("mkdir " + dq(MEDIA_DIR))
@@ -2990,7 +3359,7 @@ def inject_commands(items, existing, times, existing_media=None):
         cmds.append("set_inode_field %s gid 0" % dq(card))
     for k in ("atime", "ctime", "mtime"):
         if k in times:
-            cmds.append("set_inode_field %s %s @%d" % (dq(GAME_SCRIPT), k, times[k]))
+            cmds.append("set_inode_field %s %s @%d" % (dq(game_path), k, times[k]))
     return cmds
 
 
@@ -3070,8 +3439,9 @@ def mode_set_commands(items, existing, need_padmode_dir, monitor=None):
     under MODES_DIR, or None when there is none; every one is removed first, so the card holds
     exactly the sets asked for.  MODES_DIR/none is always made (the empty set an image with no
     modes of its own is given).  `need_padmode_dir` mkdirs PADMODE_DIR (the mountpoint the bind
-    needs on a card whose primary carries no modes); `monitor` = (staged path, times) rewrites
-    GAME_MONITOR with the preload hook, its clocks put back."""
+    needs on a card whose primary carries no modes); `monitor` = (staged path, times[, path])
+    rewrites GAME_MONITOR - or `path`, the file it links to (PAD-742) - with the preload hook,
+    its clocks put back."""
     cmds = []
     for sub, names in sorted((existing or {}).items()):
         for n in names:
@@ -3094,13 +3464,14 @@ def mode_set_commands(items, existing, need_padmode_dir, monitor=None):
         cmds += ["set_inode_field %s mode 0%o" % (dq(card), statmod.S_IFREG | mode),
                  "set_inode_field %s uid 0" % dq(card), "set_inode_field %s gid 0" % dq(card)]
     if monitor is not None:
-        staged, times = monitor
-        cmds += ["rm " + dq(GAME_MONITOR), "write %s %s" % (dq(staged), dq(GAME_MONITOR)),
-                 "set_inode_field %s mode 0100755" % dq(GAME_MONITOR),
-                 "set_inode_field %s uid 0" % dq(GAME_MONITOR), "set_inode_field %s gid 0" % dq(GAME_MONITOR)]
+        staged, times = monitor[:2]
+        mon = dq(monitor[2] if len(monitor) > 2 else GAME_MONITOR)
+        cmds += ["rm " + mon, "write %s %s" % (dq(staged), mon),
+                 "set_inode_field %s mode 0100755" % mon,
+                 "set_inode_field %s uid 0" % mon, "set_inode_field %s gid 0" % mon]
         for k in ("atime", "ctime", "mtime"):
             if k in times:
-                cmds.append("set_inode_field %s %s @%d" % (dq(GAME_MONITOR), k, times[k]))
+                cmds.append("set_inode_field %s %s @%d" % (mon, k, times[k]))
     return cmds
 
 
@@ -3129,6 +3500,46 @@ def _existing_mode_sets(p2_image):
     return out
 
 
+def mode_sets_moved(card, mode_sets):
+    """The images (1..N) whose custom modes on the card are not the ones their source carries
+    now (PAD-1386) - an image swapped for another build, or a source whose modes were edited,
+    keeps the OLD image's modes until the menu is injected again, and an update decides that
+    inject from the image list and the menu text alone.  Compared by name and bytes against
+    MODES_DIR/img<N> on the card's p2; an unreadable card counts every image as moved (an
+    inject too many costs seconds, a missed one runs the wrong modes)."""
+    if not mode_sets:
+        return []
+    try:
+        ref = select_ref(card)
+    except Exception:                                    # noqa: BLE001 - see above
+        return [i for i in range(1, len(mode_sets))]
+    return mode_sets_moved_on(ref, mode_sets)
+
+
+def mode_sets_moved_on(ref, mode_sets):
+    """:func:`mode_sets_moved` on a p2 already found (a debugfs reference)."""
+    try:
+        have = _existing_mode_sets(ref) or {}
+    except Exception:                                    # noqa: BLE001
+        return [i for i in range(1, len(mode_sets or []))]
+    moved = []
+    for i, ms in enumerate(mode_sets):
+        if i == 0:
+            continue
+        want = {n: v[0] for n, v in (ms or {}).items()} if carries_modes(ms) else {}
+        sub = "img%d" % i
+        names = sorted(have.get(sub) or [])
+        if names != sorted(want):
+            moved.append(i)
+            continue
+        try:
+            if any(debugfs_cat(ref, "%s/%s/%s" % (MODES_DIR, sub, n)) != want[n] for n in names):
+                moved.append(i)
+        except Exception:                                # noqa: BLE001
+            moved.append(i)
+    return moved
+
+
 def inject_mode_sets(p2_image, mode_sets, stage_dir):
     """Write images 1..N's own mode sets into p2 (MODES_DIR), and - when any extra image carries
     modes - make sure the rootfs can preload them: PADMODE_DIR exists (the bind's mountpoint)
@@ -3144,7 +3555,11 @@ def inject_mode_sets(p2_image, mode_sets, stage_dir):
     need_dir = bool(items) and not debugfs_exists(p2_image, PADMODE_DIR)
     monitor = None
     if items:
-        mon = debugfs_cat(p2_image, GAME_MONITOR)
+        try:
+            mpath = p2_file(p2_image, GAME_MONITOR)        # past a link (PAD-742)
+        except Refused:
+            mpath = None
+        mon = debugfs_cat(p2_image, mpath) if mpath else b""
         if not mon:
             raise Refused("an extra image carries custom modes but p2 has no %s to preload them from"
                           % GAME_MONITOR)
@@ -3156,7 +3571,7 @@ def inject_mode_sets(p2_image, mode_sets, stage_dir):
             p = os.path.join(stage_dir, "game_monitor")
             with open(p, "wb") as f:
                 f.write(hooked.encode("utf-8"))
-            monitor = (p, debugfs_stat(p2_image, GAME_MONITOR))
+            monitor = (p, debugfs_stat(p2_image, mpath), mpath)
     debugfs_write_script(p2_image, mode_set_commands(items, existing, need_dir, monitor))
     for staged, card, _mode in items:
         with open(staged, "rb") as f:
@@ -3171,6 +3586,46 @@ def inject_mode_sets(p2_image, mode_sets, stage_dir):
     if monitor is not None:
         say("%s hooked to preload the booted image's modes" % GAME_MONITOR)
     return items
+
+
+def ensure_menu_hook(p2_image, stage_dir):
+    """PAD-1309: give GAME_MONITOR the multi-boot preload block (modehook.MENU_HOOK_LINES), so
+    MENU_SO - and an image's own mode.so, when it has one - is preloaded into the game, its
+    clocks put back.  Already there: nothing written.  A card whose game_monitor is not the
+    stock loop keeps it, and the build says that card has no way back to the menu without a
+    power cycle - never a refusal: the menu itself still works.  -> True when hooked."""
+    import modehook
+    try:
+        mpath = p2_file(p2_image, GAME_MONITOR)            # past a link (PAD-742)
+    except Refused:
+        mpath = None
+    mon = debugfs_cat(p2_image, mpath) if mpath else b""
+    if not mon:
+        say("no %s on p2: holding BACK cannot restart this card into the menu" % GAME_MONITOR)
+        return False
+    if modehook.has_menu_hook(mon):
+        return True
+    try:
+        hooked = modehook.hook_game_monitor(mon.decode("utf-8", "replace"), menu=True)
+    except modehook.Refused as e:
+        say("%s - holding BACK cannot restart this card into the menu" % e)
+        return False
+    p = os.path.join(stage_dir, "game_monitor.menu")
+    with open(p, "wb") as f:
+        f.write(hooked.encode("utf-8"))
+    times = debugfs_stat(p2_image, mpath)
+    mon_q = dq(mpath)
+    cmds = ["rm " + mon_q, "write %s %s" % (dq(p), mon_q),
+            "set_inode_field %s mode 0100755" % mon_q,
+            "set_inode_field %s uid 0" % mon_q, "set_inode_field %s gid 0" % mon_q]
+    cmds += ["set_inode_field %s %s @%d" % (mon_q, k, times[k])
+             for k in ("atime", "ctime", "mtime") if k in times]
+    debugfs_write_script(p2_image, cmds)
+    if debugfs_cat(p2_image, mpath) != hooked.encode("utf-8"):
+        raise Refused("%s read back differs from the hooked copy" % mpath)
+    say("%s hooked: holding BACK on the coin door (Hold BACK, back_hold=) restarts the machine into the menu"
+        % GAME_MONITOR)
+    return True
 
 
 def inject_into_p2(p2_image, selector_dir, conf_text, stage_dir, media_files=None, replace_media=False,
@@ -3188,12 +3643,13 @@ def inject_into_p2(p2_image, selector_dir, conf_text, stage_dir, media_files=Non
     bs = ext_block_size(p2_image)
     free = (total - used) * bs
     margin = min(P2_FREE_MARGIN, total * bs // 20)          # 8 MiB, or 5% of a small (synthetic) p2
-    orig = debugfs_cat(p2_image, GAME_SCRIPT)
+    game = p2_file(p2_image, GAME_SCRIPT)
+    orig = debugfs_cat(p2_image, game)
     if not orig:
-        raise Refused("%s is empty or missing in p2" % GAME_SCRIPT)
-    times = debugfs_stat(p2_image, GAME_SCRIPT)
+        raise Refused("%s is empty or missing in p2" % game)
+    times = debugfs_stat(p2_image, game)
     hooked = hook_game_script(orig)
-    items = stage_selector(selector_dir, stage_dir, conf_text, hooked, media_files, manifests)
+    items = stage_selector(selector_dir, stage_dir, conf_text, hooked, media_files, manifests, game_path=game)
     existing = existing_media = None
     reclaim = len(orig)                                    # the game script is rm'd and rewritten
     if debugfs_exists(p2_image, SELECT_DIR):
@@ -3212,12 +3668,14 @@ def inject_into_p2(p2_image, selector_dir, conf_text, stage_dir, media_files=Non
     if staged_bytes > free + reclaim - margin:
         raise Refused("p2 has %d KB free (+ %d KB the re-injection frees) and the injection needs %d KB (+ %d KB margin)"
                       % (free >> 10, reclaim >> 10, staged_bytes >> 10, margin >> 10))
-    debugfs_write_script(p2_image, inject_commands(items, existing, times, existing_media))
+    debugfs_write_script(p2_image, inject_commands(items, existing, times, existing_media, game_path=game))
     if mode_sets is not None:
         # PAD-226: None leaves what the card holds (a menu-only inject); a list is the whole answer
         mdir = os.path.join(stage_dir, "modesets")
         os.makedirs(mdir, exist_ok=True)
         inject_mode_sets(p2_image, mode_sets, mdir)
+    if any(c == MENU_SO for (_s, c, _m) in items):
+        ensure_menu_hook(p2_image, stage_dir)
     rc, txt = e2fsck(p2_image)
     if rc != 0:
         raise Refused("p2 is not clean after injection (e2fsck rc=%d):\n%s" % (rc, txt))
@@ -3228,13 +3686,161 @@ def inject_into_p2(p2_image, selector_dir, conf_text, stage_dir, media_files=Non
         st = debugfs_stat(p2_image, card)
         if st.get("mode") != mode or st.get("uid") != 0 or st.get("gid") != 0:
             raise Refused("%s has mode %o uid %s gid %s after injection" % (card, st.get("mode", 0), st.get("uid"), st.get("gid")))
-    after = debugfs_stat(p2_image, GAME_SCRIPT)
+    after = debugfs_stat(p2_image, game)
     nmedia = len([1 for (_s, c, _m) in items if c.startswith(MEDIA_DIR + "/")])
     say("injected %d files (%d media, %d KB); %s hook %s; game script times %s; p2 had %d KB free" %
-        (len(items), nmedia, staged_bytes >> 10, GAME_SCRIPT, "present" if has_hook(hooked) else "MISSING",
+        (len(items), nmedia, staged_bytes >> 10, game, "present" if has_hook(hooked) else "MISSING",
          "kept" if all(after.get(k) == times.get(k) for k in ("atime", "ctime", "mtime") if k in times) else "changed",
          free >> 10))
     return [card for (_s, card, _m) in items]
+
+
+# ============================================================================= the test card
+#: A TEST CARD (PAD-1279): the boot menu's Settings screens and nothing else, on a card small
+#: enough to write in a minute.  p1 (boot) and p2 (the rootfs, with the selector injected) are
+#: copied from ANY Spike 2 card - the kernel and rootfs are the platform's, not the title's - and
+#: p3 (/games), p5 (/data) and p6 (/dump) are fresh, small and empty: fstab mounts all three by
+#: device, nothing at boot formats or needs them, and the only scripts that read /games (the
+#: game launcher and the updater, /etc/init.d/game's last section) run after the menu, which on a
+#: test card never hands over.  One pseudo-image, TEST CARD, carries the colour profile its
+#: Color correction starts from, so a profile can be tuned on the machine itself.
+TESTCARD_P3_MIB = 64
+TESTCARD_DATA_MIB = 128
+TESTCARD_DUMP_MIB = 128
+TESTCARD_TITLE = "TEST CARD"
+TESTCARD_SUBTITLE = "color profile and test pictures"
+TESTCARD_DEVICE = "/dev/mmcblk0p3"
+#: what Color correction starts from when no profile is given: the screen's own colours
+TESTCARD_NO_CHANGE = {"name": "No change", "gamma": [1.0, 1.0, 1.0], "gain": [1.0, 1.0, 1.0],
+                      "lift": [0.0, 0.0, 0.0], "saturation": 1.0}
+
+
+def parse_testcard_colour(spec):
+    """'GAMMA r g b|GAIN r g b|LIFT r g b|SATURATION[|NAME]' (the conf's own field order) ->
+    the colours dict conf_colour_line takes; '' / None = No change."""
+    if not spec:
+        return dict(TESTCARD_NO_CHANGE)
+    f = [x.strip() for x in str(spec).split("|")]
+    if len(f) < 4:
+        raise Refused("--color %r: expected 'gamma r g b|gain r g b|lift r g b|saturation[|name]'" % spec)
+    try:
+        trio = [[float(v) for v in f[k].split()] for k in range(3)]
+        sat = float(f[3])
+    except ValueError:
+        raise Refused("--color %r: the numbers do not read" % spec)
+    if any(len(t) != 3 for t in trio):
+        raise Refused("--color %r: three numbers each for gamma, gain and lift" % spec)
+    return {"name": f[4] if len(f) > 4 and f[4] else "Your own", "gamma": trio[0], "gain": trio[1],
+            "lift": trio[2], "saturation": sat}
+
+
+def testcard_p3_mib(test_bytes):
+    """The test card's p3 (/games): TESTCARD_P3_MIB, or room for its own test files - every
+    file rounded to a 4 KiB block, a tenth over for ext4's own tables, 16 MiB spare."""
+    need = int(test_bytes * 1.10) + (16 << 20)
+    return max(TESTCARD_P3_MIB, -(-need // (1 << 20)))
+
+
+def testcard_layout(geom, p3_mib=None):
+    """-> (prims [(type, start, count)] x3, ext_base, ext_count, logs [(ebr, start, count)] x2,
+    total bytes) for a test card made from `geom`'s p1 and p2."""
+    t1, s1, c1 = geom.part(1)
+    t2, s2, c2 = geom.part(2)
+    if t2 != 0x83:
+        raise Refused("p2 is type 0x%02x, not Linux: not a Spike 2 card" % t2)
+    mib = (1 << 20) // SECTOR
+    p3s = align_up(s2 + c2)
+    p3c = (p3_mib or TESTCARD_P3_MIB) * mib
+    ext = align_up(p3s + p3c)
+    logs = []
+    ebr = ext
+    for size in (TESTCARD_DATA_MIB, TESTCARD_DUMP_MIB):
+        start = ebr + ALIGN
+        logs.append((ebr, start, size * mib))
+        ebr = align_up(start + size * mib)
+    end = logs[-1][1] + logs[-1][2]
+    prims = [(t1, s1, c1), (t2, s2, c2), (0x83, p3s, p3c)]
+    return prims, ext, end - ext, logs, end * SECTOR
+
+
+def build_testcard(primary, out, selector_dir, media_dir=None, colour=None, workdir=None):
+    """Write the TEST CARD `out` from `primary`'s boot and rootfs, inject the selector with
+    testcard=on, the media set's test pictures and `colour` (parse_testcard_colour's dict).
+    -> the conf text written."""
+    need_tools("mke2fs", "debugfs", "e2fsck")
+    geom = Geometry.from_file(primary)
+    # its own test files ride on its p3, sized to them (the system partition has no room
+    # for whole videos); the menu's own media stay with the menu
+    media = plan_media(media_dir, 1, tests_apart=True) if media_dir else None
+    test_files = media["test_files"] if media else {}
+    p3_mib = testcard_p3_mib(media["test_bytes"] if media else 0)
+    prims, ext, ext_count, logs, total = testcard_layout(geom, p3_mib)
+    tmp = tempfile.mkdtemp(prefix="mkmulticard.testcard.", dir=workdir)
+    try:
+        say("test card: boot + rootfs from %s, %s in all" % (os.path.basename(primary), _gb(total)))
+        if os.path.exists(out):
+            os.remove(out)
+        with open(out, "wb") as f:
+            f.truncate(total)
+        # the first sectors (u-boot sits in front of p1), p1 and p2, as they are
+        p2_end = (prims[1][1] + prims[1][2]) * SECTOR
+        copy_range(primary, 0, out, 0, p2_end, "boot + rootfs", sparse=True)
+        for what, (start, count) in (("games", prims[2][1:]), ("data", logs[0][1:]), ("dump", logs[1][1:])):
+            # an empty tree each, but /games has the test files: mke2fs_games_tree removes it
+            empty = os.path.join(tmp, "empty_" + what)
+            os.mkdir(empty)
+            os.chmod(empty, 0o755)
+            if what == "games" and test_files:
+                sub = os.path.join(empty, TESTCARD_TEST_SUBDIR)
+                os.mkdir(sub)
+                os.chmod(sub, 0o755)
+                for nm, src in test_files.items():
+                    dst = os.path.join(sub, nm)
+                    try:
+                        os.link(src, dst)
+                    except OSError:
+                        shutil.copyfile(src, dst)
+                    os.chmod(dst, 0o644)
+                say("test card: %d test file%s on /games/%s (%s; p3 %d MiB)"
+                    % (len(test_files), "" if len(test_files) == 1 else "s", TESTCARD_TEST_SUBDIR,
+                       _gb(media["test_bytes"]), p3_mib))
+            img = os.path.join(tmp, what + ".img")
+            mke2fs_games_tree(empty, img, count, {}, what, label=what)
+            copy_range(img, 0, out, start * SECTOR, count * SECTOR, what, sparse=True, progress=None)
+            os.remove(img)
+        # the tables: p1 p2 p3 and the extended p4 holding p5 and p6
+        with open(out, "r+b") as f:
+            mbr = bytearray(geom.mbr)
+            mbr[0x1BE:0x1FE] = b"".join(entry(t, st, n) for t, st, n in prims) + entry(0x0F, ext, ext_count)
+            mbr[510:512] = b"\x55\xaa"
+            f.seek(0)
+            f.write(bytes(mbr))
+            for i, (ebr, start, count) in enumerate(logs):
+                eb = bytearray(SECTOR)
+                eb[0x1BE:0x1CE] = entry(0x83, start - ebr, count, chs_base=ebr)
+                if i + 1 < len(logs):
+                    nebr, nstart, ncount = logs[i + 1]
+                    eb[0x1CE:0x1DE] = entry(0x05, nebr - ext, nstart + ncount - nebr, chs_base=ext)
+                eb[510:512] = b"\x55\xaa"
+                f.seek(ebr * SECTOR)
+                f.write(bytes(eb))
+        conf = render_images_conf(
+            [TESTCARD_DEVICE], [TESTCARD_TITLE], [TESTCARD_SUBTITLE], 0, 0, SELECT_DIR + "/font.ttf",
+            media["rows"] if media else None, media["sound_move"] if media else None,
+            media["sound_confirm"] if media else None, media["volume"] if media else None,
+            colours={0: colour or dict(TESTCARD_NO_CHANGE)},
+            tests=media["tests"] if media else None, testcard=True,
+            test_dir=("/games/" + TESTCARD_TEST_SUBDIR) if test_files else None)
+        manifests = None
+        if media_dir:
+            with open(os.path.join(media_dir, MEDIA_MANIFEST), "rb") as f:
+                manifests = collections.OrderedDict([(MEDIA_MANIFEST, f.read())])
+        inject_card(out, selector_dir, conf, workdir=tmp, media_files=media["files"] if media else None,
+                    manifests=manifests)
+        say("test card: %s (%s; write it like any card image)" % (out, _gb(total)))
+        return conf
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def inject_card(card, selector_dir, conf_text, workdir=None, media_files=None, replace_media=False,
@@ -3289,6 +3895,72 @@ def plan_tree_source(plan, index):
         return path, source_part(path), None
     except Exception:
         return path, None, None
+
+
+def edition_for_plan(plan):
+    """images.conf's edition contract for the card in `plan` (PAD-495), or Refused with what is
+    wrong: every image a tree of the SAME game at the same version, each one's game program
+    carrying EDITION (plugins/stern/editions.py) for exactly as many editions as the card has
+    images and naming them alike, and every setting captioned alike - one settings store serves
+    them all, and a store that meets a different table may be reset by the game."""
+    _v, _s, _e, adjustments = _stern_plugins()      # puts the app beside us on sys.path, or refuses
+    from pinball_decryptor.plugins.stern import editions
+    n = len(plan.devices())
+    if n < 2:
+        raise Refused("editions: a card of editions needs two images or more")
+    first = None
+    for k in range(n):
+        path, part, subdir = plan_tree_source(plan, k)
+        if part is None:
+            raise Refused("editions: image %d (%s): no games partition located" % (k, path))
+        try:
+            f, r = open_source(path, part)
+            with f:
+                root = tree_root_inode(r, subdir)
+                title, _gpath, _gino, gnode = tree_game(r, root)
+                elf = r.read_file_bytes(gnode)
+        except Refused:
+            raise
+        except Exception as e:
+            raise Refused("editions: image %d (%s) could not be read (%s: %s)"
+                          % (k, path, type(e).__name__, e))
+        name = os.path.basename(str(path))
+        ed = editions.in_program(elf)
+        if ed is None:
+            raise Refused("editions: image %d (%s) has no EDITION in its menu; name the editions "
+                          "in its project and Write it again" % (k, name))
+        if ed["values"] != n:
+            raise Refused("editions: image %d (%s)'s EDITION offers %d editions and the card has "
+                          "%d images; every image is one edition, in order"
+                          % (k, name, ed["values"], n))
+        try:
+            table = adjustments.AdjustmentTable(elf)
+            captions = [adjustments.menu_label(table, i) for i in range(table.count)]
+        except Exception as e:
+            raise Refused("editions: image %d (%s)'s settings could not be read (%s)" % (k, name, e))
+        ident = game_identity(elf, title)
+        mine = {"title": title, "version": ident.get("version") if ident else None,
+                "help": ed["help"], "captions": captions, "path": name}
+        if first is None:
+            first = mine
+            continue
+        if (mine["title"], mine["version"]) != (first["title"], first["version"]):
+            raise Refused("editions: image %d (%s) is %s %s and image 0 (%s) is %s %s; the editions "
+                          "of a card are one game at one version"
+                          % (k, name, mine["title"], mine["version"] or "?", first["path"],
+                             first["title"], first["version"] or "?"))
+        if mine["help"] != first["help"]:
+            raise Refused("editions: image %d (%s) names the editions \"%s\" and image 0 \"%s\"; "
+                          "give every edition's project the same names, in the same order"
+                          % (k, name, mine["help"], first["help"]))
+        diff = [(a, b) for a, b in zip(mine["captions"], first["captions"]) if a != b]
+        if diff or len(mine["captions"]) != len(first["captions"]):
+            a, b = diff[0] if diff else ("(%d settings)" % len(mine["captions"]),
+                                         "(%d settings)" % len(first["captions"]))
+            raise Refused("editions: image %d (%s) captions a setting \"%s\" where image 0 says "
+                          "\"%s\"; the editions share one settings store, so every one must "
+                          "carry the same settings" % (k, name, a, b))
+    return {"store": MACHINE_VOLUME_STORE % first["title"], "key": editions.NVM_KEY, "values": n}
 
 
 def machine_volume_for(path, part, subdir=None):
@@ -3355,7 +4027,7 @@ def conf_for_plan(plan, args, existing=None, media=None, colours=None):
             raise Refused("--conf %s lists %r but the card holds %r" % (args.conf, devs, plan.devices()))
         return text
     ex = existing or {"images": [], "media": [], "groups": [], "default": None,
-                      "default_card": None, "timeout": None,
+                      "default_card": None, "timeout": None, "back_hold": None,
                       "heading": None, "text_size": None,
                       "counter": None, "countdown_word": None, "footer": None,
                       "font": None, "sound_move": None, "sound_confirm": None,
@@ -3376,8 +4048,17 @@ def conf_for_plan(plan, args, existing=None, media=None, colours=None):
         scores = {i: check_scores_name(x, "--own-scores") for i, x in enumerate(own.split(";")) if x.strip()}
     else:
         scores = dict(ex.get("scores") or {}) if same_n else {}
+    # PAD-1194: --hiscores likewise - one high-score group per image, apart from its store
+    hs = getattr(args, "hiscores", None)
+    if hs is not None:
+        hiscores = {i: check_scores_name(x, "--hiscores") for i, x in enumerate(hs.split(";")) if x.strip()}
+    else:
+        hiscores = dict(ex.get("hiscores") or {}) if same_n else {}
     default = args.default if getattr(args, "default", None) is not None else (ex["default"] if ex["default"] is not None else 0)
     timeout = args.timeout if getattr(args, "timeout", None) is not None else (ex["timeout"] if ex["timeout"] is not None else 15)
+    back_hold = getattr(args, "back_hold", None)
+    if back_hold is None:
+        back_hold = ex.get("back_hold")
     font = SELECT_DIR + "/font.ttf"
     sel = getattr(args, "selector_dir", None)
     if sel and not os.path.isfile(os.path.join(sel, "font.ttf")) and not os.path.isfile(HOST_FONT):
@@ -3385,7 +4066,10 @@ def conf_for_plan(plan, args, existing=None, media=None, colours=None):
     if media is not None:
         rows, move, confirm = media["rows"], media["sound_move"], media["sound_confirm"]
         volume, mixer = media["volume"], media["mixer_volume"]
+        tests = media.get("tests") or []
     else:
+        # the test pictures belong to no image: they ride along whatever the count
+        tests = list(ex.get("tests") or [])
         rows = list(ex.get("media") or [])[:n] if same_n else []
         move, confirm = ex.get("sound_move"), ex.get("sound_confirm")
         volume, mixer = ex.get("volume"), ex.get("mixer_volume")
@@ -3482,13 +4166,23 @@ def conf_for_plan(plan, args, existing=None, media=None, colours=None):
     settings = getattr(args, "settings", None)
     if settings is None:
         settings = ex.get("settings")
+    # PAD-495: --editions reads every image's EDITION; without it a card of editions stays one
+    # while it keeps its image count, and --no-editions gives it its menu back
+    edition = None
+    if getattr(args, "editions", False):
+        edition = edition_for_plan(plan)
+        say("editions: no menu; the game's EDITION setting (%s) picks one of %d images at power-up"
+            % (edition["store"], edition["values"]))
+    elif not getattr(args, "no_editions", False) and ex.get("edition") and same_n:
+        edition = ex["edition"]
     return render_images_conf(plan.devices(), titles, subtitles, default, timeout, font,
                               rows, move, confirm, volume, mixer, theme=theme, colors=colors,
                               machine_volume=mv, debug_log=bool(getattr(args, "debug_log", False)),
                               groups=groups, default_card=default_card, heading=heading,
                               text_size=text_size, counter=counter,
                               countdown_word=countdown_word, footer=footer, scores=scores,
-                              colours=colours, settings=settings)
+                              colours=colours, settings=settings, edition=edition, hiscores=hiscores,
+                              tests=tests, back_hold=back_hold)
 
 
 # ============================================================================= the JSON sidecars
@@ -3533,6 +4227,8 @@ def build_manifest(plan, conf, sources=None, existing=None, written=None, versio
             ("confirm", confirm or None),
             # PAD-226: the store name when this image keeps high scores of its own
             ("own_scores", (conf.get("scores") or {}).get(i)),
+            # PAD-1194: its high-score group when that is not simply its store's
+            ("hiscores", (conf.get("hiscores") or {}).get(i)),
             ("title_dir", v.get("title") or old.get("title_dir")),
             ("version", v.get("version") or old.get("version")),
             ("node_fw_version", v.get("node_fw_version") or old.get("node_fw_version")),
@@ -3545,8 +4241,10 @@ def build_manifest(plan, conf, sources=None, existing=None, written=None, versio
         ("layout", getattr(plan, "layout", None)),
         ("images", rows),
         ("timeout", conf["timeout"]),
+        ("back_hold", conf.get("back_hold")),
         ("default", conf["default"]),
         ("volume", conf["volume"]), ("machine_volume", conf.get("machine_volume")),
+        ("edition", conf.get("edition")),
         ("mixer_volume", conf["mixer_volume"]),
         ("sound_move", conf["sound_move"]),
         ("sound_confirm", conf["sound_confirm"]),
@@ -4344,8 +5042,11 @@ def p2_digest(path, cache_dir=None):
     if t != 0x83:
         raise Refused("%s: p2 is type 0x%02x, not Linux" % (path, t))
     man, _how = ts.source_manifest(path, st * SECTOR, cnt * SECTOR, root_ino=2, sub="p2", cache_dir=cache_dir)
+    # the hooked script is the file a linked game script leads to (PAD-742); the link stays
+    game = resolve_link_path("/" + P2_SKIP[1],
+                             lambda p: getattr(man.tree.symlinks.get(p.lstrip("/")), "target", None)).lstrip("/")
     keep = ts.TreeManifest(
-        {k: v for k, v in man.tree.files.items() if not k.startswith(P2_SKIP[0]) and k != P2_SKIP[1]},
+        {k: v for k, v in man.tree.files.items() if not k.startswith(P2_SKIP[0]) and k not in (P2_SKIP[1], game)},
         {k: v for k, v in man.tree.symlinks.items() if not k.startswith(P2_SKIP[0])},
         {k: v for k, v in man.tree.dirs.items() if not k.startswith(P2_SKIP[0])})
     return hashlib.sha256(json.dumps(keep.to_dict(), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -4372,9 +5073,11 @@ def primary_gate(card, source, recorded=None, cache_dir=None):
     if src["p2_tree"] != got["p2_tree"]:
         why.append("the rootfs (p2) differs beyond the boot menu's own files")
     try:
-        cur = debugfs_cat(select_ref(card), GAME_SCRIPT).decode("utf-8", "replace")
+        cref = select_ref(card)
+        cur = debugfs_cat(cref, p2_file(cref, GAME_SCRIPT)).decode("utf-8", "replace")
         t2, s2, c2 = Geometry.from_file(source).part(2)
-        orig = debugfs_cat(fs_ref(source, s2 * SECTOR), GAME_SCRIPT).decode("utf-8", "replace")
+        sref = fs_ref(source, s2 * SECTOR)
+        orig = debugfs_cat(sref, p2_file(sref, GAME_SCRIPT)).decode("utf-8", "replace")
         if strip_hook(cur) != orig:
             why.append("%s differs beyond the hook" % GAME_SCRIPT)
     except Refused as e:
@@ -4430,7 +5133,10 @@ def card_in_use(card):
     except OSError:
         pass
     home = os.environ.get("PAD_HOME") or os.path.expanduser("~")
-    cache = os.path.join(home, "cardcache")
+    # the same choice cardmount.sh makes (PAD-651): the shared store when it is mounted
+    cache = os.environ.get("PAD_CARD_CACHE_DIR") or (
+        "/mnt/wsl/cards/cardcache" if os.path.isdir("/mnt/wsl/cards/cardcache")
+        else os.path.join(home, "cardcache"))
     if os.path.isdir(cache):
         for name in os.listdir(cache):
             if not name.endswith(".pid"):
@@ -4501,11 +5207,22 @@ def _find_tree_game(root):
                 spath = None
                 idx = os.path.join(root, "spk", "index")
                 if os.path.isdir(idx):
+                    cands, links, other = [], {}, []
                     for s in sorted(os.listdir(idx)):
-                        if s.endswith(".sidx") and os.path.isfile(os.path.join(idx, s)) \
-                                and not os.path.islink(os.path.join(idx, s)):
-                            spath = "spk/index/" + s
-                            break
+                        full = os.path.join(idx, s)
+                        if not s.endswith(".sidx"):
+                            continue
+                        if os.path.islink(full):
+                            links[s] = os.readlink(full)
+                        elif os.path.isfile(full):
+                            m = SIDX_NAME_RE.match(s)
+                            if m:
+                                cands.append((s, m.group("pkg"), version_text(m.group("ver"))))
+                            else:
+                                other.append(s)
+                    order = live_sidx_order(cands, links, name) + other
+                    if order:
+                        spath = "spk/index/" + order[0]
                 return name, "%s/%s" % (name, cand), spath
     raise Refused("no title directory with a game file in %s" % root)
 
@@ -5061,6 +5778,7 @@ def update_card(a):
     if a.bypass_validation and getattr(a, "restore_validation", False):
         raise Refused("--bypass-validation and --restore-validation ask for opposite things")
     if not dry:
+        check_card_writable(card)
         ok, why = loop_available()
         if not ok:
             raise Refused("update writes the card in place through a loop mount and cannot here: %s" % why)
@@ -5280,6 +5998,43 @@ def _update_locked(a, ts, card, dry):
             actions = [swap.get(id(a_), a_) for a_ in actions
                        if a_.action != "remove" or a_.old_index in still_removed]
             by_index = {a_.index: a_ for a_ in actions if a_.action != "remove"}
+    # AN IMAGE SWAPPED FOR ANOTHER IN THE SAME SLOT IS THAT SLOT'S TREE, CHANGED (PAD-1386).
+    # Read as new, the slot's old tree was removed and the new one written whole - every
+    # file copied again, though a new build of the same game (a project's edited image, a
+    # newer code version) shares nearly all of them, and a parts card's partition had no
+    # room for both trees at once.  A new image no path, stamp or tree claimed takes the
+    # removed tree at its own position: the diff then writes only the files that differ
+    # and removes the ones the new image lacks, exactly as for a source edited in place.
+    # Done AFTER the same-tree matching above, so an image that merely moved (another path,
+    # another slot) is still kept or renamed rather than diffed against its neighbour.
+    replaced = set()
+    if any(a_.action == "remove" for a_ in actions):
+        pair, taken = {}, set()
+        for act in [a_ for a_ in actions if a_.action == "new" and a_.index != 0]:
+            rem = next((r for r in actions if r.action == "remove" and r.old_index == act.index
+                        and id(r) not in taken), None)
+            im = rec.image(act.index) if rem is not None else None
+            if im is None:
+                continue
+            taken.add(id(rem))
+            kept = ts.TreeAction(act.index, act.device, im.sub, act.new_sub,
+                                 "keep" if im.sub == act.new_sub else "rename", im.index)
+            t_, st_, uuid_, _old = new_trees[act.index]
+            new_trees[act.index] = (t_, st_, uuid_, im)
+            if im.bypass:
+                # the card holds the bypass's game and .sidx: a new image that is the card's
+                # own content (recovered off it) writes nothing for them
+                on_card = tree_as_on_card(im)
+                if not ts.diff_tree(on_card, t_):
+                    rematched[act.index] = on_card
+            replaced.add(act.index)
+            say("image %d: %s replaces %s - only the files that differ are written"
+                % (act.index, os.path.basename(sources[act.index]),
+                   os.path.basename((im.stamp or {}).get("path", "")) or "the image built there"))
+            pair[id(act)] = kept
+        if pair:
+            actions = [pair.get(id(a_), a_) for a_ in actions if id(a_) not in taken]
+            by_index = {a_.index: a_ for a_ in actions if a_.action != "remove"}
     for act in actions:
         if act.action == "remove":
             im = rec.image(act.old_index)
@@ -5328,19 +6083,23 @@ def _update_locked(a, ts, card, dry):
         found = find_source_deltas(sources, [types.SimpleNamespace(tree=t) for t in ordered], a.cache_dir)
         update_deltas = {i: d for i, d in enumerate(found) if d}
         if update_deltas:
-            # the machine rebuilds a delta'd file into the card's WORK PARTITION; a card built
-            # before item 107 has none, and one built for a smaller file cannot hold a bigger
-            # one - either way the variant plays the base's songs on the machine, so say so
-            # here, where a rebuild is still the cheap answer
-            largest = max(ordered[i].files[rel].size for i, d in update_deltas.items() for rel in d
-                          if rel in ordered[i].files)
-            if plan.work_part is None:
-                u["notes"].append("%d file(s) would be stored as deltas but this card has no work partition (p7) "
-                                  "for the machine to rebuild them in: build a fresh card, or the variant plays the "
-                                  "base's songs on the machine" % sum(len(d) for d in update_deltas.values()))
-            elif largest > plan.work_part.count * SECTOR - WORK_HEADROOM:
-                u["notes"].append("a delta'd file of %s outgrows the work partition p7 (%s): build a fresh card"
-                                  % (_gb(largest), _gb(plan.work_part.count * SECTOR)))
+            # the machine rebuilds a delta'd file into the card's WORK PARTITION.  A card built
+            # before item 107 has none, nor does one whose deltas were skipped because their p7
+            # would have cost a card size (PAD-1055); one built for a smaller file cannot hold a
+            # bigger one.  A delta the card cannot rebuild would play the base's files on the
+            # machine, so such files are stored WHOLE instead (they cost their full size in p3).
+            room = (plan.work_part.count * SECTOR - WORK_HEADROOM) if plan.work_part is not None else 0
+            dropped = 0
+            for i in list(update_deltas):
+                keep = {rel: v for rel, v in update_deltas[i].items()
+                        if rel in ordered[i].files and ordered[i].files[rel].size <= room}
+                dropped += len(update_deltas[i]) - len(keep)
+                update_deltas[i] = keep
+            update_deltas = {i: d for i, d in update_deltas.items() if d}
+            if dropped:
+                u["notes"].append("%d file(s) stored whole rather than as deltas: %s" % (
+                    dropped, "this card has no work partition (p7) to rebuild them in" if plan.work_part is None
+                    else "they outgrow the card's work partition p7 (%s)" % _gb(plan.work_part.count * SECTOR)))
     # --bypass-validation: a tree whose validator is still armed - or half done (item 98:
     # the tick off, the grade restore live) - is patched through the mount even when
     # nothing else changed; its game and .sidx count as writes for the room and the rows
@@ -5400,6 +6159,8 @@ def _update_locked(a, ts, card, dry):
         n = len([c for c in ch if c.op != "attr_dir"]) + len(pend)
         touched[i] = [c.rel for c in ch if c.op == "write"]
         action = act.action if act.action != "keep" else ("sync" if ch else ("bypass" if pend else "keep"))
+        if i in replaced and action in ("keep", "sync", "rename"):
+            action = "replace"
         u["files"].append((i, act.device, n, adds, action, os.path.basename(path)))
     removed_bytes = 0
     for act in actions:
@@ -5448,7 +6209,14 @@ def _update_locked(a, ts, card, dry):
     list_changed = any(a_.action != "keep" for a_ in actions)
     media = plan_media(a.media_dir, len(newplan.trees)) if a.media_dir else None
     newconf = conf_for_plan(newplan, a, existing=conf_now, media=media, colours=plan_colours(versions))
-    u["inject"] = bool(list_changed or a.media_dir or newconf.strip() != render_images_conf_text(conf_now).strip())
+    # ...and when an image's custom modes are not the ones on the card: a swapped image (or a
+    # source whose modes changed) would otherwise boot the old image's modes (PAD-1386)
+    modes_moved = mode_sets_moved(card, mode_sets) if (mode_sets is not None and not list_changed) else []
+    if modes_moved:
+        say("custom modes changed for image%s %s: the menu is injected again to carry them"
+            % ("s" if len(modes_moved) > 1 else "", ", ".join(str(i) for i in modes_moved)))
+    u["inject"] = bool(list_changed or modes_moved or a.media_dir
+                       or newconf.strip() != render_images_conf_text(conf_now).strip())
     if a.expect_bytes is not None and u["size"] > a.expect_bytes * (1 + UPDATE_SLACK) + UPDATE_SLACK_BYTES:
         u["notes"].append("the update would write %s, more than the %s expected: a source changed since it was measured"
                           % (_gb(u["size"]), _gb(a.expect_bytes)))
@@ -5646,7 +6414,9 @@ def render_images_conf_text(conf):
         heading=conf.get("heading"), text_size=conf.get("text_size"),
         counter=conf.get("counter"), countdown_word=conf.get("countdown_word"),
         footer=conf.get("footer"), scores=conf.get("scores"),
-        colours=conf.get("colours"), settings=conf.get("settings"))
+        colours=conf.get("colours"), settings=conf.get("settings"), hiscores=conf.get("hiscores"),
+        tests=conf.get("tests"), testcard=bool(conf.get("testcard")),
+        back_hold=conf.get("back_hold"), test_dir=conf.get("test_dir"))
 
 
 # ============================================================================= reading a card back
@@ -5867,13 +6637,63 @@ def holds_symlinks(d):
             pass
 
 
+def holds_modes(d):
+    """True when a file made in `d` keeps the mode it is given.  mke2fs -d takes every file's
+    mode from the staged tree, and a Windows drive mounted into WSL without the metadata
+    option reads every file back 0777 whatever chmod said (PAD-1336: a 3-image Godzilla card
+    built into a folder on C: carried its img1/img2 trees all 0777, and verify's mode/owner
+    check failed every one)."""
+    probe = os.path.join(d, ".mkmulticard-mode-probe-%d" % os.getpid())
+    try:
+        with open(probe, "wb"):
+            pass
+        os.chmod(probe, 0o640)
+        return statmod.S_IMODE(os.stat(probe).st_mode) == 0o640
+    except OSError:
+        return False
+    finally:
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+
+
+def holds_case(d):
+    """True when `d` tells 'A' from 'a': a games tree is a Linux tree, and on a Windows folder
+    two names that differ only in case are one file, so the second overwrites the first."""
+    probe = os.path.join(d, ".mkmulticard-case-probe-%d" % os.getpid())
+    try:
+        with open(probe + "A", "wb"):
+            pass
+        return not os.path.exists(probe + "a")
+    except OSError:
+        return False
+    finally:
+        try:
+            os.unlink(probe + "A")
+        except OSError:
+            pass
+
+
+def tree_unfit(d):
+    """Why `d` cannot hold a staged games tree as the card must carry it, or '' when it can."""
+    if not holds_symlinks(d):
+        return "cannot hold symlinks (an exFAT or FAT drive?)"
+    if not holds_modes(d):
+        return "does not keep Linux file permissions (a Windows drive?)"
+    if not holds_case(d):
+        return "does not tell upper from lower case in file names (a Windows drive?)"
+    return ""
+
+
 def tree_scratch(workdir, prefix):
-    """A fresh directory for a games tree: in `workdir` when that can hold symlinks, else on the
-    Linux side (said out loud, since that is where the gigabytes go for a while)."""
+    """A fresh directory for a games tree: in `workdir` when that holds a Linux tree faithfully
+    (symlinks, modes, case), else on the Linux side (said out loud, since that is where the
+    gigabytes go for a while)."""
     base = workdir or tempfile.gettempdir()
-    if not holds_symlinks(base):
-        say("%s cannot hold symlinks (an exFAT or FAT drive?); the games tree is staged under %s instead"
-            % (base, LINUX_SCRATCH))
+    why = tree_unfit(base)
+    if why:
+        say("%s %s; the games tree is staged under %s instead" % (base, why, LINUX_SCRATCH))
         base = LINUX_SCRATCH
     d = tempfile.mkdtemp(prefix=prefix, dir=base)
     # mkdtemp makes it 0700 and mke2fs -d gives the new filesystem's root the tree's mode;
@@ -5969,10 +6789,11 @@ def clean_p2(p2_image):
     rc, txt = e2fsck(p2_image)
     if rc != 0:
         raise Refused("p2 is not clean before the menu is taken out (e2fsck rc=%d):\n%s" % (rc, txt))
-    orig = debugfs_cat(p2_image, GAME_SCRIPT)
+    game = p2_file(p2_image, GAME_SCRIPT)             # past a link (PAD-742)
+    orig = debugfs_cat(p2_image, game)
     if not orig:
-        raise Refused("%s is empty or missing in p2" % GAME_SCRIPT)
-    st = debugfs_stat(p2_image, GAME_SCRIPT)
+        raise Refused("%s is empty or missing in p2" % game)
+    st = debugfs_stat(p2_image, game)
     text = orig.decode("utf-8", "replace")
     stripped = strip_hook(text)
     cmds, nfiles = [], 0
@@ -5993,14 +6814,14 @@ def clean_p2(p2_image):
         staged.write(stripped.encode("utf-8"))
         staged.close()
         mode = (st.get("mode") or 0o755) & 0o7777
-        cmds.append("rm " + dq(GAME_SCRIPT))
-        cmds.append("write %s %s" % (dq(staged.name), dq(GAME_SCRIPT)))
-        cmds.append("set_inode_field %s mode 0%o" % (dq(GAME_SCRIPT), statmod.S_IFREG | mode))
-        cmds.append("set_inode_field %s uid %d" % (dq(GAME_SCRIPT), st.get("uid", 0)))
-        cmds.append("set_inode_field %s gid %d" % (dq(GAME_SCRIPT), st.get("gid", 0)))
+        cmds.append("rm " + dq(game))
+        cmds.append("write %s %s" % (dq(staged.name), dq(game)))
+        cmds.append("set_inode_field %s mode 0%o" % (dq(game), statmod.S_IFREG | mode))
+        cmds.append("set_inode_field %s uid %d" % (dq(game), st.get("uid", 0)))
+        cmds.append("set_inode_field %s gid %d" % (dq(game), st.get("gid", 0)))
         for k in ("atime", "ctime", "mtime"):
             if k in st:
-                cmds.append("set_inode_field %s %s @%d" % (dq(GAME_SCRIPT), k, st[k]))
+                cmds.append("set_inode_field %s %s @%d" % (dq(game), k, st[k]))
     try:
         if cmds:
             debugfs_write_script(p2_image, cmds)
@@ -6010,9 +6831,9 @@ def clean_p2(p2_image):
     rc, txt = e2fsck(p2_image)
     if rc != 0:
         raise Refused("p2 is not clean after the menu was taken out (e2fsck rc=%d):\n%s" % (rc, txt))
-    back = debugfs_cat(p2_image, GAME_SCRIPT).decode("utf-8", "replace")
+    back = debugfs_cat(p2_image, game).decode("utf-8", "replace")
     if back != stripped or has_hook(back):
-        raise Refused("%s read back with the hook still in it" % GAME_SCRIPT)
+        raise Refused("%s read back with the hook still in it" % game)
     if debugfs_exists(p2_image, SELECT_DIR):
         raise Refused("%s is still in p2 after its removal" % SELECT_DIR)
     return stripped != text, nfiles
@@ -6355,7 +7176,22 @@ def tree_game(reader, root_ino):
 
 
 def tree_sidx(reader, root_ino):
-    """(path relative to the tree root, inode) of the tree's /spk/index/*.sidx, or (None, None)."""
+    """(path relative to the tree root, inode) of the tree's LIVE /spk/index/*.sidx
+    (:func:`live_sidx_order`), or (None, None).  The first one met was a stale package on a card
+    updated on the machine, and the bypass refreshed its record instead of the live one's."""
+    try:
+        try:
+            title = tree_game(reader, root_ino)[0]
+        except Refused:
+            title = None
+        pkgs = tree_packages(reader, root_ino, title)
+        if pkgs:
+            ino = tree_dir_inode(reader, root_ino, "spk", "index")
+            child = _dir_entries(reader, ino).get(pkgs[0][0]) if ino else None
+            if child:
+                return "spk/index/" + pkgs[0][0], reader.read_inode(child[0])
+    except Exception:                        # noqa: BLE001 - an odd index: the walk below
+        pass
     for path, ino, node in reader.iter_regular_files(root_ino=root_ino, max_depth=6, min_size=1):
         if path.endswith(".sidx") and path.lstrip("/").startswith("spk/index/"):
             return path.lstrip("/"), node                   # THIS tree's, never an imgN's beneath a store root
@@ -6581,25 +7417,79 @@ def tree_dir_inode(reader, root_ino, *names):
     return ino
 
 
+#: Where a .sidx records its OWN version: 'SIDX', a u32, the package name and the game's
+#: three-letter code in 32 bytes, then major, minor, patch (and 0x02).  Every newest build in
+#: the library (59 cards) carries the same three numbers here as in its file name.
+SIDX_MAGIC = b"SIDX"
+SIDX_VERSION_AT = 40
+
+
+def sidx_header_version(head):
+    """The version a .sidx's own header records ('1.16.0'), or None when `head` is not one."""
+    if len(head) < SIDX_VERSION_AT + 3 or head[:4] != SIDX_MAGIC:
+        return None
+    a, b, c = head[SIDX_VERSION_AT:SIDX_VERSION_AT + 3]
+    return "%d.%02d.%d" % (a, b, c)
+
+
 def tree_packages(reader, root_ino, title=None):
-    """[(file name, package, '1.59.0')] for every REGULAR /spk/index/<pkg>-<M_mm_p>.sidx in the
-    tree - Stern's own name for the build.  The bare '<pkg>.sidx' symlink beside it names no
-    version and is skipped, and so is anything that is not a .sidx.  A tree carrying more than
-    one puts the package named after the TITLE DIRECTORY first: that is the game's own."""
+    """[(file name, package, '1.59.0', header version or None)] for every REGULAR
+    /spk/index/<pkg>-<M_mm_p>.sidx in the tree - Stern's own name for the build, and the version
+    the file's own header records (:func:`sidx_header_version`).  The bare '<pkg>.sidx' symlink
+    beside it names no version and is not listed, and neither is anything that is not a .sidx.
+    A tree carrying more than one puts the LIVE package first (:func:`live_sidx_order`): a card
+    updated on the machine keeps every package it was ever given."""
     _v, _s, ext4, _adj = _stern_plugins()
     ino = tree_dir_inode(reader, root_ino, "spk", "index")
-    out = []
+    out, links = [], {}
     for name, (child, _t) in (sorted(_dir_entries(reader, ino).items()) if ino else []):
         m = SIDX_NAME_RE.match(name)
         if not m:
+            if name.endswith(".sidx"):
+                try:
+                    node = reader.read_inode(child)
+                    if (node["mode"] & ext4.S_IFMT) == ext4.S_IFLNK:
+                        links[name] = reader.read_symlink(node)
+                except Exception:
+                    pass
             continue
         try:
             node = reader.read_inode(child)
         except Exception:
             continue
         if (node["mode"] & ext4.S_IFMT) == ext4.S_IFREG:
-            out.append((name, m.group("pkg"), version_text(m.group("ver"))))
-    return sorted(out, key=lambda r: r[1] != title)
+            try:
+                head = reader.read_range(node, 0, SIDX_VERSION_AT + 4)
+            except Exception:
+                head = b""
+            out.append((name, m.group("pkg"), version_text(m.group("ver")),
+                        sidx_header_version(head)))
+    order = live_sidx_order([(r[0], r[1], r[2]) for r in out], links, title)
+    return sorted(out, key=lambda r: order.index(r[0]))
+
+
+def _version_key(v):
+    try:
+        return tuple(int(x) for x in (v or "").split("."))
+    except ValueError:
+        return ()
+
+
+def live_sidx_order(cands, links, title):
+    """PURE: the .sidx file names of `cands` [(name, package, version)], the LIVE one first -
+    the package the machine's spk layer checks the game against.
+
+    A card updated on the machine keeps every package it was ever given (PAD-1336: a Godzilla
+    LE updated 1.13 -> 1.16 carried godzilla_le-1_13_0 ... 1_16_0.sidx), and the old ones are
+    leftovers.  The live one is, in order: the target of the bare '<pkg>.sidx' symlink beside
+    them (`links` {link name: target}; the title's own link first), then a package named after
+    the title directory, newest version first."""
+    targets = [os.path.basename(t) for n, t in sorted(links.items(), key=lambda kv: kv[0] != "%s.sidx" % title) if t]
+    def key(c):
+        name, pkg, ver = c
+        linked = targets.index(name) if name in targets else len(targets)
+        return (linked, pkg != title, tuple(-x for x in _version_key(ver)), name)
+    return [c[0] for c in sorted(cands, key=key)]
 
 
 def tree_node_firmware(reader, root_ino, title_dir):
@@ -6645,32 +7535,13 @@ def read_tree(card, part, subdir=None):
         fw, fwver = tree_node_firmware(r, root, title)
     ident = game_identity(elf, title)
     notes = []
-    sidx_name, package, sidx_ver = pkgs[0] if pkgs else (None, None, None)
+    sidx_name, package, sidx_ver, head_ver = pkgs[0] if pkgs else (None, None, None, None)
     if len(pkgs) > 1:
-        notes.append("this tree carries %d .sidx packages (%s); %s is used, as the one named "
-                     "after the title directory"
-                     % (len(pkgs), ", ".join(n for (n, _p, _v) in pkgs), sidx_name))
-    elf_ver = ident["version"] if ident else None
-    # compare the NUMBERS, not the text: the ELF holds major.minor as two bytes and the package
-    # name spells them however Stern spelled them ('1_00_0' would never prefix-match '0.01')
-    if ident and _version_pair(sidx_ver) not in (None, (ident["raw"] >> 8, ident["raw"] & 0xFF)):
-        notes.append("the package name says %s but the game ELF's own build record says %s - "
-                     "these two DISAGREE, and the package name is the one the machine installs by"
-                     % (sidx_ver, elf_ver))
-    if sidx_ver and elf_ver:
-        source = "spk index + game ELF"
-    elif sidx_ver:
-        source = "spk index"
-        notes.append("the game ELF carries no build-identity record this tool can locate; the "
-                     "version is the .sidx package name alone")
-    elif elf_ver:
-        source = "game ELF"
-        notes.append("this tree has no /spk/index/<pkg>-<M_mm_p>.sidx; the version is the game "
-                     "ELF's build record alone, which carries no third component")
-    else:
-        source = None
-        notes.append("neither a .sidx package name nor a game ELF build record could be read: "
-                     "this tree's game code version is UNKNOWN")
+        notes.append("this tree carries %d .sidx packages (%s); %s is the live one, the others "
+                     "are left over from earlier updates and change nothing"
+                     % (len(pkgs), ", ".join(sorted(p[0] for p in pkgs)), sidx_name))
+    version, source, more = pick_version(sidx_ver, head_ver, ident)
+    notes.extend(more)
     try:
         state = bypass_state(elf)
     except Exception as e:                                # a report never dies on one odd ELF
@@ -6685,12 +7556,53 @@ def read_tree(card, part, subdir=None):
                      % (gpath, type(e).__name__, e))
     return collections.OrderedDict([
         ("device", device_name(part.num, subdir)), ("title", title), ("game_path", gpath),
-        ("version", sidx_ver or elf_ver), ("version_source", source),
+        ("version", version), ("version_source", source),
         ("package", package), ("sidx", sidx_name), ("sidx_version", sidx_ver),
-        ("elf_version", elf_ver), ("elf_name", ident["name"] if ident else None),
+        ("elf_version", ident["version"] if ident else None),
+        ("elf_name", ident["name"] if ident else None),
         ("elf_date", ident["date"] if ident else None),
         ("node_fw", fw), ("node_fw_version", fwver), ("node_fw_digest", _fw_digest(fw)),
         ("bypass", state), ("colour", colour), ("notes", notes)])
+
+
+def pick_version(sidx_ver, head_ver, ident):
+    """(version, where it came from, notes) of one games tree, from the .sidx file NAME's
+    version, the version its header records, and the game ELF's build record (or None each).
+
+    The game ELF is the code that RUNS, so when the package name disagrees with it the ELF's
+    major.minor wins (PAD-697): a stock card updated on the machine (1.08 -> 1.16) kept its
+    old '-1_08_0.sidx' name while every game file became 1.16, and the gate refused to pair
+    it with another 1.16.  The third component comes from the .sidx (header first) when that
+    agrees with the ELF, else it is 0 - the ELF does not carry one."""
+    notes = []
+    elf_ver = ident["version"] if ident else None
+    elf_pair = (ident["raw"] >> 8, ident["raw"] & 0xFF) if ident else None
+    if sidx_ver and head_ver and head_ver != sidx_ver:
+        notes.append("the package file is named %s but its own header says %s" % (sidx_ver, head_ver))
+    # compare the NUMBERS, not the text: the ELF holds major.minor as two bytes and the package
+    # name spells them however Stern spelled them ('1_00_0' would never prefix-match '0.01')
+    pkg = [v for v in (head_ver, sidx_ver) if v]
+    if elf_pair and pkg and all(_version_pair(v) != elf_pair for v in pkg):
+        version = "%d.%02d.0" % elf_pair
+        notes.append("the package name says %s but the game ELF's own build record says %s; "
+                     "%s is used, as the game code this image actually runs (a card updated "
+                     "on the machine can keep its old package name)" % (sidx_ver, elf_ver, version))
+        return version, "game ELF", notes
+    agreed = [v for v in pkg if elf_pair is None or _version_pair(v) == elf_pair]
+    version = agreed[0] if agreed else None
+    if version and elf_ver:
+        return version, "spk index + game ELF", notes
+    if version:
+        notes.append("the game ELF carries no build-identity record this tool can locate; the "
+                     "version is the .sidx package alone")
+        return version, "spk index", notes
+    if elf_ver:
+        notes.append("this tree has no /spk/index/<pkg>-<M_mm_p>.sidx; the version is the game "
+                     "ELF's build record alone, which carries no third component")
+        return elf_ver, "game ELF", notes
+    notes.append("neither a .sidx package name nor a game ELF build record could be read: "
+                 "this tree's game code version is UNKNOWN")
+    return None, None, notes
 
 
 def _version_pair(text):
@@ -7210,13 +8122,14 @@ def verify_card(card, plan, selector_dir=None, media_dir=None, mode="full", touc
     pref = fs_ref(plan.primary, p2.src_start * SECTOR)
     print("p2 (rootfs): patched - selector files and the hooked %s:" % GAME_SCRIPT)
     try:
-        cur = debugfs_cat(ref, GAME_SCRIPT).decode("utf-8", "replace")
-        orig = debugfs_cat(pref, GAME_SCRIPT).decode("utf-8", "replace")
+        game, pgame = p2_file(ref, GAME_SCRIPT), p2_file(pref, GAME_SCRIPT)   # past a link (PAD-742)
+        cur = debugfs_cat(ref, game).decode("utf-8", "replace")
+        orig = debugfs_cat(pref, pgame).decode("utf-8", "replace")
         diff = list(difflib.unified_diff(orig.splitlines(), cur.splitlines(), "primary:" + GAME_SCRIPT, "card:" + GAME_SCRIPT, lineterm="", n=1))
         print("\n".join("    " + l for l in diff) if diff else "    (identical - NOT hooked)")
         check("%s = primary's + the hook block only" % GAME_SCRIPT, has_hook(cur) and strip_hook(cur) == orig)
-        st = debugfs_stat(ref, GAME_SCRIPT)
-        ost = debugfs_stat(pref, GAME_SCRIPT)
+        st = debugfs_stat(ref, game)
+        ost = debugfs_stat(pref, pgame)
         check("%s mode/uid/gid/mtime kept" % GAME_SCRIPT,
               all(st.get(k) == ost.get(k) for k in ("mode", "uid", "gid", "mtime")),
               "card %r primary %r" % ({k: st.get(k) for k in ("mode", "uid", "gid", "mtime")},
@@ -7238,8 +8151,10 @@ def verify_card(card, plan, selector_dir=None, media_dir=None, mode="full", touc
         for (d, t, s), m in zip(conf["images"], conf["media"]):
             print("    image %s | %s | %s%s"
                   % (d, t, s, "".join(" | %s" % x for x in m) if any(m) else ""))
-        print("    default=%d timeout=%d font=%s log=%s" % (conf["default"], conf["timeout"], conf["font"],
-                                                            conf.get("debug_log") or "off"))
+        print("    default=%d timeout=%d font=%s log=%s%s" % (conf["default"], conf["timeout"], conf["font"],
+                                                              conf.get("debug_log") or "off",
+                                                              "" if conf.get("back_hold") is None
+                                                              else " back_hold=%d" % conf["back_hold"]))
         print("    sound_move=%s sound_confirm=%s volume=%s mixer_volume=%s media=%s"
               % (conf["sound_move"], conf["sound_confirm"], conf["volume"], conf["mixer_volume"], conf["media_dir"]))
         print("    heading=%s text_size=%s counter=%s countdown_word=%s"
@@ -7457,6 +8372,7 @@ def inspect_card(card, media_out=None):
             # PAD-226: the store name when this image keeps its own high scores, and the custom
             # modes it runs (None = none)
             ("own_scores", (conf.get("scores") or {}).get(i)),
+            ("hiscores", (conf.get("hiscores") or {}).get(i)),
             ("modes", card_mode_summary(ref, i)),
             ("title_dir", title_dir), ("bypass", state),
             # what game code this image actually is, read off the card (item 90's version gate);
@@ -7517,8 +8433,9 @@ def inspect_card(card, media_out=None):
             ("music", g["media"][2] or None), ("confirm", g["media"][3] or None)])
             for gi, g in enumerate(conf.get("groups") or [])]),
         ("default_card", conf.get("default_card")),
-        ("timeout", conf["timeout"]), ("default", conf["default"]),
+        ("timeout", conf["timeout"]), ("back_hold", conf.get("back_hold")), ("default", conf["default"]),
         ("volume", conf["volume"]), ("machine_volume", conf.get("machine_volume")),
+        ("edition", conf.get("edition")),
         ("mixer_volume", conf["mixer_volume"]),
         ("sound_move", conf["sound_move"]), ("sound_confirm", conf["sound_confirm"]),
         # The SPECS those two were rendered from (media.json's, not the conf's -
@@ -7542,6 +8459,12 @@ def inspect_card(card, media_out=None):
         # PAD-307: null = the card never said, and it has the SETTINGS card whenever an
         # image can be adjusted; "off" = the owner left it out.  ...and which images can
         ("settings", conf.get("settings")),
+        # PAD-1279: the test pictures, each with the source media.json says it was made from
+        ("tests", [collections.OrderedDict([
+            ("file", test_parts(t)[0]), ("label", test_parts(t)[1]), ("kind", test_parts(t)[2]),
+            ("source", next((m.get("source") for m in ((media_man or {}).get("tests") or [])
+                             if isinstance(m, dict) and m.get("file") == test_parts(t)[0]), None))])
+            for t in (conf.get("tests") or [])]),
         ("colours", {str(k): v for k, v in sorted((conf.get("colours") or {}).items())}),
         # null = the card never set one, and the selector draws its own instructions
         # line (the one that follows the buttons); "" = the card asked for no line
@@ -7575,9 +8498,10 @@ def print_inspect(rep):
     if rep.get("build"):
         print("built      %s by %s %s" % (rep["build"].get("written"), rep["build"].get("tool"),
                                           rep["build"].get("version")))
-    print("menu       default=%s timeout=%s volume=%s mixer_volume=%s sound_move=%s sound_confirm=%s font=%s log=%s"
+    print("menu       default=%s timeout=%s volume=%s mixer_volume=%s sound_move=%s sound_confirm=%s font=%s log=%s%s"
           % (rep["default"], rep["timeout"], rep["volume"], rep["mixer_volume"],
-             rep["sound_move"], rep["sound_confirm"], rep["font"], rep.get("debug_log") or "off"))
+             rep["sound_move"], rep["sound_confirm"], rep["font"], rep.get("debug_log") or "off",
+             "" if rep.get("back_hold") is None else " back_hold=%s" % rep["back_hold"]))
     head = rep.get("heading")
     print("heading    %s" % ("(the selector's own SELECT GAME CODE)" if head is None
                              else "(none - the top of the menu is bare)" if not head
@@ -8343,6 +9267,51 @@ def selftest(d, selector_file=None):
     ok &= verify_card(out3, plan3, sel, mode="full")
     print("== update: a parts card refuses a list change")
     ok &= main(["update", "--card", out3, "--primary", v0, "--extra", v2, "--extra", V[1], "--dry-run"]) == 2
+
+    def swap_one(card, primary, extras, slot, title, flags, tag):
+        """PAD-1386: image *slot* swapped for a copy at another path holding one more file
+        -> a 'replace' row writing that one file, not the image again; the card verifies
+        against the new list; then swapped back, which writes nothing and removes it."""
+        good = True
+
+        def check(cond, detail):
+            if not cond:
+                print("swap %s FAILED: %s" % (tag, detail))
+            return bool(cond)
+        src = extras[slot - 1]
+        dst = os.path.join(d, "swap_%s_%d.img" % (tag, slot))
+        shutil.copyfile(src, dst)
+        _t, sts, _cnt = Geometry.from_file(dst).part(3)
+        payload = os.path.join(d, "swap_%s.bin" % tag)
+        with open(payload, "wb") as f:
+            f.write(b"S" * 50000)
+        debugfs_write_script(fs_ref(dst, sts * SECTOR), ["write %s /%s/swapped.bin" % (dq(payload), title),
+                                                         "set_inode_field /%s/swapped.bin mode 0100644" % title])
+        new = list(extras)
+        new[slot - 1] = dst
+        for want_size, lst in ((50000, new), (0, list(extras))):
+            args = ["update", "--card", card, "--primary", primary]
+            for x in lst:
+                args += ["--extra", x]
+            args += ["--selector-dir", sel] + flags
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(args + ["--dry-run"])
+            dry = buf.getvalue()
+            rows = [ln.split() for ln in dry.splitlines() if ln.startswith("update-files ")]
+            row = [r for r in rows if r[1] == str(slot)]
+            good &= check(rc == 0 and len(row) == 1 and row[0][5] == "replace" and row[0][3] == "1", rows)
+            good &= check(bool(row) and int(row[0][4]) == want_size, rows)
+            good &= check(("update-size %d" % want_size) in dry, dry)
+            good &= check(not any(r[5] in ("new", "remove") for r in rows), rows)
+            good &= main(args) == 0
+            good &= verify_card(card, verify_plan(card, [primary] + lst), sel, mode="full")
+            good &= ts.stamps_equal(read_trees(card).images[slot].stamp, ts.source_stamp(lst[slot - 1]))
+        print("== update (%s): image %d swapped for another file and back - one file each way: %s"
+              % (tag, slot, "PASS" if good else "FAIL"))
+        return good
+
+    ok &= swap_one(out3, v0, [v2], 1, "turtles_pro", [], "parts")
     print("== update: a primary that is another build is refused by the gate")
     other = os.path.join(d, "other.img")
     shutil.copyfile(v0, other)
@@ -8428,6 +9397,7 @@ def selftest(d, selector_file=None):
     finally:
         losetup_detach(loop)
         os.rmdir(foreign)
+    ok &= swap_one(out2, A, [C, B], 2, "B_title", ["--allow-version-mismatch"], "multi")
     print("SELFTEST part 5 (update)", "PASS" if ok else "FAIL")
 
     # ------------------------------------------------- part 6: the store layout (item 95), root only
@@ -8565,6 +9535,7 @@ def selftest(d, selector_file=None):
     ok &= debugfs_cat(ref3, "/A_title/newa.bin") == b"C" * 40000
     ok &= i0["A_title/newa.bin"] == i1["C_title/only.bin"] and i0["A_title/newa.bin"][1] == 3
     ok &= verify_card(out6, verify_plan(out6, [A, C, B]), sel, mode="full")
+    ok &= swap_one(out6, A, [C, B], 2, "B_title", ["--allow-version-mismatch"], "store")
     print("== a raw bypass of a store card is refused")
     ok &= main(["bypass", "--card", out6, "--dry-run"]) == 2
     print("SELFTEST part 6 (store)", "PASS" if ok else "FAIL")
@@ -8934,6 +9905,13 @@ def selftest_modes(d, sel):
     # what inspect reports per image off the built p2
     ok &= card_mode_summary(p2, 1) == "1 mode file, 0 code modes", card_mode_summary(p2, 1)
     ok &= card_mode_summary(p2, 0) is None and card_mode_summary(p2, 2) is None
+    print("== PAD-1386: an update knows when an image's modes are not the card's")
+    ok &= mode_sets_moved_on(p2, sets) == []
+    other = [dict(x) for x in sets]
+    other[1]["mode.so"] = (so + b"v38", other[1]["mode.so"][1])
+    ok &= mode_sets_moved_on(p2, other) == [1]
+    ok &= mode_sets_moved_on(p2, [{}, {}]) == [1]
+    ok &= mode_sets_moved_on(p2, [sets[0], sets[1], {}]) == []
     print("== inject again, the same sets: idempotent")
     stage2 = os.path.join(d, "stage two")
     os.makedirs(stage2, exist_ok=True)
@@ -8950,8 +9928,59 @@ def selftest_modes(d, sel):
     os.makedirs(stage4, exist_ok=True)
     inject_into_p2(p2, sel, conf, stage4, mode_sets=[{}, {}])
     ok &= not debugfs_exists(p2, MODES_DIR)
+    ok &= mode_sets_moved_on(p2, [{}, {}]) == [] and mode_sets_moved_on(p2, sets) == [1]
     ok &= debugfs_exists(p2, SELECT_DIR + "/images.conf") and e2fsck(p2)[0] == 0
     print("SELFTEST part 9 (modes)", "PASS" if ok else "FAIL")
+    ok &= selftest_menu_back(d, sel, A, B, sets, conf)
+    return bool(ok)
+
+
+def selftest_menu_back(d, sel, A, B, sets, conf):
+    """PART 9b (PAD-1309): a selector dir carrying padmenu.so.  inject_into_p2 writes it to
+    MENU_SO (0755) and gives GAME_MONITOR the multi-boot block (MENU_HOOK_LINES) with its
+    clocks kept, whether the images carry modes or not; injecting again writes nothing new; a
+    mode-set inject leaves the block as it is.  Without padmenu.so the card is as before."""
+    import shutil
+    import modehook
+    ok = Checks()
+    print("== PART 9b: hold BACK to come back to the menu (padmenu.so)")
+    selm = os.path.join(d, "seldir menu")
+    if os.path.isdir(selm):
+        shutil.rmtree(selm)
+    shutil.copytree(sel, selm)
+    so = b"\x7fELF synthetic padmenu\n" * 8
+    with open(os.path.join(selm, "padmenu.so"), "wb") as f:
+        f.write(so)
+    geom = Geometry.from_file(A)
+    _t, st, cnt = geom.part(2)
+    p2 = os.path.join(d, "A p2 menu.img")
+    with open(p2, "wb") as f:
+        f.truncate(cnt * SECTOR)
+    copy_range(A, st * SECTOR, p2, 0, cnt * SECTOR, "p2", sparse=False, progress=None)
+    before = debugfs_stat(p2, GAME_MONITOR)
+    for k, mode_sets in enumerate((None, sets, [{}, {}])):
+        stage = os.path.join(d, "stage menu %d" % k)
+        os.makedirs(stage, exist_ok=True)
+        inject_into_p2(p2, selm, conf, stage, mode_sets=mode_sets)
+        mon = debugfs_cat(p2, GAME_MONITOR).decode()
+        ok &= modehook.has_menu_hook(mon), (k, mon)
+        ok &= modehook.strip_hook(mon) == SYNTH_MONITOR, k
+        ok &= debugfs_cat(p2, MENU_SO) == so, k
+        ok &= debugfs_stat(p2, MENU_SO).get("mode") == 0o755, k
+        after = debugfs_stat(p2, GAME_MONITOR)
+        ok &= all(after.get(x) == before.get(x) for x in ("mtime", "ctime", "atime")), (k, before, after)
+        ok &= e2fsck(p2)[0] == 0, k
+    # a card whose selector dir has no padmenu.so: game_monitor stays stock
+    p2s = os.path.join(d, "A p2 plain.img")
+    with open(p2s, "wb") as f:
+        f.truncate(cnt * SECTOR)
+    copy_range(A, st * SECTOR, p2s, 0, cnt * SECTOR, "p2", sparse=False, progress=None)
+    stage = os.path.join(d, "stage plain")
+    os.makedirs(stage, exist_ok=True)
+    inject_into_p2(p2s, sel, conf, stage)
+    ok &= debugfs_cat(p2s, GAME_MONITOR).decode() == SYNTH_MONITOR
+    ok &= not debugfs_exists(p2s, MENU_SO)
+    print("SELFTEST part 9b (menu back)", "PASS" if ok else "FAIL")
     return bool(ok)
 
 
@@ -9148,7 +10177,16 @@ def _add_conf_flags(s):
                         "settings and audits) of its own on the machine, '' leaves it sharing the title's "
                         "store (images.conf scores=; PAD-226). Images given the same name share that store. "
                         "An existing card's are kept when absent; --own-scores '' makes every image share")
+    s.add_argument("--hiscores", metavar="NAMES",
+                   help="';'-separated, one per image: the high-score table it plays into, apart from "
+                        "where its settings are (images.conf hiscores=; PAD-1194). Images of one game given "
+                        "the same name share one table even when each keeps its own settings; the selector "
+                        "hands the table from the image that played last to the one that boots. '' = its "
+                        "scores stay with its settings. Kept from an existing card when absent; "
+                        "--hiscores '' clears them all")
     s.add_argument("--timeout", type=int, help="images.conf timeout in seconds (default 15; 0 = wait for ever)")
+    s.add_argument("--back-hold", dest="back_hold", type=int, default=None,
+                   help="seconds BACK held in a game restarts into the menu (0 = off; card default 3)")
     s.add_argument("--heading", metavar="TEXT",
                    help="images.conf heading=TEXT - the line across the top of the menu (the selector's "
                         "own '%s' when no card ever set one; --heading '' leaves the top bare); an "
@@ -9162,6 +10200,14 @@ def _add_conf_flags(s):
                    help="images.conf counter= - whether the '<  N / M  >' line under the cards "
                         "is drawn (only a carousel of five cards or more has one); an existing "
                         "card's is kept when absent, and a card that says neither draws it")
+    s.add_argument("--editions", action="store_true",
+                   help="images.conf edition= (PAD-495): every image is an edition of one game, in "
+                        "order, and the game's own EDITION setting (Adjustments > Machine Settings > Attract Mode, put "
+                        "there by each edition's Write) picks the one that boots at the next "
+                        "power-up; no menu is shown. Every image must carry EDITION for exactly "
+                        "this many editions")
+    s.add_argument("--no-editions", action="store_true",
+                   help="take edition= off a card of editions: its menu comes back")
     s.add_argument("--settings", choices=list(SETTINGS_WORDS),
                    help="images.conf settings= - whether the SETTINGS card (color correction on "
                         "the machine) ends the menu when an image can be adjusted (PAD-307); an "
@@ -9232,6 +10278,17 @@ def main(argv=None):
     s.add_argument("--dd", action="store_true", help="copy the ranges with dd bs=16M conv=sparse instead of python")
     s.add_argument("--force", action="store_true", help="overwrite an existing --out")
     s.add_argument("--workdir", help="scratch directory for the p2 extract and the multi layout's tree + p7 image (default: beside --out)")
+    s = sub.add_parser("testcard", help="PAD-1279: a small TEST CARD - the menu's Settings screens "
+                                        "(Color correction, Test pictures) and no game, made from any "
+                                        "Spike 2 card's boot and rootfs")
+    s.add_argument("--primary", required=True, help="any stock Spike 2 card image (.raw)")
+    s.add_argument("--out", required=True)
+    s.add_argument("--selector-dir", required=True, help="as for build: the built selector to inject")
+    s.add_argument("--media-dir", help="selectmedia.py prepare's output: its test pictures go on the card")
+    s.add_argument("--color", default="", help="the profile Color correction starts from, "
+                                               "'gamma r g b|gain r g b|lift r g b|saturation[|name]' "
+                                               "(default: No change)")
+    s.add_argument("--workdir")
     s = sub.add_parser("inject", help="redo only the p2 injection on an existing multi card (idempotent)")
     s.add_argument("--card", required=True, help="the multi card to modify IN PLACE")
     _add_conf_flags(s)
@@ -9332,6 +10389,7 @@ def main(argv=None):
             return 0 if check_stock(a.image) else 1
         elif a.cmd == "build":
             check_output_path(a.out, [a.primary] + a.extra + [a.conf, a.selector_dir, a.media_dir], force=a.force)
+            check_card_writable(a.out)          # a --force over a read-only or held-open card
             if not a.no_inject and not a.selector_dir:
                 raise Refused("build needs --selector-dir (or --no-inject)")
             # THE GROUPS REACH THE PLANNER, not only the conf: --layout auto picks the
@@ -9440,8 +10498,13 @@ def main(argv=None):
                 (", %s allocated" % _gb(alloc)) if alloc is not None else "", time.monotonic() - t0))
             if conf:
                 print(conf.rstrip())
+        elif a.cmd == "testcard":
+            build_testcard(a.primary, a.out, a.selector_dir, a.media_dir,
+                           parse_testcard_colour(a.color), a.workdir)
+            return 0
         elif a.cmd == "inject":
             check_output_path(a.card, [a.conf, a.selector_dir, a.media_dir, a.primary] + list(a.extra), must_exist=True)
+            check_card_writable(a.card)
             if not a.selector_dir:
                 raise Refused("inject needs --selector-dir")
             plan = plan_from_card(a.card)
@@ -9495,6 +10558,8 @@ def main(argv=None):
                          workdir=a.workdir, force=a.force)
         elif a.cmd == "bypass":
             check_output_path(a.card, [], must_exist=True)
+            if not a.dry_run:
+                check_card_writable(a.card)
             plan = plan_from_card(a.card)
             print("layout: %s; trees: %s" % (plan.layout, ", ".join(plan.devices())))
             if plan.layout == "store":

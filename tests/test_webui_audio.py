@@ -85,6 +85,7 @@ def test_state_after_manufacturer(tmp_path, mfr, era):
         assert s["col"] == want_col
         assert s["level_cap"] == bool(caps.audio_level_offset)
         assert s["adv_cap"] == (mfr == "stern")
+        assert s["adv_full"] == (era == "spike2")
         assert s["dups_cap"] == (mfr == "cgc")
         forced = mfr in ("jjp", "stern")
         assert s["trim_visible"] == (not forced)
@@ -110,12 +111,20 @@ def test_no_audio_tab_for_williams(tmp_path):
         assert not tabs["audio"]["visible"]
 
 
-def test_grow_active_follows_the_advanced_option(tmp_path):
-    settings = {"audio_advanced": {"audio_grow": True}}
+def test_grow_active_on_every_spike2_card(tmp_path, monkeypatch):
+    """Always on since PAD-843, whatever an older settings.json says."""
+    monkeypatch.delenv("PAD_STERN_AUDIO_GROW", raising=False)
+    settings = {"audio_advanced": {"audio_grow": False}}
     with web_app(tmp_path, mfr="stern", settings=settings) as w:
         assert w.window._audio_grow_active() is True
+        monkeypatch.setenv("PAD_STERN_AUDIO_GROW", "0")
+        assert w.window._audio_grow_active() is False
+        monkeypatch.delenv("PAD_STERN_AUDIO_GROW")
         w.call("ui.set_era", "spike1")
         assert w.window._audio_grow_active() is False
+        # PAD-1186: a Spike 3 Write plays each sound at its own length too
+        w.call("ui.set_era", "spike3")
+        assert w.window._audio_grow_active() is True
     with web_app(tmp_path / "b", mfr="jjp", settings=settings) as w:
         assert w.window._audio_grow_active() is False
 
@@ -194,10 +203,29 @@ def test_cancel_scan(tmp_path):
         w.call("audio.scan")          # reads "Cancel scan" while scanning
         s = w.state("audio")
         assert not s["scanning"]
-        assert s["empty"] == "Scan cancelled — click Scan to try again."
+        assert s["empty"] == "Scan canceled — click Scan to try again."
 
 
 # ----------------------------------------------------------------- picking
+def test_a_sound_dropped_on_a_row_is_its_replacement(tmp_path):
+    """PAD-838: a sound dropped on a row from the desktop answers the row's
+    picker."""
+    folder = _project(tmp_path)
+    rep = str(tmp_path / "mine" / "new_jackpot.wav")
+    _wav(rep, seconds=1.0)
+    rel = "audio/idx0001 - Jackpot.wav"
+    with web_app(tmp_path, mfr="ap") as w:
+        _open(w, folder)
+        n = len(w.asked)
+        w.ctx.drops.put([rep])
+        assert w.call("ui.drop_arm", ["new_jackpot.wav"]) is True
+        assert w.call("audio.choose", rel) is True
+        assert len(w.asked) == n                 # no picker opened
+        row = w.state("audio")["rows"][0]
+        assert row["rep"] == "new_jackpot.wav" and row["t"] == "picked"
+        assert _sidecar(folder)["audio"] == {rel: rep}
+
+
 def test_choose_stages_in_the_sidecar_and_feeds_the_write(tmp_path):
     folder = _project(tmp_path)
     rep = str(tmp_path / "mine" / "new_jackpot.wav")
@@ -236,7 +264,7 @@ def test_choose_stages_in_the_sidecar_and_feeds_the_write(tmp_path):
         assert "Remove replacement" in labels
         assert "Revert to original" not in labels
         assert "Play replacement" in labels
-        assert "Properties…  (name / type)" in labels
+        assert "Properties…  (name / type / comment)" in labels
         # Remove replacement
         w.call("audio.menu_action", "remove", rel, [rel])
         assert _sidecar(folder)["audio"] == {}
@@ -316,7 +344,7 @@ def test_export_csv(tmp_path):
         assert w.call("audio.export_csv") is True
         text = open(out, encoding="utf-8-sig").read().splitlines()
         assert text[0] == ("Original Track,Length,Format,Type,Replacement,"
-                           "Changed On Disk,Loop,Full Length,Level dB")
+                           "Changed On Disk,Loop,Full Length,Level dB,Comment")
         assert len(text) == 4
 
 
@@ -389,22 +417,39 @@ def test_stern_advanced_dialog(tmp_path):
         data = w.call("audio.advanced_get")
         assert data["cfg"]["head_mode"] == "encode"
         assert w.state("audio")["adv_marker"] is False
-        cfg = dict(data["cfg"], audio_grow=True, loudness_db=40,
+        assert "audio_grow" not in data["cfg"]
+        cfg = dict(data["cfg"], audio_grow=False, loudness_db=40,
                    experiment_idxs="231; 258, x")
         w.call("audio.advanced_set", cfg)
         saved = w.app._settings["audio_advanced"]
-        assert saved["audio_grow"] is True
+        assert "audio_grow" not in saved
         assert saved["loudness_db"] == 12
         assert saved["experiment_idxs"] == "231,258"
         assert w.state("audio")["adv_marker"] is True
         assert w.window._audio_grow_active() is True
 
 
+@pytest.mark.parametrize("era", ["sam", "spike1"])
+def test_advanced_dialog_is_loudness_only_off_spike2(tmp_path, era):
+    """SAM and Spike 1 builds read only the loudness row (PAD-588): the
+    Spike 2 encoder levers neither show nor mark the button."""
+    with web_app(tmp_path, mfr="stern", era=era) as w:
+        assert w.state("audio")["adv_full"] is False
+        data = w.call("audio.advanced_get")
+        assert data["full"] is False
+        assert [c["label"] for c in data["loudness"]][1] == \
+            "Keep each replacement's own level"
+        # a Spike 2-only lever left on from a Spike 2 card: no marker here
+        w.call("audio.advanced_set", dict(data["cfg"], slot_seed=True))
+        assert w.state("audio")["adv_marker"] is False
+        w.call("audio.advanced_set", dict(data["cfg"], loudness_db=3))
+        assert w.state("audio")["adv_marker"] is True
+
+
 def test_stern_keep_whole_menu(tmp_path):
     folder = _project(tmp_path)
     rel = "audio/idx0001 - Jackpot.wav"
-    settings = {"audio_advanced": {"audio_grow": True}}
-    with web_app(tmp_path, mfr="stern", settings=settings) as w:
+    with web_app(tmp_path, mfr="stern") as w:
         _open(w, folder)
         items = {i.get("label"): i for i in w.call("audio.menu", rel, [rel])}
         keep = items["Keep this song whole if the bank fills up"]
@@ -438,6 +483,41 @@ def test_properties_rename(tmp_path):
         assert w.state("audio")["sel"] == [new]
 
 
+def test_type_change_survives_reopening(tmp_path):
+    """PAD-1061: a sound moved from Callouts to Sound FX in Audio Properties
+    came back as a callout after closing and reopening the app.  A sound
+    with no name (a speech row in callouts.csv) kept its Type for that
+    session only; a named one already kept it."""
+    folder = _project(tmp_path, names=("audio/idx0001 - Jackpot.wav",
+                                       "audio/idx0002.wav"))
+    with open(os.path.join(folder, "callouts.csv"), "w",
+              encoding="utf-8") as f:
+        f.write("folder,file,seconds,classification,text\n"
+                "audio,idx0002.wav,0.3,speech,\n")
+    bare, named = "audio/idx0002.wav", "audio/idx0001 - Jackpot.wav"
+    with web_app(tmp_path, mfr="stern") as w:
+        _open(w, folder)
+        rows = {r["k"]: r for r in w.state("audio")["rows"]}
+        assert rows[bare]["type"] == rows[named]["type"] == "Callouts"
+        assert w.call("audio.rename", bare, "", "sfx") is True
+        assert w.call("audio.rename", named, "Jackpot", "sfx") is True
+        rows = {r["k"]: r for r in w.state("audio")["rows"]}
+        assert rows[bare]["type"] == rows[named]["type"] == "Sound FX"
+    with web_app(tmp_path, mfr="stern") as w:
+        _open(w, folder)
+        rows = {r["k"]: r for r in w.state("audio")["rows"]}
+        assert rows[named]["type"] == "Sound FX"
+        assert rows[bare]["type"] == "Sound FX"
+        # the file was not renamed: a Type change alone keeps the name
+        assert os.path.isfile(os.path.join(folder, "audio", "idx0002.wav"))
+        # and putting it back to Callouts sticks too
+        assert w.call("audio.rename", bare, "", "callouts") is True
+    with web_app(tmp_path, mfr="stern") as w:
+        _open(w, folder)
+        rows = {r["k"]: r for r in w.state("audio")["rows"]}
+        assert rows[bare]["type"] == "Callouts"
+
+
 def test_sequential_play_steps_down_the_list(tmp_path):
     folder = _project(tmp_path)
     with web_app(tmp_path, mfr="ap") as w:
@@ -456,6 +536,88 @@ def test_sequential_play_steps_down_the_list(tmp_path):
         w.call("ui.set", "audio", "play_through", False)
         w.call("audio.set_play_subst", True)
         assert w.window.service("audio").audio_play_through_var.get()
+
+
+def test_panes_name_the_row_they_hold(tmp_path):
+    """PAD-1074: each pane says which row's sound it holds, so that row's
+    own ▶ can turn into ■ while it plays; another file in the pane (a
+    mode's file, a jukebox song) names no row."""
+    folder = _project(tmp_path)
+    one, two = "audio/idx0001 - Jackpot.wav", "audio/idx0002.wav"
+    rep = str(tmp_path / "a.wav")
+    _wav(rep)
+    with web_app(tmp_path, mfr="ap") as w:
+        _open(w, folder)
+        panes = lambda: w.state("audio")["panes"]               # noqa: E731
+        assert panes()["orig"]["rel"] is None and panes()["rep"]["rel"] is None
+        w.call("audio.play_row", one)
+        assert _wait(w, lambda: panes()["orig"]["rel"] == one)
+        assert panes()["rep"]["rel"] is None      # nothing in it to play
+        w.answers.append(rep)
+        assert w.call("audio.choose", two) is True
+        w.call("audio.play_row", two)
+        assert _wait(w, lambda: panes()["rep"]["path"] == rep)
+        assert panes()["orig"]["rel"] == two and panes()["rep"]["rel"] == two
+        svc = _svc(w)
+        w.run(lambda: svc._pane_load("rep", rep, autoplay=False, label="Mode 1"))
+        assert _wait(w, lambda: panes()["rep"]["rel"] is None)
+
+
+def test_previous_next_step_through_the_shown_list(tmp_path):
+    """PAD-701: a pane's ⏮ / ⏭ play the row above / below, in the list as
+    the filters show it, and the Replacement pane's play replacements."""
+    folder = _project(tmp_path)
+    one, two, three = ("audio/idx0001 - Jackpot.wav", "audio/idx0002.wav",
+                       "audio/idx0003 - music loop.wav")
+    with web_app(tmp_path, mfr="ap") as w:
+        _open(w, folder)
+        played = []
+        svc = _svc(w)
+        real = svc._publish
+        w.run(lambda: setattr(svc, "_publish", lambda ev, **d: (
+            played.append((d.get("pane"), d.get("path"))) if ev == "audio_play"
+            else None, real(ev, **d))))
+        sel = lambda: w.state("audio")["sel"]                # noqa: E731
+        # opening the folder selects the top row: Next plays the one below it
+        assert sel() == [one]
+        assert w.call("audio.step", "orig", 1) is True
+        assert _wait(w, lambda: played) and sel() == [two]
+        assert played[-1] == ("orig", w.state("audio")["panes"]["orig"]["path"])
+        assert played[-1][1].endswith("idx0002.wav")
+        # a search that hides the loaded row: Next takes the top of what shows
+        w.call("ui.set", "audio", "search", "music")
+        assert w.call("audio.step", "orig", 1) is True and sel() == [three]
+        w.call("ui.set", "audio", "search", "")
+        assert w.call("audio.step", "orig", -1) is True and sel() == [two]
+        assert w.call("audio.step", "orig", -1) is True and sel() == [one]
+        # the top and the bottom of the list stay put
+        n = len(played)
+        assert w.call("audio.step", "orig", -1) is False and sel() == [one]
+        assert len(played) == n
+        # a filter: Show Changed leaves the two rows with a replacement
+        reps = []
+        for rel in (one, three):
+            rep = str(tmp_path / "mine" / (rel[6:14] + ".wav"))
+            _wav(rep, seconds=0.6)
+            reps.append(rep)
+            w.answers.append(rep)
+            assert w.call("audio.choose", rel) is True
+        w.call("audio.set_show", "Changed")
+        assert [r["k"] for r in w.state("audio")["rows"]] == [one, three]
+        w.call("audio.play_row", one)
+        played.clear()
+        # under Replacement, Next skips the hidden row and plays the replacement
+        assert w.call("audio.step", "rep", 1) is True and sel() == [three]
+        assert _wait(w, lambda: played)
+        assert played[-1] == ("rep", reps[1])
+        assert w.call("audio.step", "rep", 1) is False and sel() == [three]
+        # under Original, the original (no "Play replacements")
+        assert w.call("audio.step", "orig", -1) is True and sel() == [one]
+        assert played[-1][0] == "orig"
+        # a row without a replacement plays its original under Replacement too
+        w.call("audio.set_show", "All")
+        assert w.call("audio.step", "rep", 1) is True and sel() == [two]
+        assert played[-1][0] == "orig"
 
 
 def test_fan_out_calls(tmp_path):
@@ -735,10 +897,10 @@ def test_keyboard_moves_from_the_focus_row(tmp_path):
     (tmp_path / "core").mkdir()
     (tmp_path / "tabs" / "audio.js").write_text(src, encoding="utf-8")
     # stand-ins for the modules audio.js imports (keyNav needs none of them)
-    for mod, frm in (("ui", "../core/ui.js"), ("store", "../core/store.js")):
-        m = re.search(r"import \{([^}]*)\} from \"%s\"" % re.escape(frm), src)
+    # (every ../core/ module it imports: ui, store, testtick (PAD-1279), ...)
+    for m in re.finditer(r"import \{([^}]*)\} from \"\.\./core/(\w+)\.js\"", src):
         names = [n.strip() for n in m.group(1).split(",") if n.strip()]
-        (tmp_path / "core" / (mod + ".js")).write_text(
+        (tmp_path / "core" / (m.group(2) + ".js")).write_text(
             "".join("export const %s = () => null;\n" % n for n in names),
             encoding="utf-8")
     # ...and for the tab's own sibling modules (originals.js, PAD-443)
@@ -786,8 +948,7 @@ def test_row_controls_never_fire_the_row_double_click():
     through the core Table."""
     src = open(_AUDIO_JS, encoding="utf-8").read()
     for cls in ("aud-rowplay", "aud-flag", "aud-rep"):
-        start = src.index('class="%s"' % cls if cls == "aud-rowplay"
-                          else '"%s"' % cls)
+        start = src.index('"%s"' % cls)
         tag = src[start:src.index("</button>", start)]
         assert "onDblClick=${noDbl}" in tag, cls
         assert "onClick=${once(" in tag, cls

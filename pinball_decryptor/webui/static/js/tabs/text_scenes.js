@@ -6,6 +6,7 @@ import { html, useState, useEffect, useLayoutEffect, useRef, Button, Field, Sele
          Icon, Progress, Spinner, tip, call, mediaUrl, cx } from "../core/ui.js";
 import { useNs } from "../core/store.js";
 import { LookRow } from "../core/look.js";
+import { testCol } from "../core/testtick.js";
 
 // Load its own sheet once.
 const CSS_HREF = "/static/css/tabs/text_scenes.css";
@@ -22,7 +23,7 @@ if (typeof document !== "undefined" && !document.querySelector(`link[href="${CSS
 const SCENE_COLS = [
   { key: "label", label: "Scene", width: "minmax(0,1fr)", sort: "#0",
     titleOf: (r) => r.label + "\n" + r.d + (r.state ? "\n" + STATE_TIP[r.state] : ""),
-    render: (r) => html`<span class="sc-name"><span class=${"sc-dot " + (r.state || "same")}></span><span class="ellip">${r.label}</span></span>` },
+    render: (r) => html`<span class="sc-name"><span class=${"sc-dot " + (r.state || "same")}></span><span class="ellip notr">${r.label}</span></span>` },
   { key: "imgs", label: "Images", width: "60px", sort: "imgs", num: true },
   { key: "fonts", label: "Fonts", width: "50px", sort: "fonts", num: true },
   { key: "texts", label: "Text", width: "44px", sort: "texts", num: true },
@@ -30,11 +31,14 @@ const SCENE_COLS = [
 ];
 let sceneWidths = null;         // dragged column widths, kept for the session
 // DragonRR: a scene's colour says where its edits stand - orange: changed and not written to
-// a card yet (the next Write puts them on); green: exactly what the last Write put on the card
+// a card yet (the next Write puts them on); green: exactly what the last Write put on the card.
+// A color profile on one of its pictures or lines of text is a change too (PAD-524); blue: the
+// only change is the profile applied to all of them (DragonRR: every dot was orange after All images).
 const STATE_TIP = {
-  same: "Not changed: the scene as the game ships it.",
-  edited: "Changed since the last Write: the next Write puts it on the card.",
-  written: "Written: the last Write put exactly these edits on the card.",
+  same: "Not changed: the scene as the game ships it, no color profile on any of its pictures or lines.",
+  edited: "Changed since the last Write (its edits, or a color profile of its own on one of its pictures or lines): the next Write puts it on the card.",
+  all: "Changed since the last Write only by the color profile applied to all pictures or lines (All images, All text, Apply to all; No change too), or by a font color given to all lines of text: the next Write puts it on the card.",
+  written: "Written: the last Write put exactly these edits and color profiles on the card.",
 };
 // PAD-429 (DragonRR): the search finds the game's on-screen text, not only scene names;
 // PAD-468: with nothing typed, the arrows go through every line of text of every scene
@@ -46,9 +50,12 @@ const FIND_TIP = "Finds scenes by name, font or the words they show. Enter (or t
 // readable and drops the counts, least useful first (Video, Fonts, then Text and Images).
 const COLS_BY_WIDTH = [[470, ["imgs", "fonts", "texts", "vids"]], [330, ["imgs", "texts"]],
   [250, ["imgs"]], [0, []]];
-function sceneCols(width) {
+function sceneCols(width, s) {
   const keep = (COLS_BY_WIDTH.find(([w]) => width >= w) || [0, []])[1];
   const cols = SCENE_COLS.filter((c) => c.key === "label" || keep.includes(c.key));
+  // PAD-1279: TEST puts the scene's resting frame on the test card (after the name: kept
+  // however narrow the list is; a fixed track, so it may be the last one)
+  if (s && s.test_on) cols.splice(1, 0, testCol({ ns: "text_scenes", tags: s.test_tags, full: s.test_full, keyOf: (r) => r.d }));
   // the last column is a fixed track so the Table keeps its width (see SCENE_COLS)
   return cols.map((c, i) => (i === cols.length - 1 && c.key !== "label" && !c.width.startsWith("minmax")
     ? { ...c, width: `minmax(${parseInt(c.width, 10)}px,${parseInt(c.width, 10)}px)` } : c));
@@ -220,11 +227,11 @@ export function ScenesActions() {
           onClick: () => call("text_scenes.edits_save", "all") },
         // PAD-369 (DragonRR): everything, to hand to someone else
         { label: "Save this scene with pictures, text and color profiles…", icon: "download", disabled: !s.tree_view,
-          title: "Its edits, plus each picture in it you replaced on the Images tab (the file itself, its size tick, its color switch and color profile), the pictures you added, its words you changed on the Text tab, and the whole screen overlay, in one .zip file",
+          title: "Its edits, plus each picture in it you replaced on the Images tab (the file itself, its size tick, its color switch and color profile), the pictures you added, the color profile of each of the game's own pictures and lines in it you switched on, its words you changed on the Text tab, and the whole screen overlay, in one .zip file",
           onClick: () => call("text_scenes.edits_save", "this", true) },
         // PAD-387: the project's whole look, sounds, videos and modes aside
         { label: "Save every scene with pictures, text and color profiles…", icon: "download",
-          title: "Your project's whole look in one .zip file: every scene's edits, every picture you replaced on the Images tab (with its size tick, color switch and color profile), every Text tab edit and the whole screen overlay. Sounds, videos and modes are not in it.",
+          title: "Your project's whole look in one .zip file: every scene's edits, every picture you replaced on the Images tab (with its size tick, color switch and color profile), the color profile of every one of the game's own pictures and lines you switched on, every Text tab edit and the whole screen overlay. Sounds, videos and modes are not in it.",
           onClick: () => call("text_scenes.edits_save", "all", true) },
         { sep: true },
         { label: "Load scene edits from a file…", icon: "upload",
@@ -291,6 +298,7 @@ export function ScenesPage({ colorsOpen = false, openColors, openFont } = {}) {
   const bodyStyle = [split.left != null ? `--sc-left:${split.left}px` : "",
     split.right != null ? `--sc-right:${split.right}px` : ""].filter(Boolean).join(";");
   useEffect(() => { if (!s.alive) setColor(null); }, [s.alive]);
+  useEffect(() => { if (s.edit_list && wide) setWide(false); }, [!!s.edit_list]);
   const tips = s.tips || {};
   const layout = s.layout_dialog;               // Move… / Font size…, shown in the side column
   const startColor = async (text) => {
@@ -304,11 +312,11 @@ export function ScenesPage({ colorsOpen = false, openColors, openFont } = {}) {
     let items = [];
     if (it.id.startsWith("txt::")) {
       items = [
-        { label: "Text colour…", onClick: () => startColor(it.text) },
-        it.picked ? { label: "Back to the original colour", onClick: () => call("text_scenes.reset_color", it.text) } : null,
+        { label: "Text color…", onClick: () => startColor(it.text) },
+        it.picked ? { label: "Back to the original color", onClick: () => call("text_scenes.reset_color", it.text) } : null,
         { sep: true },
         { label: "Move…", onClick: () => startLayout(it.text, "move") },
-        { label: "Alignment", submenu: [["left", "Left"], ["center", "Centre"], ["right", "Right"]].map(([n, l]) => ({
+        { label: "Alignment", submenu: [["left", "Left"], ["center", "Center"], ["right", "Right"]].map(([n, l]) => ({
           label: l, checked: it.align === n, onClick: () => call("text_scenes.align_text", it.text, n) })) },
         { label: "Font size…", onClick: () => startLayout(it.text, "size") },
         it.has_layout ? { label: "Back to the original layout", onClick: () => call("text_scenes.reset_layout", it.text) } : null,
@@ -366,12 +374,14 @@ export function ScenesPage({ colorsOpen = false, openColors, openFont } = {}) {
         </div>
         ${(s.scenes || []).length ? null : html`<p class="small muted" style="margin:0">${s.hint}</p>`}
         ${(s.scenes || []).length ? html`<div class="row small muted sc-legend">
-          <span class="sc-dot same"></span><span title=${STATE_TIP.same}>not changed</span>
-          <span class="sc-dot edited"></span><span title=${STATE_TIP.edited}>not written yet</span>
-          <span class="sc-dot written"></span><span title=${STATE_TIP.written}>written to a card</span>
+          <span class="sc-key" title=${STATE_TIP.same}><span class="sc-dot same"></span>not changed</span>
+          <span class="sc-key" title=${STATE_TIP.edited}><span class="sc-dot edited"></span>not written yet</span>
+          <span class="sc-key" title=${STATE_TIP.all}><span class="sc-dot all"></span>profile on all</span>
+          <span class="sc-key" title=${STATE_TIP.written}><span class="sc-dot written"></span>written to a card</span>
         </div>` : null}
-        <div class="scenes-list-wrap" ref=${listRef} ...${tip(tips.list)}>
-          <${Table} key=${sceneCols(listW).length} cls="scenes-list" columns=${sceneCols(listW)}
+        ${s.edit_list ? html`<${EditList} list=${s.edit_list} t=${s.tree_view} />` : null}
+        <div class=${cx("scenes-list-wrap", s.edit_list && "sc-off")} ref=${listRef} ...${tip(tips.list)}>
+          <${Table} key=${sceneCols(listW).length} cls="scenes-list" columns=${sceneCols(listW, s)}
             rowClass=${(r) => (r.state ? "sc-" + r.state : "")} rows=${s.scenes || []} rowKey=${(r) => r.d}
             selected=${s.sel} onSelect=${(r) => call("text_scenes.select", r.d)} rowHeight=${30}
             sort=${{ key: (s.sort || {}).col, desc: (s.sort || {}).rev }}
@@ -384,8 +394,8 @@ export function ScenesPage({ colorsOpen = false, openColors, openFont } = {}) {
         ${[s.card_note, editor && s.pic_note].filter(Boolean).map((t, i) => html`<div key=${"w" + i}
           class="note warn scenes-warn" role="status"><${Icon} name="warn" /><div class="body-text small">${t}</div></div>`)}
         ${editor && s.mode_layout && s.mode_layout.scene_dir === s.sel ? html`<div class="note scenes-warn scenes-modelay" role="status">
-          <${Icon} name="info" /><div class="body-text small grow">Laying out <b>${s.mode_layout.mode}</b>'s screen: drag the
-            picture or its words, size them, and Send to back to put the screen under the HUD's own pictures.
+          <${Icon} name="info" /><div class="body-text small grow">Laying out <b>${s.mode_layout.mode}</b>'s ${s.mode_layout.what || "screen"}: drag the
+            picture or its words, size them, and Send to back to put it under the HUD's own pictures.
             Saved into the mode as you go${s.mode_layout.under ? " (now under the HUD)" : ""}.</div>
           ${s.mode_layout.laid_out ? html`<${Button} size="xs" kind="ghost" title="Back to where the app places it by itself"
             onClick=${() => call("text_scenes.mode_layout_auto")}>Place automatically<//>` : null}
@@ -444,7 +454,7 @@ export function ScenesPage({ colorsOpen = false, openColors, openFont } = {}) {
       <div class="scenes-inspector" ref=${inspRef}>
         ${editor ? html`<div class="insp-top" ref=${topRef} data-play=${s.tree_play ? 1 : 0}
             style=${split.top != null ? `flex:0 0 auto;height:${split.top}px;max-height:calc(100% - 120px)` : ""}>
-            <${TreeSide} t=${s.tree_view} play=${s.tree_play} playFrame=${playFrame} openFont=${openFont}
+            <${TreeSide} t=${s.tree_view} play=${s.tree_play} playFrame=${playFrame} openFont=${openFont} from=${s.resize_from}
               find=${s.find} searching=${searching} /></div>
           <${Divider} k="top" horizontal measure=${measureTop} label="Selection and Layers" ...${splitProps} />
           <${TreeTop} s=${s} onMenu=${itemMenu} />`
@@ -480,30 +490,48 @@ function Contents({ s, onMenu }) {
   const c = s.contents;
   const [open, setOpen] = useState({});
   const listRef = useRef(null);
+  const stepped = useRef(null);
+  const step = useStepper((id) => call("text_scenes.select_item", id), s.item);
   useEffect(() => { setOpen({}); }, [c && c.path]);
   useEffect(() => {
     // land on a focused line (Show in Scenes…)
     if (!s.item || !listRef.current) return;
     const el = listRef.current.querySelector(`[data-id="${CSS.escape(s.item)}"]`);
-    // centred: the list can still shrink a little once the preview lands
-    if (el) el.scrollIntoView({ block: "center" });
+    // centred: the list can still shrink a little once the preview lands; an arrow's step
+    // only brings the row into view
+    if (el) el.scrollIntoView({ block: stepped.current === s.item ? "nearest" : "center" });
   }, [s.item, c && c.path]);
   if (!c) return html`<div class="scenes-contents"><div class="sc-head"><span class="eyebrow">Contents</span></div></div>`;
-  return html`<div class="scenes-contents" ref=${listRef} role="tree" aria-label="Contents">
+  const isOpen = (g) => open[g.key] ?? (g.open || (s.item && g.items.some((it) => it.id === s.item)));
+  const onKey = (e) => {
+    if (!listArrow(e)) return;
+    e.preventDefault();
+    const ids = c.groups.flatMap((g) => (isOpen(g) ? g.items.filter((it) => it.id).map((it) => it.id) : []));
+    const at = step.from(ids);
+    const next = stepRow(ids, at, e.key);
+    if (next == null || next === at) return;
+    // a group open only for the row in it stays open as the arrows leave it
+    const g = c.groups.find((x) => open[x.key] == null && x.items.some((it) => it.id === at));
+    if (g) setOpen({ ...open, [g.key]: true });
+    stepped.current = next;
+    step.go(next);
+  };
+  return html`<div class="scenes-contents" ref=${listRef} role="tree" aria-label="Contents" tabindex="0" onKeyDown=${onKey}>
     <div class="sc-head"><span class="eyebrow">Contents</span></div>
     ${c.groups.map((g) => {
-      const isOpen = open[g.key] ?? (g.open || (s.item && g.items.some((it) => it.id === s.item)));
+      const opened = isOpen(g);
       return html`<div class="sc-group" key=${g.key}>
-        <button type="button" class="sc-gh" onClick=${() => setOpen({ ...open, [g.key]: !isOpen })}>
-          <${Icon} name=${isOpen ? "down" : "right"} />${g.title}</button>
-        ${isOpen ? g.items.map((it, n) => html`<div key=${it.id || g.key + n} data-id=${it.id || ""}
-            class=${cx("sc-item", it.id && s.item === it.id && "sel", !it.id && "note")}
+        <button type="button" class="sc-gh" onClick=${() => setOpen({ ...open, [g.key]: !opened })}>
+          <${Icon} name=${opened ? "down" : "right"} />${g.title}</button>
+        ${opened ? g.items.map((it, n) => html`<div key=${it.id || g.key + n} data-id=${it.id || ""}
+            class=${cx("sc-item", "ct-item", it.id && s.item === it.id && "sel", !it.id && "note")}
             onClick=${() => it.id && call("text_scenes.select_item", it.id)}
             onDblClick=${() => it.id && call("text_scenes.activate", it.id)}
-            onContextMenu=${(e) => { e.preventDefault(); onMenu(it, e); }}>
-          ${it.swatch ? html`<span class="swatch sc-sw" style=${`background:${it.swatch}`}></span>` : html`<span></span>`}
-          <span class="sc-t ellip" title=${it.text}>${it.text}</span>
-          <span class="sc-i small muted ellip" title=${it.info}>${it.info}</span>
+            onContextMenu=${(e) => { e.preventDefault(); onMenu(it, e); }}
+            ...${tip({ head: it.text, lines: [it.info] })}>
+          ${it.thumb ? html`<span class="sc-pic"><img src=${mediaUrl(it.thumb)} alt="" loading="lazy" decoding="async" /></span>`
+            : it.swatch ? html`<span class="swatch sc-sw" style=${`background:${it.swatch}`}></span>` : html`<span></span>`}
+          <span class="sc-t ellip notr">${it.text}</span>
         </div>`) : null}
       </div>`;
     })}
@@ -532,7 +560,7 @@ function ColorDialog({ c, onClose }) {
   return html`<${Modal} title=${c.title} onClose=${onClose}
       footer=${html`<${Button} onClick=${onClose}>Cancel<//><${Button} kind="primary" onClick=${ok}>OK<//>`}>
     <div class="row" style="gap:14px">
-      <input type="color" class="scenes-color" value=${v} onInput=${(e) => setV(e.target.value)} aria-label="Colour" />
+      <input type="color" class="scenes-color" value=${v} onInput=${(e) => setV(e.target.value)} aria-label="Color" />
       <span class="mono">${v}</span>
     </div>
   <//>`;
@@ -593,6 +621,38 @@ function inPoly(pts, x, y) {
   return inside;
 }
 
+// PAD-512 (DragonRR): a click goes through a picture where it is clear to what is drawn under
+// it (a full-screen picture of the score panel on top of a mode's screen took every click
+// meant for its title).  *see* is the server's grid of the picture (tree_see): one bit per
+// cell, set where it shows.
+const seeBits = new Map();
+export function clearAt(h, see, x, y) {
+  const m = h.img && see ? see[h.img] : null;
+  if (!m) return false;
+  const [p0, p1, , p3] = h.pts;
+  const ex = p1[0] - p0[0], ey = p1[1] - p0[1], fx = p3[0] - p0[0], fy = p3[1] - p0[1];
+  const det = ex * fy - fx * ey;
+  if (Math.abs(det) < 1e-9) return false;
+  const dx = x - p0[0], dy = y - p0[1];
+  const u = (dx * fy - fx * dy) / det, v = (ex * dy - ey * dx) / det;
+  const col = Math.min(m.c - 1, Math.max(0, Math.floor((u * m.w) / m.s)));
+  const row = Math.min(Math.ceil(m.h / m.s) - 1, Math.max(0, Math.floor((v * m.h) / m.s)));
+  let bits = seeBits.get(m.b);
+  if (!bits) {
+    if (seeBits.size > 400) seeBits.clear();
+    bits = Uint8Array.from(atob(m.b), (ch) => ch.charCodeAt(0));
+    seeBits.set(m.b, bits);
+  }
+  const i = row * m.c + col;
+  return !((bits[i >> 3] >> (7 - (i & 7))) & 1);
+}
+
+// PAD-515 (DragonRR): what the game does to a box as it plays, which colors its outline on the
+// preview: "filled" (teal) the game fills its words in (PAD-485), "painted" (violet) the game
+// paints its colors (PAD-507), "" anything else.  *h* is an outline, a layer or the selection.
+// An outline shows only under the mouse and on the selection, the same for every kind.
+export const outlineKind = (h) => (!h ? "" : h.filled ? "filled" : h.painted || h.game_colors ? "painted" : "");
+
 // PAD-447 (DragonRR): a click whose mouse jiggles a pixel or two picks a picture or a line of
 // text without moving it.  A press moves, resizes or scales nothing until the pointer has gone
 // DRAG_SLOP px on the screen from where it went down; from then on it follows the pointer from
@@ -608,6 +668,147 @@ export function dragTo(d, sx, sy, x, y) {
   return { ...d, go: true, f: Math.max(0.05, Math.hypot(x - d.cx, y - d.cy) / d.d0) };
 }
 
+// PAD-1014 (DragonRR): snapping, as drawing programs do it.  Snap to grid puts what is dragged
+// on a grid of *size* glass px; Snap to other parts pulls its edges and middle onto the edges and
+// middles of the other pictures and lines of text in the scene (and the screen's), when they
+// come within SNAP_PX screen px, a guide line showing where.  *handle* is the point of what is
+// dragged that snaps: "auto" (any of its edges or its middle; the grid takes the top-left
+// corner) or one of the nine of SNAP_HANDLES.  Alt held down while dragging places it freely.
+// A corner dragged to resize snaps the same way.  Kept for the next session (per viewer).
+export const SNAP_PX = 8;
+export const SNAP_SIZES = [2, 4, 5, 8, 10, 16, 20, 25, 32, 50, 64, 100];
+export const SNAP_HANDLES = [["tl", "Top left"], ["tc", "Top middle"], ["tr", "Top right"],
+  ["ml", "Middle left"], ["mc", "Middle"], ["mr", "Middle right"],
+  ["bl", "Bottom left"], ["bc", "Bottom middle"], ["br", "Bottom right"]];
+const SNAP_KEY = "pad.scenes.snap";
+const SNAP_DEFAULT = { grid: false, size: 10, objects: false, handle: "auto" };
+let snapNow = (() => {
+  try { return { ...SNAP_DEFAULT, ...(JSON.parse(localStorage.getItem(SNAP_KEY) || "{}") || {}) }; }
+  catch (e) { return { ...SNAP_DEFAULT }; }
+})();
+const snapSubs = new Set();
+function setSnap(ch) {
+  snapNow = { ...snapNow, ...ch };
+  try { localStorage.setItem(SNAP_KEY, JSON.stringify(snapNow)); } catch (e) { /* not kept */ }
+  snapSubs.forEach((f) => f(snapNow));
+}
+function useSnap() {
+  const [v, setV] = useState(snapNow);
+  useEffect(() => { snapSubs.add(setV); return () => { snapSubs.delete(setV); }; }, []);
+  return v;
+}
+// a handle as fractions of the box across and down
+const handleAt = (h) => [{ l: 0, c: 0.5, r: 1 }[h[1]], { t: 0, m: 0.5, b: 1 }[h[0]]];
+// PAD-1211: a part's box on the glass as it is (props.box), else the rounded one shown
+export const exactBox = (p) => (p.box ? { x: p.box[0], y: p.box[1], w: p.box[2], h: p.box[3] }
+  : { x: p.x, y: p.y, w: p.w, h: p.h });
+// a move kept to a thousandth of a pixel (what the edits keep)
+export const r3 = (v) => Math.round(v * 1000) / 1000;
+// the box round a set of outline points
+export function boxOfPts(pts) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of pts) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+// the lines a part snaps onto, across (xs) and down (ys): the screen's edges and middle, and
+// each other part's (o.others: boxes)
+function snapLines(o) {
+  const xs = [0, o.W / 2, o.W], ys = [0, o.H / 2, o.H];
+  for (const b of o.others || []) { xs.push(b.x, b.x + b.w / 2, b.x + b.w); ys.push(b.y, b.y + b.h / 2, b.y + b.h); }
+  return [xs, ys];
+}
+// one way (across or down): pts are where the snapping points are now -> {d, line, hit}: how
+// far to move them, the guide (null: on the grid, or not snapped) and whether it snapped at all.
+// The nearest line within tol wins over the grid; the grid takes pts[0].
+function snapAxis(pts, lines, o) {
+  let best = null;
+  if (o.objects) {
+    for (const p of pts) {
+      for (const l of lines) {
+        const d = l - p;
+        if (Math.abs(d) <= o.tol && (!best || Math.abs(d) < Math.abs(best.d))) best = { d, line: l, hit: true };
+      }
+    }
+  }
+  if (best) return best;
+  if (o.grid && o.size > 0) return { d: Math.round(pts[0] / o.size) * o.size - pts[0], line: null, hit: true };
+  return { d: 0, line: null, hit: false };
+}
+const guidesOf = (sx, sy) => [...(sx.line != null ? [{ x: sx.line }] : []), ...(sy.line != null ? [{ y: sy.line }] : [])];
+// a part (box *b*) moved by (dx, dy) -> the move snapped, its guides, and which ways it
+// snapped ([across, down]: the drop keeps those exact, PAD-1211)
+export function snapMove(b, dx, dy, o) {
+  const [fx, fy] = o.handle && o.handle !== "auto" ? handleAt(o.handle).map((f) => [f]) : [[0, 0.5, 1], [0, 0.5, 1]];
+  const [xs, ys] = snapLines(o);
+  const sx = snapAxis(fx.map((f) => b.x + b.w * f + dx), xs, o);
+  const sy = snapAxis(fy.map((f) => b.y + b.h * f + dy), ys, o);
+  return { dx: dx + sx.d, dy: dy + sy.d, guides: guidesOf(sx, sy), snapped: [sx.hit, sy.hit] };
+}
+// a corner dragged to (x, y) -> where it snaps
+export function snapPoint(x, y, o) {
+  const [xs, ys] = snapLines(o);
+  const sx = snapAxis([x], xs, o), sy = snapAxis([y], ys, o);
+  return { x: x + sx.d, y: y + sy.d, guides: guidesOf(sx, sy), snapped: [sx.hit, sy.hit] };
+}
+// a picture scaled by *f* about (cx, cy) from its corner (kx, ky): the size that puts that
+// corner on the nearest line (across or down, whichever is nearer), else on the grid
+export function snapScale(c, k, f, o) {
+  const [xs, ys] = snapLines(o);
+  const tries = [];
+  for (const [i, lines] of [[0, xs], [1, ys]]) {
+    const span = k[i] - c[i];
+    if (Math.abs(span) < 1) continue;
+    const s = snapAxis([c[i] + span * f], lines, o);
+    if (s.d) tries.push({ ...s, i, f: f + s.d / span });
+  }
+  // a part's line before the grid, then the nearer
+  tries.sort((a, b) => (a.line == null) - (b.line == null) || Math.abs(a.d) - Math.abs(b.d));
+  const t = tries.find((q) => q.f >= 0.05);
+  if (!t) return { f, guides: [] };
+  return { f: t.f, guides: t.line == null ? [] : [t.i ? { y: t.line } : { x: t.line }] };
+}
+// a drag (dragTo's) with the snapping *o* put on it; o null: none
+export function snapDrag(d, o) {
+  if (!d.go) return d;
+  if (!o || (!o.grid && !o.objects)) return d.guides || d.snapped ? { ...d, guides: null, snapped: null } : d;
+  if (d.mode === "move" && d.b) {
+    const s = snapMove(d.b, d.dx, d.dy, o);
+    return { ...d, dx: s.dx, dy: s.dy, guides: s.guides, snapped: s.snapped };
+  }
+  if (d.mode === "box") { const s = snapPoint(d.x, d.y, o); return { ...d, x: s.x, y: s.y, guides: s.guides, snapped: s.snapped }; }
+  if (d.mode === "scale" && d.kx != null) {
+    const s = snapScale([d.cx, d.cy], [d.kx, d.ky], d.f, o);
+    return { ...d, f: s.f, guides: s.guides };
+  }
+  return d;
+}
+
+// The Snap menu under the preview
+function SnapButton() {
+  const sn = useSnap();
+  const on = sn.grid || sn.objects;
+  const hName = (SNAP_HANDLES.find(([k]) => k === sn.handle) || [0, "Auto"])[1];
+  return html`<${Button} size="sm" kind="ghost" iconRight="down" cls=${cx("tree-snap", on && "on")}
+    title=${{ head: on ? "Snapping is on" : "Snapping is off",
+      lines: ["Snap to a grid, or to the edges and middles of the other parts, as you drag a part or a corner.",
+        ["Alt", "held while dragging places it freely"]] }}
+    onClick=${(e) => openMenu(e.currentTarget, [
+      { label: "Snap to grid", checked: !!sn.grid, onClick: () => setSnap({ grid: !sn.grid }),
+        title: "Drop what you drag on a grid (drawn on the preview while this is on): its top-left corner, or the point picked under Snap with" },
+      { label: `Grid size: ${sn.size} px`, submenu: SNAP_SIZES.map((v) => ({ label: `${v} px`, checked: v === sn.size,
+        onClick: () => setSnap({ size: v, grid: true }) })) },
+      { sep: true },
+      { label: "Snap to other parts", checked: !!sn.objects, onClick: () => setSnap({ objects: !sn.objects }),
+        title: "Pull what you drag onto the edges and middles of the other pictures and lines of text, and of the screen, when it comes near; a line shows where" },
+      { label: `Snap with: ${hName}`, submenu: [
+        { label: "Auto (any edge or the middle)", checked: sn.handle === "auto", onClick: () => setSnap({ handle: "auto" }),
+          title: "Whichever of its edges or its middle is nearest a line snaps onto it. On the grid, its top-left corner." },
+        { sep: true },
+        ...SNAP_HANDLES.map(([k, label]) => ({ label, checked: sn.handle === k, onClick: () => setSnap({ handle: k }),
+          title: `Only its ${label.toLowerCase()} point snaps, onto any edge or middle of the others (or the grid). It shows as a dot on the selection.` }))] },
+    ])}>Snap${on ? html`<span class="tree-snap-dot"></span>` : null}<//>`;
+}
+
 function TreeTop({ s, onMenu }) {
   const [view, setView] = useState("layers");
   return html`<div class="scenes-top">
@@ -615,7 +816,7 @@ function TreeTop({ s, onMenu }) {
       { value: "layers", label: html`<${Icon} name="scenes" />Layers`,
         title: "Every part of the scene, in the order it is drawn: pick, hide or edit them" },
       { value: "contents", label: html`<${Icon} name="list" />Contents`,
-        title: "The pictures, fonts and text this scene uses: double-click one to find it on its own tab" }]} /></div>
+        title: "The pictures, fonts and text this scene uses: click one to pick it on the preview, double-click it to find it on its own tab" }]} /></div>
     ${view === "layers" ? html`<${TreeLayers} t=${s.tree_view} />` : html`<${Contents} s=${s} onMenu=${onMenu} />`}
   </div>`;
 }
@@ -623,6 +824,42 @@ function TreeTop({ s, onMenu }) {
 // Ctrl (Cmd on a Mac) adds a layer to the selection or takes it out; Shift selects a run of
 // them in the Layers list (PAD-279).
 const pickHow = (e, range) => (range && e.shiftKey ? "range" : e.ctrlKey || e.metaKey || e.shiftKey ? "add" : "");
+
+// PAD-508 (DragonRR): Up and Down in the Layers and Contents lists pick the row above or below,
+// as they do in every other list; they only scrolled the list, like the mouse wheel.  ids: the
+// rows in list order; at: the row the arrows are on.  -> the row to pick, or null (not an
+// arrow, nothing above the top or below the bottom).  With no row picked yet, the first.
+export function stepRow(ids, at, key) {
+  if ((key !== "ArrowDown" && key !== "ArrowUp") || !ids.length) return null;
+  const i = at == null ? -1 : ids.indexOf(at);
+  if (i < 0) return ids[0];
+  const j = key === "ArrowDown" ? i + 1 : i - 1;
+  return j >= 0 && j < ids.length ? ids[j] : null;
+}
+// One pick on its way to Python at a time: an arrow held down sends the row it has got to
+// once the pick before is answered, not a redraw of the preview per key repeat.  from(ids,
+// sel) is the row the arrows are on: the last one asked for until Python's selection moves.
+export function useStepper(send, sel) {
+  const st = useRef({ busy: false, at: null, next: null });
+  useEffect(() => { if (!st.current.busy) st.current.at = null; }, [sel]);
+  const go = (...args) => {
+    const s = st.current;
+    s.at = args[0];
+    if (s.busy) { s.next = args; return; }
+    s.busy = true;
+    const run = (a) => Promise.resolve(send(...a)).finally(() => {
+      const q = s.next;
+      s.next = null;
+      if (q) run(q); else s.busy = false;
+    });
+    run(args);
+  };
+  const from = (ids) => (st.current.at != null && ids.includes(st.current.at) ? st.current.at : sel);
+  return { go, from };
+}
+// the list's own arrow keys; a modifier other than Shift, or a box being typed in, is left alone
+const listArrow = (e) => (e.key === "ArrowDown" || e.key === "ArrowUp") && !e.altKey && !e.ctrlKey && !e.metaKey
+  && !(e.target && e.target.closest && e.target.closest("input, textarea, select"));
 
 // PAD-294 (DragonRR): a plain click on the empty room around the picture, or below the rows
 // in Layers, drops the selection (a selected layer is drawn on top until then).  A click on
@@ -658,17 +895,28 @@ const eyeTip = (l, solo) => ({
     ["Ctrl+Z", "take an eye click back, as any edit"],
     "The game is not changed.",
   ] });
-const gameTip = (l) => ({
-  head: l.hidden ? "Game: hidden" : "Game: shown",
+// PAD-535 (DragonRR: "no real indication items have deleted status"): every row says whether
+// it is in the game, a green tick or a red stop sign at its end; with several rows selected a
+// click on one of theirs sets them all
+const gameTip = (l, n) => ({
+  head: l.hidden ? "Hidden in the game (deleted)" : "In the game",
   lines: l.hidden ? [
-    "Write leaves it out of the card, so the machine never draws it.",
-    ["Click", "put it back in the game (and in the preview)"],
+    // PAD-535: hidden by an earlier Write on the card this project was extracted from
+    l.baked ? "The card this project was extracted from already has it hidden: an earlier Write hid it, so the game's own scene never draws it now. Nothing is lost: it stays in the scene, since the game's code still looks for it."
+      : "Write leaves it out of the card, so the machine never draws it. Nothing is lost: it stays in the scene, since the game's code still looks for it.",
+    ["Click", n > 1 ? `put the ${n} selected layers back in the game (and in the preview)` : "put it back in the game (and in the preview)"],
     l.view_off ? "Its eye is shut too; open the eye to see it here anyway." : "Its eye is open, so the preview still shows it.",
   ] : [
-    ["Click", "hide it in the game (Write leaves it out of the card) and in the preview"],
+    l.baked ? "Put back: the card this project was extracted from had it hidden by an earlier Write, and Write shows it again whenever the game shows its group."
+      : "Write puts it on the card, so the machine draws it.",
+    ["Click", n > 1 ? `hide the ${n} selected layers in the game and in the preview` : "hide it in the game (Write leaves it out of the card) and in the preview"],
     ["Delete", "hide it in the game and the preview, after asking"],
     `The eye on its own hides it here only.${l.part_off ? " It shows only when the look it sits in is on." : ""}`,
   ] });
+const gameMarkIds = (t, l) => {
+  const sels = t.sels || [];
+  return sels.includes(l.id) && sels.length > 1 ? sels : [l.id];
+};
 // PAD-451 (DragonRR): a line in a font whose letters carry their own colors (c.art) has a
 // palette of its own: the Write gives it its own copy of the font.  What that means, and how
 // to reach every line in the font at once (its pictures, on the Images tab)
@@ -689,6 +937,11 @@ const artLines = (c) => {
 // advanced box beside Preview colors unlocks it (PAD-344; moved there in PAD-349)
 const colorTip = (l, cs) => {
   const c = l.color || {};
+  // PAD-514: a line with a color of its own (the Font bar's) is drawn in it, profile or not
+  if (c.line && c.own_colour) return { head: `Its own color: ${c.own_colour}`, lines: [
+    "Set in the Font bar: this line is drawn in exactly this color, in the preview and on the machine, so the color profile does not change it.",
+    c.on || c.font_on ? "Its color profile switch stays as it was; it counts again once Default in the Font bar takes the line's own color off." : null,
+    "Open the Font bar on this line to change it, or Default to take it off." ] };
   if (c.locked && c.line) return { head: "Color: the game's own line of text", lines: [
     "Stern made its colors for the machine's screen, so the individual files profile is not offered on it.",
     ...artLines(c),
@@ -745,18 +998,105 @@ export const filledLines = (f) => {
   const who = (f.modes || []).join(", ");
   return [
     f.line ? `The game fills this box in as it plays, with its own line: ${f.line}${who ? ` (${who})` : ""}. The words here are a stand-in; the game's line is what the machine shows.`
-      : `The game fills this box in as it plays${who ? `, during ${who}` : ""}. The words here are a stand-in; the game's own line is what the machine shows.`,
+      : who ? `The game fills this box in as it plays, during ${who}. The words here are a stand-in; the game's own line is what the machine shows.`
+        // PAD-513: a box the game names (or a placeholder: XXX,XXX,XXX, 00) with no line or mode to name
+        : "The game fills this box in as it plays with words of its own: a score, a count, a name or one of its lines. The words here are a stand-in.",
     "Its size, place and font set here hold for whatever the game puts in it.",
   ];
 };
 const filledTip = (f) => ({ head: "Filled in by the game", lines: [
   ...filledLines(f),
-  ["T", f.line ? "find the game's line on the Replace Text tab" : "list that mode's lines on the Replace Text tab"] ] });
+  f.line ? ["T", "find the game's line on the Replace Text tab"]
+    : (f.modes || []).length ? ["T", "list that mode's lines on the Replace Text tab"] : null ] });
+// PAD-531 (DragonRR: "multiple icons in each of the three locations and it is hard to know
+// why"): a layer drawn in only some looks of a switchable part (the map's Bridge: Loop, Select,
+// Destroyed) names them on its row, and the Selected panel can show that look
+const lookLine = (k) => `Part of ${k.part_name}'s ${k.looks.join(" and ")} ${k.looks.length > 1 ? "looks" : "look"}. The game's code picks which look shows; its other looks sit in the same place.`;
+function LookNote({ k }) {
+  if (!k) return null;
+  const back = k.shown && k.pinned != null;
+  return html`<div class="tree-row tree-look">
+    <span class="small muted grow">${lookLine(k)}</span>
+    ${k.shown && !back ? null : html`<${Button} size="xs" icon=${back ? "undo" : "eye"}
+      title=${back ? `Put ${k.part_name} back as it rests (Switchable parts)` : `Show ${k.part_name} at ${k.looks[0]} in the preview (Switchable parts); the card is not changed`}
+      onClick=${() => call("text_scenes.tree_state", k.part, back ? "" : k.frame)}>${back ? "As it rests" : "Show this look"}<//>`}
+  </div>`;
+}
+// PAD-1278 (DragonRR): an added picture animated. When it shows (all the time, between two
+// frames with a fade, or as one of the game's layers does), a pulse, and pictures in turn.
+// The pulse and the pictures loop as long as the picture shows, the scene resting included.
+function AnimBox({ p }) {
+  const a = p.anim;
+  if (!a) return null;
+  const fps = a.fps || 30;
+  const mode = a.follow != null ? "follow" : (a.start || a.end || a.fade_in || a.fade_out) ? "frames" : "always";
+  const set = (patch) => {
+    const next = { ...a, ...patch };
+    delete next.fps;
+    delete next.images;
+    call("text_scenes.tree_anim", p.id, next);
+  };
+  const secs = (n) => (n ? ` (${(n / fps).toFixed(n / fps < 10 ? 1 : 0)} s)` : "");
+  const numIn = (label, key, title, min = 1, max = 99999) => html`<label class="tree-num" ...${tip(title)}>
+    <span class="lbl">${label}</span>
+    <div class="field sm"><input type="number" min=${min} max=${max} value=${a[key] ?? ""}
+      onChange=${(e) => set({ [key]: e.target.value === "" ? null : e.target.value })} /></div>
+  </label>`;
+  const choices = [{ value: "", label: "Pick a layer of the game..." }].concat(
+    (p.follow_choices || []).map((c) => ({ value: String(c.id), label: c.words ? `${c.name}: ${c.words}` : c.name })));
+  const imgs = a.images || [];
+  return html`<div class="tree-anim" id="ts-anim">
+    <span class="eyebrow">Animation</span>
+    <div class="tree-row">
+      <span class="lbl">Shows</span>
+      <${Select} sm value=${mode} title="When the picture is on the glass: all the time, between two frames of the scene (with a fade in and out if you like), or exactly when one of the game's own layers is, fading as it fades"
+        options=${[{ value: "always", label: "All the time" }, { value: "frames", label: "Between frames" }, { value: "follow", label: "Like a layer of the game" }]}
+        onChange=${(v) => set(v === "always" ? { follow: null, start: null, end: null, fade_in: null, fade_out: null }
+          : v === "frames" ? { follow: null, start: a.start || 1, fade_in: a.fade_in || Math.round(fps / 2) }
+          : { start: null, end: null, fade_in: null, fade_out: null, follow: (p.follow_choices || [])[0] ? p.follow_choices[0].id : null })} />
+    </div>
+    ${mode === "frames" ? html`<div class="tree-row tree-anim-nums">
+      ${numIn("From", "start", "The frame of the scene it comes on at (the Frame box above counts them)")}
+      ${numIn("To", "end", "The last frame it shows on; empty: to the end of the scene, and on while the scene rests")}
+      ${numIn("Fade in", "fade_in", `Frames it takes to fade in, from nothing to full (${fps} frames = 1 second)`, 0)}
+      ${numIn("Fade out", "fade_out", "Frames it takes to fade out before its last frame (needs a To frame)", 0)}
+    </div>` : null}
+    ${mode === "follow" ? html`<div class="tree-row">
+      <${Select} sm value=${a.follow != null ? String(a.follow) : ""} options=${choices}
+        title="It comes on, fades in and out and goes off exactly as this layer does as the scene plays. To put the picture in place of a line of words, pick that line here, then hide the line in the game with its red stop sign in Layers"
+        onChange=${(v) => v && set({ follow: v })} />
+    </div>` : null}
+    <div class="tree-row">
+      <${Check} checked=${a.pulse != null} label="Pulse" title="Fade down and back up, over and over, for as long as it shows (the scene resting on its last frame too)"
+        onChange=${(v) => set({ pulse: v ? 0.3 : null, period: v ? (a.period || fps) : null })} />
+      ${a.pulse != null ? html`
+        <label class="tree-num" ...${tip("How faint it gets at the bottom of each pulse")}>
+          <span class="lbl">Down to</span>
+          <div class="field sm"><input type="number" min="0" max="100" value=${Math.round(a.pulse * 100)}
+            onChange=${(e) => set({ pulse: Math.max(0, Math.min(100, +e.target.value || 0)) / 100 })} /></div><span class="small muted">%</span>
+        </label>
+        ${numIn("Every", "period", "Frames one pulse takes, down and back up", 2)}
+        <span class="small muted">${secs(a.period)}</span>` : null}
+    </div>
+    <div class="tree-row tree-anim-pics">
+      <span class="lbl" ...${tip("Pictures shown one after the other in its place, the picture itself first, looping for as long as it shows: a flip-book. Make them the same size so they line up")}>In turn</span>
+      ${imgs.map((rel, i) => html`<span class="tag sm" title=${rel}>${rel.split("/").pop()}
+        <${Button} size="xs" kind="ghost" icon="x" label="Take this picture out of the loop" onClick=${() => call("text_scenes.tree_anim_picture", p.id, i)} /></span>`)}
+      <${Button} size="xs" icon="plus" title="Add a picture shown after this one, in turn" onClick=${() => call("text_scenes.tree_anim_picture", p.id)}>Picture...<//>
+      ${imgs.length ? html`${numIn("Each", "every", "Frames each picture shows for", 1)}<span class="small muted">${secs(a.every)}</span>` : null}
+    </div>
+    <div class="small muted">Frames are the scene's own, ${fps} a second. Press Play to see it move.</div>
+  </div>`;
+}
+
+const filledFinds = (f) => !!(f && (f.line || (f.modes || []).length));
 const rowTip = (l, cs) => ({
   head: `${l.name}${l.added ? " (added)" : ""}`,
   lines: [
     l.edits || l.kind,
     ...filledLines(l.filled),
+    l.painted ? "The game paints it as it plays: the colors the machine shows it in are picked in the Selected panel." : null,
+    l.look ? lookLine(l.look) : null,
     l.state_off ? "Off in the preview: the part it sits in shows another of its looks. Its eye turns it on here."
       : l.part_off && !l.view_off ? "The look it sits in is off in the preview: it shows when that look is on."
       : !l.drawn && !l.view_off ? "Not on the screen at this moment." : null,
@@ -877,6 +1217,17 @@ function TreeLayers({ t }) {
     const el = listRef.current.querySelector(`[data-node="${t.sel}"]`);
     if (el) el.scrollIntoView({ block: "nearest" });
   }, [t.sel]);
+  // PAD-508: Up / Down pick the layer above or below; Shift+Up / Down take in a run of them,
+  // as Shift-click does
+  const step = useStepper((id, how) => call("text_scenes.tree_select", id, how), t.sel);
+  const onKey = (e) => {
+    if (!listArrow(e)) return;
+    e.preventDefault();
+    const ids = (t.layers || []).map((l) => l.id);
+    const at = step.from(ids);
+    const next = stepRow(ids, at, e.key);
+    if (next != null && next !== at) step.go(next, e.shiftKey && at != null ? "range" : "");
+  };
   // H hides or shows the selected layers in the preview, wherever the focus is on the tab
   const tRef = useRef(t);
   tRef.current = t;
@@ -901,7 +1252,7 @@ function TreeLayers({ t }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
   return html`<div class="scenes-contents tree-layers" ref=${listRef} role="tree" aria-label="Layers"
-      onPointerDown=${(e) => deselectOnBlank(t, e)}>
+      tabindex="0" onKeyDown=${onKey} onPointerDown=${(e) => deselectOnBlank(t, e)}>
     <div class="sc-head"><span class="eyebrow">Layers — last drawn on top</span>
       ${t.solo != null ? html`<button type="button" class="ly-solo small"
         ...${tip({ head: "One layer is shown alone", lines: [["Click", "bring the other layers back"], ["Alt+click", "its eye does the same"]] })}
@@ -915,18 +1266,15 @@ function TreeLayers({ t }) {
         onDragEnd=${endDrag}
         onDragOver=${(e) => onRowOver(l, e)}
         onDrop=${(e) => onRowDrop(l, e)}
-        onMouseDown=${(e) => { if (e.shiftKey) e.preventDefault(); }}
+        onMouseDown=${(e) => { if (e.shiftKey) { e.preventDefault(); listRef.current.focus({ preventScroll: true }); } }}
         onContextMenu=${(e) => layerMenu(t, l, e)}
         onClick=${(e) => call("text_scenes.tree_select", l.id, pickHow(e, true))}>
       <button type="button" class=${cx("ly-eye", (l.view_off || l.state_off) && "shut", t.solo === l.id && "solo")}
         aria-label="Shown in the preview" ...${tip(eyeTip(l, t.solo))} onClick=${(e) => eyeClick(l, e)}>
         <${Icon} name=${l.view_off || l.state_off ? "eye-off" : "eye"} /></button>
-      <span class="sc-t ellip">${l.filled ? html`<span class="ly-filled" aria-label="Filled in by the game" ...${tip(filledTip(l.filled))}><${Icon} name="gear" /></span>` : null}${l.name}${l.added ? " (added)" : ""}</span>
-      <span class=${cx("sc-i small ellip", l.hidden ? "in-game" : "muted")}>${l.edits || (l.filled ? "game fills it" : l.kind)}</span>
-      <button type="button" class=${cx("ly-game", l.hidden && "on")} aria-label="Hidden in the game"
-        aria-pressed=${l.hidden ? "true" : "false"} ...${tip(gameTip(l))}
-        onClick=${(e) => { e.stopPropagation(); call("text_scenes.tree_visible", l.id, l.hidden); }}>
-        <${Icon} name="sd" /></button>
+      <span class="sc-t ellip">${l.filled ? html`<span class="ly-filled" aria-label="Filled in by the game" ...${tip(filledTip(l.filled))}><${Icon} name="gear" /></span>`
+        : l.painted ? html`<span class="ly-filled ly-painted" aria-label="Painted by the game" ...${tip(GAME_COLORS_TIP)}><${Icon} name="brush" /></span>` : null}${l.name}${l.added ? " (added)" : ""}</span>
+      <span class=${cx("sc-i small ellip", l.hidden ? "in-game" : "muted")}>${l.edits || (l.filled ? "game fills it" : l.painted ? "game paints it" : l.look ? l.look.short : l.kind)}</span>
       ${l.color ? html`<button type="button" class=${cx("ly-color", l.color.locked ? "locked" : l.color.on || l.color.font_on ? "on" : "off", l.color.font_on && "via-font")}
         aria-label=${l.color.line ? "Color profile on this line" : "Color profile on this picture"} aria-pressed=${l.color.on || l.color.font_on ? "true" : "false"} ...${tip(colorTip(l, cs))}
         onClick=${(e) => { e.stopPropagation(); if (!l.color.locked) call("text_scenes.tree_color", l.id, !l.color.on, true); }}>
@@ -935,7 +1283,7 @@ function TreeLayers({ t }) {
         aria-label="Show on the Images tab" ...${tip(l.pics.length === 1 ? "Show this picture on the Images tab"
           : `Show one of the ${l.pics.length} pictures it draws on the Images tab`)}
         onClick=${(e) => { e.stopPropagation(); showPics(l.pics, e); }}><${Icon} name="image" /></button>`
-        : l.filled ? html`<button type="button" class="ly-img ly-txt"
+        : filledFinds(l.filled) ? html`<button type="button" class="ly-img ly-txt"
         aria-label="Find the game's line on the Replace Text tab" ...${tip(l.filled.line ? `Find the game's line, ${l.filled.line}, on the Replace Text tab`
           : `List the lines of ${(l.filled.modes || []).join(", ")} on the Replace Text tab`)}
         onClick=${(e) => { e.stopPropagation(); call("text_scenes.activate", filledJump(l.filled)); }}><${Icon} name="text" /></button>`
@@ -943,6 +1291,10 @@ function TreeLayers({ t }) {
         aria-label="Find on the Replace Text tab" ...${tip("Find these words on the Replace Text tab")}
         onClick=${(e) => { e.stopPropagation(); call("text_scenes.activate", "str::" + l.text); }}><${Icon} name="text" /></button>`
         : html`<span></span>`}
+      <button type="button" class=${cx("ly-ingame", l.hidden ? "gone" : "in")} aria-label=${l.hidden ? "Hidden in the game" : "In the game"}
+        aria-pressed=${l.hidden ? "true" : "false"} ...${tip(gameTip(l, gameMarkIds(t, l).length))}
+        onClick=${(e) => { e.stopPropagation(); call("text_scenes.tree_game_mark", gameMarkIds(t, l), l.hidden); }}>
+        <${Icon} name=${l.hidden ? "ban" : "check"} /></button>
     </div>`)}
   </div>`;
 }
@@ -1113,6 +1465,7 @@ function TreeCanvas({ s }) {
   const [hover, setHover] = useState(null);
   // a text's box resized on the canvas, shown until the redraw that has it comes back
   const [boxPend, setBoxPend] = useState(null);
+  const sn = useSnap();
   const p = t.props;
   // the selection (PAD-279: several at once): what a drag, the arrow keys and Delete act on.
   // *key* names it for the edits shown by hand and the layers the server draws for it.
@@ -1176,29 +1529,43 @@ function TreeCanvas({ s }) {
     nudgeT.current = setTimeout(flushNudge, 350);
   };
 
+  // PAD-1211: the pointer on the glass, inside the canvas's border (the picture and the
+  // outlines fill the inside, not the border box)
   const toStage = (e) => {
-    const r = box.current.getBoundingClientRect();
-    return [((e.clientX - r.left) * W) / r.width, ((e.clientY - r.top) * H) / r.height];
+    const el = box.current, r = el.getBoundingClientRect();
+    const bx = el.clientLeft || 0, by = el.clientTop || 0;
+    return [((e.clientX - r.left - bx) * W) / Math.max(1, r.width - 2 * bx),
+      ((e.clientY - r.top - by) * H) / Math.max(1, r.height - 2 * by)];
   };
   const pick = (x, y) => {
     const hits = t.hits || [];
-    for (let i = hits.length - 1; i >= 0; i--) if (inPoly(hits[i].pts, x, y)) return hits[i];
+    for (let i = hits.length - 1; i >= 0; i--) {
+      if (inPoly(hits[i].pts, x, y) && !clearAt(hits[i], s.tree_see, x, y)) return hits[i];
+    }
     return null;
   };
   const boxOf = (d) => ({ x: Math.min(d.fx, d.x), y: Math.min(d.fy, d.y), w: Math.abs(d.x - d.fx), h: Math.abs(d.y - d.fy) });
   // a line of text's box is resized apart from its words (PAD-383); the words re-flow in it
   const boxLive = drag && drag.mode === "box" ? boxOf(drag)
     : boxPend && p && boxPend.node === p.id ? boxPend.box : null;
-  const selBox = boxLive || (p && !multi && p.x != null ? { x: p.x, y: p.y, w: p.w, h: p.h } : null);
+  // PAD-1211: the box as it is, not the rounded one the panel shows: a drag snaps by it
+  const selBox = boxLive || (p && !multi && p.x != null ? exactBox(p) : null);
   const corner = (x, y) => {
     if (!selBox) return null;
     const r = box.current.getBoundingClientRect();
     const tol = (10 * W) / r.width;
     for (const [cx0, cy0] of [[selBox.x, selBox.y], [selBox.x + selBox.w, selBox.y],
       [selBox.x, selBox.y + selBox.h], [selBox.x + selBox.w, selBox.y + selBox.h]]) {
-      if (Math.abs(x - cx0) < tol && Math.abs(y - cy0) < tol) return true;
+      if (Math.abs(x - cx0) < tol && Math.abs(y - cy0) < tol) return [cx0, cy0];
     }
-    return false;
+    return null;
+  };
+  // PAD-1014: what a drag snaps onto: the boxes of the parts not being dragged
+  const othersOf = (ids) => (t.hits || []).filter((h) => !ids.includes(h.id)).map((h) => boxOfPts(h.pts));
+  const snapOf = (e, d) => {
+    if (e.altKey || !d || (!sn.grid && !sn.objects)) return null;
+    const r = box.current.getBoundingClientRect();
+    return { ...sn, W, H, tol: (SNAP_PX * W) / (r.width || W), others: sn.objects ? d.others : null };
   };
   const down = (e) => {
     if (e.button !== 0) return;
@@ -1206,18 +1573,23 @@ function TreeCanvas({ s }) {
     const [x, y] = toStage(e);
     box.current.setPointerCapture(e.pointerId);
     const at = { sx: e.clientX, sy: e.clientY, x0: x, y0: y };      // where it went down (PAD-447)
-    if (corner(x, y) && p.kind === "Text") {
+    const k = corner(x, y);
+    if (k && p.kind === "Text") {
       // the corner across from the one picked stays put
       const left = Math.abs(x - selBox.x) < Math.abs(x - (selBox.x + selBox.w));
       const top = Math.abs(y - selBox.y) < Math.abs(y - (selBox.y + selBox.h));
       const fx = left ? selBox.x + selBox.w : selBox.x, fy = top ? selBox.y + selBox.h : selBox.y;
       const mx = left ? selBox.x : selBox.x + selBox.w, my = top ? selBox.y : selBox.y + selBox.h;
-      setDrag({ mode: "box", node: p.id, fx, fy, mx, my, x: mx, y: my, ...at });
+      setDrag({ mode: "box", node: p.id, fx, fy, mx, my, x: mx, y: my, others: othersOf([p.id]), ...at });
       return;
     }
-    if (corner(x, y)) {
-      const cx0 = selBox.x + selBox.w / 2, cy0 = selBox.y + selBox.h / 2;
-      setDrag({ mode: "scale", id: String(p.id), node: p.id, cx: cx0, cy: cy0, d0: Math.hypot(x - cx0, y - cy0) || 1, f: 1, ...at });
+    if (k) {
+      // PAD-557: Resize from Top-left keeps the corner across from the one dragged; Middle, the middle
+      const mid = s.resize_from === "middle";
+      const cx0 = mid ? selBox.x + selBox.w / 2 : x < selBox.x + selBox.w / 2 ? selBox.x + selBox.w : selBox.x;
+      const cy0 = mid ? selBox.y + selBox.h / 2 : y < selBox.y + selBox.h / 2 ? selBox.y + selBox.h : selBox.y;
+      setDrag({ mode: "scale", id: String(p.id), node: p.id, cx: cx0, cy: cy0, d0: Math.hypot(x - cx0, y - cy0) || 1, f: 1,
+        kx: k[0], ky: k[1], others: othersOf([p.id]), ...at });
       return;
     }
     const h = pick(x, y);
@@ -1227,30 +1599,38 @@ function TreeCanvas({ s }) {
     // a picture already in a selection of several drags them all
     const ids = multi && sels.includes(h.id) ? sels : [h.id];
     if (!p || (ids.length === 1 && h.id !== p.id)) call("text_scenes.tree_select", h.id);
-    setDrag({ mode: "move", id: keyOf(ids), ids, dx: 0, dy: 0, ...at });
+    // PAD-1014: the box that snaps: the selection's own (a text's box), else round its outlines
+    const own = ids.length === 1 && p && ids[0] === p.id && selBox;
+    const mine = (t.hits || []).filter((q) => ids.includes(q.id));
+    const b = own ? { ...selBox } : mine.length ? boxOfPts(mine.flatMap((q) => q.pts)) : null;
+    setDrag({ mode: "move", id: keyOf(ids), ids, dx: 0, dy: 0, b, others: othersOf(ids), ...at });
   };
   const move = (e) => {
     const [x, y] = toStage(e);
     if (!drag) { const h = pick(x, y); setHover(h ? h.id : null); return; }
-    setDrag((q) => q && dragTo(q, e.clientX, e.clientY, x, y));
+    setDrag((q) => q && snapDrag(dragTo(q, e.clientX, e.clientY, x, y), snapOf(e, q)));
   };
   const up = () => {
     const d = drag;
     setDrag(null);
     if (!d || !d.go) return;                  // a click (PAD-447): it picked, it moves nothing
-    if (d.mode === "move" && Math.abs(d.dx) + Math.abs(d.dy) >= 1) {
-      const dx = Math.round(d.dx), dy = Math.round(d.dy);
-      send(d.ids, { m: "move", dx, dy }, () => moveCall(d.ids, dx, dy));
+    // PAD-1211 (DragonRR: "after letting go of the mouse there always seems to be a few pixels
+    // shift"): a way that snapped keeps the move exact, so the part lands on the line; one
+    // dragged freely moves by whole pixels
+    const sn = d.snapped || [];
+    if (d.mode === "move") {
+      const dx = sn[0] ? r3(d.dx) : Math.round(d.dx), dy = sn[1] ? r3(d.dy) : Math.round(d.dy);
+      if (dx || dy) send(d.ids, { m: "move", dx, dy }, () => moveCall(d.ids, dx, dy));
     }
-    if (d.mode === "box" && Math.abs(d.x - d.mx) + Math.abs(d.y - d.my) >= 1) {
+    if (d.mode === "box" && (sn[0] || sn[1] || Math.abs(d.x - d.mx) + Math.abs(d.y - d.my) >= 1)) {
       const b = boxOf(d);
-      const r = { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h) };
+      const r = { x: r3(b.x), y: r3(b.y), w: r3(b.w), h: r3(b.h) };
       setBoxPend({ node: d.node, box: r, rev: t.rev || 0 });
       Promise.resolve(call("text_scenes.tree_set_box", d.node, r.x, r.y, r.w, r.h))
         .then((ok) => { if (ok === false) setBoxPend(null); }, () => setBoxPend(null));
     }
     if (d.mode === "scale" && Math.abs(d.f - 1) > 0.01)
-      send([d.node], { m: "scale", cx: d.cx, cy: d.cy, f: d.f }, () => call("text_scenes.tree_scale", d.node, d.f));
+      send([d.node], { m: "scale", cx: d.cx, cy: d.cy, f: d.f }, () => call("text_scenes.tree_scale", d.node, d.f, null, [d.cx, d.cy]));
   };
   const key = (e) => {
     if (!p) return;
@@ -1298,9 +1678,17 @@ function TreeCanvas({ s }) {
   const busy = !loading && (s.tree_busy || !!(pend && pend.ops.some((o) => o.want == null || o.want > shownRev)));
   const hov = hover != null && !sels.includes(hover) ? (t.hits || []).filter((h) => h.id === hover) : [];
   const selPolys = boxLive ? [] : (t.hits || []).filter((h) => sels.includes(h.id));
-  // PAD-485: the boxes the game fills in as it plays keep their own outline
-  const filledPolys = (t.hits || []).filter((h) => h.filled && !sels.includes(h.id) && h.id !== live);
-  const filledSel = boxLive ? [] : (t.hits || []).filter((h) => h.filled && sels.includes(h.id));
+  // PAD-515: a box the game fills in or paints is outlined in its own color, under the mouse
+  // and selected (no longer always, under the selection too)
+  const pk = multi ? "" : outlineKind(p);
+  const poly = (h, key, cls) => html`<polygon key=${key} points=${h.pts.map((q) => q.join(",")).join(" ")}
+    class=${cx(cls, outlineKind(h))} />`;
+  // PAD-1014: the grid while Snap to grid is on (every few lines when they would crowd on the
+  // screen), the guides of the drag's snap, and the snapping point picked on the selection
+  const scr = box.current ? box.current.getBoundingClientRect().width / W || 0.5 : 0.5;
+  const gridStep = sn.grid ? sn.size * Math.max(1, Math.ceil(6 / (sn.size * scr))) : 0;
+  const guides = (drag && drag.guides) || [];
+  const hp = (sn.grid || sn.objects) && sn.handle !== "auto" && selBox ? handleAt(sn.handle) : null;
   return html`<div class=${cx("scenes-canvas tree-canvas", loading && "loading")} ref=${box} tabIndex="0" onKeyDown=${key}
       style=${`background:${s.bg_rgb || "#101014"};aspect-ratio:${W} / ${H}`}
       onPointerDown=${down} onPointerMove=${move} onPointerUp=${up} onPointerLeave=${() => setHover(null)}>
@@ -1312,20 +1700,119 @@ function TreeCanvas({ s }) {
       : full ? html`<img src=${mediaUrl(full.srcs[0])} alt="" draggable="false" />`
       : html`<span class="scenes-msg">${s.canvas_msg}</span>`}
     ${loading ? null : html`<svg viewBox=${`0 0 ${W} ${H}`} preserveAspectRatio="none" class="tree-svg">
-      ${filledPolys.map((h, i) => html`<polygon key=${"f" + i} points=${h.pts.map((q) => q.join(",")).join(" ")} class="tree-filled" />`)}
-      ${hov.map((h, i) => html`<polygon key=${"h" + i} points=${h.pts.map((q) => q.join(",")).join(" ")} class="tree-hover" />`)}
+      ${gridStep ? html`<defs><pattern id="tree-grid" width=${gridStep} height=${gridStep} patternUnits="userSpaceOnUse">
+          <path d=${`M ${gridStep} 0 L 0 0 0 ${gridStep}`} class="tree-grid-line" /></pattern></defs>
+        <rect x="0" y="0" width=${W} height=${H} fill="url(#tree-grid)" class="tree-grid" />` : null}
+      ${hov.map((h, i) => poly(h, "h" + i, "tree-hover"))}
+      ${guides.map((g, i) => (g.x != null
+        ? html`<line key=${"g" + i} x1=${g.x} y1="0" x2=${g.x} y2=${H} class="tree-guide" />`
+        : html`<line key=${"g" + i} x1="0" y1=${g.y} x2=${W} y2=${g.y} class="tree-guide" />`))}
       <g transform=${svgTf(lineOps)}>
-        ${selPolys.map((h, i) => html`<polygon key=${"s" + i} points=${h.pts.map((q) => q.join(",")).join(" ")} class="tree-sel" />`)}
-        ${filledSel.map((h, i) => html`<polygon key=${"fs" + i} points=${h.pts.map((q) => q.join(",")).join(" ")} class="tree-filled" />`)}
-        ${selBox ? html`<rect x=${selBox.x} y=${selBox.y} width=${selBox.w} height=${selBox.h} class="tree-box" />` : null}
+        ${selPolys.map((h, i) => poly(h, "s" + i, "tree-sel"))}
+        ${selBox ? html`<rect x=${selBox.x} y=${selBox.y} width=${selBox.w} height=${selBox.h} class=${cx("tree-box", pk)} />` : null}
         ${multi ? (t.sel_boxes || []).map(([bx, by, bw, bh], i) =>
           html`<rect key=${"b" + i} x=${bx} y=${by} width=${bw} height=${bh} class="tree-box" />`) : null}
         ${selBox ? [[selBox.x, selBox.y], [selBox.x + selBox.w, selBox.y], [selBox.x, selBox.y + selBox.h],
           [selBox.x + selBox.w, selBox.y + selBox.h]].map(([hx, hy], i) =>
-          html`<rect key=${"k" + i} x=${hx - 7} y=${hy - 7} width="14" height="14" class="tree-handle" />`) : null}
+          html`<rect key=${"k" + i} x=${hx - 7} y=${hy - 7} width="14" height="14" class=${cx("tree-handle", pk)} />`) : null}
+        ${hp ? html`<circle cx=${selBox.x + selBox.w * hp[0]} cy=${selBox.y + selBox.h * hp[1]} r=${Math.max(3, 5 / scr)} class="tree-snap-at" />` : null}
       </g>
     </svg>`}
     ${busy ? html`<div class="tree-busy" role="status"><${Spinner} /><span>Updating</span></div>` : null}
+  </div>`;
+}
+
+// PAD-507 (DragonRR: "in game the score is yellow and PRESS START is green"): Godzilla's
+// score panel is painted by the game program itself (a box shows its line's scene color
+// times the game's), so its colors are picked here and Write puts them in the game program
+const GAME_COLORS_TIP = { head: "Painted by the game", lines: [
+  "The game paints the score boxes itself as it plays: a box shows its line's color times the color the game paints, so a color set on the line alone never reaches the machine. These are the colors the machine shows.",
+  "Pick one and Write makes the machine show it, in every player's box: the game program paints it, and that kind of line goes white in the scene. The preview draws the boxes the same way.",
+  "A score line with the color profile switched on puts the profile on these too, unless a color is picked here." ] };
+const gameColorSrc = (r) => r.picked ? "picked" : r.profiled ? "color profile" : "the game's own";
+
+// PAD-515 (DragonRR: "it is extremely easy to forget this exists"): what the game does to the
+// selected box as it plays, a bar each, like Switchable parts: always there, lit in its own
+// color (as its outline on the preview) when the game does it, greyed out when it does not,
+// so the panel keeps its shape from one pick to the next
+const FILLS_OFF_TIP = { head: "Filled in by the game", lines: [
+  "Not this one: the game does not put words of its own in it.",
+  "A box the game fills in as it plays is lit here in teal, with the game's line and a button to find it on the Replace Text tab. On the preview its outline is teal." ] };
+const PAINTS_OFF_TIP = { head: "Painted by the game", lines: [
+  "Not this one: the game does not paint its colors as it plays, so its Tint and its color profile (or a line's own color, from the Font bar) are what the machine shows.",
+  "A line the game paints (the score panel's) is lit here in violet, with the colors the machine shows it in. On the preview its outline is violet." ] };
+// PAD-539: with no reading of the boxes the game program names (a project whose card was not at
+// hand when the Text tab would have read it), the marks are the old word guesses: a box the game
+// does write can say "Not this one".  The panel says so, and reads the card for the real ones.
+const GUESS_LINES = [
+  "These marks are guesses from the words in the box: this project's card has not been read for the boxes the game program names, so a box the game does write can say \"Not this one\", and words typed in it would never show.",
+  ["Re-read from card", "read the game program off the card this project came from; the marks are then the game's own"] ];
+const guessTip = (t) => ({ ...t, lines: [...t.lines, ...GUESS_LINES] });
+function GameFills({ p, proven = true }) {
+  const reading = !!useNs("text_scenes").fills_reading;
+  const f = p.filled;
+  const who = f ? (f.modes || []).join(", ") : "";
+  const tipOf = f ? filledTip(f) : FILLS_OFF_TIP;
+  return html`<div class=${cx("tree-game fills", !f && "off")}>
+    <div class="tree-row tg-head">
+      <span class="tg-name" ...${tip(proven ? tipOf : guessTip(tipOf))}><${Icon} name="gear" /><span class="eyebrow">Filled in by the game</span></span>
+      <span class="grow"></span>
+      <${Button} size="xs" kind="ghost" icon="text" disabled=${!filledFinds(f)}
+        title=${!f ? "Only a box the game fills in has a line of the game's"
+          : !filledFinds(f) ? "The game writes words of its own here, not one line of its text" : f.line ? "Find the game's line on the Replace Text tab" : "List that mode's lines on the Replace Text tab"}
+        onClick=${() => call("text_scenes.activate", filledJump(f))}>${f && !f.line ? "Its lines" : "Its line"}<//>
+    </div>
+    <div class="small ellip tg-what">${!f ? "Not this one"
+      : f.line ? html`With <b>${f.line}</b>${who ? ` (${who})` : ""}` : who ? html`During <b>${who}</b>`
+        : "With words of its own"}</div>
+    ${f && p.try ? html`<${TryWords} id=${p.id} t=${p.try} />` : null}
+    ${proven ? null : html`<div class="tree-row tg-guess">
+      <span class="small warn-ink grow" ...${tip({ head: "Guessed, not read off the card", lines: GUESS_LINES })}>
+        <${Icon} name="warn" /> A guess until the card is read</span>
+      <${Button} size="xs" kind="ghost" icon="refresh" disabled=${reading}
+        title="Read the game program off the card this project came from, for the boxes the game fills in"
+        onClick=${() => call("text_scenes.read_program")}>${reading ? "Reading…" : "Re-read from card"}<//>
+    </div>`}
+  </div>`;
+}
+// PAD-1338 (DragonRR): a box the game fills holds only a stand-in ("Inactive Player"); the
+// preview can draw it with words the game puts there ("PLAYER 2 - LOG IN"), to see how they sit
+// in the box on the machine.  The preview only: nothing is written to the card.
+const TRY_TIP = { head: "Show it with", lines: [
+  "The machine never shows this box's own words: the game writes its own in as it plays. Pick one of the game's lines (or type any words) to see it here as the machine would, laid out by this box's alignment and its Shrink to fit.",
+  "Only the preview changes: nothing is written to the card, and other boxes keep their own words.",
+  ["Its own", "back to the words in the box"] ] };
+function TryWords({ id, t }) {
+  const [v, setV] = useState(t.words || "");
+  useEffect(() => setV(t.words || ""), [id, t.words]);
+  const go = (w) => { if ((w || "").trim() !== (t.words || "")) call("text_scenes.tree_try_words", id, (w || "").trim() || null); };
+  const listId = `tree-try-${id}`;
+  return html`<div class="tree-row tg-try" ...${tip(TRY_TIP)}>
+    <span class="small lbl">Show it with</span>
+    <${Field} value=${v} list=${listId} placeholder="its own words" cls="grow"
+      onChange=${(x) => { setV(x); if ((t.options || []).includes(x)) go(x); }}
+      onCommit=${go} />
+    <datalist id=${listId}>${(t.options || []).map((x) => html`<option value=${x} />`)}</datalist>
+    <${Button} size="xs" kind="ghost" disabled=${!t.words} title="Back to the words in the box"
+      onClick=${() => { setV(""); go(""); }}>Its own<//>
+  </div>`;
+}
+export function GameColors({ g }) {
+  return html`<div class=${cx("tree-game paints", !g && "off")}>
+    <div class="tree-row tg-head">
+      <span class="tg-name" ...${tip(g ? GAME_COLORS_TIP : PAINTS_OFF_TIP)}><${Icon} name="brush" /><span class="eyebrow">Painted by the game</span></span>
+    </div>
+    ${!g ? html`<div class="small tg-what">Not this one</div>` : g.roles.map((r) => html`<div key=${r.role} class="tree-row tgc-row" ...${tip({ head: r.label, lines: [
+        `On the machine: ${r.hex} (${gameColorSrc(r)}). As the game ships: ${r.game}.`,
+        r.mine ? "This line is drawn in it." : "Another line of the score panel is drawn in it.",
+        ["Click the swatch", "pick a color"],
+        r.picked ? ["Revert", "back to the game's own (or the color profile's)"] : null ] })}>
+      <input type="color" class="tree-color" value=${r.hex} aria-label=${r.label}
+        onChange=${(e) => call("text_scenes.tree_game_color", r.role, e.target.value)} />
+      <span class=${cx("small ellip tgc-label", r.mine ? "" : "muted")}>${r.label}</span>
+      <span class="small muted tgc-src">${gameColorSrc(r)}</span>
+      ${r.picked ? html`<${Button} size="xs" kind="ghost" onClick=${() => call("text_scenes.tree_game_color", r.role, null)}>Revert<//>` : null}
+    </div>`)}
   </div>`;
 }
 
@@ -1336,20 +1823,26 @@ const WORDS_TIP = { head: "Words", lines: [
   "The words this line shows. Change them and press Enter (or click away): the preview draws them at once, and Write puts them on the card.",
   "A line of the game's is the same edit as on the Text tab, which lists it too. A line you added keeps its words in this scene (Undo takes a change back).",
   "Type \\n for a line break." ] };
+// PAD-515: greyed out, not gone, on anything whose words cannot be changed here
+const wordsOff = (p) => (p.words && p.words.locked ? (p.words.note || GAME_WRITES)
+  : p.kind === "Text" ? "Its words cannot be changed here" : "Only a line of text has words");
+// PAD-513 (DragonRR): the game writes this box itself, so words typed here would never show
+const GAME_WRITES = "The game writes this line itself as it plays: change the game's own line on the Text tab";
 function Words({ p, find, searching }) {
-  const w = p.words;
+  const off = !p.words || !!p.words.locked;
+  const w = p.words || { text: "" };
   const [draft, setDraft] = useState(w.text);
   useEffect(() => { setDraft(w.text); }, [p.id, w.text]);
   const len = [...draft].length;
   const over = w.limit != null && len > w.limit;
   const apply = (v) => { if (v !== w.text && v.trim()) call("text_scenes.tree_words", p.id, v); };
-  const where = find && find.pos ? `${find.pos} of ${find.n}` : "";
+  const where = find && find.pos && !off ? `${find.pos} of ${find.n}` : "";
   const what = searching ? "line with the words searched for" : "line of text, in this scene or the next";
   return html`<div class="tree-words">
     <div class="tree-row">
-      <span class="lbl" ...${tip(WORDS_TIP)}>Words</span>
+      <span class=${cx("lbl", off && "tree-off")} ...${tip(off ? wordsOff(p) : WORDS_TIP)}>Words</span>
       <${Field} key=${p.id} sm cls="grow" value=${w.text} onChange=${setDraft} onCommit=${apply} bad=${over}
-        title=${WORDS_TIP} />
+        disabled=${off} title=${off ? wordsOff(p) : WORDS_TIP} />
       <${Button} size="xs" kind="ghost" icon="up" label="Previous line" disabled=${!(find && find.n)}
         title=${`Previous ${what.replace("next", "one before")} (Shift+Enter in the search box)`}
         onClick=${() => call("text_scenes.find_step", -1)} />
@@ -1358,6 +1851,7 @@ function Words({ p, find, searching }) {
         onClick=${() => call("text_scenes.find_step", 1)} />
     </div>
     <div class="tree-row">
+      ${off ? html`<span class="small muted tree-off">${wordsOff(p)}</span>` : null}
       ${w.limit != null ? html`<span class=${cx("small nw", over ? "err-ink" : "muted")}
         ...${tip(over ? "Too long: a line of a scene can take this many bytes at most." : "Its length, and the most a line of a scene can take.")}>
         ${len} / ${w.limit} bytes</span>` : null}
@@ -1371,15 +1865,28 @@ function Words({ p, find, searching }) {
   </div>`;
 }
 
-function TreeSide({ t, play, playFrame, openFont, find, searching }) {
+// PAD-534: how the game itself turns a layer as it draws it ("turned 48° clockwise")
+function gameTurnText(g) {
+  const deg = Math.abs(g.deg);
+  const turn = deg < 0.5 ? "" : deg === 180 ? "turned upside down"
+    : `turned ${deg}° ${g.deg > 0 ? "clockwise" : "anticlockwise"}`;
+  return g.mirrored ? (turn ? `mirrored and ${turn}` : "mirrored") : turn;
+}
+
+// PAD-557 (DragonRR): what stays put when a size is set
+const RESIZE_FROM = [
+  { value: "corner", label: "Top-left", title: "Its top-left corner stays where it is, so X and Y keep their numbers. A corner dragged on the preview keeps the corner across from it." },
+  { value: "middle", label: "Middle", title: "Its middle stays where it is: it grows or shrinks all round, so X and Y change. A corner dragged on the preview does the same." }];
+
+function TreeSide({ t, play, playFrame, openFont, find, searching, from }) {
   const p = t.props;
   const [tint, setTint] = useState(p ? p.tint : "#ffffff");
   const [keepShape, setKeepShape] = useState(true);
   const isText = !!p && p.kind === "Text";
   useEffect(() => { if (p) setTint(p.tint); }, [p && p.id, p && p.tint]);
-  const num = (label, value, onCommit, title) => html`<label class="tree-num" ...${tip(title)}>
+  const num = (label, value, onCommit, title, off) => html`<label class=${cx("tree-num", off && "tree-off")} ...${tip(title)}>
     <span class="lbl">${label}</span>
-    <div class="field sm"><input type="number" value=${value ?? ""} onChange=${(e) => onCommit(e.target.value)} /></div>
+    <div class=${cx("field sm", off && "disabled")}><input type="number" value=${value ?? ""} disabled=${!!off} onChange=${(e) => onCommit(e.target.value)} /></div>
   </label>`;
   return html`<div class="tree-side">
     <span class="eyebrow">Moment</span>
@@ -1428,36 +1935,47 @@ function TreeSide({ t, play, playFrame, openFont, find, searching }) {
       ${p.peek && p.view_off ? html`<div class="small muted">Hidden in the preview with its eye. It is shown on top while it is selected.</div>`
       : p.peek && p.view_in ? html`<div class="small muted">It sits in ${p.view_in}, hidden in the preview with its eye. It is shown on top while it is selected.</div>`
       : p.peek ? html`<div class="small muted">The game does not draw this at this moment. It is shown on top while it is selected; an edit holds wherever the game shows it.</div>` : null}
-      ${p.hidden ? html`<div class="small in-game">Hidden in the game: Write leaves it out of the card.${p.view_off ? "" : " Its eye is open, so the preview still shows it."}</div>`
+      ${p.hidden ? html`<div class="small in-game">${p.baked ? "Hidden in the game: an earlier Write hid it on the card this project was extracted from. Click its red stop sign in Layers to put it back."
+        : "Hidden in the game: Write leaves it out of the card."}${p.view_off ? "" : " Its eye is open, so the preview still shows it."}</div>`
       : p.hid_in ? html`<div class="small in-game">It sits in ${p.hid_in}, hidden in the game: Write leaves it out of the card.</div>` : null}
-      ${p.filled ? html`<div class="small tree-filled-note" ...${tip(filledTip(p.filled))}><${Icon} name="gear" /><span>${p.filled.line
-          ? html`Filled in by the game with <b>${p.filled.line}</b>${(p.filled.modes || []).length ? ` (${p.filled.modes.join(", ")})` : ""}`
-          : html`Filled in by the game during <b>${(p.filled.modes || []).join(", ")}</b>`}</span>
-        <${Button} size="xs" kind="ghost" icon="text" title=${p.filled.line ? "Find the game's line on the Replace Text tab" : "List that mode's lines on the Replace Text tab"}
-          onClick=${() => call("text_scenes.activate", filledJump(p.filled))}>${p.filled.line ? "Its line" : "Its lines"}<//></div>` : null}
-      ${p.words ? html`<${Words} p=${p} find=${find} searching=${searching} />` : null}
-      ${p.pic ? html`<div class="tree-row">
-        <span class="small muted" ...${tip("The picture's own size, and how much the game scales it to draw it here. Anything but 100% is resized by the game as it draws, which can leave jagged edges: make the picture at the size it shows, replace it on the Images tab with \"Keep this picture's own size\" ticked, then press Draw 1:1.")}>
-          Picture ${p.pic.w} x ${p.pic.h} px, drawn at ${p.pic.sx === p.pic.sy ? p.pic.sx : `${p.pic.sx} x ${p.pic.sy}`}%</span>
-        <${Button} size="xs" disabled=${p.pic.sx === 100 && p.pic.sy === 100}
-          title="Draw the picture pixel for pixel (100%), keeping its top-left corner where it is"
+      <${LookNote} k=${p.look} />
+      <${GameFills} p=${p} proven=${t.fills_proven !== false} />
+      <${GameColors} g=${p.game_colors} />
+      <${Words} p=${p} find=${find} searching=${searching} />
+      <div class=${cx("tree-row tree-pic", !p.pic && "tree-off")}>
+        <span class="small muted ellip" ...${tip(p.pic ? "The picture's own size, and how much the game scales it to draw it here. Anything but 100% is resized by the game as it draws, which can leave jagged edges: make the picture at the size it shows, replace it on the Images tab with \"Keep this picture's own size\" ticked, then press Draw 1:1."
+          : "Only a picture has a size of its own to draw it at.")}>
+          ${p.pic ? `Picture ${p.pic.w} x ${p.pic.h} px at ${p.pic.sx === p.pic.sy ? p.pic.sx : `${p.pic.sx} x ${p.pic.sy}`}%` : "No picture of its own"}</span>
+        <${Button} size="xs" disabled=${!p.pic || (p.pic.sx === 100 && p.pic.sy === 100)}
+          title=${p.pic ? "Draw the picture pixel for pixel (100%), keeping its top-left corner where it is" : "Only a picture is drawn 1:1"}
           onClick=${() => call("text_scenes.tree_one_to_one", p.id)}>Draw 1:1<//>
-      </div>` : null}
-      ${p.x != null ? html`<div class="tree-row">
-        ${num("X", p.x, (v) => call("text_scenes.tree_move", p.id, Number(v) - p.x, 0), "Left edge on the glass (px)")}
-        ${num("Y", p.y, (v) => call("text_scenes.tree_move", p.id, 0, Number(v) - p.y), "Top edge on the glass (px)")}
-      </div>` : html`<div class="small muted">Not on the glass at this moment.</div>`}
-      ${p.w != null ? html`<div class="tree-row">
+      </div>
+      <${AnimBox} p=${p} />
+      ${p.x != null ? null : html`<div class="small muted">Not on the glass at this moment.</div>`}
+      <div class="tree-row">
+        ${num("X", p.x, (v) => call("text_scenes.tree_move", p.id, r3(Number(v) - exactBox(p).x), 0), "Left edge on the glass (px)", p.x == null)}
+        ${num("Y", p.y, (v) => call("text_scenes.tree_move", p.id, 0, r3(Number(v) - exactBox(p).y)), "Top edge on the glass (px)", p.x == null)}
+      </div>
+      <div class="tree-row">
         ${num("W px", p.w, (v) => call("text_scenes.tree_set_pixels", p.id, v, null, keepShape), isText
           ? "The width of its box on the screen, in pixels. The words stay their size and wrap to fit inside it (the corner handles do the same)."
-          : "Its width on the screen, in pixels (the screen is 1360 x 768)")}
+          : "Its width on the screen, in pixels (the screen is 1360 x 768)", p.w == null)}
         ${num("H px", p.h, (v) => call("text_scenes.tree_set_pixels", p.id, null, v, keepShape), isText
           ? "The height of its box on the screen, in pixels. The words stay their size."
-          : "Its height on the screen, in pixels")}
+          : "Its height on the screen, in pixels", p.w == null)}
       </div>
-      ${isText ? null : html`<label class="tree-row small tree-keep" title="On: a new width or height resizes it both ways, so it keeps its shape. Off: it stretches one way only.">
-        <input type="checkbox" checked=${keepShape} onChange=${(e) => setKeepShape(e.target.checked)} /> Keep its shape
-      </label>`}` : null}
+      <label class=${cx("tree-row small tree-keep", (isText || p.w == null) && "tree-off")} ...${tip(isText
+        ? "A line of text's box takes any width and height: its words keep their size."
+        : "On: a new width or height resizes it both ways, so it keeps its shape. Off: it stretches one way only.")}>
+        <input type="checkbox" checked=${keepShape && !isText} disabled=${isText || p.w == null}
+          onChange=${(e) => setKeepShape(e.target.checked)} /> Keep its shape
+      </label>
+      <div class=${cx("tree-row", p.x == null && "tree-off")}>
+        <span class="lbl" ...${tip(isText
+          ? "What stays put when Size % or a corner drag resizes it. W px / H px on a line of text keep the side its words sit on."
+          : "What stays put when Size %, Width %, Height %, W px / H px or a corner drag resizes it")}>Resize from</span>
+        <${Seg} value=${from || "corner"} options=${RESIZE_FROM} onChange=${(v) => call("text_scenes.tree_resize_from", v)} />
+      </div>
       <div class="tree-row">
         ${num("Size %", p.scale === p.scale_y ? p.scale : "", (v) => call("text_scenes.tree_set_scale", p.id, v), isText
           ? "The size of the words (and their box with them), both ways at once; 100 = the size the game ships"
@@ -1468,10 +1986,12 @@ function TreeSide({ t, play, playFrame, openFont, find, searching }) {
         ${num("Height %", p.scale_y, (v) => call("text_scenes.tree_set_size", p.id, null, v), "Stretch it up and down only")}
       </div>
       <div class="tree-row">
-        ${num("Turn °", p.rotate, (v) => call("text_scenes.tree_set_rotation", p.id, v), "How far it is turned from as shipped, in degrees clockwise (0 = as shipped)")}
+        ${num("Turn °", p.rotate, (v) => call("text_scenes.tree_set_rotation", p.id, v), "How far you have turned it from as shipped, in degrees clockwise (0 = as shipped), on top of any turn the game gives it")}
         <${Button} size="xs" title="Turn it 90° anticlockwise" onClick=${() => call("text_scenes.tree_rotate", p.id, -90)}>⟲ 90°<//>
         <${Button} size="xs" title="Turn it 90° clockwise" onClick=${() => call("text_scenes.tree_rotate", p.id, 90)}>⟳ 90°<//>
       </div>
+      ${p.game_turn ? html`<div class="small muted">The game draws it ${gameTurnText(p.game_turn)}${p.pic
+        ? ". The Images tab shows its picture as it is stored, not turned" : ""}. Turn ° is your own turn on top.</div>` : null}
       <div class="tree-row">
         <span class="lbl">Tint</span>
         <input type="color" class="tree-color" value=${tint} onInput=${(e) => setTint(e.target.value)}
@@ -1490,27 +2010,70 @@ function TreeSide({ t, play, playFrame, openFont, find, searching }) {
         <${Button} size="xs" onClick=${() => call("text_scenes.tree_order", p.id, "back")}>To back<//>
         <${Button} size="xs" onClick=${() => call("text_scenes.tree_reset", p.id)}>${p.added ? "Remove" : "As shipped"}<//>
       </div>
-      ${p.kind === "Text" && p.font && openFont ? html`<div class="tree-row">
-        <${Button} size="xs" icon="text" title=${{ head: "Font controls", lines: [
-          "Opens the Font bar on the right edge: this line's font, size, italic, letter width, spacing, wrapping, where its words sit in its box, Fit box to text and its drop shadow."] }}
+      ${openFont ? html`<div class=${cx("tree-row", !(isText && p.font) && "tree-off")}>
+        <${Button} size="xs" icon="text" disabled=${!(isText && p.font)} title=${{ head: "Font controls", lines: [
+          "Opens the Font bar on the right edge: this line's font, size, italic, letter width, spacing, wrapping, where its words sit in its box, Fit box to text and its drop shadow.",
+          isText && p.font ? null : isText ? "Not for this line: its font is not known." : "Only a line of text has a font."] }}
           onClick=${openFont}>Font controls<//>
-        <span class="small muted ellip">${p.font.style ? `${p.font.style}, ${p.font.size} px` : `${p.font.size} px`}</span>
+        <span class="small muted ellip">${!(isText && p.font) ? (isText ? "Its font is not known" : "Only a line of text has a font")
+          : p.font.style ? `${p.font.style}, ${p.font.size} px` : `${p.font.size} px`}</span>
       </div>` : null}
     </div>` : html`<div class="small muted">Click a picture or a line of text in the preview, or a row in Layers. Ctrl-click (or Shift-click) to pick several and move them together.</div>`}
     ${(t.notes || []).length ? html`<div class="small warn-ink">${t.notes.join("; ")}</div>` : null}
   </div>`;
 }
 
+// The list of edits (DragonRR, PAD-540): opened from "N edits, not written yet", it stands in
+// for the scene list.  Every scene's edits, the selected scene's first: click one to go to its
+// scene with what it changed selected; Reset takes that one edit back (Undo puts it back).
+function EditList({ list, t }) {
+  const n = list.reduce((a, g) => a + g.edits.length, 0);
+  const sel = t && t.sel;
+  return html`<div class="sc-edits">
+    <div class="row sc-edits-hd">
+      <span class="h2 grow">Edits${n ? ` (${n})` : ""}</span>
+      <${Button} size="sm" icon="left" cls="sc-list-hide" title="Back to the scene list"
+        onClick=${() => call("text_scenes.edit_list", false)}>Scenes<//>
+    </div>
+    <div class="sc-edits-body">
+      ${n ? null : html`<p class="small muted sc-edits-none">No scene has an edit: every one is as the game shipped it.</p>`}
+      ${list.map((g) => html`<div key=${g.card} class="sc-edits-scene">
+        <div class="row sc-edits-sh" ...${tip(g.d || g.card)}>
+          <span class="ellip grow">${g.label}</span>
+          ${g.here ? html`<span class="small acc-ink nw">this scene</span>` : null}
+          <span class="small muted nw">${g.edits.length}</span>
+        </div>
+        ${g.edits.map((e) => html`<div key=${e.i + ":" + e.sig} role="button" tabindex="0"
+            class=${cx("sc-edit-row", g.here && sel === e.node && "on", !g.d && "gone")}
+            onClick=${() => g.d && call("text_scenes.edit_list_pick", g.card, e.i)}
+            onKeyDown=${(ev) => { if ((ev.key === "Enter" || ev.key === " ") && g.d) { ev.preventDefault(); call("text_scenes.edit_list_pick", g.card, e.i); } }}
+            ...${tip({ head: `${e.name}: ${e.what}`, lines: g.d ? [["Click", "go to its scene with it selected"],
+              ["Revert", "take this edit back (Ctrl+Z on its scene puts it back)"]] : ["Its scene is not in this project."] })}>
+          <span class="small muted sc-edit-n">${e.i + 1}</span>
+          <span class="sc-edit-txt"><span class="ellip sc-edit-name">${e.name}</span>
+            <span class="ellip small muted sc-edit-what">${e.what}</span></span>
+          <${Button} size="xs" kind="ghost" icon="undo" disabled=${!g.d}
+            onClick=${(ev) => { ev.stopPropagation(); call("text_scenes.edit_list_reset", g.card, e.i, e.sig); }}>Revert<//>
+        </div>`)}
+      </div>`)}
+    </div>
+  </div>`;
+}
+
+// PAD-539 (DragonRR): a project extracted from a card a Write changed goes back to THAT card
+const baseWord = (t) => t.base_note ? " " + t.base_note.lines[1] : "";
+
 // The whole scene's actions, in the bar under the preview: add a picture or a line of text,
-// undo, put the scene back as shipped.
+// undo, put the scene back as shipped; and (PAD-539) the word that "as shipped" is that card.
 function TreeActions({ t }) {
   const [adding, setAdding] = useState(false);
   const [words, setWords] = useState("");
   return html`<div class="row tree-actions">
-    <${Button} size="sm" kind="ghost" icon="plus" title="Add a picture of your own (PNG, JPG or WEBP) to this scene"
+    <${Button} drop size="sm" kind="ghost" icon="plus" title="Add a picture of your own (PNG, JPG or WEBP) to this scene"
       onClick=${() => call("text_scenes.tree_add_picture")}>Picture…<//>
     <${Button} size="sm" kind="ghost" icon="plus" title="Add a line of text to this scene"
       onClick=${() => { setWords(""); setAdding(true); }}>Text…<//>
+    <${SnapButton} />
     <span class="tree-actions-sep"></span>
     <${Button} size="sm" kind="ghost" icon="undo" disabled=${!t.can_undo} title="Undo the last edit in this scene, an eye click in Layers too (Ctrl+Z)"
       onClick=${() => call("text_scenes.tree_undo")}>Undo<//>
@@ -1528,17 +2091,23 @@ function TreeActions({ t }) {
           title: "Every eye back to what the game shows, as when the scene was first opened: shut on the layers hidden in the game, open on the rest. The card is not changed.",
           onClick: () => call("text_scenes.tree_view_reset") },
         { label: "As shipped (this scene)", icon: "refresh", disabled: !t.edits,
-          title: "Put this scene back the way the game shipped it.", onClick: () => call("text_scenes.tree_clear") },
+          title: "Put this scene back the way the game shipped it. Its color profiles and replaced pictures stay: Reset… in the project menu puts those back." + baseWord(t), onClick: () => call("text_scenes.tree_clear") },
         { sep: true },
         { label: "As shipped (every scene)…", icon: "trash", disabled: !t.all_edits,
-          title: "Put every scene in this project back the way the game shipped it.",
+          title: "Put every scene in this project back the way the game shipped it. Color profiles and replaced pictures stay: Reset… in the project menu puts those back." + baseWord(t),
           onClick: () => call("text_scenes.tree_clear_all") },
-      ])}>Reset<//>
-    ${t.built === "same" && t.edits ? html`<span class="small nw ok-ink" title=${STATE_TIP.written}><span class="sc-dot written"></span> Written to a card</span>`
-      : t.edits || t.built === "changed" ? html`<span class="small nw warn-ink" title="Edits are kept as you make them; there is nothing to save. The next Write puts them on the card.">
-          <span class="sc-dot edited"></span> ${t.edits ? `${t.edits} edit${t.edits === 1 ? "" : "s"}` : "Back as shipped"}, not written yet</span>` : null}
+      ])}>Revert<//>
+    ${t.built === "same" && t.edits ? html`<button type="button" class="small nw ok-ink sc-edits-open"
+        onClick=${() => call("text_scenes.edit_list", true)} ...${tip({ head: STATE_TIP.written,
+          lines: [["Click", "list every edit: go to one, or Revert it"]] })}><span class="sc-dot written"></span> Written to a card</button>`
+      : t.edits || t.built === "changed" ? html`<button type="button" class="small nw warn-ink sc-edits-open"
+          onClick=${() => call("text_scenes.edit_list", true)} ...${tip({ head: "Edits are kept as you make them; there is nothing to save. The next Write puts them on the card.",
+            lines: [["Click", "list every edit: go to one, or Revert it"]] })}>
+          <span class="sc-dot edited"></span> ${t.edits ? `${t.edits} edit${t.edits === 1 ? "" : "s"}` : "Back as shipped"}, not written yet</button>` : null}
+    ${t.base_note ? html`<span class="small nw warn-ink sc-base-note" ...${tip({ head: t.base_note.head, lines: t.base_note.lines })}>
+        <${Icon} name="info" /> ${t.base_note.chip}</span>` : null}
     ${(t.hidden_names || []).length ? html`<span class="small nw warn-ink"
-        title=${`Hidden in the game, so the machine never draws it: ${t.hidden_names.join(", ")}. Click the card at the end of its row in Layers to put it back.`}>
+        title=${`Hidden in the game, so the machine never draws it: ${t.hidden_names.join(", ")}. Click the red stop sign at the end of its row in Layers to put it back.`}>
         <${Icon} name="eye-off" /> ${t.hidden_names.length} hidden in game</span>` : null}
     ${adding ? html`<${Modal} title="Add a line of text" onClose=${() => setAdding(false)}
         footer=${html`<${Button} onClick=${() => setAdding(false)}>Cancel<//><${Button} kind="primary"

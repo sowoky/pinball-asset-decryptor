@@ -31,7 +31,7 @@ from unicorn.arm_const import (UC_ARM_REG_LR, UC_ARM_REG_R0, UC_ARM_REG_R1,
                                UC_ARM_REG_R8, UC_ARM_REG_R9, UC_ARM_REG_R10,
                                UC_ARM_REG_R11, UC_ARM_REG_R12, UC_ARM_REG_SP)
 
-from .emulator import BLOCK, VOL, _algn
+from .emulator import BLOCK, VOL, _algn, band_params, bands_of
 
 _md = Cs(CS_ARCH_ARM, CS_MODE_ARM)
 _md.detail = True
@@ -258,6 +258,42 @@ def _find_companding_all(mu, fn_addr, n=0xC00):
     return out
 
 
+def _own_captures(emu, rec):
+    """Name *rec* (a :class:`GenRecover` / :class:`StereoRecover`) to *emu* as
+    an owner of capture hooks, so a whole-sound decode on it can take them off
+    (:func:`drop_captures`)."""
+    owners = getattr(emu, "_capture_owners", None)
+    if owners is None:
+        owners = emu._capture_owners = []
+    owners.append(rec)
+
+
+def _drop_captures(rec):
+    """Take *rec*'s capture hooks off its emulator; its next recovery puts
+    them back (``_hooked`` is emptied with them)."""
+    for h in rec._handles:
+        if isinstance(h, tuple):
+            rec.emu.del_hook(h[1])
+        else:
+            rec.mu.hook_del(h)
+    rec._handles = []
+    rec._hooked = set()
+
+
+def drop_captures(emu):
+    """Take every recovery's capture hooks off *emu* (PAD-609).
+
+    A capture hook is a Python call on every output sample, and once a
+    recovery installed it, it stayed on for everything else the emulator ran:
+    the full decode that checks each encoded sound (``_verify_encoded``) paid
+    one for every sample of every song, 86 million calls and about two minutes
+    of a Godzilla build with 11 modes' music.  Nothing reads what a decode
+    captures, so a decode takes them off and the next recovery puts them back."""
+    for rec in getattr(emu, "_capture_owners", None) or ():
+        if rec._handles:
+            _drop_captures(rec)
+
+
 class GenRecover:
     """Mono keystream recovery + analytic encode, driven on a booted emulator."""
 
@@ -268,8 +304,10 @@ class GenRecover:
         self._cap = []
         self._capreg = None
         self._hooked = set()
+        self._handles = []
+        _own_captures(emu, self)
         self.qmul = emu.qmul(1)
-        self._calib = {}   # (scale, chan) -> (dom_mul_addr, S_reg, body_word_delta)
+        self._calib = {}   # (scale, chan, band?) -> (dom_mul_addr, S_reg, body_word_delta)
 
     def _install_hook(self, mul_addr):
         if mul_addr in self._hooked:
@@ -286,11 +324,13 @@ class GenRecover:
             def cap(uc, address, size, ud):
                 rr(uch, self._capreg, pbuf)
                 self._cap.append(buf.value & 0xffff)
-            self.mu.hook_add(UC_HOOK_CODE, cap, begin=mul_addr, end=mul_addr)
+            self._handles.append(
+                self.mu.hook_add(UC_HOOK_CODE, cap, begin=mul_addr, end=mul_addr))
         else:
             def cap(eng):
                 self._cap.append(eng.mu.reg_read(self._capreg))
             self.emu.add_hook(mul_addr, cap)
+            self._handles.append(("extra", mul_addr))
         self._hooked.add(mul_addr)
 
     def _drive_decode(self, p, cursor, body_u16):
@@ -303,8 +343,14 @@ class GenRecover:
         emu = self.emu; mu = self.mu
         decode_fn = emu.recover_entry(p)   # resolved audio slot (generic) / decode_fn (validated)
         arr = np.asarray(body_u16, dtype="<u2")
-        R = max(0, 2 * cursor - 400)
-        emu._ensure_body(_algn(R + 0x4000))
+        band = int(p.get("band", 0))
+        st = int(p["stride"]) if band else 1
+        if st > 1:
+            # one variant of a multi-band record: every lane of a frame gets
+            # the probe word, so whichever lane the band reads sees it
+            arr = np.repeat(arr.ravel(), st)
+        R = max(0, 2 * st * cursor - 400 * st)
+        emu._ensure_body(_algn(R + 0x4000 * st))
         pv = int(arr.ravel()[0]) & 0xffff if arr.size else 0
         fill = struct.pack("<H", pv)
         marg = min(R, 0x80)
@@ -318,7 +364,7 @@ class GenRecover:
             mu.mem_write(emu.BB - 0x80, fill * (0x80 // 2))
         mu.mem_write(emu.BB + R, arr.tobytes())
         mu.mem_write(emu.OBJ_VA, emu._build_obj(p))
-        mu.mem_write(emu.VOICE_VA, emu._voice(1))
+        mu.mem_write(emu.VOICE_VA, emu._voice(1, band))
         emu.st["R"] = R; emu.st["k"] = R
         mu.mem_write(emu.VOICE_VA + 0xc, struct.pack("<I", cursor))
         mu.mem_write(emu.ACC, b"\x00" * 0x8000)
@@ -343,7 +389,10 @@ class GenRecover:
             contiguous re-encode is one word off on the former.
 
         Two cheap probe decodes (one zeros, one single-marker), cached."""
-        key = (p["scale"], p["chan"])
+        if "band" not in p and bands_of(p) > 1:
+            p = band_params(p, 1)
+        # a variant's body offset differs from a plain sound's of the same key
+        key = (p["scale"], p["chan"], bool(p.get("band")))
         if key in self._calib:
             return self._calib[key]
         emu = self.emu
@@ -407,8 +456,12 @@ class GenRecover:
                        rb.astype(np.int64)).astype(np.uint16)
         return body16, err
 
-    def encode_sound(self, p, target):
+    def encode_sound(self, p, target, blocks=None):
         """Full size-neutral mono body bytes that re-decode to ``target``.
+
+        *blocks*, when given, is :meth:`.parallel.BlockPool.blocks`: every
+        block after the first is recovered and encoded by its workers
+        (PAD-599), the first here so the calibration is this object's own.
 
         Returns ``(start_off, bytes)``: the byte window the hardware actually
         READS for this sound — ``body_off + 2*delta`` for ``delta < 0`` keys
@@ -435,22 +488,69 @@ class GenRecover:
           audible pop ending every full predecessor playback, even for a
           silent replacement).  The engine therefore re-picks that word
           jointly for both keystreams after this returns — see
-          ``engine._resolve_shared_boundary``."""
+          ``engine._resolve_shared_boundary``.
+
+        A multi-band record (:func:`.emulator.bands_of`) takes *target* as its
+        variants one after another, each ``length - BLOCK`` long as Extract
+        writes them, and encodes every variant into its own lane of the
+        record's whole body; a variant the target does not reach keeps its
+        stock words."""
+        nb = 1 if "band" in p else bands_of(p)
+        if nb > 1 or p.get("band"):
+            return self._encode_bands(p, target, nb, blocks)
+        return self._encode_window(p, target, blocks)
+
+    def _encode_bands(self, p, target, nb, blocks=None):
+        """:meth:`encode_sound` for a multi-band record, or (``p["band"]``
+        set) one variant of it: ``(body_off, the record's whole body)``."""
+        length = p["length"]
+        st = int(p["stride"])
+        start = p["body_off"]
+        words = np.frombuffer(self.emu.mm[start:start + 2 * st * length],
+                              dtype="<u2").copy()
+        tgt = np.asarray(target, np.int64)
+        n = length - BLOCK
+        if p.get("band"):
+            jobs = [(int(p["band"]), tgt)]
+        else:
+            jobs = [(k, tgt[(k - 1) * n:k * n]) for k in range(1, nb + 1)]
+        for k, seg in jobs:
+            if len(seg) == 0:
+                continue
+            q = p if p.get("band") == k else band_params(p, k)
+            # lane k - 1 of every frame, as a writable view of the body
+            self._encode_window(q, seg, blocks, body=words[k - 1::st])
+        return start, words.tobytes()
+
+    def _encode_window(self, p, target, blocks, body=None):
         length = p["length"]
         _a, _r, delta = self._calibrate(p)
         d = min(delta, 0)
         start = p["body_off"] + 2 * d
         tgt = np.asarray(target, np.int64)
-        body = np.frombuffer(
-            self.emu.mm[start:start + 2 * length], dtype="<u2").copy()
-        for k in range((length + 199) // 200):
+        if body is None:
+            body = np.frombuffer(
+                self.emu.mm[start:start + 2 * length], dtype="<u2").copy()
+        elif d:
+            raise RuntimeError("idx %d band %s: body offset %d, a variant reads "
+                               "its own lane" % (p["idx"], p.get("band"), delta))
+        nblk = (length + 199) // 200
+        pre = None
+        for k in range(nblk):
             g0 = 200 * k
             seg = tgt[g0:g0 + 200]
             if len(seg) == 0:
                 break
-            K, rb = self.recover_block(p, 200 + 200 * k, n=len(seg))
-            m = len(K)
-            enc, _ = self.encode_block(seg[:m], K, rb)
+            if k == 1 and blocks is not None:
+                pre = blocks(p, [(j, 200 + 200 * j, tgt[200 * j:200 * j + 200],
+                                  None)
+                                 for j in range(1, nblk) if 200 * j < len(tgt)])
+            if pre is not None and k in pre:
+                m, enc = pre[k]
+            else:
+                K, rb = self.recover_block(p, 200 + 200 * k, n=len(seg))
+                m = len(K)
+                enc, _ = self.encode_block(seg[:m], K, rb)
             lo = g0 + delta - d          # window-relative index of enc[0]
             s = max(0, -lo); e = min(m, length - lo)  # clip words out of range
             if s < e:
@@ -506,6 +606,15 @@ class GenRecover:
             body[lo + s:lo + e] = enc[s:e]
 
 
+def _put_frames(body, f0, f1, fr):
+    """Frames ``f0..f1`` of a stereo body: the flat u0/u1 word array of a plain
+    sound, or a multi-band variant's ``[frames, 2]`` view of its record."""
+    if body.ndim == 2:
+        body[f0:f1] = fr
+    else:
+        body[2 * f0:2 * f1] = fr.ravel()
+
+
 class StereoRecover:
     """Stereo (joint L/R) keystream recovery + analytic encode."""
 
@@ -516,7 +625,9 @@ class StereoRecover:
         self.qmul = emu.qmul(2)
         self._cap = []
         self._hooked = set()
-        self._calib = {}   # (scale, chan) -> body_frame_delta
+        self._handles = []
+        _own_captures(emu, self)
+        self._calib = {}   # (scale, chan, band?) -> body_frame_delta
         self._comps = {}   # render_fn -> [(mul_addr, S_reg), ...] (capstone cache)
         # (scale, chan) -> needs the third (0,1) probe.  The u1 rotate ``bR`` is
         # ≡0 on every observed build (verified across all 32 scales), so after the
@@ -539,11 +650,12 @@ class StereoRecover:
             def cap(uc, address, size, ud, _a=addr, _r=reg):
                 rr(uch, _r, pbuf)
                 self._cap.append((_a, buf.value & 0xffff))
-            self.mu.hook_add(UC_HOOK_CODE, cap, begin=addr, end=addr)
+            self._handles.append(self.mu.hook_add(UC_HOOK_CODE, cap, begin=addr, end=addr))
         else:
             def cap(eng, _a=addr, _r=reg):
                 self._cap.append((_a, eng.mu.reg_read(_r) & 0xffff))
             self.emu.add_hook(addr, cap)
+            self._handles.append(("extra", addr))
         self._hooked.add(key)
 
     @staticmethod
@@ -584,9 +696,16 @@ class StereoRecover:
         comps = self._comps_for(render_fn)
         for a, reg in comps:
             self._hook(a, reg)
-        OBJ = emu._build_obj(p); VOICE = emu._voice(2)
-        R = max(0, 4 * cursor - 800)
-        emu._ensure_body(_algn(R + 0x8000))
+        band = int(p.get("band", 0))
+        OBJ = emu._build_obj(p); VOICE = emu._voice(2, band)
+        nb = int(p["stride"]) // 2 if band else 1
+        if nb > 1:
+            # one variant of a multi-band record: every variant's pair of a
+            # frame gets the probe frame, so whichever the band reads sees it
+            body_bytes = np.repeat(
+                np.frombuffer(body_bytes, dtype="<u4"), nb).tobytes()
+        R = max(0, 4 * nb * cursor - 800 * nb)
+        emu._ensure_body(_algn(R + 0x8000 * nb))
         # mirror the first frame into a margin BEFORE the base: the first sample
         # of a block reads body frame ``base-1`` on builds with a -1 frame offset
         # (see :meth:`_calibrate`), so it must see the probe, not stale memory.
@@ -597,7 +716,7 @@ class StereoRecover:
             # First block: the margin must sit BELOW BB (see the mono driver).
             emu.ensure_bb_margin()
             mu.mem_write(emu.BB - 0x80, first * (0x80 // 4))
-        mu.mem_write(emu.BB + R, b"\x00" * 0x2000)
+        mu.mem_write(emu.BB + R, b"\x00" * (0x2000 * nb))
         mu.mem_write(emu.BB + R, body_bytes)
         mu.mem_write(emu.OBJ_VA, OBJ); mu.mem_write(emu.VOICE_VA, VOICE)
         emu.st["R"] = R; emu.st["k"] = R
@@ -618,7 +737,9 @@ class StereoRecover:
         ``i + delta``), cached per ``(scale, chan)``.  Same -1/0 split as the
         mono path (see :meth:`GenRecover._calibrate`); the live L/R companding
         sites are already picked by fire count in :meth:`_split_lr`."""
-        key = (p["scale"], p["chan"])
+        if "band" not in p and bands_of(p) > 1:
+            p = band_params(p, 1)
+        key = (p["scale"], p["chan"], bool(p.get("band")))
         if key in self._calib:
             return self._calib[key]
         # nf must cover the second marker frame (see DELTA_Q2) with room for the
@@ -637,9 +758,12 @@ class StereoRecover:
         self._calib[key] = delta
         return delta
 
-    def encode_sound(self, p, targetL, targetR):
+    def encode_sound(self, p, targetL, targetR, blocks=None):
         """Full size-neutral stereo body bytes (interleaved u0/u1 per frame)
-        that re-decode to ``(targetL, targetR)``.
+        that re-decode to ``(targetL, targetR)``.  *blocks*: as the mono
+        :meth:`GenRecover.encode_sound`'s (PAD-599); the first block here also
+        settles whether the scale needs its third probe, and the workers are
+        told the answer.
 
         Returns ``(start_off, bytes)`` — the frame window the hardware reads,
         ``body_off + 4*delta`` on delta<0 keys so frame 0 (the trigger-time
@@ -647,28 +771,77 @@ class StereoRecover:
         :meth:`GenRecover.encode_sound` for the head/tail click story (every
         delta=-1 sound observed on LZ 1.22.0 is stereo — scales 22/23/30 —
         so this path is where a tester's start-of-callout tick lived; their
-        stock word below body_off decodes at 4k-16.5k of ~21.5k full scale)."""
+        stock word below body_off decodes at 4k-16.5k of ~21.5k full scale).
+
+        A multi-band record takes its variants one after another, as the
+        mono :meth:`GenRecover.encode_sound` does."""
+        nb = 1 if "band" in p else bands_of(p)
+        if nb > 1 or p.get("band"):
+            return self._encode_bands(p, targetL, targetR, nb, blocks)
+        return self._encode_window(p, targetL, targetR, blocks)
+
+    def _encode_bands(self, p, targetL, targetR, nb, blocks=None):
+        """:meth:`encode_sound` for a multi-band record, or (``p["band"]``
+        set) one variant of it: ``(body_off, the record's whole body)``."""
+        length = p["length"]
+        st = int(p["stride"])
+        start = p["body_off"]
+        words = np.frombuffer(self.emu.mm[start:start + 2 * st * length],
+                              dtype="<u2").copy()
+        frames = words.reshape(length, st)
+        L = np.asarray(targetL, np.int64); R = np.asarray(targetR, np.int64)
+        n = length - BLOCK
+        if p.get("band"):
+            jobs = [(int(p["band"]), L, R)]
+        else:
+            jobs = [(k, L[(k - 1) * n:k * n], R[(k - 1) * n:k * n])
+                    for k in range(1, nb + 1)]
+        for k, sl, sr in jobs:
+            if len(sl) == 0:
+                continue
+            q = p if p.get("band") == k else band_params(p, k)
+            # variant k's u0/u1 pair of every frame, as a writable view
+            self._encode_window(q, sl, sr, blocks,
+                                body=frames[:, 2 * (k - 1):2 * k])
+        return start, words.tobytes()
+
+    def _encode_window(self, p, targetL, targetR, blocks, body=None):
         length = p["length"]
         delta = self._calibrate(p)
         d = min(delta, 0)
         start = p["body_off"] + 4 * d
         L = np.asarray(targetL, np.int64); R = np.asarray(targetR, np.int64)
-        body = np.frombuffer(
-            self.emu.mm[start:start + 4 * length],
-            dtype="<u2").copy()          # interleaved u0, u1
-        for k in range((length + 199) // 200):
+        if body is None:
+            body = np.frombuffer(
+                self.emu.mm[start:start + 4 * length],
+                dtype="<u2").copy()      # interleaved u0, u1
+        elif d:
+            raise RuntimeError("idx %d band %s: body offset %d, a variant reads "
+                               "its own pair" % (p["idx"], p.get("band"), delta))
+        nblk = (length + 199) // 200
+        pre = None
+        for k in range(nblk):
             g0 = 200 * k
             segL = L[g0:g0 + 200]
             if len(segL) == 0:
                 break
-            rec = self.recover_block(p, 200 + 200 * k, nf=len(segL))
-            m = rec["m"]
-            frame, _ = self.encode_block(L[g0:g0 + m], R[g0:g0 + m], rec)
+            if k == 1 and blocks is not None:
+                pre = blocks(p, [(j, 200 + 200 * j, L[200 * j:200 * j + 200],
+                                  R[200 * j:200 * j + 200])
+                                 for j in range(1, nblk) if 200 * j < len(L)],
+                             three=self._three_probe.get(
+                                 (p["scale"], p["chan"])))
+            if pre is not None and k in pre:
+                m, frame = pre[k]
+            else:
+                rec = self.recover_block(p, 200 + 200 * k, nf=len(segL))
+                m = rec["m"]
+                frame, _ = self.encode_block(L[g0:g0 + m], R[g0:g0 + m], rec)
             fr = frame.reshape(-1, 2)          # [m, 2] -> (u0, u1) per frame
             lo = g0 + delta - d          # window-relative index of frame 0
             s = max(0, -lo); e = min(m, length - lo)   # clip frames out of range
             if s < e:
-                body[2 * (lo + s):2 * (lo + e)] = fr[s:e].ravel()
+                _put_frames(body, lo + s, lo + e, fr[s:e])
         self._encode_leadout(p, body, delta, d)
         return start, body.tobytes()
 
@@ -703,7 +876,7 @@ class StereoRecover:
         lo = n + delta - d
         s = max(0, -lo); e = min(m, length - lo)
         if s < e:
-            body[2 * (lo + s):2 * (lo + e)] = fr[s:e].ravel()
+            _put_frames(body, lo + s, lo + e, fr[s:e])
 
     def recover_block(self, p, cursor, nf=200):
         key = (p["scale"], p["chan"])

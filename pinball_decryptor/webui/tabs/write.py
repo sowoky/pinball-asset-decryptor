@@ -85,6 +85,10 @@ CARD_SIZE_WAY_BACK = ("To build it at its own size, choose \"Same as the "
 #: 16 GB card (PAD-465, card_size.SMALL), which an 8 GB card grows to and a
 #: 16 GB card is made smaller for
 CARD_SIZE_CHOICES = ("16S", "16G", "32G")
+#: PAD-1235: the probe's "own" for an original laid out the way Stern lays a
+#: card out at no Stern size: one made as small as it can be (card_size
+#: fit_image), which a build can still grow to any bigger size
+FITTED = "fitted"
 #: the control's words for a size, where "<n> GB card" would not say it
 CARD_SIZE_LABELS = {"16S": "Smaller 16 GB card"}
 #: PAD-467: under SD card size, the finished build cut down to what is on it
@@ -101,6 +105,34 @@ CARD_FIT_TIP = (
     "each build is made whole from the original. The machine only writes to "
     "that partition to install a code update, so a card made this small may "
     "not have the room for one.")
+#: PAD-495: EDITION in the operator menu, and the multi-boot card that boots by it
+#: (plugins/stern/editions.py)
+EDITIONS_LABEL = "Editions"
+EDITIONS_TIP = (
+    "For one card that holds several editions of this game (a Standard and a "
+    "70th Anniversary look, say) and lets the operator pick one in the game's "
+    "own menu. Name the editions here, the same names in the same order in "
+    "every edition's project, and Write each one. Each card gets EDITION in "
+    "its operator menu (Adjustments > Machine Settings > Attract Mode, or the "
+    "last row of Standard Adjustments on a game whose menu has that page). "
+    "Then put the images on a "
+    "Multi-boot card, edition 1 first, with \"Boot the edition the game's "
+    "EDITION setting names\" ticked: the card shows no menu, and the edition "
+    "the setting names boots at the next power-up.")
+EDITIONS_NONE = "None. This card is not one of several editions."
+#: PAD-537: BRIGHTNESS, CONTRAST and SATURATION in the operator menu (plugins/stern/
+#: picture_settings.py); PAD-575: a change shows from the game's next start, and at 5 the
+#: game draws as it does without them
+PICTURE_LABEL = "Picture settings in the service menu"
+PICTURE_TIP = (
+    "Gives the card BRIGHTNESS, CONTRAST and SATURATION in its operator menu "
+    "(Adjustments > Machine Settings > LCD/Lamp), values 1 to 9, 5 for no change. "
+    "A value the operator changes shows from the game's next start, on the whole "
+    "screen and on top of the colors the card was built with. While all three are "
+    "at 5 the game draws exactly as it does without them. Away from 5 every picture "
+    "takes an extra step on the machine, which can slow busy scenes. They share the "
+    "game's spare settings with the Audio tab's music choice and with Editions: with "
+    "both on the card, only Brightness fits.")
 EDITABLE_HINT = (
     "Tip: edit your audio (.wav), images (.webp), and video (.ogv) "
     "files in pck/_EDITABLE ASSETS/ inside your Modified Assets "
@@ -237,7 +269,8 @@ def _probe_card_size(path):
     "why": {choice: (class it builds at or None, error sentence, the built
     image's size or None)}, "room": {class: usable bytes}}`` with ``own``
     None when the tables are not laid out the way Stern lays a Spike 2 card
-    out.  The built size is card_size.plan's: the class size, or the original
+    out (:data:`FITTED` for one laid out that way at no Stern size: a card
+    made as small as it can be).  The built size is card_size.plan's: the class size, or the original
     FILE's size when that is longer (a dump of a whole bigger SD card keeps
     its length).  ``room`` is :func:`_probe_room`'s."""
     from ...core.longpath import ext as _lp
@@ -255,6 +288,15 @@ def _probe_card_size(path):
                 own = cs.layout_class(layout.laid_out)
             except cs.CardSizeError:
                 own = layout = None
+                # PAD-1235: a card made as small as it can be (a custom image
+                # someone shared after building it that way) is Stern's
+                # table at no Stern size; a build grows it all the same
+                # (card_size.read_growing_layout, PAD-593)
+                try:
+                    layout = cs.read_layout(f, size, any_size=True)
+                    own = FITTED
+                except cs.CardSizeError:
+                    layout = None
         why = {}
         for choice in CARD_SIZE_CHOICES:
             try:
@@ -270,7 +312,8 @@ def _probe_card_size(path):
         return None
     room = _probe_room(path, layout, own, why)
     return {"own": own, "size": size, "why": why, "room": room,
-            "fit": _probe_fit(path, own)}
+            "fit": _probe_fit(path, own),
+            "laid_out": layout.laid_out if layout is not None else None}
 
 
 def _probe_fit(path, own):
@@ -314,6 +357,12 @@ def _probe_room(path, layout, own, why):
                        if (why.get(c) or (None, "", None))[0]
                        and not why[c][1]]
     room = {}
+    if own == FITTED:
+        # at its own size: the partition as it is
+        try:
+            room[own] = cs.usable_blocks(space, None, cs.ROUTE_MOUNT)                 * space.block_size
+        except Exception:  # noqa: BLE001 - no figure
+            log.debug("card size probe: no room figure", exc_info=True)
     for c in classes:
         try:
             room.update(cs.room_by_class(layout, space, [c], cs.ROUTE_MOUNT))
@@ -526,7 +575,12 @@ class WriteTab(TabService):
                  card_size_note_kind="", card_size_label=CARD_SIZE_LABEL,
                  card_size_tip=CARD_SIZE_TIP, card_fit_cap=False,
                  card_fit_note="", card_fit_note_kind="",
-                 card_fit_label=CARD_FIT_LABEL, card_fit_tip=CARD_FIT_TIP)
+                 card_fit_label=CARD_FIT_LABEL, card_fit_tip=CARD_FIT_TIP,
+                 editions_cap=False, editions_text="", editions_note="",
+                 editions_note_kind="", editions_label=EDITIONS_LABEL,
+                 editions_tip=EDITIONS_TIP, picture_cap=False, picture_on=False,
+                 picture_note="", picture_note_kind="",
+                 picture_label=PICTURE_LABEL, picture_tip=PICTURE_TIP)
         self._hook_mirrors()
 
     # ------------------------------------------------------------------
@@ -665,6 +719,8 @@ class WriteTab(TabService):
         self._update_write_filename()
         self._refresh_prebuild_notes()
         self._refresh_card_size()
+        self._publish_editions()
+        self._publish_picture()
         self._sync_buttons()
 
     @staticmethod
@@ -882,7 +938,7 @@ class WriteTab(TabService):
             text = "Matches multiple manufacturers: %s" % ", ".join(
                 m.display for m, _ in hits)
         else:
-            text = "Not recognised as %s" % mfr.display
+            text = "Not recognized as %s" % mfr.display
         self.set(badge=text, badge_switch=switch)
         self._sync_badge()
 
@@ -1596,9 +1652,14 @@ class WriteTab(TabService):
             note, kind = card_class_words(err), "err"
         else:
             size = int(probe.get("size") or 0)
-            note = ("The original is %s %s card"
-                    % ("an" if own == "8G" else "a", _class_words(own)))
-            if size > layout_size(own):
+            if own == FITTED:
+                note = ("The original is a card image made as small as it "
+                        "can be (%s), not one of Stern's card sizes"
+                        % _fmt_size(probe.get("laid_out") or size))
+            else:
+                note = ("The original is %s %s card"
+                        % ("an" if own == "8G" else "a", _class_words(own)))
+            if own != FITTED and size > layout_size(own):
                 note += " in a %s file" % _fmt_size(size)
             note += "." + _room_words(probe.get("room") or {}, own, offered)
             if builds_at and fit:
@@ -1653,6 +1714,162 @@ class WriteTab(TabService):
                     % size_words(fit["size"]))
         self.set(card_fit_cap=True, card_fit_note=note,
                  card_fit_note_kind=kind)
+
+    # ------------------------------------------------------------------
+    # PAD-495: Editions
+    # ------------------------------------------------------------------
+    def _editions_applies(self):
+        """A Stern Spike 2 image build: EDITION grows the game program. PAD-1325: a Spike 3
+        card's too (its 64-bit program's menu, spike3_menu)."""
+        mfr = self.mfr
+        return bool(mfr is not None and mfr.key == "stern"
+                    and getattr(mfr, "current_era", "spike2") in ("spike2", "spike3")
+                    and self.cap("write") and not self._is_direct())
+
+    def _publish_editions(self):
+        """The Editions row: the project's edition names, or None, and in
+        red why this project's game cannot have them."""
+        if not self._editions_applies():
+            self.set(editions_cap=False)
+            return
+        from ...plugins.stern import editions as _Ed
+        assets = self._info_assets_dir()
+        names = _Ed.load(assets) if assets else []
+        text = (", ".join("%d %s" % (i + 1, n) for i, n in enumerate(names))
+                if _Ed.count(names) else EDITIONS_NONE)
+        note, kind = "", ""
+        if _Ed.count(names):
+            why = _Ed.project_refusal(assets)
+            if why:
+                note, kind = why, "err"
+            else:
+                note = ("The card this builds gets EDITION in its operator menu "
+                        "(%s). Put every edition's card on one Multi-boot card in "
+                        "this order." % _Ed.project_menu_path(assets))
+        self.set(editions_cap=True, editions_text=text, editions_note=note,
+                 editions_note_kind=kind)
+
+    @rpc
+    def edit_editions(self):
+        """Ask for the editions' names, one line, commas between; an empty
+        answer takes the editions off the project."""
+        from ...core import history_log, staged_changes
+        from ...plugins.stern import editions as _Ed
+        if self.window._running or not self._editions_applies():
+            return False
+        assets = self._info_assets_dir()
+        if not assets:
+            compat.messagebox.showinfo(
+                "Editions", "Set the project folder on the Extract tab first.")
+            return False
+        now = _Ed.load(assets)
+        text = compat.simpledialog.askstring(
+            "Editions",
+            "The names of the editions, in order, separated by commas (2 to %d), "
+            "for example: Standard, 70th Anniversary. Give every edition's "
+            "project the same names in the same order. The machine's EDITION "
+            "setting names them in its help line. Leave it empty for none."
+            % _Ed.MAX_EDITIONS, initialvalue=", ".join(now))
+        if text is None:
+            return False
+        names = _Ed.clean({"names": [t for t in str(text).split(",")]})
+        if len(names) == 1:
+            compat.messagebox.showinfo(
+                "Editions", "One name is not editions: give two or more, or "
+                "leave it empty for none.")
+            return False
+        data = staged_changes.load(assets)
+        old = data.get(_Ed.STAGED_KEY)
+        value = _Ed.to_json(names)
+        if value:
+            data[_Ed.STAGED_KEY] = value
+        else:
+            data.pop(_Ed.STAGED_KEY, None)
+        staged_changes.save(assets, data)
+        hist = history_log.diff_scalar(
+            "write  editions", ", ".join(_Ed.clean(old)) or "none",
+            ", ".join(names) or "none")
+        history_log.record(assets, [hist] if hist else [])
+        self.log("Editions: %s." % (
+            "this card is one of %d editions (%s)" % (
+                len(names), ", ".join("%d %s" % (i + 1, n) for i, n in enumerate(names)))
+            if names else "this card is no longer one of several editions"), "info")
+        cb = self.window.cb.get("on_folder_state_written")
+        if cb is not None:
+            cb(assets)
+        self._publish_editions()
+        return True
+
+    # ------------------------------------------------------------------
+    # PAD-537: Picture settings in the service menu
+    # ------------------------------------------------------------------
+    def _picture_rows(self, assets):
+        """How many of the three rows fit beside the project's other menu settings."""
+        from ...plugins.stern import editions as _Ed
+        from ...plugins.stern import sound_modes as _SMo
+        taken = int(bool(_Ed.count(_Ed.load(assets))))
+        try:
+            taken += int(bool(_SMo.load(assets).count))
+        except Exception:                               # noqa: BLE001 - unreadable: none
+            pass
+        return max(0, 3 - taken)
+
+    def _publish_picture(self):
+        """The tick, and under it where the rows land, how many fit, or in red
+        why this project's game cannot have them."""
+        from ...plugins.stern import picture_settings as _PS
+        if not _PS.OFFERED or not self._editions_applies():      # PAD-575: not offered for now
+            self.set(picture_cap=False)
+            return
+        assets = self._info_assets_dir()
+        on = bool(assets) and _PS.load(assets)
+        note, kind = "", ""
+        if on:
+            why = _PS.title_refusal(_PS.project_title(assets))
+            if why:
+                note, kind = why, "err"
+            else:
+                n = self._picture_rows(assets)
+                rows = ["Brightness", "Contrast", "Saturation"][:n]
+                if not rows:
+                    note, kind = ("The Audio tab's music choice and Editions use the game's spare settings, "
+                                  "so none of the three fits on this card."), "err"
+                else:
+                    note = "The card gets %s in %s." % (
+                        " and ".join([", ".join(rows[:-1]), rows[-1]] if len(rows) > 1 else rows),
+                        _PS.menu_path())
+                    if n < 3:
+                        note += (" The Audio tab's music choice and Editions use the game's other spare "
+                                 "settings, so %s left out." % (
+                                     "Saturation is" if n == 2 else "Contrast and Saturation are"))
+        self.set(picture_cap=True, picture_on=on, picture_note=note,
+                 picture_note_kind=kind)
+
+    @rpc
+    def set_picture(self, on):
+        """Tick or untick the picture settings for this project."""
+        from ...core import history_log
+        from ...plugins.stern import picture_settings as _PS
+        if self.window._running or not _PS.OFFERED or not self._editions_applies():
+            return False
+        assets = self._info_assets_dir()
+        if not assets:
+            compat.messagebox.showinfo(
+                "Picture settings", "Set the project folder on the Extract tab first.")
+            self._publish_picture()
+            return False
+        was = _PS.save(assets, bool(on))
+        hist = history_log.diff_scalar("write  picture settings", "on" if was else "off",
+                                       "on" if on else "off")
+        history_log.record(assets, [hist] if hist else [])
+        self.log("Picture settings: %s." % (
+            "the card gets BRIGHTNESS, CONTRAST and SATURATION in its operator menu"
+            if on else "the card gets no picture settings"), "info")
+        cb = self.window.cb.get("on_folder_state_written")
+        if cb is not None:
+            cb(assets)
+        self._publish_picture()
+        return True
 
     # ------------------------------------------------------------------
     # Modified Files: the scan
@@ -1802,13 +2019,13 @@ class WriteTab(TabService):
     def _cancel_scan(self, text=None):
         self._scan_id += 1
         if self._scan_t0 is not None:
-            self._log_scan("Write change scan cancelled after %.1f s."
+            self._log_scan("Write change scan canceled after %.1f s."
                            % (time.monotonic() - self._scan_t0))
         self._scan_t0 = None
         self._scanning = False
         self._rows = []
         self.set(scanning=False, scan_msg="",
-                 empty=text or "Scan cancelled — click Refresh to try "
+                 empty=text or "Scan canceled — click Refresh to try "
                                "again.")
         self._publish_rows()
 
@@ -2087,8 +2304,14 @@ class WriteTab(TabService):
             # a stale answer to "can this computer grow a card?" is renewed
             # while the SD card is being picked, before the dialog's Start
             self._ask_grow_here()
+        # the original image: what a build starts from, and what a built
+        # one is set against in the readout (PAD-1314)
+        orig = (self.write_upd_var.get() or "").strip()
+        orig_size = (os.path.getsize(orig)
+                     if orig and os.path.isfile(orig) else None)
         self._flash = FlashDialog(
             self.ctx.loop, mfr, on_flash,
+            original_size=orig_size, original_path=orig,
             initial_image=initial,
             on_build_flash=self.window.cb.get("on_build_flash"),
             build_target=target, can_build=can_build,
@@ -2500,6 +2723,8 @@ class WriteTab(TabService):
         self._refresh_prebuild_notes()
         # the original may have been replaced on disk since it was read
         self._refresh_card_size()
+        self._publish_editions()
+        self._publish_picture()
         self.set_admin_warning_collapsed(self._shared_admin_collapsed())
 
     def on_close(self):

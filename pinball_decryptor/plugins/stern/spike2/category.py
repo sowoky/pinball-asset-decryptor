@@ -47,9 +47,18 @@ from unicorn.arm_const import (UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
 
 from . import locate as L
 from .elf import parse_elf
-from .emulator import DESC_BASE, MAX_RECORDS, PAGE, Spike2Emu, _R, _u32
+from .emulator import DESC_BASE, MAX_RECORDS, PAGE, Spike2Emu, _R, _algn, _u32
+from unicorn import UC_PROT_EXEC, UC_PROT_READ
 
-DESC2 = 0xb0000000          # 2nd offset-identity window (clear of the image.bin one)
+
+# Fallback 2nd offset-identity window.  The real one is computed per card in
+# :class:`CatEmu.__init__` so it always sits clear of the image.bin window —
+# a fixed address here is NOT safe: Foo Fighters 1.04's 1.33 GB image.bin
+# covers 0xb0000000, and _backing checks the image.bin range FIRST, so a
+# DESC2 inside it serves the category file's reads from image.bin at the
+# wrong offset (every bank's header then registers as garbage and every
+# record-count gate fails — the songs silently never extracted).
+DESC2 = 0xb0000000
 
 
 # --------------------------------------------------------------------------
@@ -111,6 +120,25 @@ def _is_funcstart(fw, tgt):
     return False
 
 
+def _is_leaf_funcstart(fw, tgt):
+    """True if ``tgt`` looks like a LEAF function's entry: up to four
+    ``movw``/``movt`` loading its globals, then a ``push`` that saves no ``lr``
+    (it calls nothing).  Deadpool 1.16's map-revalidation helper (0x3845e8) is
+    one: ``movw r3; movw ip; movt r3; movt ip; push {r4, r5}``, which
+    :func:`_is_funcstart` turns down, so its 16 song banks never extracted
+    (PAD-813)."""
+    t = fw.secs[".text"]; base = t["addr"]; o = t["off"]
+    if not (base <= tgt < base + t["size"] - 24):
+        return False
+    for d in range(0, 24, 4):
+        w = struct.unpack_from("<I", fw.raw, o + (tgt - base + d))[0]
+        if (w & 0xFFFF0000) == 0xE92D0000 and w & 0xFFFF:       # push {...}
+            return True
+        if (w & 0x0FF00000) not in (0x03000000, 0x03400000) or (w >> 28) != 0xE:
+            return False                                         # not movw / movt
+    return False
+
+
 def _find_snprintf(fw, cat0, end):
     """First ``bl`` after the movw/movt that builds the ``image-sc…`` filename
     string's address."""
@@ -162,13 +190,19 @@ def category_locators(raw, addrs):
 
         # The map-revalidation helper is a local function called between the
         # fstat and mmap calls (the not-found registration path).  Usually 1-3
-        # candidates; the caller trial-selects.
+        # candidates; the caller trial-selects.  A leaf function (no lr saved)
+        # is a candidate too, tried after the others (PAD-813: Deadpool 1.16's).
         lo = fstat_site if fstat_site is not None else cat0
-        cands, seen = [], set()
+        cands, leaves, seen = [], [], set()
         for site, tgt in _raw_bls(fw, lo, mmap_site):
-            if tgt != cat0 and tgt not in seen and _is_funcstart(fw, tgt):
-                seen.add(tgt)
+            if tgt == cat0 or tgt in seen:
+                continue
+            seen.add(tgt)
+            if _is_funcstart(fw, tgt):
                 cands.append(tgt)
+            elif _is_leaf_funcstart(fw, tgt):
+                leaves.append(tgt)
+        cands += leaves
         if not cands:
             return None
         return {"SNPRINTF": snp, "REVALIDATE_CANDIDATES": cands}
@@ -188,9 +222,18 @@ class CatEmu(Spike2Emu):
         super().__init__(game_real_path, image_path)
         self._mm_img = self.mm
         self._img0 = self._mm_img.size()
+        # The category window goes just past the image.bin window's end (page
+        # aligned), where _backing's image.bin branch can never reach it.  A
+        # ~2 GB image (MAX_IMAGE_BYTES) plus the largest bank still fits under
+        # 4 GB: 0x703da000 + 0x80000000 + 0x9000000 < 0x100000000.
+        self.DESC2 = _algn(DESC_BASE + self._img0 + 0x10000)
         self._catf = None
         self._mm_cat = None
         self.cat2size = 0
+        # PAD-595: the bank window backed in ONE piece (a private copy-on-write
+        # view), as the image.bin window is; (lo, hi) of the region, else (0, 0)
+        self._catcow = self._catbuf = None
+        self._cat_lo = self._cat_hi = 0
         self._serving_cat = False
         self._revalidate = None      # selected once per card
         raw = open(game_real_path, "rb").read()
@@ -207,13 +250,16 @@ class CatEmu(Spike2Emu):
     def _backing(self, addr):
         if DESC_BASE <= addr < DESC_BASE + self._img0 + 0x10000:
             return (self._mm_img, addr - DESC_BASE)
+        d2 = self.DESC2
         if (self._mm_cat is not None
-                and DESC2 <= addr < DESC2 + self.cat2size + 0x10000):
-            return (self._mm_cat, addr - DESC2)
+                and d2 <= addr < d2 + self.cat2size + 0x10000):
+            return (self._mm_cat, addr - d2)
         return (None, None)
 
     def _ensure_page(self, addr):
         base = addr & ~(PAGE - 1)
+        if self._card_lo <= base < self._card_hi or self._cat_lo <= base < self._cat_hi:
+            return True            # backed by a one-piece region already
         if base in self.mapped_pages:
             return True
         try:
@@ -231,7 +277,7 @@ class CatEmu(Spike2Emu):
     def _mmap(self):
         sp = self.mu.reg_read(UC_ARM_REG_SP)
         off = struct.unpack("<I", bytes(self.mu.mem_read(sp + 4, 4)))[0]
-        self._ret((DESC2 if self._serving_cat else DESC_BASE) + off)
+        self._ret((self.DESC2 if self._serving_cat else DESC_BASE) + off)
 
     def _fstat(self):
         sb = self.mu.reg_read(UC_ARM_REG_R2)
@@ -250,10 +296,19 @@ class CatEmu(Spike2Emu):
     # ---- category file in the 2nd window ------------------------------------
     def set_category_file(self, sc_path):
         """Map ``image-scNN.bin`` into the DESC2 window (replacing any previous
-        one — its window pages are invalidated so they re-fill)."""
+        one — its window pages are invalidated so they re-fill).
+
+        The window is backed in ONE piece where it can be (PAD-595), the way
+        :meth:`Spike2Emu._map_card_window` backs image.bin's: a bank this app
+        builds has whole bodies written into the window by the chain encode,
+        and paging those in 4 KiB at a time left every later guest access
+        searching thousands of tiny regions (the three first beds of a nine-bed
+        bank took 136, 355 and 816 s).  Any failure keeps the paging path."""
         if self._mm_cat is not None:
+            d2 = self.DESC2
+            self._unmap_cat_region()
             for base in [p for p in self.mapped_pages
-                         if DESC2 <= p < DESC2 + self.cat2size + 0x20000]:
+                         if d2 <= p < d2 + self.cat2size + 0x20000]:
                 try:
                     self.mu.mem_unmap(base, PAGE)
                 except UcError:
@@ -270,6 +325,47 @@ class CatEmu(Spike2Emu):
         self._catf = open(sc_path, "rb")
         self._mm_cat = mmap.mmap(self._catf.fileno(), 0, access=mmap.ACCESS_READ)
         self.cat2size = self._mm_cat.size()
+        self._map_cat_region()
+
+    def _map_cat_region(self):
+        span = self.cat2size & ~(PAGE - 1)
+        d2 = self.DESC2
+        if span <= 0 or d2 + span > 0x1_0000_0000:
+            return
+        # PAD-777 (spike2.window): a bank's encode writes its bodies into this
+        # window, so it is a copy-on-write view from the start as it always was
+        # (a bank is 218 MB at most; image.bin's window is the one that weighed)
+        try:
+            self.mu.map_window(d2, span, self._catf, UC_PROT_READ | UC_PROT_EXEC,
+                               copy=True)
+        except Exception as e:                                       # noqa: BLE001
+            self.log.append(("cat_map_ptr", str(e)))
+            return
+        self._cat_lo, self._cat_hi = d2, d2 + span
+
+    def _unmap_cat_region(self):
+        if self._cat_hi > self._cat_lo:
+            try:
+                self.mu.unmap_window(self._cat_lo)
+            except UcError:
+                pass
+        self._cat_lo = self._cat_hi = 0
+        self._catbuf = None
+        self._catcow = None
+
+    def close(self):
+        try:
+            self._unmap_cat_region()
+        except Exception:                                            # noqa: BLE001
+            pass
+        for f in (self._mm_cat, self._catf):
+            try:
+                if f is not None:
+                    f.close()
+            except Exception:
+                pass
+        self._mm_cat = self._catf = None
+        super().close()
 
     # ---- snprintf stub (filename irrelevant — window chosen by the flag) -----
     def _snprintf_stub(self, eng):
@@ -287,7 +383,7 @@ class CatEmu(Spike2Emu):
 
     # ---- derive one category's params --------------------------------------
     def _derive_cat(self, cat, revalidate, load_limit=80_000_000,
-                    md_limit=600_000_000):
+                    md_limit=600_000_000, after_step=None):
         """Drive ``load_category_assets(cat)`` + ``MASTERDIR_DECODE(cat)`` with
         the two stubs; return the per-sound params (mirrors
         :meth:`Spike2Emu.derive_params`) or ``None`` if the category didn't
@@ -346,15 +442,23 @@ class CatEmu(Spike2Emu):
             # alone still lets a misaligned hit straddle two records (see
             # emulator._record_write_addr).
             self._md_range = (cap["mddst"], cap["mddst"] + n * 24)
-            return self._chain_records(md, n, cap["state"])
+            return self._chain_records(md, n, cap["state"], after_step)
         finally:
             self.del_hook(snp)
             self.del_hook(revalidate)
             self._serving_cat = False
 
-    def _chain_records(self, md, n, state):
+    def _chain_records(self, md, n, state, after_step=None):
         """Replay each master-dir record's band-build in isolation (identical to
-        :meth:`Spike2Emu.derive_params`'s chain), reading the raw obj verbatim."""
+        :meth:`Spike2Emu.derive_params`'s chain), reading the raw obj verbatim.
+
+        Each row also carries the record's ``identity`` bytes and the container
+        key it registered under (``findkey`` / ``key0``, generic builds), as
+        :meth:`Spike2Emu.derive_params` reports them.  *after_step* ``(idx, row,
+        redo)`` is that method's chain-aware hook (PAD-595: a bank this app
+        builds is encoded along its own chain): it may change the bank's bytes
+        in this emulator's memory and call ``redo()`` for the same record's
+        step again, returning the new ``(obj, next)`` to carry the chain on."""
         def _stub(eng):
             eng.mu.reg_write(UC_ARM_REG_R0, 0)
             eng.mu.reg_write(UC_ARM_REG_PC, eng.mu.reg_read(UC_ARM_REG_LR))
@@ -378,9 +482,30 @@ class CatEmu(Spike2Emu):
                 obj, nxt = self._drive_step(cur, rec, rec_idx=idx)
                 if obj is None:
                     break
-                rows.append(dict(idx=idx, body_off=_u32(obj, 0x00),
-                                 length=_u32(obj, 0x10), scale=obj[0x1d],
-                                 chan=obj[0x1b], _rawobj=obj))
+                fk = getattr(self, "_last_find_key", None)
+                row = dict(idx=idx, body_off=_u32(obj, 0x00),
+                           length=_u32(obj, 0x10), scale=obj[0x1d],
+                           chan=obj[0x1b], _rawobj=obj,
+                           identity=rec[4:16] + rec[20:24],
+                           key0=_u32(fk, 0) if fk and len(fk) >= 4 else None,
+                           findkey=bytes(fk) if fk and len(fk) >= 8 else None)
+                if after_step is not None:
+                    def redo(_cur=cur, _rec=rec, _idx=idx):
+                        return self._drive_step(_cur, _rec, rec_idx=_idx)
+                    got = after_step(idx, row, redo)
+                    if got is not None:
+                        obj2, nxt2 = got
+                        if obj2 is None or obj2[:0x20] != obj[:0x20]:
+                            raise RuntimeError(
+                                "bank record %d built a different codec object when its "
+                                "own body changed; a record's windows set only the records "
+                                "after it" % idx)
+                        nxt = nxt2
+                        fk2 = getattr(self, "_last_find_key", None)
+                        if fk2 and len(fk2) >= 8:
+                            row["key0"] = _u32(fk2, 0)
+                            row["findkey"] = bytes(fk2)
+                rows.append(row)
                 if nxt is None:
                     break
                 cur = dict(regs=nxt[0], sp=nxt[1], frame=nxt[2])
@@ -389,6 +514,69 @@ class CatEmu(Spike2Emu):
             for a in self.CHAIN_STUBS:
                 self.extra.pop(a, None)
         return rows
+
+    # ---- a bank this app built (PAD-595) ------------------------------------
+    def derive_bank(self, cat, sc_path, after_step=None, revalidate=None):
+        """Derive the records of the bank *sc_path* as category *cat*, through the
+        firmware's own loader and directory decode, each row with the container
+        key it registers under.  *revalidate* is the map-revalidation stub
+        (:meth:`pick_revalidate`); None tries the build's candidates in turn.
+        *after_step* is :meth:`_chain_records`'s.  Returns the rows, or raises
+        when the firmware does not register the bank -- a file the game would
+        not load either.  Use a FRESH emulator per call: a second derive on one
+        booted emulator finds the category already registered."""
+        if not self.categories_supported:
+            raise RuntimeError("this game program's category loader cannot be driven")
+        self.set_category_file(sc_path)
+        cands = [revalidate] if revalidate is not None else \
+            list(self._cat_locs["REVALIDATE_CANDIDATES"])
+        if self._revalidate is not None and revalidate is None:
+            cands = [self._revalidate]
+        last = None
+        for rev in cands:
+            try:
+                rows = self._derive_cat(cat, rev, after_step=after_step)
+            except RuntimeError:
+                raise
+            except Exception as e:                                  # noqa: BLE001
+                rows, last = None, e
+            if rows:
+                self._revalidate = rev
+                return rows
+        raise RuntimeError("the firmware did not register sound bank %s as category %d%s"
+                           % (os.path.basename(sc_path), cat,
+                              " (%s)" % last if last is not None else ""))
+
+    def register_bank(self, cat, sc_path, revalidate=None, load_limit=80_000_000):
+        """Load the bank *sc_path* as category *cat* through the firmware's own
+        loader (``load_category_assets``: open, fstat, mmap, the header copied,
+        the container registered) WITHOUT decoding its directory, and return
+        the record count the firmware then reports for it (PAD-595).  The
+        game's resolver can then be driven for the bank's sids: it needs only
+        the container's base and header.  (A full :meth:`derive_bank` of a
+        bank with real audio left this emulator unable to run the resolver
+        afterwards, where the records had derived correctly.)"""
+        if not self.categories_supported:
+            raise RuntimeError("this game program's category loader cannot be driven")
+        self.set_category_file(sc_path)
+        rev = revalidate if revalidate is not None else self._revalidate
+        if rev is None:
+            rev = list(self._cat_locs["REVALIDATE_CANDIDATES"])[0]
+        snp = self._cat_locs["SNPRINTF"]
+        self.add_hook(snp, self._snprintf_stub)
+        self.add_hook(rev, self._ret_stub)
+        try:
+            self._serving_cat = True
+            st = self.call(self.CAT0_REGISTER, (cat,), limit=load_limit)
+            if st[0] != "ok":
+                raise RuntimeError("the firmware's bank loader did not return for %s (%s)"
+                                   % (os.path.basename(sc_path), st[1]))
+            cnt = self.call(self._count_fn, (cat, 4), limit=20_000_000)
+            return cnt[1] if cnt[0] == "ok" else 0
+        finally:
+            self.del_hook(snp)
+            self.del_hook(rev)
+            self._serving_cat = False
 
     # ---- decode a category sound (body from the category file) --------------
     def decode_cat(self, p, max_secs=None, cancel=None, progress=None):
@@ -459,8 +647,74 @@ def _find_revalidate(game_real_path, image_path, files, log):
         emu.close()
 
 
+def bank_sound_test_names(game_real_path, image_path, rev, catid, sc_path, rows,
+                          entries):
+    """``{record: name}``: the Sound Test entries *entries* ``[(sid, name)]`` of
+    category *catid* (:func:`.sfx_names.bank_menu_sids`), landed on the bank's
+    records (*rows*, its derive, for the keys and lengths) through the game's
+    own resolver (PAD-820).  A FRESH emulator, the bank loaded by the game's
+    loader alone: a full derive leaves an emulator unable to run the resolver
+    (:meth:`CatEmu.register_bank`).  ``{}`` when nothing can be named; never
+    raises."""
+    from . import sfx_names as SN
+    entries = [(s, n) for s, n in entries if s >> 16 == catid]
+    if not entries or not rows:
+        return {}
+    keys = collections.Counter(r.get("key0") for r in rows)
+    key0_to_idx = {r["key0"]: r["idx"] for r in rows
+                   if r.get("key0") is not None and keys[r["key0"]] == 1}
+    seconds = {r["idx"]: r.get("length", 0) / 44100.0 for r in rows}
+    emu = CatEmu(game_real_path, image_path)
+    try:
+        emu.boot()
+        if not emu.register_bank(catid, sc_path, revalidate=rev):
+            return {}
+        resolver, out = SN._find_resolver(emu)
+        if resolver is None:
+            return {}
+        d2, mm = emu.DESC2, emu._mm_cat
+
+        def resolve(sid):
+            emu.mu.mem_write(out, b"\x00" * 0x40)
+            st = emu.call(resolver, (sid, out), limit=5_000_000)
+            if st[0] != "ok" or not d2 <= st[1] < d2 + emu.cat2size:
+                return None
+            off = st[1] - d2
+            ks = _u32(bytes(emu.mu.mem_read(out, 4))) - emu.VF2_VA
+            if not 0 <= ks < 0x3F00:
+                return None
+            body = mm[off:off + SN.DESC_WINDOW]
+            vf2 = bytes(emu.mu.mem_read(emu.VF2_VA + ks, len(body)))
+            return bytes(a ^ b for a, b in zip(body, vf2))
+        return SN.bank_name_map(resolve, entries, key0_to_idx, seconds)
+    except Exception:                                               # noqa: BLE001
+        return {}
+    finally:
+        emu.close()
+
+
+def name_cat_wavs(out_dir, catid, names):
+    """Rename this bank's decoded ``music_catNN_MMMM.wav`` files to
+    ``music_catNN_MMMM - <name>.wav`` (the cat-0 ``idx#### - <name>`` shape,
+    the name cleaned the same way).  Returns the count renamed."""
+    from ..engine import _ILLEGAL_FN
+    n = 0
+    for idx, name in names.items():
+        stem = "music_cat%02d_%04d" % (catid, idx)
+        src = os.path.join(out_dir, stem + ".wav")
+        safe = _ILLEGAL_FN.sub("", name).strip().rstrip(".")[:80]
+        if not safe or not os.path.isfile(src):
+            continue
+        try:
+            os.replace(src, os.path.join(out_dir, "%s - %s.wav" % (stem, safe)))
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
 def _derive_decode_bank(game_real_path, image_path, rev, catid, sc_path, sink,
-                        cancel):
+                        cancel, only=None, menu=None, named=None):
     """Derive + decode ONE bank on a FRESH CatEmu, emitting each decoded sound
     to ``sink(catid, idx, L, R, stereo)``.  Returns the count decoded.
 
@@ -470,8 +724,16 @@ def _derive_decode_bank(game_real_path, image_path, rev, catid, sc_path, sink,
     fresh emu derives every bank in ~13 s flat, so the whole job parallelises
     cleanly.  The decode reuses this same emu — decoding is registry-stateless
     and switches the emulator to the narrow-hook fast path (~1 s per 20 s of
-    audio), so re-deriving it elsewhere would be wasted work."""
+    audio), so re-deriving it elsewhere would be wasted work.  *only*: the
+    record numbers to decode (PAD-608: a sound bank of this app's, of which an
+    extract wants the music modes' files alone); all when None.
+
+    *menu* ``[(sid, name)]`` (:func:`.sfx_names.bank_menu_sids`, PAD-820): once
+    the bank is decoded, the Sound Test names of its records are worked out on
+    a fresh emulator (:func:`bank_sound_test_names`) and handed to
+    ``named(catid, {record: name})``."""
     emu = CatEmu(game_real_path, image_path)
+    ok = 0
     try:
         emu.boot()
         if not emu.categories_supported:
@@ -479,26 +741,38 @@ def _derive_decode_bank(game_real_path, image_path, rev, catid, sc_path, sink,
         emu.set_category_file(sc_path)
         try:
             rows = emu._derive_cat(catid, rev)
-        except Exception:
+        except Exception as e:
+            from .parallel import out_of_memory
+            if out_of_memory(e):
+                raise   # PAD-830: the caller decodes the bank again alone
             rows = None
         if not rows:
             return 0
-        ok = 0
         for r in rows:
             if cancel():
                 break
+            if only is not None and r["idx"] not in only:
+                continue
             try:
                 res = emu.decode_cat(r, cancel=cancel)
-            except Exception:
+            except Exception as e:
+                from .parallel import out_of_memory
+                if out_of_memory(e):
+                    raise   # PAD-830: the caller decodes the bank again alone
                 res = None
             if res is None:
                 continue
             L, R, stereo = res
             sink(catid, r["idx"], L, R, stereo)
             ok += 1
-        return ok
     finally:
         emu.close()
+    if ok and menu and named is not None and not cancel():
+        names = bank_sound_test_names(game_real_path, image_path, rev, catid,
+                                      sc_path, rows, menu)
+        if names:
+            named(catid, names)
+    return ok
 
 
 def extract_category_audio(game_real_path, image_path, sc_files, write_wav,
@@ -562,27 +836,57 @@ def _bank_pool_worker(args):
     """One task = derive + decode a SINGLE bank on a fresh emu, writing its WAVs
     straight to ``out_dir`` (so only a small count crosses the process boundary).
     Top-level so it pickles across the spawn boundary; ``rev`` is found once in
-    the parent and passed in."""
-    game_real_path, image_path, rev, catid, sc_path, out_dir = args
+    the parent and passed in.  Returns ``(decoded, named from the Sound Test)``;
+    decoded is :data:`.parallel.NO_MEMORY` when the bank ran out of memory
+    (PAD-830: it used to come back as 0, its songs silently missing)."""
+    game_real_path, image_path, rev, catid, sc_path, out_dir = args[:6]
+    only = args[6] if len(args) > 6 else None
+    menu = args[7] if len(args) > 7 else None
+    renamed = []
+
+    def named(c, names):
+        renamed.append(name_cat_wavs(out_dir, c, names))
     try:
-        return _derive_decode_bank(
+        n = _derive_decode_bank(
             game_real_path, image_path, rev, catid, sc_path,
             lambda c, idx, L, R, stereo: _write_cat_wav(out_dir, c, idx, L, R,
                                                         stereo),
-            lambda: False)
-    except Exception:
-        return 0
+            lambda: False, only=only, menu=menu, named=named)
+    except Exception as e:
+        from .parallel import NO_MEMORY, out_of_memory
+        if out_of_memory(e):
+            return NO_MEMORY, 0
+        n = 0
+    return n, sum(renamed)
+
+
+def _decode_again(task, n):
+    """Whether a bank pool's answer *n* for *task* wants another go alone
+    (PAD-830): it ran out of memory, or decoded nothing it was asked for."""
+    from .parallel import NO_MEMORY
+    only = task[6] if len(task) > 6 else None
+    return n == NO_MEMORY or (n == 0 and (only is None or bool(only)))
+
+
+def _bank_pool_indexed(arg):
+    """``(i, task)`` -> ``(i, _bank_pool_worker(task))``: which bank a pool
+    answer is for, to decode it again when it ran out of memory (PAD-830)."""
+    i, task = arg
+    return i, _bank_pool_worker(task)
 
 
 def extract_category_audio_parallel(game_real_path, image_path, sc_files, out_dir,
                                     nworkers=None, log=None, progress=None,
-                                    cancel=None):
+                                    cancel=None, only=None, names=False):
     """Parallel twin of :func:`extract_category_audio` — one task PER BANK, each
     deriving + decoding on a fresh emulator in its own spawned process (so the
     per-bank derive can't accumulate the state that grinds a long-lived emu, and
     the work spreads across cores).  ``rev`` is located once up front and shared.
     Writes ``music_catNN_*.wav`` into ``out_dir``; falls back to the serial path
-    if the pool can't start.  Returns the count decoded."""
+    if the pool can't start.  Returns the count decoded.  *only* ``{category:
+    {record, ...}}`` decodes just those records of those banks (PAD-608).
+    *names* titles the songs the game's Sound Test names
+    (``music_catNN_MMMM - <name>.wav``, :func:`bank_sound_test_names`, PAD-820)."""
     log = log or (lambda *a, **k: None)
     cancel = cancel or (lambda: False)
     files = sorted((c, p) for p in sc_files
@@ -594,8 +898,15 @@ def extract_category_audio_parallel(game_real_path, image_path, sc_files, out_di
         return 0
     import multiprocessing as mp
 
-    nworkers = nworkers or max(1, min((os.cpu_count() or 2) - 2, 8))
-    nworkers = max(1, min(nworkers, len(files)))
+    from .parallel import NO_MEMORY, emulator_commit, emulators_that_fit
+    want = max(1, min(nworkers or max(1, min((os.cpu_count() or 2) - 2, 8)),
+                      len(files)))
+    # PAD-830: a bank's worker holds its longest song decoded, so it is held to
+    # two emulators' worth of the memory the computer has room for
+    nworkers = emulators_that_fit(2 * emulator_commit(image_path), want)
+    if nworkers < want:
+        log("Decoding the music banks on %d process(es), not %d: this computer "
+            "has the memory for %d now." % (nworkers, want, nworkers), "info")
     # Longest-processing-time-first: the pool pulls tasks greedily, so start the
     # biggest banks (≈ longest songs ≈ longest decodes) first — otherwise a 9-min
     # song picked up in the final round becomes pure tail latency.  Bank file
@@ -606,8 +917,21 @@ def extract_category_audio_parallel(game_real_path, image_path, sc_files, out_di
         except OSError:
             return 0
     ordered = sorted(files, key=lambda cp: _sz(cp[1]), reverse=True)
-    tasks = [(game_real_path, image_path, rev, catid, p, out_dir)
-             for catid, p in ordered]
+    menu = None
+    if names:
+        try:
+            from .sfx_names import bank_menu_sids
+            with open(game_real_path, "rb") as f:
+                menu = bank_menu_sids(f.read()) or None
+        except Exception:                                           # noqa: BLE001
+            menu = None
+
+    def _task(catid, p):
+        return (game_real_path, image_path, rev, catid, p, out_dir,
+                frozenset((only or {}).get(catid, ())) if only is not None else None,
+                [e for e in menu if e[0] >> 16 == catid] if menu else None)
+    tasks = [_task(catid, p) for catid, p in ordered]
+    titled = 0
     log("Decoding %d music bank(s) across %d process(es)..."
         % (len(files), nworkers), "info")
     try:
@@ -617,25 +941,73 @@ def extract_category_audio_parallel(game_real_path, image_path, sc_files, out_di
         # maxtasksperchild=1: a fresh process per bank reclaims the large
         # unicorn mappings a long song's decode allocates, and guarantees the
         # per-bank emu never inherits another bank's accumulated state.
+        again = []
         with ctx.Pool(nworkers, maxtasksperchild=1) as pool:
-            for n in pool.imap_unordered(_bank_pool_worker, tasks):
-                ok += n
-                done += 1
+            for i, (n, t) in pool.imap_unordered(_bank_pool_indexed,
+                                                 list(enumerate(tasks))):
+                task = tasks[i]
+                if _decode_again(task, n):
+                    again.append(task)
+                else:
+                    ok += n
+                    titled += t
+                    done += 1
                 if progress:
                     progress(done, len(tasks))
                 if cancel():
                     pool.terminate()
                     break
+        # PAD-830: a bank that came back with nothing beside the others is
+        # decoded again here, alone, once the pool has given its memory back
+        # (out of memory is not always an error that reaches here: the codec
+        # probes take any failure for a codec that does not fit, and a song
+        # then decodes to nothing)
+        missing, short = [], False
+        for task in again:
+            if cancel():
+                break
+            log("Music bank %d did not decode beside the others; decoding it "
+                "again on its own." % task[3], "warning")
+            n, t = _bank_pool_worker(task)
+            if _decode_again(task, n):
+                missing.append(task[3])
+                short = short or n == NO_MEMORY
+                continue
+            ok += n
+            titled += t
+            done += 1
+            if progress:
+                progress(done, len(tasks))
+        if missing:
+            log("Music bank(s) %s could not be decoded%s."
+                % (", ".join(map(str, sorted(missing))),
+                   ": this computer ran out of memory even with nothing else "
+                   "decoding. Close other programs, check the C: drive has a few "
+                   "GB free so Windows can grow its page file, and extract again"
+                   if short else ""), "error" if short else "warning")
+        _log_titled(log, titled)
         return ok
     except Exception as e:
         log("Parallel music decode unavailable (%s); using one process." % e,
             "warning")
-        ok = 0
+        ok = titled = 0
         for catid, p in files:
             if cancel():
                 break
-            ok += _bank_pool_worker(
-                (game_real_path, image_path, rev, catid, p, out_dir))
+            n, t = _bank_pool_worker(_task(catid, p))
+            if n == NO_MEMORY:
+                log("Music bank %d could not be decoded: this computer ran out "
+                    "of memory." % catid, "error")
+                continue
+            ok += n
+            titled += t
             if progress:
                 progress(ok, len(files))
+        _log_titled(log, titled)
         return ok
+
+
+def _log_titled(log, titled):
+    if titled:
+        log("Named %d song file(s) from the game's Sound Test menu." % titled,
+            "success")

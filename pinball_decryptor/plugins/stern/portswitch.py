@@ -444,6 +444,35 @@ def site_line(elf, name, va):
     return "site %-16s 0x%08x 0x%08x 0x%08x" % (name, va, elf.word(va), elf.word(va + 4))
 
 
+def drain_source(elf, info=None):
+    """The switch drain's own lines for a port, with no shots: dict(sites=[lines], data={name:
+    address}, values=[(name, number)], how=words, generation), or None when the drain is not found
+    or its per-switch function cannot be hooked. PAD-645: a port whose shots come another way
+    (``site shot_dispatch``) carries these for the flipper buttons' sounds in attract."""
+    info = info or drain(elf)
+    if not info or not G.is_hooked_ok(elf, info["leaf"]):
+        return None
+    g = info["generation"]
+    how = ("the framework's per-switch call in its switch drain (generation %s: r0 = the switch id, called for %s) "
+           "- press the switches to prove it" % (g, "every edge after the new level is stored" if not info["level_before"]
+                                                 else "every edge the game acts on, before the level is stored"))
+    values = [("switch_drain_size", info["drain_size"]), ("switch_record_size", info["record_size"]),
+              ("switch_level_at", info["level_at"])]
+    if info["level_via"] is not None:
+        values.append(("switch_level_via", info["level_via"]))
+    if info["level_before"]:
+        values.append(("switch_level_before", 1))
+    if info["desc_via"] is not None:
+        values.append(("switch_desc_via", info["desc_via"]))
+    values += [("switch_flags_at", info["flags_at"]), ("switch_polarity_at", info["polarity_at"])]
+    return dict(
+        sites=["#   switch_edge: %s" % how, site_line(elf, "switch_edge", info["leaf"]),
+               "#   switch_drain: the drain itself, never hooked: an edge counts only when switch_edge is called "
+               "from it", site_line(elf, "switch_drain", info["drain"])],
+        data={"switch_records": info["records"], "switch_count": info["count"], "mode_mask": info["mode_mask"]},
+        values=values, how=how, generation=g)
+
+
 def switch_source(elf, first_bit=0):
     """The switch-drain shot source for a port, as parts a port's sections take: dict(sites=[lines],
     data={name: address}, values=[(name, number)], mapped=[(switch id, shot mask, name)], how=words,
@@ -467,25 +496,10 @@ def switch_source(elf, first_bit=0):
         if names[nm] > 1:
             nm = "%s (%d)" % (nm, sid)
         mapped.append((sid, 1 << (first_bit + k), nm[:150]))
-    g = info["generation"]
-    how = ("the framework's per-switch call in its switch drain (generation %s: r0 = the switch id, called for %s) "
-           "- press the switches to prove it" % (g, "every edge after the new level is stored" if not info["level_before"]
-                                                 else "every edge the game acts on, before the level is stored"))
-    values = [("switch_drain_size", info["drain_size"]), ("switch_record_size", info["record_size"]),
-              ("switch_level_at", info["level_at"])]
-    if info["level_via"] is not None:
-        values.append(("switch_level_via", info["level_via"]))
-    if info["level_before"]:
-        values.append(("switch_level_before", 1))
-    if info["desc_via"] is not None:
-        values.append(("switch_desc_via", info["desc_via"]))
-    values += [("switch_flags_at", info["flags_at"]), ("switch_polarity_at", info["polarity_at"])]
-    return dict(
-        sites=["#   switch_edge: %s" % how, site_line(elf, "switch_edge", info["leaf"]),
-               "#   switch_drain: the drain itself, never hooked: an edge counts only when switch_edge is called "
-               "from it", site_line(elf, "switch_drain", info["drain"])],
-        data={"switch_records": info["records"], "switch_count": info["count"], "mode_mask": info["mode_mask"]},
-        values=values, mapped=mapped, how=how, notes=notes, generation=g)
+    src = drain_source(elf, info)
+    if src is None:
+        return dict(mapped=[], notes=["the framework's switch drain's per-switch call cannot be hooked here"])
+    return dict(src, mapped=mapped, notes=notes)
 
 
 def switch_lines(mapped):
@@ -499,3 +513,66 @@ def example_start_shot(mapped):
         if re.search(r"\b(target|tgt)\b", name, re.I):
             return name
     return mapped[0][2] if mapped else ""
+
+
+# ---- PAD-1326: a Spike 3 (64-bit) program's switches ----------------------------------------------------------------
+# A Spike 3 program has no 32-bit static descriptors: its device table is 0x50-byte records (a name pointer at +0, a
+# word at +0x20 holding the I/O group, the index and the class: 1 a switch, 2 a coil, 3 a lamp, 5 other), walked out
+# from the one named TROUGH 1. A switch's id is its rank among the table's switches, from 1 - the ids the 64-bit edge
+# source reports (the port drafter's s3port.switch_ids, measured on the rig, PAD-1271).
+
+def _device_records_a64(e):
+    """[(name, group, index, class)] of the 64-bit program *e*'s (screen_time._Elf64) device table, in its order."""
+    def rec(a):
+        n = e.ptr.get(a)
+        o = e.off(n) if n else None
+        if o is None:
+            return None
+        raw = e.b[o:e.b.find(b"\0", o, o + 80)]
+        try:
+            name = raw.decode("utf-8")          # PAD-1289: Pokemon LE's "POKÉ BALL SPOT" is UTF-8
+        except UnicodeDecodeError:
+            name = raw.decode("latin1")
+        if not name or len(name) > 40 or not name.isprintable():
+            return None
+        w = e.u64(a + 0x20)
+        if w is None:
+            return None
+        g, idx, cls = w & 0xFFFF, (w >> 16) & 0xFFFF, (w >> 32) & 0xFFFF
+        return (name, g, idx, cls) if 1 <= g <= 64 and idx < 512 and cls in (1, 2, 3, 5) else None
+    m = re.search(rb"\0TROUGH 1\0", e.b)
+    if not m:
+        return []
+    o = m.start() + 1
+    sva = next((va + o - off for off, va, fs, _fl in e.loads if off <= o < off + fs), None)
+    for a, v in e.ptr.items():
+        r = rec(a) if v == sva else None
+        if r and r[3] == 1:
+            lo = a
+            while rec(lo - 0x50):
+                lo -= 0x50
+            out, k = [], 0
+            while rec(lo + 0x50 * k):
+                out.append(rec(lo + 0x50 * k))
+                k += 1
+            return out
+    return []
+
+
+def switches_a64(b):
+    """:func:`switches` for a Spike 3 program's bytes *b*: [dict(id, name)] in id order (the first record of a name
+    keeps it), [] when the device table cannot be read."""
+    from .screen_time import _Elf64
+    try:
+        e = _Elf64(bytes(b))
+        recs = _device_records_a64(e)
+    except (struct.error, ValueError, IndexError):
+        return []
+    out, n, seen = [], 0, set()
+    for name, _g, _idx, cls in recs:
+        if cls == 1:
+            n += 1
+            if name.upper() not in seen:
+                seen.add(name.upper())
+                out.append({"id": n, "name": name})
+    return out

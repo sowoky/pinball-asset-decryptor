@@ -11,6 +11,8 @@ version        1.06
 # ---- functions ----
 site tick             0x00430e3c 0xe92d4038 0xe3a00037
 site sound_lookup     0x00384ea0 0xe92d4038 0xe1a05000
+# PAD-494/724 music modes: get_asset_descriptor, WRAPPED (sounds.cfg)
+site sound_resolve    0x002ea78c 0xe92d41f0 0xe1a05820
 site score_add        0x002ab994 0xe30912d6 0xe3401086
 site callout          0x002eb93c 0xe92d4010 0xe30de588
 site callout_nth      0x002ebaf0 0xe92d4010 0xe30de588
@@ -44,6 +46,35 @@ site surface_find     0x0057fbd8 0xe92d4070 0xe24dd008
 site surface_set_video 0x005772bc 0xe5d030d4 0xe92d4ff0
 site surface_play     0x005750c8 0xe5d030d4 0xe92d43f0
 site surface_stop     0x00574878 0xe5d030d4 0xe92d40f0
+# PAD-530: the surface's own seek, length and position, at LE 1.06's distances from surface_play, each the same code
+# (seek calls the player's gst_element_seek, length and position its query_duration / query_position). A mode's clip
+# the game's own clip took the surface from comes back where it would be by then, once the game's clip is over: when
+# the game asks for its main-play video (MainPlayLoop_<film>, as on LE), or the surface is idle. Seen in the emulator
+# 2026-10-11 (stock card, hidden, muted) as on LE: the game's own Ball Lock (effect 117) and Extra Ball (effect 279,
+# award_screen(279, 0, 0, 0x7a7e00) as Pro 0x5e8ec) over a mode file's 111.9 s clip - back at 8785 ms and 15372 ms.
+site surface_seek     0x00574d5c 0xe92d43f0 0xe1a07003
+site surface_duration 0x00574a14 0xe5d030d4 0xe92d40f0
+site surface_position 0x00574bb8 0xe5d030d4 0xe92d40f0
+# PAD-725: the game's reel (a clip of its own kept in step with a song): its tick waits while a clip of
+# ours has the bank's surface. Found by what it calls (surface_position, surface_seek, surface_play) and
+# its prologue (push; mov r4, r0; ldr r0, [r0, #0x1c]; cmp r0, #0; popeq).
+site reel_tick       0x0044fe00 0xe92d47f0 0xe1a04000
+text backdrop_idle MainPlayLoop
+# PAD-722: the backdrop on the bank's surface, as on LE 1.06 (PAD-521): a mode's loop is played there again whenever
+# it is idle. Seen on the glass in the emulator 2026-10-25 (stock card, hidden, muted): a blocks mode's own loop in the
+# TV frame, taken back each time the game asked for MainPlayLoop_DrNo.
+value backdrop_surface 1
+# PAD-722: the game's own status bar under the TV (scene hud 7de1c159, the LE's): the score display's getter, LE
+# 1.06's 0x1862dc on this build (the LE recipe places it strictly; the same 0x128-byte singleton). Its frame update
+# 0x185ac4 reads the LE's fields: the nodes at +0x104/+0x108/+0x10c/+0x114, the wipe's frame +0x11c, the four flags
+# +0x11e..+0x121 - the runtime's defaults. Seen on the glass in the emulator 2026-10-25: a blue bar named FRWL WIZARD,
+# its clock draining along it, held again when a display of the game's moved it.
+site status_bar       0x00184aec 0xe92d4038 0xe3004138
+# PAD-889: the Bond Women multiplier's getter (2X-7X while it runs, else 1): the byte at +0x20 of its record while
+# process 0x1ab runs; the game adds it to the playfield multiplier score_add multiplies by. pm_bond_women_mult.
+site bond_women_mult  0x0008c89c 0xe92d4008 0xe3a01f6b
+# PAD-722: where a mode's info line goes, as on LE 1.06 (PAD-547): under the status bar.
+text info_line_at 679 510
 site balls_in_play    0x00264464 0xe92d4010 0xe3094860
 site find_text        0x0057f380 0xe92d4070 0xe24dd008
 site agent_header     0x005cc978 0xe92d40f8 0xe2505000
@@ -71,6 +102,8 @@ data typeinfo_resource      0x00614704
 data typeinfo_scene_player  0x00738dfc
 data display_holder         0x0088d7a8
 data award_screen_arg       0x007a7e00
+#   display_effects: PAD-639, read off award_screen 0x3c62d8: its manager getter 0x523340 loads *0x8a0348 (LE 0x89b708)
+data display_effects        0x008a0348
 data sound_channels         0x0086d694
 data sound_queue            0x0086df08
 data sound_requests         0x008058ec
@@ -199,6 +232,20 @@ event tilt_warning   0xc8
 event tilt           0xc6
 event game_over      0x47
 
+# ---- PAD-722: a FILM completed, as on LE 1.06 (PAD-428). The collect 0x1cf08c(film, part) (the LE's 0x1d0918, the
+# same code) calls 0x1d3134(film) once, the moment the film's fourth part is in (0x1cefec(film) = all four). Films in
+# the game's order: 0 Dr. No, 1 From Russia With Love, 2 Goldfinger, 3 Thunderball, 4 You Only Live Twice,
+# 5 Diamonds Are Forever. Seen in the emulator 2026-10-25 (an instrument calling the collect for From Russia With
+# Love's four parts): a blocks mode on film_frwl started 119 ms after the fourth; on the port without these lines
+# nothing started.
+site film_complete   0x001d3134 0xe92d4038 0xe1a05000
+event film_dr_no        site film_complete arg 0
+event film_frwl         site film_complete arg 1
+event film_goldfinger   site film_complete arg 2
+event film_thunderball  site film_complete arg 3
+event film_yolt         site film_complete arg 4
+event film_daf          site film_complete arg 5
+
 # ---- lamps ----
 # shot ties (PAD-420): an insert's shot mask is every shot it stands in front of, read at the desk from the game's
 # own names (a shot's switch name against the insert's: its arrow, its target's own light, its lane's light, the
@@ -292,10 +339,36 @@ lamp 103          0x400000000    TOP LANE-RIGHT  # lamp 95, I/O group 8 index 36
 lamp 44           0x10           DB5 UNDER  # lamp 96, I/O group 7 index 2, at 378,612; tie: Db5 roof
 lamp 110          0              LEFT SLING FLASH  # lamp 105, I/O group 7 index 24, at 104,715
 lamp 111          0              RIGHT SLING FLASH  # lamp 106, I/O group 7 index 25, at 317,715
+# ---- cabinet: cablamp <light ids R,G,B | one> <u> <name> - the expression lights, read by lamp_map.py ----
+# 0 blade pixel(s), 23 speaker light(s), placed on the cabinet drawing (PAD-1040)
+cablamp 445,446,447  41  SPEAKER 1  # lamp 212, I/O group 6 index 1, at 95,28, speaker L
+cablamp 448,449,450  125 SPEAKER 2  # lamp 213, I/O group 6 index 4, at 116,34, speaker L
+cablamp 451,452,453  208 SPEAKER 3  # lamp 214, I/O group 6 index 7, at 131,49, speaker L
+cablamp 454,455,456  291 SPEAKER 4  # lamp 215, I/O group 6 index 10, at 137,70, speaker L
+cablamp 457,458,459  375 SPEAKER 5  # lamp 216, I/O group 6 index 13, at 131,91, speaker L
+cablamp 460,461,462  458 SPEAKER 6  # lamp 217, I/O group 6 index 16, at 116,106, speaker L
+cablamp 463,464,465  541 SPEAKER 7  # lamp 218, I/O group 6 index 19, at 95,112, speaker L
+cablamp 466,467,468  625 SPEAKER 8  # lamp 219, I/O group 6 index 22, at 74,106, speaker L
+cablamp 469,470,471  708 SPEAKER 9  # lamp 220, I/O group 6 index 25, at 59,91, speaker L
+cablamp 472,473,474  791 SPEAKER 10  # lamp 221, I/O group 6 index 28, at 53,70, speaker L
+cablamp 475,476,477  875 SPEAKER 11  # lamp 222, I/O group 6 index 31, at 59,49, speaker L
+cablamp 478,479,480  958 SPEAKER 12  # lamp 223, I/O group 6 index 34, at 74,34, speaker L
+cablamp 481,482,483  45  SPEAKER 13  # lamp 224, I/O group 6 index 37, at 205,28, speaker R
+cablamp 484,485,486  136 SPEAKER 14  # lamp 225, I/O group 6 index 40, at 228,35, speaker R
+cablamp 487,488,489  227 SPEAKER 15  # lamp 226, I/O group 6 index 43, at 243,53, speaker R
+cablamp 490,491,492  318 SPEAKER 16  # lamp 227, I/O group 6 index 46, at 247,76, speaker R
+cablamp 493,494,495  409 SPEAKER 17  # lamp 228, I/O group 6 index 49, at 237,98, speaker R
+cablamp 496,497,498  500 SPEAKER 18  # lamp 229, I/O group 6 index 52, at 217,110, speaker R
+cablamp 499,500,501  590 SPEAKER 19  # lamp 230, I/O group 6 index 55, at 193,110, speaker R
+cablamp 502,503,504  681 SPEAKER 20  # lamp 231, I/O group 6 index 58, at 173,98, speaker R
+cablamp 505,506,507  772 SPEAKER 21  # lamp 232, I/O group 6 index 61, at 163,76, speaker R
+cablamp 508,509,510  863 SPEAKER 22  # lamp 233, I/O group 6 index 64, at 167,53, speaker R
+cablamp 511,512,513  954 SPEAKER 23  # lamp 234, I/O group 6 index 67, at 182,35, speaker R
 
 # PAD-363: the game's own modes a mode of ours may keep from starting (game_mode_blocks.py, from the
 # game program: each mode's start = its vtable + 8 + 4 * the title's start slot). Never a multiball.
 # plain-C / slot-less title: starts found by the start finder (PAD-363, cstarts)
+# PAD-578: Jetpack Multiball, Bird One Multiball: not their start but the game's lock-open check, refused with 0 (the lock closes as for the game's own modes)
 site block_start_0      0x0005be58 0xe92d4010 0xe30001ad
 text block_name_0       Bullshit Scoring
 site block_start_1      0x000b1978 0xe3011430 0xe300019f
@@ -328,6 +401,94 @@ site block_start_14     0x00047ff4 0xe92d43f8 0xe3041d2c
 text block_name_14      Bath O Sub Hurryup
 site block_start_15     0x0008ca40 0xe92d4008 0xe30001ab
 text block_name_15      Double Scoring
+# PAD-526: the twelve henchman and villain modes (the story's chapters), from the chapter table 0x629018 as on the
+# LE; their caller goes on only when a start says it began, so each is refused with 0
+site block_start_16     0x0011095c 0xe92d41f0 0xe3a00003
+text block_name_16      Dr No's Lair
+site block_start_17     0x0011a8bc 0xe92d40f8 0xe1a05001
+text block_name_17      Orient Express
+site block_start_18     0x00115ff4 0xe92d41f0 0xe3a00003
+text block_name_18      Oddjob Battles Bond
+site block_start_19     0x0012c4a4 0xe92d41f0 0xe3a00003
+text block_name_19      Cut Bond in Half
+site block_start_20     0x00122f48 0xe92d41f0 0xe3a00003
+text block_name_20      Mr Osato
+site block_start_21     0x001267bc 0xe92d41f0 0xe3a00003
+text block_name_21      Professor Dent
+site block_start_22     0x0011839c 0xe92d40f8 0xe1a05001
+text block_name_22      Mr Wint & Mr Kidd
+site block_start_23     0x00113844 0xe92d41f0 0xe3a00003
+text block_name_23      Feeding Frenzy
+site block_start_24     0x0011df60 0xe92d41f0 0xe3a00003
+text block_name_24      Fiona Volpe
+site block_start_25     0x0012e8b8 0xe92d40f8 0xe3a00003
+text block_name_25      Under Water Fight
+site block_start_26     0x001299cc 0xe92d40f8 0xe3a00003
+text block_name_26      Training Grounds
+site block_start_27     0x0013115c 0xe92d40f8 0xe3a00003
+text block_name_27      Diamond Death Ray
+site block_start_28     0x000ebe44 0xe92d4008 0xeb02c501
+text block_name_28      Jetpack Multiball
+site block_start_29     0x0016f2e0 0xe92d4008 0xebfeea0f
+text block_name_29      Bird One Multiball
+value block_ret_16          0
+value block_ret_17          0
+value block_ret_18          0
+value block_ret_19          0
+value block_ret_20          0
+value block_ret_21          0
+value block_ret_22          0
+value block_ret_23          0
+value block_ret_24          0
+value block_ret_25          0
+value block_ret_26          0
+value block_ret_27          0
+value block_ret_28          0
+value block_ret_29          0
+# EMU 2026-10-14 (PAD-578, as the LE's with this build's addresses: handlers 0xec314 / 0x16facc): a mode of ours
+# blocking: both checks 0, nothing counted, balls 1; its list without 28 / 29: Jetpack Multiball served (balls 2).
+# No abort. PROVEN.
+
+# PAD-1026: the game's gadget countdowns (game_mode_blocks.read_gate_rules, from the game program): each
+# asks one check before it counts, plays its clip or lights its inserts - the check the game's own
+# mini-wizards and multiballs make say no. While a mode of ours blocks, the runtime refuses it with 0
+# (`value block_rule_gate_<n> 1`) unless the mode keeps that countdown counting.
+site block_rule_0          0x000c61f8 0xe92d4008 0xebff6421  # the check of the countdown at 0x000c63f0 (gadget 1)
+value block_rule_gate_0    1
+text block_rule_name_0     Attache Case Countdown
+site block_rule_1          0x000651f4 0xe92d4008 0xeb00e822  # the check of the countdown at 0x00065344 (gadget 2)
+value block_rule_gate_1    1
+text block_rule_name_1     DB5 Countdown
+site block_rule_2          0x00155404 0xe92d4008 0xebfd279e  # the check of the countdown at 0x00155548 (gadget 3)
+value block_rule_gate_2    1
+text block_rule_name_2     Powerpack Countdown
+# EMU 2026-11-06 (PAD-1026, as the LE's: Right vuk opto 93, Left eject 52, DB5 0x81b028, Powerpack 0x81f6b8): main
+# with the mode running counted both 4-5-6-3; this port 4-4-4; no mode running 4-5-6-3. No abort. PROVEN.
+
+# ---- PAD-473: the game's own mini-wizards (MODE_SDK.md "The game's own mini-wizards"), James Bond LE 1.06's code
+# on this build: the same table (4 entries of 0x20 bytes: index, bit, insert lamp, start, running query - the inserts
+# 34, 35, 36, 43 and Ahoy Mr. Bond's start 0x20530 as on the LE) and the same functions 0xfcc lower (LE 0x110d98
+# start, 0x110cac lighting; the Right ramp's handler 0x1ad998 calls the start, the collect 0x1cf2b4 / 0x1cf2f0 the
+# lighting), each player's words at 0x81dc34 (selected, +0x10 lit, +0x20 played) and the lamps' refresh byte at
+# 0x869ab8 read off the same instructions.
+site  wizard_start   0x0010fdcc 0xe92d4070 0xeb033961
+site  wizard_light   0x0010fce0 0xe303013c 0xe3a01004
+# PAD-503: the game's own check before its start of one, the LE's 0x110b90 0xfcc lower (the same calls, its own
+# table 0x621d38): 1 = nothing of the game's in the way. pm_game_wizard_way: a mode lit at the Right ramp waits on it.
+site  wizard_way     0x0010fbc4 0xe92d4038 0xebfe3dce
+data  wizard_state   0x0081dc34
+data  wizard_table   0x00621d38
+data  lamps_dirty    0x00869ab8
+value wizard_entry   0x20
+text  wizard_name_1  Chaos at Crab Key
+text  wizard_name_2  Ahoy Mr. Bond
+text  wizard_name_3  Goldfinger's Jackpot
+text  wizard_name_4  Duel on the Disco Volante
+text  wizard_film_1  Dr. No
+text  wizard_film_2  From Russia With Love
+text  wizard_film_3  Goldfinger
+text  wizard_film_4  Thunderball
+text  wizard_shot    Right ramp
 
 # ---- PAD-420: held coils by their board address (generation C)
 # (coils/coil_job_c.sh: each held 2000 ms - or its own longest - as a mode started, ONE command at the
@@ -341,7 +502,25 @@ data gate_obj            0x00821318
 value gate_ctl            28
 value gate_off_slot       3
 value gate_devoff         18
-text held_coils            gate
+# PAD-621: the right return up post, as the game's own mini-wizards hold the ball with it through their start
+# clip when the Right ramp starts them (BottomLaneUpPost, device 9; the game's own command 255 for 64 ms, then
+# AD_BOTTOM_LANE_UP_POST_POWER - adjustment 178 - for 20 s; its v[3] reads AD_BOTTOM_LANE_UP_POST_DISABLED).
+# A Device-framework object: its update OFFs it on most switch hits and its tick raises it 1875 ticks on a pending
+# raise, unless a process controls it (+0x10). So a hold takes it (the framework's take / give), and clears its
+# countdown (+0x20) and pending raise (+0x24) before giving it back, so the give's update lowers it.
+text right_return_up_label Right return up post
+text right_return_up_drive 8 7 255 64 a178
+data right_return_up_obj   0x0081acf0
+site right_return_up_take  0x00079108 0xe92d40f0 0xe30676ac
+site right_return_up_give  0x000791bc 0xe3510000 0xe92d4038
+value right_return_up_ctl    16
+value right_return_up_devoff 18
+value right_return_up_off_slot 3
+value right_return_up_left   32
+value right_return_up_pending 36
+value right_return_up_max_ms 14000
+value right_return_up_no_hold_flag 166   # FG_MODES_DO_NOT_HOLD_BALL
+text held_coils            gate right_return_up
 
 # PAD-420: the other modes' flags, from james_bond_le-1.06's proven port (the game's own ids; proven here by a stack run)
 value mode_flag_1           102
@@ -427,6 +606,74 @@ text show_name_12         Wide red strobe
 text show_kind_12         accent
 value show_secs_12        2
 
+# ---- PAD-642: the game's own lit-shot flash (pad_mode_runtime.c "PAD-642"): every mode's lit shot plays it as it is
+# made - the GI and the inserts flash in turn in the mode's colour, three times, ~2 s. It has no body of its own: the
+# game's lit-shot process (body 0x138410; LE 1.06's show 464, colours 1-10 as LE's) calls 0x19cd44(colour), which starts
+# shows 448 (the GI, body 0x19bd2c) and 446 (the inserts, body 0x1bd1d4, show 8 here)
+# through the game's show starter, each told the colour and 3 repeats. So each show here is that call, with a colour of the
+# game's palette (0x163fe8's: RGB in the comment); the runtime stops one with the game's "stop every show with this number" for the two. Seen in the emulator (PAD-642).
+site show_stop_number     0x00207220 0xe92d4070 0xe30666a8
+site show_13             0x0019cd44 0xe92d4010 0xe1a04000   # the game's lit-shot flash, colour 1 (85,85,85)
+value show_call_13       1
+text show_numbers_13     448 446
+text show_name_13        Lit shot flash white
+text show_kind_13        accent
+value show_secs_13       2
+site show_14             0x0019cd44 0xe92d4010 0xe1a04000   # the game's lit-shot flash, colour 2 (255,0,0)
+value show_call_14       2
+text show_numbers_14     448 446
+text show_name_14        Lit shot flash red
+text show_kind_14        accent
+value show_secs_14       2
+site show_15             0x0019cd44 0xe92d4010 0xe1a04000   # the game's lit-shot flash, colour 3 (0,255,0)
+value show_call_15       3
+text show_numbers_15     448 446
+text show_name_15        Lit shot flash green
+text show_kind_15        accent
+value show_secs_15       2
+site show_16             0x0019cd44 0xe92d4010 0xe1a04000   # the game's lit-shot flash, colour 4 (0,0,255)
+value show_call_16       4
+text show_numbers_16     448 446
+text show_name_16        Lit shot flash blue
+text show_kind_16        accent
+value show_secs_16       2
+site show_17             0x0019cd44 0xe92d4010 0xe1a04000   # the game's lit-shot flash, colour 5 (0,255,255)
+value show_call_17       5
+text show_numbers_17     448 446
+text show_name_17        Lit shot flash cyan
+text show_kind_17        accent
+value show_secs_17       2
+site show_18             0x0019cd44 0xe92d4010 0xe1a04000   # the game's lit-shot flash, colour 6 (255,0,255)
+value show_call_18       6
+text show_numbers_18     448 446
+text show_name_18        Lit shot flash magenta
+text show_kind_18        accent
+value show_secs_18       2
+site show_19             0x0019cd44 0xe92d4010 0xe1a04000   # the game's lit-shot flash, colour 7 (148,0,211)
+value show_call_19       7
+text show_numbers_19     448 446
+text show_name_19        Lit shot flash purple
+text show_kind_19        accent
+value show_secs_19       2
+site show_20             0x0019cd44 0xe92d4010 0xe1a04000   # the game's lit-shot flash, colour 8 (255,255,0)
+value show_call_20       8
+text show_numbers_20     448 446
+text show_name_20        Lit shot flash yellow
+text show_kind_20        accent
+value show_secs_20       2
+site show_21             0x0019cd44 0xe92d4010 0xe1a04000   # the game's lit-shot flash, colour 9 (255,127,0)
+value show_call_21       9
+text show_numbers_21     448 446
+text show_name_21        Lit shot flash orange
+text show_kind_21        accent
+value show_secs_21       2
+site show_22             0x0019cd44 0xe92d4010 0xe1a04000   # the game's lit-shot flash, colour 10 (127,15,0)
+value show_call_22       10
+text show_numbers_22     448 446
+text show_name_22        Lit shot flash dark orange
+text show_kind_22        accent
+value show_secs_22       2
+
 # ---- PAD-474: the shaker motor, read by shaker_lines.py from the game's own shake routine ----------
 # shake(kind 1..5 (200/384/1024/896/2816 ms), min level: one power, 32/255; a mode's shake is sent as its own are): adjustment 291 (AD_SHAKER_MOTOR), drive 7; 259 constant calls
 site shake              0x001867d8 0xe92d4030 0xe1a05000
@@ -440,3 +687,210 @@ text shake_setting_ms      0 2816 2816 2816
 text shake_short            0:200:0
 text shake_medium           0:384:0
 text shake_long             0:1024:0
+
+# ---- PAD-615: the game's Challenge list (MODE_SDK.md "A mode in the game's Challenge list"; challenge_lines.py):
+# each challenge's own start on the ball's start event, run in a Player Challenge game with its pick. A mode that holds
+# one starts instead of it; the game ends the challenge game at the first ball's end either way.
+value challenge_on_flag   18
+# Chaos at Crab Key: its handler starts 0x92a90
+site  challenge_go_0    0x00092cfc 0xe92d4008 0xeb05cbdb
+value challenge_flag_0  185
+text  challenge_name_0  Chaos at Crab Key
+# Ahoy Mr. Bond: its handler starts 0x20530
+site  challenge_go_1    0x000207f0 0xe92d4008 0xeb07951e
+value challenge_flag_1  186
+text  challenge_name_1  Ahoy Mr. Bond
+# Goldfinger's Jackpot: its handler starts 0xbd2c4
+site  challenge_go_2    0x000bd4e0 0xe92d4008 0xeb0521e2
+value challenge_flag_2  187
+text  challenge_name_2  Goldfinger's Jackpot
+# Duel on the Disco Volante: its handler starts 0x7dfd8
+site  challenge_go_3    0x0007e1fc 0xe92d4008 0xeb061e9b
+value challenge_flag_3  188
+text  challenge_name_3  Duel on the Disco Volante
+# Her Majesty's Secret Service: its handler starts 0x1d7f54
+site  challenge_go_4    0x001d8198 0xe92d4008 0xeb00b6b4
+value challenge_flag_4  189
+text  challenge_name_4  Her Majesty's Secret Service
+# the start menu (CHOOSE YOUR MODE OF PLAY): our names on the challenges modes take, and challenges of their own
+site  challenge_menu      0x000acc68 0xe2400001 0xe3500005
+site  challenge_menu_pick 0x000add5c 0xe2433001 0xe3530007
+value challenge_menu_list_at   388
+value challenge_menu_count_at  92
+value challenge_menu_cap       9
+value challenge_menu_kind      3
+value challenge_menu_caption   1921
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+site  challenge_balls     0x001de38c 0xe92d4030 0xe1a05000
+site  challenge_extra_ball 0x00389d40 0xe30e32e4 0xe3403086
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x002665b0 0xe30922d6 0xe3402086
+# PAD-640: the game's end-of-game high scores (a mode's challenge game keeps the mode's own) and each challenge's champion category
+site  challenge_scores       0x0025214c 0xe92d4ff0 0xe24dd0bc
+site  challenge_score_entry  0x00251680 0xe1a03000 0xe30806e4
+# DR. NO CHALLENGE CHAMPION
+value challenge_scores_cat_0  10
+# AHOY MR. BOND CHALLENGE CHAMPION
+value challenge_scores_cat_1  11
+# GOLDFINGER'S JACKPOT CHALLENGE CHAMPION
+value challenge_scores_cat_2  12
+# DISCO VOLANTE CHALLENGE CHAMPION
+value challenge_scores_cat_3  13
+# CHALLENGE CHAMPION
+value challenge_scores_cat_4  14
+# PAD-660: the attract mode's last challenge champion page; a mode's challenge champion is shown after it, in the same page
+site  challenge_page        0x001d4acc 0xe92d4ff0 0xe3a0000e
+site  challenge_page_text   0x00252c2c 0xe92d4008 0xe304397c
+site  challenge_page_yield  0x00207560 0xe30636a8 0xe3403082
+value challenge_page_cat    14
+value challenge_page_title  3952
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x00262420 0xe92d4010 0xe3094860
+value ball_launch_flag       12
+value ball_launch_wait_flag  13
+site  challenge_plain_0   0x0018c560 0xe92d4070 0xe1a05000
+
+# ---- PAD-663: the game's champions for a mode's challenge game, read off this build's own code (portchallenge.py) ----
+# PAD-663: its question to the bus before it files a player under a category's entry ({player, category +2, entry +4}): in a mode's challenge game only the mode's record says yes
+site  challenge_scores_gate  0x002523b8 0xeb025e18 0xe3500000
+value challenge_scores_gate_id       91
+value challenge_scores_gate_cat_at   2
+value challenge_scores_gate_entry_at 4
+# PAD-663: the category table (36 bytes each; +28 the entry list a category's insert shifts) and its count
+data  challenge_scores_table 0x007c65d4
+data  challenge_scores_count 0x005f4448
+# PAD-663: HIGHEST SCORES, whose first entry a mode's challenge game goes in as the mode's own record
+value challenge_scores_cat   1
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x0025214c 0xe92d4ff0 0xe24dd0bc
+
+# PAD-710: the game's own books of its modes (mode_framework.py, from this build's audit and flag names): a
+# mode of ours in one's place counts its STARTED audit and PLAYED flag, and when completed its COMPLETED ones
+site  audit_add              0x00456ad0 0xe92d43f0 0xe2505000
+value place_audit_started_0        208
+value place_flag_played_0          141
+value place_audit_started_1        209
+value place_audit_started_2        210
+value place_audit_started_3        211
+value place_audit_started_4        212
+value place_audit_started_5        213
+value place_audit_started_6        276
+value place_flag_played_6          86
+value place_flag_completed_6       89
+value place_audit_started_7        290
+value place_audit_started_8        292
+value place_audit_started_9        294
+value place_audit_started_10       296
+value place_audit_started_11       298
+value place_audit_started_12       300
+value place_audit_started_13       302
+value place_audit_started_14       304
+value place_audit_started_15       310
+value place_audit_started_16       339
+value place_audit_completed_16     341
+value place_audit_started_17       342
+value place_audit_completed_17     344
+value place_audit_started_18       345
+value place_audit_completed_18     347
+value place_audit_started_19       348
+value place_audit_completed_19     350
+value place_audit_started_20       351
+value place_audit_completed_20     353
+value place_audit_started_21       354
+value place_audit_completed_21     356
+value place_audit_started_22       357
+value place_audit_completed_22     359
+value place_audit_started_23       360
+value place_audit_completed_23     362
+value place_audit_started_24       363
+value place_audit_completed_24     365
+value place_audit_started_25       366
+value place_audit_completed_25     368
+value place_audit_started_26       369
+value place_audit_completed_26     371
+value place_audit_started_27       372
+value place_audit_completed_27     374
+value place_audit_started_28       377
+value place_flag_played_28         106
+site  place_start_28               0x000e6058 0xe92d43f0 0xe24dd00c
+value place_audit_started_29       263
+value place_flag_played_29         73
+site  place_start_29               0x00164f2c 0xe92d40f0 0xe24dd00c
+
+# PAD-710: the challenges that are one of the game's own modes: a mode taking the challenge counts as it
+value challenge_place_1        6
+
+# PAD-747: the game's other modes it keeps books of (mode_framework.done_lines): a mode of ours may start once
+# some of them are completed - each one's COMPLETED audit (through audit_add) or COMPLETED flag
+text  done_name_0                  Story Mode
+value done_audit_0                 376
+text  done_name_1                  Rocket Multiball Cranked Up
+value done_flag_1                  77
+text  done_name_2                  Dr No Multiball
+value done_flag_2                  83
+text  done_name_3                  Goldfinger Wizard Mode
+value done_flag_3                  94
+text  done_name_4                  Disco Volante Multiball
+value done_flag_4                  100
+text  done_name_5                  Little Nellie Multiball
+value done_flag_5                  113
+text  done_name_6                  Hunted By Helicopter Multiball
+value done_flag_6                  117
+text  done_name_7                  Powerpack Multiball
+value done_flag_7                  121
+text  done_name_8                  Aston Martin Multiball
+value done_flag_8                  125
+text  done_name_9                  James Bond Multiball
+value done_flag_9                  131
+text  done_name_10                 Wizard Mode Multiball
+value done_flag_10                 136
+text  done_name_11                 Wizard Mode Level 2
+value done_flag_11                 174
+
+# PAD-782: the attract mode's page table (portattract.py); an owner's attract items play between its pages
+data  attract_table       0x007a97f0
+value attract_entry_size  8
+value attract_page_at     4
+value attract_count       40
+site  attract_sleep       0x00206848 0xe30636a8 0xe3403082
+# PAD-782: the attract video element its pages play their clips through (an item plays the same way)
+data  attract_video       0x0081a4e8
+site  attract_video_play    0x001cce10 0xe52de004 0xe24dd00c
+site  attract_video_playing 0x001ccdf4 0xe92d4008 0xe5900008
+site  attract_video_update  0x001ccefc 0xe5900000 0xea07e5f2
+site  attract_video_draw    0x001ccf04 0xe5900000 0xe3a01003
+site  attract_video_yield   0x00207560 0xe30636a8 0xe3403082
+text  attract_video_clip  Attract_BondIntro_LogoOnly
+# PAD-782: the scene show an attract item's page puts the video bank's scene on the glass with
+site  attract_show        0x003c66fc 0xe92d4070 0xe30646ac
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x005aa794 0xe5d13000 0xe3530008
+site coil_off              0x005a6880 0xe3510008 0xe1a02001
+data sw_struct             0x0086b82c
+
+# ---- PAD-1017: co-op play (portcoop.py, read off this build's program) ----
+site  coop_player_change 0x001de4bc 0xe92d41f0 0xe24dd008
+site  coop_add_player    0x001de2fc 0xe92d4038 0xe3a00051
+data  coop_player        0x007ad724
+data  coop_players       0x00821e50
+site  coop_first_ball    0x0040dad4 0xebf74245 0xe1a04000
+site  coop_icon_draw         0x00253df4 0xebfffdf3 0xe1560004
+
+# ---- PAD-1202: co-op play - the ball start's "player N, you're up" call's read of the player up (portcoop.py) ----
+site  coop_up_call           0x0009cf6c 0xeb0504fa 0xe2404001
+
+# ---- PAD-1017: more for co-op play (the message table and its BALL line; the end-of-game high scores) ----
+value coop_ball_msg          1255
+
+# ---- PAD-1316: co-op play - the game start's adds of the Insider lobby's players, made while ball 1 waits (portcoop.py) ----
+site  coop_start_game        0x0040dcf4 0xe92d47f0 0xe30949b8
+site  coop_lobby_add         0x0040de1c 0xebfffea3 0xe2506000

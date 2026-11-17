@@ -32,7 +32,7 @@ from dataclasses import dataclass, replace
 from typing import Dict, List, Optional
 
 from .audio_slots import replace_with_retry
-from .checksums import NON_ASSET_DIRS, is_other_extract
+from .checksums import slot_dir_filter
 from .video import (VIDEO_EXTS, VideoInfo, backend_for, detect_video_info,
                     encode_replacement, find_ffmpeg, isobmff_brand,
                     keyint_conflict, profile_rank, remux_video_to,
@@ -99,7 +99,7 @@ class VideoSlot:
 
 
 def scan_video_slots(assets_dir: str, roots=None, exts=None,
-                     probe: bool = True) -> List[VideoSlot]:
+                     probe: bool = True, keep_dirs=()) -> List[VideoSlot]:
     """Walk *assets_dir* and return a VideoSlot for every video file, sorted
     by relative path.  Hidden dot-folders and our own ``*.stage.*`` temp files
     are skipped.
@@ -128,18 +128,16 @@ def scan_video_slots(assets_dir: str, roots=None, exts=None,
 
     allowed = tuple(e.lower() for e in exts) if exts else VIDEO_EXTS
     walk_roots = [r for r in (roots or [assets_dir]) if os.path.isdir(r)]
+    keep = slot_dir_filter(assets_dir, keep_dirs)
     seen = set()
     for walk_root in walk_roots:
         for root, dirs, files in os.walk(walk_root):
-            # Same prune as audio_slots: dot-dirs + the project's top-level
-            # generated / staged folders (checksums.NON_ASSET_DIRS).
-            dirs[:] = [d for d in dirs
-                       if not d.startswith(".")
-                       and not is_other_extract(os.path.join(root, d))
-                       and not (d in NON_ASSET_DIRS
-                                and os.path.normcase(os.path.normpath(root))
-                                == os.path.normcase(
-                                    os.path.normpath(assets_dir)))]
+            # checksums.slot_dir_filter: dot-dirs, the project's own
+            # generated / staged folders at the top, another card's
+            # extract inside this one, and (PAD-1193) any folder the
+            # extract never wrote into: the user's own files kept
+            # beside it are not this card's slots.
+            dirs[:] = [d for d in dirs if keep(root, d)]
             for fn in files:
                 ext = os.path.splitext(fn)[1].lower()
                 if ext not in allowed or ".stage." in fn:
@@ -337,7 +335,8 @@ def stage_replacement(slot: VideoSlot, replacement_path: str,
                       trim_to_length: bool = False, no_conversion: bool = False,
                       cancel_cb=None, byte_budget: Optional[int] = None,
                       match_bitrate: Optional[float] = None,
-                      best_quality: bool = False, colour=None):
+                      best_quality: bool = False, colour=None,
+                      loop: bool = False, stretch: bool = False):
     """Stage a single replacement over *slot*.
 
     With *no_conversion* set, the replacement is copied through verbatim and
@@ -369,6 +368,12 @@ def stage_replacement(slot: VideoSlot, replacement_path: str,
     *best_quality* makes a re-encode with no budget a constant-quality one
     instead (the Video tab's "Best quality"), held up to *match_bitrate* when
     the picture is simple enough to come in under it.
+
+    *loop*, with *trim_to_length*, fills a slot longer than the replacement
+    by playing the replacement over and over (PAD-1226) rather than holding
+    its last frame.  *stretch* instead slows a shorter replacement down (or
+    speeds a longer one up) to the slot's length (PAD-1232).  Only a
+    re-encode can do either; a custom-backend format pads as before.
 
     Returns ``(ok, detail)`` — on success *detail* summarises the conversions
     applied (may be empty, or note a copy-through); on failure it's an error
@@ -449,7 +454,9 @@ def stage_replacement(slot: VideoSlot, replacement_path: str,
                     match_length=trim_to_length, cancel_cb=cancel_cb,
                     max_bytes=byte_budget,
                     match_bitrate=match_bitrate,
-                    best_quality=best_quality, colour=colour)
+                    best_quality=best_quality, colour=colour,
+                    **({"loop": True} if loop else {}),
+                    **({"stretch": True} if stretch else {}))
                 if not ok:
                     _remove(tmp)
                     return False, detail
@@ -507,9 +514,12 @@ class StagedCache:
     """
 
     VERSION = 1
+    #: the cache's file in the project folder (the pictures keep their own:
+    #: :class:`core.image_slots.PictureCache`)
+    FILE = STAGED_CACHE
 
     def __init__(self, assets_dir: Optional[str]):
-        self.path = (os.path.join(assets_dir, STAGED_CACHE)
+        self.path = (os.path.join(assets_dir, self.FILE)
                      if assets_dir else None)
         self.entries: Dict[str, dict] = {}
         if self.path:
@@ -593,10 +603,46 @@ class StagedCache:
             pass
 
 
+def staging_workers(clips: int) -> int:
+    """How many clips :func:`stage_replacements` converts at once: half the
+    computer's cores, at most six, never more than there are clips.  Each
+    ffmpeg spreads over several cores itself, but on a retheme's 298 short
+    clips (16 cores) two at once took 122 s, four 103 s and eight 91 s
+    against 215-280 s one at a time.  ``PAD_STAGE_WORKERS`` overrides it
+    (1 = one at a time, as before PAD-599)."""
+    try:
+        n = int(os.environ.get("PAD_STAGE_WORKERS", "") or 0)
+    except ValueError:
+        n = 0
+    if n <= 0:
+        n = min(6, max(1, (os.cpu_count() or 1) // 2))
+    return max(1, min(n, clips))
+
+
 #: Per-clip length choices (see :func:`stage_replacements`); a number of
 #: seconds is the third.
 LENGTH_STOCK = "stock"
 LENGTH_FULL = "full"
+#: the stock clip's length, a shorter replacement played over and over to
+#: fill it instead of holding its last frame (PAD-1226)
+LENGTH_LOOP = "loop"
+#: the stock clip's length, the replacement slowed down or sped up to run
+#: exactly that long instead of holding its last frame or being cut (PAD-1232)
+LENGTH_STRETCH = "stretch"
+#: the choices that run the stock clip's length
+LENGTH_TO_STOCK = (LENGTH_STOCK, LENGTH_LOOP, LENGTH_STRETCH)
+
+
+def fill_kwargs(choice) -> dict:
+    """How a length choice fills the stock clip's length, as the keyword
+    :func:`stage_replacement` (and the staging recipe) takes: ``{"loop":
+    True}``, ``{"stretch": True}`` or nothing, so a recipe without either is
+    exactly what it was."""
+    if choice == LENGTH_LOOP:
+        return {"loop": True}
+    if choice == LENGTH_STRETCH:
+        return {"stretch": True}
+    return {}
 
 
 def length_seconds(choice) -> float:
@@ -649,7 +695,7 @@ def _staging_items(slots_by_rel, assignments, assets_dir):
     """``(colour, chosen, items)`` of a staging pass: the project's colour
     profile (PAD-305), the files profiles ``{rel: Profile}``, and the
     ``[(rel, replacement), ...]`` it stages, in that order."""
-    from . import colour_profile
+    from . import colour_profile, staged_originals
     # the project's colour profile (PAD-305), read once for the whole pass
     colour = colour_profile.active(assets_dir) if assets_dir else None
     items = [(rel, rep) for rel, rep in assignments.items()
@@ -661,10 +707,20 @@ def _staging_items(slots_by_rel, assignments, assets_dir):
                                             [rel for rel, _r in items]))
     # A game's own clip unlocked on the Video tab (PAD-336) is its own
     # replacement: re-encoded from its original only to bake the colors in,
-    # so with no profile to bake (or no original to keep) it is left alone.
+    # so with no profile to bake (or no original to keep) it is left alone;
+    # unless an earlier build re-encoded it (it has its .orig/ snapshot):
+    # then No change puts the game's own clip back (PAD-528)
     items = [(rel, rep) for rel, rep in items
-             if rep != STOCK_SOURCE or (assets_dir and rel in chosen)]
+             if rep != STOCK_SOURCE or (assets_dir and (
+                 rel in chosen or (colour is None and staged_originals
+                                   .has_snapshot(assets_dir, rel))))]
     return colour, chosen, items
+
+
+def _stock_put_back(rep, clip_colour):
+    """A game's own clip switched on with No change (PAD-528): staging puts
+    its snapshot back, as switching it off does; no conversion."""
+    return rep == STOCK_SOURCE and clip_colour is None
 
 
 def _conversion(cache, slot, rep, orig, slot_noconv, choice, trim_to_length,
@@ -676,7 +732,7 @@ def _conversion(cache, slot, rep, orig, slot_noconv, choice, trim_to_length,
     seconds = length_seconds(choice)
     if choice == LENGTH_FULL:
         slot_trim = False
-    elif choice == LENGTH_STOCK or seconds:
+    elif choice in LENGTH_TO_STOCK or seconds:
         slot_trim = True
     else:
         slot_trim = bool(trim_to_length)
@@ -705,6 +761,10 @@ def _conversion(cache, slot, rep, orig, slot_noconv, choice, trim_to_length,
     # another (PAD-305); with none the recipe is exactly what it was.
     if clip_colour is not None:
         gop["colour"] = clip_colour.key()
+    # A looped (PAD-1226) or retimed (PAD-1232) clip is a different
+    # conversion from a held last frame; every other recipe is exactly what
+    # it was.
+    gop.update(fill_kwargs(choice))
     recipe = cache.recipe(slot, rep, orig, trim=slot_trim,
                           length=seconds or 0,
                           noconv=slot_noconv, budget=budget,
@@ -744,6 +804,8 @@ def conversions_due(slots_by_rel: Dict[str, VideoSlot],
         slot = slots_by_rel[rel]
         stock = rep == STOCK_SOURCE
         if not stock and bool(overrides.get(rel, no_conversion)):
+            continue
+        if _stock_put_back(rep, colour or chosen.get(rel)):
             continue
         orig = (staged_originals.snapshot_path(assets_dir, rel)
                 if assets_dir else None)
@@ -815,8 +877,11 @@ def stage_replacements(slots_by_rel: Dict[str, VideoSlot],
     *length_overrides*, when given, is ``{rel_path: choice}`` and wins over
     *trim_to_length* for those slots -- the per-clip answer to "how long
     should this come out": :data:`LENGTH_STOCK` (the stock clip's length),
-    :data:`LENGTH_FULL` (the replacement's own length) or a number of
-    seconds.  A tester's 14 s export for a 6 s slot had to be cut to 6 s,
+    :data:`LENGTH_FULL` (the replacement's own length),
+    :data:`LENGTH_LOOP` (the stock clip's length, a shorter replacement
+    looped to fill it; PAD-1226), :data:`LENGTH_STRETCH` (the stock clip's
+    length, the replacement slowed down or sped up to it; PAD-1232) or a
+    number of seconds.  A tester's 14 s export for a 6 s slot had to be cut to 6 s,
     and one tab-wide box couldn't say that for one clip and not the next
     (PAD-215).  A typed length gets no byte budget: the stock clip's bytes
     were sized for the stock clip's length.
@@ -843,28 +908,38 @@ def stage_replacements(slots_by_rel: Dict[str, VideoSlot],
     cache = StagedCache(assets_dir)
     kept = 0
 
-    for i, (rel, rep) in enumerate(items):
-        if cancel_cb is not None and cancel_cb():
-            if log_cb:
-                log_cb("Cancelled — skipping the remaining video "
-                       "replacement(s).", "error")
-            break
+    import threading
+    lock = threading.Lock()
+    results = {}        # i -> (ok, kept, failure or None)
+
+    def _one(i, rel, rep):
+        """Stage one clip; ``(ok, kept, failure, lines)``, *lines* being its
+        log lines, said together once it is done so the clips converting at
+        the same time do not interleave theirs."""
+        lines = []
+        say = lines.append if log_cb else (lambda _l: None)
         slot = slots_by_rel[rel]
         stock = rep == STOCK_SOURCE
         slot_noconv = False if stock else bool(overrides.get(rel, no_conversion))
-        if progress_cb:
-            progress_cb(i, total, rel)
-        if log_cb:
-            note = ""
-            if rel in overrides and bool(overrides[rel]) != bool(no_conversion):
-                note = ("  (this clip is set to go on as-is)" if slot_noconv
-                        else "  (this clip is set to be converted)")
-            if stock:
-                log_cb(f"Staging {rel}  ←  the game's own clip, with the "
-                       f"individual files color profile", "info")
-            else:
-                log_cb(f"Staging {rel}  ←  {os.path.basename(rep)}{note}",
-                       "info")
+        if _stock_put_back(rep, colour or chosen.get(rel)):
+            if staged_originals.revert(assets_dir, rel):
+                with lock:
+                    cache.forget(rel)
+                say((f"  ✓ {rel}  ←  the game's own clip, its own "
+                     f"colors (No change)", "success"))
+                return True, False, None, lines
+            say((f"  ✗ {rel}: its original could not be put back", "error"))
+            return (False, False, (rel, "its original could not be put back"),
+                    lines)
+        note = ""
+        if rel in overrides and bool(overrides[rel]) != bool(no_conversion):
+            note = ("  (this clip is set to go on as-is)" if slot_noconv
+                    else "  (this clip is set to be converted)")
+        if stock:
+            say((f"Staging {rel}  ←  the game's own clip, with the "
+                 f"individual files color profile", "info"))
+        else:
+            say((f"Staging {rel}  ←  {os.path.basename(rep)}{note}", "info"))
         if assets_dir:
             staged_originals.snapshot(assets_dir, rel, baseline.get(rel))
         # The budget is the PRISTINE original's length.  slot.size is only
@@ -876,24 +951,21 @@ def stage_replacements(slots_by_rel: Dict[str, VideoSlot],
                 if assets_dir else None)
         if stock:
             if not orig:
-                failures.append((rel, "its original could not be kept, so "
-                                      "it was left as it is"))
-                if log_cb:
-                    log_cb(f"  ✗ {rel}: its original could not be kept, so "
-                           f"it was left as it is", "error")
-                continue
+                why = ("its original could not be kept, so it was left as "
+                       "it is")
+                say((f"  ✗ {rel}: {why}", "error"))
+                return False, False, (rel, why), lines
             rep = orig
         clip_colour = colour or chosen.get(rel)
         slot_trim, seconds, budget, rate, recipe = _conversion(
             cache, slot, rep, orig, slot_noconv, lengths.get(rel),
             trim_to_length, pin_byte_size, best_quality, clip_colour)
-        if cache.fresh(slot, recipe):
-            staged += 1
-            kept += 1
-            if log_cb:
-                log_cb(f"  ✓ {rel}  (already converted from this file — "
-                       f"kept)", "success")
-            continue
+        with lock:
+            fresh = cache.fresh(slot, recipe)
+        if fresh:
+            say((f"  ✓ {rel}  (already converted from this file — kept)",
+                 "success"))
+            return True, True, None, lines
         target = _pristine_slot(slot, orig)
         if seconds:
             target = _with_length(target, seconds)
@@ -904,22 +976,91 @@ def stage_replacements(slots_by_rel: Dict[str, VideoSlot],
                                        byte_budget=budget,
                                        match_bitrate=rate,
                                        best_quality=best_quality,
+                                       **fill_kwargs(lengths.get(rel)),
                                        **({"colour": clip_colour}
                                           if clip_colour is not None else {}))
+        with lock:
+            if ok:
+                cache.record(slot, recipe)
+            else:
+                cache.forget(rel)
+        if ok:
+            say((f"  ✓ {rel}" + (f"  ({detail})" if detail else ""),
+                 "success"))
+            return True, False, None, lines
+        if detail == "cancelled":
+            say((f"  – {rel}: canceled, left as it was", "warning"))
+        else:
+            say((f"  ✗ {rel}: {detail}", "error"))
+        return False, False, (rel, detail), lines
+
+    def _done(i, rel, res):
+        ok, was_kept, failure, lines = res
+        results[i] = (ok, was_kept, failure)
+        for text, level in lines:
+            log_cb(text, level)
+        if progress_cb:
+            progress_cb(len(results), total, rel)
+        if not was_kept:
+            with lock:
+                cache.save()
+
+    # Several clips convert at once (PAD-599).  Each is its own ffmpeg, and
+    # one x264 encode of a short 1360x768 clip leaves most of a many-core PC
+    # idle: its start-up, the probes, the reads and writes between encodes
+    # all ran one clip after another, so a retheme's 300 clips waited on
+    # each other for nothing.
+    workers = staging_workers(total)
+    cancelled = False
+    if workers <= 1:
+        for i, (rel, rep) in enumerate(items):
+            if cancel_cb is not None and cancel_cb():
+                cancelled = True
+                break
+            if progress_cb:
+                progress_cb(i, total, rel)
+            _done(i, rel, _one(i, rel, rep))
+    else:
+        from concurrent.futures import ThreadPoolExecutor, wait, \
+            FIRST_COMPLETED
+        if progress_cb:
+            progress_cb(0, total, items[0][0] if items else "")
+        todo = iter(enumerate(items))
+        running = {}
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="pad-stage") as pool:
+            while True:
+                while len(running) < workers and not cancelled:
+                    nxt = next(todo, None)
+                    if nxt is None:
+                        break
+                    if cancel_cb is not None and cancel_cb():
+                        cancelled = True
+                        break
+                    i, (rel, rep) = nxt
+                    running[pool.submit(_one, i, rel, rep)] = (i, rel)
+                if not running:
+                    break
+                finished, _rest = wait(list(running),
+                                       return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    i, rel = running.pop(fut)
+                    try:
+                        res = fut.result()
+                    except Exception as e:              # noqa: BLE001
+                        res = (False, False, (rel, str(e)),
+                               [(f"  ✗ {rel}: {e}", "error")])
+                    _done(i, rel, res)
+    if cancelled and log_cb:
+        log_cb("Canceled — skipping the remaining video "
+               "replacement(s).", "error")
+    for i in sorted(results):
+        ok, was_kept, failure = results[i]
         if ok:
             staged += 1
-            cache.record(slot, recipe)
-            if log_cb:
-                msg = f"  ✓ {rel}" + (f"  ({detail})" if detail else "")
-                log_cb(msg, "success")
-        else:
-            cache.forget(rel)
-            failures.append((rel, detail))
-            if log_cb and detail == "cancelled":
-                log_cb(f"  – {rel}: cancelled, left as it was", "warning")
-            elif log_cb:
-                log_cb(f"  ✗ {rel}: {detail}", "error")
-        cache.save()
+            kept += 1 if was_kept else 0
+        elif failure is not None:
+            failures.append(failure)
 
     if kept and log_cb:
         log_cb("%d clip(s) were already converted from the same file with "

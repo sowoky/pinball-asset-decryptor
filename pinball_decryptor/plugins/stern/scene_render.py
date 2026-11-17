@@ -52,8 +52,8 @@ SCENE_LAYOUT_MANIFEST = os.path.join("images", "scene_textures",
 # at all?".
 BACKGROUNDS = (
     ("Black", (0, 0, 0)),
-    ("Dark grey", (46, 46, 52)),
-    ("Mid grey", (128, 128, 128)),
+    ("Dark gray", (46, 46, 52)),
+    ("Mid gray", (128, 128, 128)),
     ("White", (255, 255, 255)),
     ("Checkerboard", "checker"),
     ("Magenta", (255, 0, 255)),
@@ -773,6 +773,21 @@ def picture_sizes(assets_dir):
     return out
 
 
+def _kept_box(d, size, want):
+    """The ``(w, h)`` box a picture of *size* kept at its own size is fitted into where the
+    bitmap draw *d* shows it, or None to draw it at its own size: the original's box (PAD-865),
+    or for a node laid out over a picture at its own size (PAD-981, ``own``) the box of that
+    picture once another has taken its place (PAD-1301, ``own_box``)."""
+    if d.get("kind") != "bitmap" or not (d.get("w") and d.get("h")) or not own_size(size, want):
+        return None
+    if not d.get("own"):
+        return d["w"], d["h"]
+    box = d.get("own_box")
+    if box and tuple(int(v) for v in box) != tuple(size):
+        return int(box[0]), int(box[1])
+    return None
+
+
 def own_size(size, want):
     """Is a project-folder picture of *size* written at that size rather than fitted to the
     card texture's *want*?  A Write takes the project's file as it is and regrows the scene
@@ -786,7 +801,7 @@ def own_size(size, want):
     return (pad(size[0]), pad(size[1])) != (int(want[0]), int(want[1]))
 
 
-def pending_pictures(assets_dir, bake=True):
+def pending_pictures(assets_dir, bake=True, paths=True, identity=False):
     """The Images tab's picks, as a scene render uses them: ``{picture rel: {"path":
     replacement file or None, "keep": keep its own size, "colour": the chosen-files profile
     baked into it, or None}}``.  A pick not built yet is drawn from its own file, so a
@@ -795,7 +810,11 @@ def pending_pictures(assets_dir, bake=True):
     the Write bakes it.  ``"skip"`` is True for the user's own picture whose colour switch is
     OFF (red in the Layers list): with :func:`render_tree`'s *as_made* the machine screen
     passes it by and it shows its own colours (PAD-325).  *bake* False is the preview's
-    Individual files switch turned off (PAD-330): no picture gets its correction drawn in."""
+    Individual files switch turned off (PAD-330): no picture gets its correction drawn in.
+    *paths* False leaves the game's own pictures' snapshot paths out (``None``), for a caller
+    that wants only the colours (PAD-524: one look on disk per picture).  *identity*: a
+    picture switched on whose profile is No change has it as its colour too, where it is
+    otherwise ``None`` (PAD-528: the Scenes list's dots)."""
     try:
         from ...core import staged_changes, colour_profile
         data = staged_changes.peek(assets_dir) or {}
@@ -804,7 +823,7 @@ def pending_pictures(assets_dir, bake=True):
     keep = set(data.get("image_keep_size") or ())
     try:
         # each picture's own profile (PAD-368), else the project's
-        resolve = colour_profile.asset_resolver(assets_dir, data)
+        resolve = colour_profile.asset_resolver(assets_dir, data, identity=identity)
         settings = colour_profile.asset_settings(assets_dir)
     except Exception:
         resolve, settings = None, None
@@ -833,7 +852,7 @@ def pending_pictures(assets_dir, bake=True):
             from ...core import staged_originals
             for rel in colour_profile.stock_image_rels(assets_dir, set(data.get("image") or ())):
                 out[rel[len("images/"):]] = {
-                    "path": staged_originals.snapshot_path(assets_dir, rel),
+                    "path": staged_originals.snapshot_path(assets_dir, rel) if paths else None,
                     "keep": False, "colour": prof_of(rel), "skip": False, "stock": True}
         except Exception:
             pass
@@ -852,14 +871,11 @@ def pending_pictures(assets_dir, bake=True):
         try:
             from . import scene_edit
             for ops in scene_edit.load(assets_dir).values():
-                for op in ops or ():
-                    if not (isinstance(op, dict) and op.get("op") == "add_picture"):
-                        continue
-                    rel = op.get("image") or ""
+                # PAD-1278: an animated picture's more pictures as its own
+                for rel, own in scene_edit.picture_rels(ops):
                     if not rel or rel in out:
                         continue
-                    on = colour_profile.asset_applies(settings, "images", rel,
-                                                      own=op.get("color"))
+                    on = colour_profile.asset_applies(settings, "images", rel, own=own)
                     prof = prof_of(rel) if on else None
                     if prof is not None:
                         path = os.path.join(assets_dir, "images", *rel.split("/"))
@@ -940,6 +956,39 @@ def _premultiplied(img, key, cache):
         out = Image.fromarray(pm, "RGBA")
     cache[ck] = (img, out)
     return out
+
+
+#: PAD-512: the grid :func:`see_through` cuts a picture into: at most this many cells along
+#: its longer side, a cell clear when none of its pixels is above SEE_LEVEL
+SEE_CELLS = 64
+SEE_LEVEL = 8
+
+
+def see_through(img):
+    """``{"w", "h", "s", "c", "b"}``: where the Scenes preview's click goes through picture
+    *img* (as :func:`_picture` gives it, premultiplied) to what is drawn under it (PAD-512,
+    DragonRR: a full-screen picture of the score panel on top of a mode's screen, clear but
+    for the panel, took every click meant for the screen's title, so his colours went on
+    it).  The picture is cut into cells of ``s`` x ``s`` px, ``c`` to a row; ``b`` is base64
+    of one bit per cell, row by row, set where it shows (a premultiplied pixel with no alpha
+    but some colour adds light, so it shows).  ``None`` when every cell shows."""
+    import base64
+    import numpy as np
+    if img is None:
+        return None
+    v = np.asarray(img.convert("RGBA")).max(axis=2)
+    h, w = v.shape
+    if not (w and h):
+        return None
+    s = max(1, -(-max(w, h) // SEE_CELLS))
+    rows, cols = -(-h // s), -(-w // s)
+    grid = np.zeros((rows * s, cols * s), v.dtype)
+    grid[:h, :w] = v
+    shows = grid.reshape(rows, s, cols, s).max(axis=(1, 3)) > SEE_LEVEL
+    if shows.all():
+        return None
+    return {"w": w, "h": h, "s": s, "c": cols,
+            "b": base64.b64encode(np.packbits(shows.ravel()).tobytes()).decode("ascii")}
 
 
 def _load_file(path, key, cache):
@@ -1329,6 +1378,7 @@ def render_tree(assets_dir, man, frame=None, pins=None, hidden=(), fonts=None,
         return None
     from . import fontrender as fr
     from . import scene_eval as ev
+    from . import radium_grow
     try:
         w, h = int(man["stage"][0]), int(man["stage"][1])
     except (KeyError, TypeError, ValueError, IndexError):
@@ -1367,7 +1417,14 @@ def render_tree(assets_dir, man, frame=None, pins=None, hidden=(), fonts=None,
             img = _picture(assets_dir, d.get("image"), cache, pictures, sizes)
             if img is None:
                 continue
-            got = _warp(img, d["m"], w, h)
+            m = d["m"]
+            want = (sizes or {}).get(d.get("image"))
+            box = _kept_box(d, img.size, want)
+            if box:
+                # kept at its own size: in the original's place and size, fitted and
+                # centred, as the Write lays it out (PAD-865, radium_grow.keep_boxes)
+                m = ev.compose(m, radium_grow.fit_box(img.size[0], img.size[1], *box))
+            got = _warp(img, m, w, h)
             if got is not None:
                 _composite(canvas, got[0], got[1], got[2], d["mul"], d["add"])
                 if skip is not None:
@@ -1384,7 +1441,9 @@ def render_tree(assets_dir, man, frame=None, pins=None, hidden=(), fonts=None,
             font = fr.font_at_size(by_key.get(d.get("font") or ""), d.get("font_px") or 0)
             if font is None or not d["text"]:
                 continue
-            shown = _unpadded(text_manifest.edit_for(text_edits, d["text"]) or d["text"])
+            # PAD-1338: words the Scenes preview was asked to show in a box the game fills
+            shown = d.get("shown") or _unpadded(text_manifest.edit_for(text_edits, d["text"])
+                                                or d["text"])
             rgba = list(d.get("rgba") or (1, 1, 1, 1))
             if d.get("styled"):
                 rgba = [1.0, 1.0, 1.0, rgba[3]]          # the game ignores it (see scene_eval)

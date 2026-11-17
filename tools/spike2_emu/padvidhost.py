@@ -662,7 +662,14 @@ def serve(m, c, path, w, h, native, gen, old_read, start_ms=0):
         tick, up to ~16 ms later. At full depth the very next write is
         allowed to land in the slot of the frame the game was JUST handed -
         the steady-state intermittent tear. One slot of distance keeps the
-        write head a full frame period behind the display."""
+        write head a full frame period behind the display.
+
+        PAD-617: a frame period was not always enough - a renderer two
+        30 fps frames behind read a slot this had already refilled, and the
+        video ran back. The guest now holds read_idx at one past the oldest
+        frame an unread upload still names (gstvid.c vid_free_slots), and
+        that "one past" leans on this one slot of distance: going to SLOTS
+        here would hand it straight back."""
         r = get(m, c, "read_idx")
         if r > p:      # stale: the doomed previous thread published one last
             r = 0      # read_idx after chan_loop zeroed it. Without this
@@ -1102,11 +1109,14 @@ def chan_loop(m, c, resume=False):
         # Log what was actually ASKED FOR. The basename of the parent directory
         # is "2.asset" for every video in the game, so the old form made two
         # different clips look like the same clip served twice.
-        log("ch%d serving %dx%d %d frames (acked %.1f ms after notice) %s%s%s%s"
+        # PAD-827: the rate goes last, so the playfield's clip list can tell
+        # a loop (the same file asked for again as it ends) from a replay.
+        log("ch%d serving %dx%d %d frames (acked %.1f ms after notice) %s%s%s%s%s"
             % (c, w, h, n, (time.monotonic() - t_notice) * 1000.0, want,
                "  (from %d ms)" % start_ms if start_ms else "",
                "  (RESCALED from %dx%d)" % native if (w, h) != native else "",
-               "  (your edit)" if from_edits(full) else ""))
+               "  (your edit)" if from_edits(full) else "",
+               "  (%.3f fps)" % (float(num) / den) if num and den else ""))
         note_serve(c, want)
         try:
             serve(m, c, full, w, h, native, req, old_read, start_ms)

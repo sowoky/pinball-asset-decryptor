@@ -12,7 +12,7 @@ from pinball_decryptor.core.registry import (Capabilities, Game, InputSpec,
 
 
 EXPECTED_KEYS = {"ap", "pb", "spooky", "bof", "jjp", "cgc", "williams", "dp",
-                 "stern", "data_east", "sega"}
+                 "stern", "data_east", "sega", "capcom"}
 
 
 def test_all_expected_manufacturers_loaded(manufacturers_by_key):
@@ -82,7 +82,12 @@ def test_only_known_unsupported_games_exist(all_manufacturers):
     """Catch-all: if a new game is marked unsupported, the test
     author has to update this list explicitly — prevents accidental
     UI regressions where every game suddenly shows as unsupported."""
-    expected_unsupported = {("spooky", "total_nuclear")}
+    expected_unsupported = {
+        ("spooky", "total_nuclear"),
+        # Every Spike 3 title is decryptable now: the fleet OTP keyfile
+        # (user-supplied) unlocks each card's LUKS keyslots, so none are
+        # greyed.  See stern/spike3_games.py.
+    }
     actual_unsupported = {
         (m.key, g.key)
         for m in all_manufacturers

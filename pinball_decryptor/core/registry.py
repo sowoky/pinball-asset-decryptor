@@ -143,6 +143,12 @@ class Capabilities:
     # is up, and an era could have an emulator without a mode runtime.  Used by
     # Stern Spike 2.  See gui/modes_tab.py and tools/spike2_emu/modes.
     modes: bool = False
+    # PAD-1350: the Modes tab's JJP editor - custom modes for the JJP mode SDK
+    # (tools/jjp_emu/MODES.md), one folder of mode files per title, checked
+    # against the title's port report and built into its install ISO.  Its own
+    # flag, never ``modes``: that one also gates the Stern-only Attract, Play
+    # Options and Expression Lights tabs.  Used by JJP.  See webui/modes_jjp.py.
+    jjp_modes: bool = False
     # Auto-transcribe path: run faster-whisper across the extracted
     # audio files and emit a ``callouts.csv`` mapping each WAV to its
     # spoken text (non-speech samples are skipped via VAD).  Used by
@@ -274,6 +280,11 @@ class Capabilities:
     # loose files Write round-trips — e.g. Stern Spike 2 (loose .png on the SD
     # card, patched in place size-neutral).
     replace_image: bool = False
+    # The pictures are shades of one color (Stern SAM's 16-shade DMD,
+    # PAD-583): there is nothing for a color profile to do and no scenes to
+    # lay them out in, so the Scenes and Color Profile tabs and the Images
+    # tab's Colors bar stay away.
+    dmd_shades: bool = False
     # Replace-text path: surfaces a "Replace Text" tab that loads the editable
     # on-screen-text manifest Extract produced (``<assets>/text/strings.tsv`` —
     # see core.text_manifest) and lets the user edit each player-facing display
@@ -601,6 +612,17 @@ class Manufacturer(ABC):
     # Defaults match JJP's historical wording (mirrors the standalone JJP
     # decryptor); override per manufacturer to track the destination radio.
     write_build_button: str = "Build update"        # build-image / ISO mode
+    # Extract tab, for plugins with both a basic extract and a PinMAME
+    # capture (Williams): the Basic box's words, and whether the capture's
+    # "Simulate gameplay" box applies (it drives per-game shot scripts).
+    capture_basic_label: str = (
+        "Basic extract (raw ROM asset bitmaps + animation MP4s)")
+    capture_simulates_gameplay: bool = True
+
+    def capture_help_text(self, basic, capture):
+        """The grey help under the Extract tab's capture boxes for this
+        combination, or None for the shared wording."""
+        return None
     write_direct_button: str = "Apply Modifications"  # write-to-medium mode
 
     # Generic noun for the physical medium in Direct-from-device mode, used
@@ -666,6 +688,10 @@ class Manufacturer(ABC):
         File/Detection sections; whatever a plugin returns is appended.  Must
         stay read-only and cheap — a slow probe holds the whole tab on
         "Reading image…".  The default contributes nothing.
+
+        A plugin may also take a ``partial`` keyword: a callable it calls
+        with its sections so far when part of the probe is slow, so the page
+        shows them while the rest is read (Stern's video count, PAD-626).
         """
         return []
 
@@ -849,7 +875,8 @@ class Manufacturer(ABC):
         ``image_path`` is the source ``.img``/``.raw``; ``device_path`` is an
         OS-native physical-disk path (``\\\\.\\PHYSICALDRIVEn`` / ``/dev/sdX``).
         A plugin that also names ``menu_flash_phases`` takes ``menu_only=``
-        too; no other plugin is ever passed it.
+        too; no other plugin is ever passed it.  Likewise ``keep_data=``,
+        only to a plugin with ``flash_keep_data`` (PAD-736).
         """
         raise NotImplementedError(
             f"{self.display} does not implement a flash-image pipeline.")
@@ -879,6 +906,17 @@ class Manufacturer(ABC):
         """
         return ReadCardPipeline(device_path, image_path,
                                 log_cb, phase_cb, progress_cb, done_cb)
+
+    def slot_keep_dirs(self, assets_dir):
+        """Top-level folders of *assets_dir* the Replace tabs list although
+        the Extract leaves them out of its baseline on purpose (derived
+        copies Write still repacks, e.g. CGC's decoded DCS sounds).
+
+        With a baseline, the slot scans skip every folder the extract never
+        wrote into, so a folder of the user's own files kept in the project
+        is not listed as slots (PAD-1193, core.checksums.slot_dir_filter).
+        Default: none."""
+        return ()
 
     def audio_slot_dirs(self, assets_dir):
         """Subdirectories of *assets_dir* that hold replaceable audio slots.
@@ -968,6 +1006,41 @@ class Manufacturer(ABC):
         has no such thing, and the tab offers nothing.  Called off the UI
         thread: it may open the project's card image."""
         return None
+
+    def sound_modes_offer(self, assets_dir, rels):
+        """Which Replace-Audio slots can have files for other MUSIC MODES that
+        an operator setting picks between (PAD-494): ``{"why": why_none,
+        "slots": {rel: why_not}, "max": n}`` - why no slot of this project can
+        (``""`` when they can), per slot why that one cannot (``""`` when it
+        can), and how many modes a project may have. ``None`` (the default)
+        when the plugin has no such thing, and the tab offers nothing. Called
+        off the UI thread: it may open the project's card image.  PAD-565 adds
+        ``"turns_why"`` / ``"turn_slots"`` (files in turn) and PAD-641
+        ``"attract_why"``: why the flipper buttons cannot play sounds in
+        attract mode on this project's game (``""`` when they can; no key: the
+        tab offers no such button)."""
+        return None
+
+    def sound_request_uses(self, assets_dir, rels):
+        """Which of the game code's sound requests play each Replace-Audio
+        slot (PAD-635): ``{rel: [(request number, name), ...]}``, ``[]`` for a
+        slot no request plays, the slot left out when this plugin cannot say.
+        ``None`` (the default) when the project has no such map at all, and the
+        tab shows no Requests column. Called off the UI thread."""
+        return None
+
+    def sound_request_why(self, assets_dir):
+        """Why :meth:`sound_request_uses` has no map for a project that could
+        have one (PAD-635), for the Audio tab to say; ``""`` (the default)
+        when there is nothing to say. Called off the UI thread."""
+        return ""
+
+    def sound_variant_counts(self, assets_dir, rels):
+        """``{rel: n}`` for each Replace-Audio slot whose file is *n* variants of
+        one sound one after another, the game playing one of them each time
+        (PAD-637: Spike 2 multi-band records); ``{}`` (the default) for none.
+        Called off the UI thread."""
+        return {}
 
     def video_pins_byte_size(self, assets_dir=None) -> bool:
         """Whether this plugin's Write may hold a replacement clip to the

@@ -84,6 +84,25 @@ Operations (``op`` and its fields)::
                                   every node drawing the Text scaled (sx, 1) about the rect's
                                   top-left, the rect's width shrunk by 1/*sx*
 
+    anim    node[, follow, track][, start][, end][, fade_in][, fade_out][, pulse, period]
+            [, images, every]
+                                  an ADDED picture animated (DragonRR, PAD-1278).  On its
+                                  group's timeline: *follow* (a node of the game's) - it shows
+                                  and fades as that node does on the glass, *track*
+                                  ``[[frame, visible, alpha], ...]`` (:func:`follow_track`,
+                                  its groups' fades in it; without one, the node's own
+                                  keyframes and alpha); else it shows from frame *start*
+                                  to *end* (None: to the end), fading in over its first
+                                  *fade_in* frames and out over its last *fade_out*.  And on a
+                                  loop of its own that runs as long as it shows (the scene
+                                  resting on its last frame included): *pulse* (its lowest
+                                  alpha) every *period* frames, and/or *images*
+                                  (``[{image, w, h}, ...]``, more PNG rels) shown in turn after
+                                  its own, *every* frames each.  A loop is written as a nested
+                                  Sprite (no labels, so the game plays it round and round) in
+                                  the picture's place (the preview draws it as the one layer).
+                                  The last anim of a node wins
+
 ``id`` of an added node is the one it has in the preview; the writer gives it a fresh id in
 the card's own id space.
 """
@@ -93,6 +112,7 @@ import copy
 import json
 import math
 import os
+import re
 
 RELDIR = ("images", "scene_textures")
 FILENAME = "scene_edits.json"
@@ -116,31 +136,153 @@ def path_of(assets_dir):
     return os.path.join(assets_dir, *RELDIR, FILENAME)
 
 
-def load(assets_dir):
-    """``{card path: [op, ...]}`` (``{}`` when there is none or it is unreadable)."""
+#: in the file of a version that draws a picture kept at its own size in the original's place
+#: and size (PAD-865): its moves and resizes were made over the fitted picture.  A file
+#: without it was laid out over the picture at its own size (PAD-981)
+FIT_KEY = "_fit"
+#: ``{card: [node, ...]}``: the nodes laid out over a kept picture at its own size, so they
+#: keep drawing it so (PAD-981)
+OWN_KEY = "_own"
+#: ``{card: {node: [w, h]}}``: PAD-1301, the size of the picture each of those nodes was laid
+#: out over, kept from the moment another picture took its place: the new one is fitted into
+#: that box instead of drawn at its own size (DoomWalrus666: DragonRR's 4000x2860 Battle Select
+#: cards, on his own-size card nodes, drew six times too big)
+OWN_BOX_KEY = "_own_box"
+
+
+def _raw(assets_dir):
     try:
         with open(path_of(assets_dir), "r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def load(assets_dir):
+    """``{card path: [op, ...]}`` (``{}`` when there is none or it is unreadable)."""
+    data = _raw(assets_dir)
+    if data is None:
         return {}
     return {k: [op for op in v if isinstance(op, dict) and op.get("op")]
             for k, v in data.items() if isinstance(v, list) and v}
 
 
+def _laid_out(ops):
+    """The nodes *ops* move or resize."""
+    return {op["node"] for op in ops or ()
+            if isinstance(op, dict) and op.get("op") in ("move", "scale")
+            and isinstance(op.get("node"), int)}
+
+
+def _own_of(data):
+    """``{card: [node]}`` of the file *data*: what it records, or, written before PAD-865,
+    every node its edits move or resize (each was placed over its picture's own size)."""
+    if not isinstance(data, dict):
+        return {}
+    if FIT_KEY in data:
+        own = data.get(OWN_KEY)
+        return {k: list(v) for k, v in own.items() if isinstance(v, list) and v} \
+            if isinstance(own, dict) else {}
+    return {k: sorted(_laid_out(v)) for k, v in data.items()
+            if isinstance(v, list) and _laid_out(v)}
+
+
+def own_size_nodes(assets_dir, card):
+    """The nodes of *card* whose moves and resizes were made over a picture kept at its own
+    size, before PAD-865 fitted such a picture into the original's box: they keep drawing it
+    at its own size, so the layout stays as it was built (PAD-981: DoomWalrus666's Battle
+    Select grid and portraits, centred by hand, came out shrunk and shifted).  A node whose
+    edits are reset is fitted like any other."""
+    data = _raw(assets_dir)
+    own = set(_own_of(data).get(card) or ())
+    return frozenset(own & _laid_out((data or {}).get(card))) if own else frozenset()
+
+
+def own_boxes(assets_dir, card):
+    """``{node: (w, h)}``: of :func:`own_size_nodes`, the ones whose picture was replaced since
+    their layout was made, each with the size of the picture it was made over (PAD-1301,
+    :data:`OWN_BOX_KEY`): a picture of another size is fitted and centred in that box, the way
+    the layout's own picture filled it."""
+    data = _raw(assets_dir) or {}
+    got = data.get(OWN_BOX_KEY) if isinstance(data.get(OWN_BOX_KEY), dict) else {}
+    boxes = got.get(card) if isinstance(got.get(card), dict) else {}
+    if not boxes:
+        return {}
+    own = own_size_nodes(assets_dir, card)
+    out = {}
+    for k, v in boxes.items():
+        try:
+            nid, w, h = int(k), int(v[0]), int(v[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if nid in own and w > 0 and h > 0:
+            out[nid] = (w, h)
+    return out
+
+
+def pin_own_boxes(assets_dir, boxes):
+    """Keep ``{card: {node: (w, h)}}`` as the boxes of those own-size nodes (:func:`own_boxes`),
+    each only the first time: the size of the picture the layout was made over."""
+    data = _raw(assets_dir)
+    if not isinstance(data, dict) or not boxes:
+        return
+    have = data.get(OWN_BOX_KEY) if isinstance(data.get(OWN_BOX_KEY), dict) else {}
+    have = {k: dict(v) for k, v in have.items() if isinstance(v, dict)}
+    changed = False
+    for card, nodes in boxes.items():
+        cur = have.setdefault(card, {})
+        for nid, (w, h) in nodes.items():
+            if str(nid) not in cur and w and h:
+                cur[str(nid)] = [int(w), int(h)]
+                changed = True
+    if not changed:
+        return
+    data[OWN_BOX_KEY] = {k: v for k, v in have.items() if v}
+    with open(path_of(assets_dir), "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+
+
+def mark_own(man, nodes, boxes=None):
+    """Preview manifest *man* with each of *nodes* marked ``own`` (its kept picture drawn at
+    its own size, :func:`own_size_nodes`), and ``own_box`` where *boxes* (:func:`own_boxes`)
+    has one; *man* itself is changed and returned."""
+    if nodes:
+        for n, _sibs in _man_index(man).values():
+            if n.get("id") in nodes:
+                n["own"] = True
+                if boxes and n["id"] in boxes:
+                    n["own_box"] = list(boxes[n["id"]])
+    return man
+
+
+def mark_own_of(man, assets_dir, card):
+    """:func:`mark_own` with *card*'s own-size nodes and their boxes in *assets_dir*."""
+    return mark_own(man, own_size_nodes(assets_dir, card), own_boxes(assets_dir, card))
+
+
 def save(assets_dir, edits):
     path = path_of(assets_dir)
-    edits = {k: v for k, v in (edits or {}).items() if v}
+    edits = {k: v for k, v in (edits or {}).items() if isinstance(v, list) and v}
     if not edits:
         try:
             os.remove(path)
         except OSError:
             pass
         return
+    raw = _raw(assets_dir)
+    own = {k: v for k, v in _own_of(raw).items() if k in edits}
+    boxes = (raw or {}).get(OWN_BOX_KEY) if isinstance((raw or {}).get(OWN_BOX_KEY), dict) else {}
+    boxes = {k: v for k, v in boxes.items() if k in own and isinstance(v, dict) and v}
+    data = dict(edits)
+    data[FIT_KEY] = 1
+    if own:
+        data[OWN_KEY] = own
+    if boxes:
+        data[OWN_BOX_KEY] = boxes
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(edits, f, indent=1, sort_keys=True)
+        json.dump(data, f, indent=1, sort_keys=True)
 
 
 def ops_for(assets_dir, card):
@@ -169,6 +311,8 @@ def add(assets_dir, card, op):
         last["s"] = round(last["s"] * op["s"], 6)
         if abs(last["s"] - 1.0) < 1e-6 and abs(last.get("sy", 1.0) - 1.0) < 1e-6:
             ops.pop()
+    elif last and last.get("node") == op.get("node") and last["op"] == op["op"] == "anim":
+        ops[-1] = op                     # PAD-1278: the box changed again: one entry
     elif last and last.get("node") == op.get("node") and last["op"] == op["op"] == "text_align":
         last["align"], last["valign"] = op["align"], op["valign"]
     elif (last and last.get("node") == op.get("node")
@@ -251,6 +395,31 @@ def drop(assets_dir, card, node, kind):
     save(assets_dir, edits)
 
 
+def without(ops, index):
+    """*ops* less the one at *index* (PAD-540: one edit Reset from the list of them), and the
+    ones that would be left with nothing to act on: an edit of a node an add or a drop shadow
+    made goes with it, and so does whatever was then added inside it."""
+    ops = [dict(op) for op in ops or ()]
+    if not 0 <= index < len(ops):
+        return ops
+    gone = ops.pop(index)
+    made = {gone["id"]} if gone.get("id") is not None and gone["op"] in _MAKES else set()
+    while made:
+        keep, more = [], set()
+        for op in ops:
+            if op.get("node") in made or (op["op"] in _MAKES and op.get("parent") in made):
+                if op.get("id") is not None and op["op"] in _MAKES:
+                    more.add(op["id"])
+            else:
+                keep.append(op)
+        ops, made = keep, more
+    return ops
+
+
+#: the edits that make a node of their own (its id is the op's ``id``)
+_MAKES = ("add_picture", "add_text", "shadow")
+
+
 def undone(ops):
     """*ops* without its last edit (a group's ops go together)."""
     ops = list(ops or ())
@@ -315,8 +484,8 @@ def export_edits(assets_dir, zip_path, cards=None):
         edits = {c: edits[c] for c in cards if edits.get(c)}
     if not edits:
         raise SceneEditError("there are no scene edits to save")
-    pictures = sorted({op["image"] for ops in edits.values() for op in ops
-                       if op["op"] == "add_picture" and _safe_rel(op.get("image"))})
+    pictures = sorted({rel for ops in edits.values() for rel, _c in picture_rels(ops)
+                       if _safe_rel(rel)})
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         doc = {"format": 1, "kind": SHARE_KIND, "scenes": edits}
         states = states_to_save(assets_dir, edits, trees_of(assets_dir))
@@ -351,8 +520,27 @@ def read_states(zip_path):
     except (OSError, KeyError, ValueError, zipfile.BadZipFile):
         return {}
     states = data.get("states") if isinstance(data, dict) else None
-    return {c: s for c, s in states.items() if isinstance(s, dict)} if isinstance(
+    out = {c: s for c, s in states.items() if isinstance(s, dict)} if isinstance(
         states, dict) else {}
+    # PAD-1320 (round 3): a file saved before its states kept the pictures' sizes (``pics``)
+    # names each picture it replaced as the extract did, its size in the name
+    pictures = data.get("pictures") if isinstance(data, dict) else None
+    named = {}
+    for rel, p in (pictures.items() if isinstance(pictures, dict) else ()):
+        m = _SIZED_NAME.search(os.path.basename(str(rel)))
+        if not m or not isinstance(p, dict):
+            continue
+        for got in p.get("drawn") or ():
+            if (isinstance(got, (list, tuple)) and len(got) == 2 and got[0] in out
+                    and not isinstance(out[got[0]].get("pics"), dict)):
+                named.setdefault(got[0], {})[str(got[1])] = [int(m.group(1)), int(m.group(2))]
+    for card, pics in named.items():
+        out[card] = dict(out[card], pics=pics, pics_named=True)
+    return out
+
+
+#: An extracted scene picture's name: ``radimg_<name>_<w>x<h>_<hash>.png``
+_SIZED_NAME = re.compile(r"_(\d+)x(\d+)_[0-9a-f]{6,}\.png$", re.I)
 
 
 def read_share(zip_path):
@@ -425,8 +613,8 @@ def import_edits(assets_dir, zip_path, cards_here=None, renamed=None, skip=()):
     with zipfile.ZipFile(zip_path) as z:
         members = set(z.namelist())
         for ops in scenes.values():
-            for op in ops:
-                rel = _safe_rel(op.get("image")) if op["op"] == "add_picture" else None
+            for rel, _c in picture_rels(ops):
+                rel = _safe_rel(rel)
                 if rel is None or rel in renamed or "images/" + rel not in members:
                     continue
                 data = z.read("images/" + rel)
@@ -449,6 +637,10 @@ def import_edits(assets_dir, zip_path, cards_here=None, renamed=None, skip=()):
         for op in ops:
             if op["op"] == "add_picture" and op.get("image") in renamed:
                 op["image"] = renamed[op["image"]]
+            elif op["op"] == "anim":
+                for im in op.get("images") or ():
+                    if isinstance(im, dict) and im.get("image") in renamed:
+                        im["image"] = renamed[im["image"]]
     if scenes:
         edits = load(assets_dir)
         edits.update(scenes)
@@ -468,12 +660,13 @@ def mark_built(assets_dir):
     """Record the current edits as the ones the last Write built (called when a Write run from
     this project folder succeeds).  A project with no scene edits at all records nothing."""
     edits = load(assets_dir)
+    colours = colour_marks(assets_dir)
     path = _built_path(assets_dir)
-    if not edits and not os.path.isfile(path):
+    if not edits and not colours and not os.path.isfile(path):
         return False
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"edits": edits}, f, indent=1, sort_keys=True)
+        json.dump({"edits": edits, "colours": colours}, f, indent=1, sort_keys=True)
     # PAD-403: the card built now shows every one of them; a project extracted from it knows so
     try:
         keep_states(assets_dir, states_to_save(assets_dir, edits, trees_of(assets_dir)))
@@ -495,13 +688,16 @@ def built_all(assets_dir):
 
 
 def scene_states(assets_dir):
-    """``{card: "edited" | "written"}`` for every scene with edits now or at the last Write:
-    *edited* = its edits differ from what the last Write put on the card (not written yet),
-    *written* = the last Write put exactly these edits on the card.  A scene as shipped both
-    now and then is absent."""
+    """``{card: "edited" | "all" | "written"}`` for every scene with edits now or at the last
+    Write: *edited* = its edits differ from what the last Write put on the card (not written
+    yet), *written* = the last Write put exactly these edits on the card.  A scene as shipped
+    both now and then is absent.  *all* is *edited* where the only difference is one font
+    color given to its lines that many scenes got alike (PAD-528: the Font bar's Apply to all
+    lines of text, as :func:`scene_colour_states` tells the profile on all apart)."""
     now = load(assets_dir)
     built = built_all(assets_dir)
     out = {}
+    alike = {}
     for card in set(now) | set(built or {}):
         ops = now.get(card) or []
         was = [op for op in ((built or {}).get(card) or ()) if isinstance(op, dict)]
@@ -510,6 +706,167 @@ def scene_states(assets_dir):
                 out[card] = "written"
         else:
             out[card] = "edited"
+            change = _font_colour_change(ops, was)
+            if change and len(set(change.values())) == 1:
+                alike[card] = next(iter(change.values()))
+    if alike:
+        counts = {}
+        for v in alike.values():
+            counts[v] = counts.get(v, 0) + 1
+        for card, v in alike.items():
+            if counts[v] >= ALL_SCENES_MIN and counts[v] * 2 > len(alike):
+                out[card] = "all"
+    return out
+
+
+def _font_colour_change(ops, was):
+    """``{node: (pick, brightness) or None}``: the lines whose own font color (PAD-514) *ops*
+    change from *was* (``None``: Default, none of its own) when that is all they change, else
+    ``None``."""
+    from . import text_colour
+
+    def rest(lst):
+        return [op for op in lst if op.get("op") != "text_colour"]
+    if rest(ops) != rest(was):
+        return None
+    a, b = text_colour.own_colours(ops), text_colour.own_colours(was)
+
+    def colour(op):
+        return None if op is None else (op.get("pick"), op.get("bright"))
+    return {n: colour(a.get(n)) for n in set(a) | set(b) if colour(a.get(n)) != colour(b.get(n))}
+
+
+def scene_dir(card):
+    """The scene a card path belongs to, as the Scenes list names it."""
+    card = (card or "").replace("\\", "/")
+    if "/scene.assets/" in card:
+        return card.rsplit("/scene.assets/", 1)[0]
+    return card.rsplit("/", 1)[0] or card
+
+
+def colour_marks(assets_dir, identity=False):
+    """``{scene dir: [[rel, profile key]]}``: the pictures and lines of text of each scene the
+    next Write bakes a color profile into, each with the profile's numbers (DragonRR, PAD-524:
+    a scene whose only change is a line's yellow profile showed as not changed).  A scene
+    with none is absent.  *identity*: the ones switched on with No change too, under
+    :func:`no_change_key` (PAD-528)."""
+    from ...core import colour_profile as cp, staged_changes
+    from . import scene_render
+    out = {}
+
+    def add(card, rel, prof):
+        out.setdefault(scene_dir(card), set()).add((rel, prof.key()))
+    try:
+        pending = scene_render.pending_pictures(assets_dir, paths=False, identity=identity)
+    except Exception:                                    # noqa: BLE001
+        pending = {}
+    coloured = {rel: v["colour"] for rel, v in pending.items()
+                if isinstance(v, dict) and v.get("colour") is not None}
+    if coloured:
+        for name in ("radium_images.txt", "manifest.txt"):
+            try:
+                with open(os.path.join(assets_dir, *RELDIR, name), "r", encoding="utf-8",
+                          errors="replace") as f:
+                    rows = [ln.rstrip("\r\n").split("\t") for ln in f
+                            if ln.strip() and not ln.startswith("#")]
+            except OSError:
+                continue
+            for cols in rows:
+                rel = cols[0].replace("\\", "/") if len(cols) >= 2 else ""
+                if rel in coloured:
+                    add(cols[1], "images/" + rel, coloured[rel])
+        for card, ops in load(assets_dir).items():
+            for rel, _c in picture_rels(ops):
+                if rel in coloured:
+                    add(card, "images/" + rel, coloured[rel])
+    data = staged_changes.peek(assets_dir)
+    lines = cp.text_lines_on(assets_dir, data)
+    for card, ops in load(assets_dir).items():
+        lines.update(cp.text_rel(card, op["id"]) for op in ops
+                     if op.get("op") == "add_text" and op.get("color")
+                     and op.get("id") is not None)
+    if lines:
+        resolve = cp.asset_resolver(assets_dir, data, identity=identity)
+        for rel in lines:
+            prof = resolve("text", rel)
+            if prof is not None:
+                add(rel.rsplit("#", 1)[0], rel, prof)
+    return {d: sorted([list(m) for m in marks]) for d, marks in out.items()}
+
+
+def built_colours(assets_dir):
+    """:func:`colour_marks` as the last Write built them, or ``None`` when no Write has been
+    recorded (a Write recorded before PAD-524 kept none: ``{}``)."""
+    try:
+        with open(_built_path(assets_dir), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    colours = data.get("colours")
+    return colours if isinstance(colours, dict) else {}
+
+
+#: a profile on files in at least this many scenes, and in more than half the scenes with one,
+#: is one applied to all (an Apply to all from a file's own profile)
+ALL_SCENES_MIN = 3
+
+
+
+def no_change_key():
+    """:meth:`Profile.key` of No change (every profile that changes nothing has its numbers)."""
+    from ...core import colour_profile as cp
+    return cp.Profile().key()
+
+
+def all_profile_keys(assets_dir, marks):
+    """The profiles applied to all of a project's files, by :meth:`Profile.key`, from *marks*
+    (:func:`colour_marks`): the individual files profile (what All images and All text give
+    every file), and one a file's Apply to all gave the rest, seen as reaching more than half
+    the scenes with a profile on them (DragonRR, PAD-524: with every file Black and white,
+    every scene was orange, and the few he had colored on their own were lost among them)."""
+    from ...core import colour_profile as cp
+    keys = set()
+    # No change too (PAD-528, DragonRR: "NO CHANGE does something"): with every picture Black
+    # and white on the card, All images with No change made every dot orange
+    keys.add(cp.asset_profile(assets_dir).key())
+    scenes = {}
+    for d, ms in marks.items():
+        for _rel, key in ms:
+            scenes.setdefault(key, set()).add(d)
+    keys.update(key for key, ds in scenes.items()
+                if len(ds) >= ALL_SCENES_MIN and len(ds) * 2 > len(marks))
+    return keys
+
+
+def scene_colour_states(assets_dir):
+    """``{scene dir: "edited" | "all" | "written"}`` for every scene with a color profile baked
+    into one of its pictures or lines now or at the last Write, as :func:`scene_states` for
+    edits: *edited* = not what the last Write baked, *written* = exactly that.  *all* is
+    *edited* where every difference is the profile applied to all (:func:`all_profile_keys`):
+    a picture or line that has it now, or had it and has no profile now (PAD-524)."""
+    full = colour_marks(assets_dir, identity=True)
+    none = no_change_key()
+    # what the next Write bakes: No change bakes nothing
+    now = {d: ms for d, ms in ((d, [m for m in ms if m[1] != none])
+                               for d, ms in full.items()) if ms}
+    built = built_colours(assets_dir)
+    every = all_profile_keys(assets_dir, full)
+    out = {}
+    for d in set(now) | set(built or {}):
+        marks = now.get(d) or []
+        if built is not None and marks == (built.get(d) or []):
+            if marks:
+                out[d] = "written"
+            continue
+        was = dict((built or {}).get(d) or [])
+        # a file the last Write baked a profile into that has No change now is a change, as
+        # any other profile is (PAD-528); one that never had one changes nothing
+        mine = {rel: key for rel, key in full.get(d) or [] if key != none or rel in was}
+        own = any((mine[rel] if rel in mine else was[rel]) not in every
+                  for rel in set(mine) | set(was) if mine.get(rel) != was.get(rel))
+        out[d] = "edited" if own else "all"
     return out
 
 
@@ -556,6 +913,22 @@ def describe(op):
                                        " (colors corrected)" if op.get("color") else "")
     if k == "add_text":
         return 'added text "%s"' % op["text"]
+    if k == "anim":
+        bits = []
+        if op.get("follow") is not None:
+            bits.append("shows and fades like a game layer")
+        else:
+            if op.get("fade_in"):
+                bits.append("fades in over %d frames" % op["fade_in"])
+            if op.get("fade_out") and op.get("end"):
+                bits.append("fades out over %d frames" % op["fade_out"])
+            if op.get("start") or op.get("end"):
+                bits.append("shows frames %s-%s" % (op.get("start") or 1, op.get("end") or "end"))
+        if op.get("pulse") is not None:
+            bits.append("pulses every %d frames" % int(op.get("period") or 30))
+        if op.get("images"):
+            bits.append("%d pictures in turn" % (len(op["images"]) + 1))
+        return "animated: " + (", ".join(bits) or "no animation")
     if k == "rotate":
         return "turned %+g°" % op["deg"]
     if k == "shadow":
@@ -570,6 +943,9 @@ def describe(op):
         return "aligned %s %s" % (VALIGN_NAMES[op["valign"]], ALIGN_NAMES[op["align"]])
     if k in ("line_colour", "line_font"):
         return "colors corrected"
+    if k == "text_colour":
+        return "colored #%02x%02x%02x" % tuple(int(round(min(1.0, max(0.0, c)) * 255))
+                                              for c in op["rgb"][:3])
     if k == "text_font":
         return ", ".join((["font %s" % op["style"]] if op.get("style") else [])
                          + (["%g px" % op["px"]] if op.get("px") else [])) or "font changed"
@@ -596,6 +972,155 @@ def new_id(man, ops=()):
         if op.get("id"):
             used.append(int(op["id"]))
     return max(used) + 2      # +2: the node and its component object
+
+
+# ---------------------------------------------------------------------------------------------
+# an added picture animated (PAD-1278)
+# ---------------------------------------------------------------------------------------------
+#: the longest loop of its own an animated picture gets, in frames (a pulse and a flipbook
+#: of lengths with no small common multiple loop on the flipbook's length instead)
+ANIM_MAX_LOOP = 3600
+
+
+def picture_rels(ops):
+    """``[(rel, color), ...]``: every PNG the edits *ops* draw from ``images/`` (an added
+    picture's, and the more pictures an ``anim`` shows in turn, under the picture's own
+    ``color`` choice)."""
+    colour = {}
+    out = []
+    for op in ops or ():
+        if not isinstance(op, dict):
+            continue
+        if op.get("op") == "add_picture" and op.get("image"):
+            colour[op.get("id")] = op.get("color")
+            out.append((op["image"], op.get("color")))
+        elif op.get("op") == "anim":
+            for im in op.get("images") or ():
+                if isinstance(im, dict) and im.get("image"):
+                    out.append((im["image"], colour.get(op.get("node"))))
+    return out
+
+
+def _anim_timing(op, follow, kf0, col0):
+    """``(keyframes, colours)`` of an animated picture on its group's timeline, as plain
+    lists.  *follow* is ``(keyframes, colours)`` of the node it follows (as the card had them,
+    before any edit) or None; *kf0* / *col0* are its own before the anim."""
+    mul0 = [float(v) for v in (col0[0][1] if col0 else (1.0, 1.0, 1.0, 1.0))]
+    add0 = [float(v) for v in (col0[0][2] if col0 else (0.0, 0.0, 0.0, 0.0))]
+    if kf0 and all(not v for _f, v in kf0):
+        kf = [[int(f), int(v)] for f, v in kf0]           # hidden by the user: stays hidden
+    else:
+        kf = None
+
+    def key(f, a):
+        return [int(f), mul0[:3] + [round(mul0[3] * max(0.0, min(1.0, a)), 5)], list(add0)]
+
+    if op.get("track"):
+        # PAD-1278: what the game draws of the layer it follows, frame by frame (its groups'
+        # timelines in it: a line of text fades as the sprite holding it does)
+        tr = [(int(f), int(v), float(a)) for f, v, a in op["track"]]
+        if kf is None:
+            kf = [[f, v] for f, v, _a in tr] or [[1, 1]]
+        return kf, [key(f, a) for f, _v, a in tr]
+    if follow is not None:
+        fkf, fcol = follow
+        if kf is None:
+            kf = [[int(f), int(v)] for f, v in fkf] or [[1, 1]]
+        # only its ALPHA: a red line's red is not the picture's
+        col = [key(f, float(m[3])) for f, m, _a in fcol]
+        return kf, (col or [list(c) for c in col0])
+    start = max(1, int(op.get("start") or 1))
+    end = int(op["end"]) if op.get("end") else None
+    if end is not None and end < start:
+        end = None
+    if kf is None:
+        kf = [[start, 1]] + ([[end + 1, 0]] if end is not None else [])
+    fi = max(0, int(op.get("fade_in") or 0))
+    fo = max(0, int(op.get("fade_out") or 0)) if end is not None else 0
+    alpha = {}
+    if fi:
+        for i in range(fi + 1):
+            alpha[start + i] = i / float(fi)
+    if fo:
+        for i in range(fo + 1):
+            f = end - fo + i
+            if f >= start:
+                alpha[f] = min(alpha.get(f, 1.0), 1.0 - i / float(fo))
+    if not alpha:
+        return kf, [list(c) for c in col0]
+    if start not in alpha:
+        alpha[start] = 1.0
+    return kf, [key(f, alpha[f]) for f in sorted(alpha)]
+
+
+def follow_track(man, node, frames=None):
+    """``[[frame, visible, alpha], ...]`` (a key where either changes): how the layer *node*
+    of manifest *man* shows on the glass over the scene, PLAYING (its groups' timelines and
+    fades in it), for an ``anim`` that follows it.  None when it never shows."""
+    from . import scene_eval
+    frames = int(frames or man["root"].get("frames") or 1)
+    out, last, seen = [], None, False
+    settled = {}
+    for f in range(1, frames + 1):
+        alphas = [d["mul"][3] for d in scene_eval.draw_list(man, f, play=True,
+                                                             _settled=settled)
+                  if d["node"] == node]
+        now = (1, round(max(alphas), 3)) if alphas else (0, 0.0)
+        seen = seen or bool(alphas)
+        if now != last:
+            out.append([f, now[0], now[1]])
+            last = now
+    return out if seen else None
+
+
+def anim_loop(op):
+    """The loop of its own an ``anim`` op gives its picture, or None:
+    ``{"frames": L, "every": e, "count": n, "alpha": [per frame] | None, "images": [...]}``.
+    Frame *f* (1..L) of it shows picture ``((f - 1) // e) % n`` (0: the picture's own, then
+    *images*) at ``alpha[f - 1]`` of its alpha.  A pulse starts bright."""
+    imgs = [im for im in (op.get("images") or ()) if isinstance(im, dict) and im.get("image")]
+    pulse = op.get("pulse")
+    if not imgs and pulse is None:
+        return None
+    n = len(imgs) + 1
+    every = max(1, int(op.get("every") or 1)) if imgs else 0
+    period = max(2, int(op.get("period") or 30)) if pulse is not None else 0
+    flip = every * n
+    if imgs and period:
+        both = flip * period // math.gcd(flip, period)
+        frames = both if both <= ANIM_MAX_LOOP else flip
+    else:
+        frames = flip if imgs else period
+    frames = max(1, min(ANIM_MAX_LOOP, frames))
+    alpha = None
+    if pulse is not None:
+        lo = max(0.0, min(1.0, float(pulse)))
+        alpha = [round(lo + (1.0 - lo) * (0.5 + 0.5 * math.cos(2 * math.pi * (f % period)
+                                                               / period)), 4)
+                 for f in range(frames)]
+    return {"frames": frames, "every": every or frames, "count": n, "alpha": alpha,
+            "images": [{"image": im["image"], "w": int(im.get("w") or 0),
+                        "h": int(im.get("h") or 0)} for im in imgs]}
+
+
+def _loop_children(loop):
+    """Per picture of a loop: ``(keyframes, colours)`` on the loop's own timeline (frame 1 =
+    the loop's first), so a nested Sprite plays it."""
+    frames, every, n = loop["frames"], loop["every"], loop["count"]
+    out = []
+    for i in range(n):
+        kf, last = [], None
+        for s in range(1, frames + 1, every):
+            v = 1 if ((s - 1) // every) % n == i else 0
+            if v != last:
+                kf.append([s, v])
+                last = v
+        if kf and kf[0][0] != 1:
+            kf.insert(0, [1, 0])
+        col = ([[f + 1, [1.0, 1.0, 1.0, a], [0.0, 0.0, 0.0, 0.0]]
+                for f, a in enumerate(loop["alpha"])] if loop["alpha"] else [])
+        out.append((kf, col))
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -756,8 +1281,10 @@ def _man_kids_of(man, index, parent):
 
 def apply_manifest(man, ops):
     """A copy of manifest *man* with *ops* applied; ``(manifest, [skipped op notes])``."""
+    man0 = man
     man = copy.deepcopy(man)
     notes = []
+    stock = None                     # PAD-1278: every node's timeline before the edits
     for op in ops or ():
         index = _man_index(man)
         k = op.get("op")
@@ -809,6 +1336,8 @@ def apply_manifest(man, ops):
                         n["kf"] = [[1, 0]]
                     elif "_kf" in n:
                         n["kf"] = n.pop("_kf")
+                    elif n["kf"] and all(not v for _f, v in n["kf"]):
+                        n["kf"] = [[1, 1]]        # hidden on the card it came from (PAD-535)
                 elif k == "order":
                     sibs.remove(n)
                     sibs.insert(max(0, min(len(sibs), int(op["index"]))), n)
@@ -865,6 +1394,35 @@ def apply_manifest(man, ops):
                                 o.pop("art", None)
                             else:
                                 o["art"] = {"profile": op["profile"], "mul": op.get("mul")}
+            elif k == "anim":
+                got = index.get(op["node"])
+                if got is None or not got[0].get("added"):
+                    notes.append("anim: node %s is not a picture added in this scene"
+                                 % op["node"])
+                    continue
+                n = got[0]
+                pic = [(st, oid) for st, oid in n["comps"]
+                       if (man["objects"].get(str(oid)) or {}).get("kind") == "Bitmap"]
+                if not pic:
+                    notes.append("anim: node %s is not a picture" % op["node"])
+                    continue
+                if stock is None:
+                    stock = {i: (copy.deepcopy(m["kf"]), copy.deepcopy(m["col"]))
+                             for i, (m, _s) in _man_index(copy.deepcopy(man0)).items()}
+                n.setdefault("_anim0", (copy.deepcopy(n["kf"]), copy.deepcopy(n["col"])))
+                fol = op.get("follow")
+                follow = stock.get(int(fol)) if fol not in (None, "") else None
+                if fol not in (None, "") and follow is None:
+                    notes.append("anim: the layer to follow (%s) is not in this scene" % fol)
+                n["kf"], n["col"] = _anim_timing(op, follow, *n["_anim0"])
+                loop = anim_loop(op)
+                if loop is None:
+                    n.pop("loop", None)
+                else:
+                    first = man["objects"].get(str(pic[0][1])) or {}
+                    loop["images"].insert(0, {"image": first.get("image"),
+                                              "w": first.get("w"), "h": first.get("h")})
+                    n["loop"] = loop
             elif k in ("add_picture", "add_text"):
                 kids = _man_kids_of(man, index, op.get("parent"))
                 if kids is None:
@@ -897,6 +1455,8 @@ def apply_manifest(man, ops):
                         "tr": [[1, [1, 0, 0, 1, op["x"], op["y"]]]], "comps": [[1, oid]],
                         "added": True}
                 kids.insert(max(0, min(len(kids), int(op.get("index", len(kids))))), node)
+            elif k == "text_colour":
+                pass        # PAD-514: drawn by text_colour.line_ops, as the profile's are
             else:
                 notes.append("unknown edit %r" % k)
         except (KeyError, TypeError, ValueError, ZeroDivisionError) as e:
@@ -1053,6 +1613,12 @@ def apply_scene(scene, ops, assets_dir=None, names=None):
         nxt[0] += 1
         return v
 
+    anim0 = {}                               # PAD-1278: an animated picture as it was added
+    stock_tl = {}                            # ... and every node's timeline before the edits
+    if any(op.get("op") == "anim" for op in ops or ()):
+        stock_tl = {i: (list(m.keyframes), list(m.colors), m.name)
+                    for i, (m, _s) in _tree_index(scene).items()}
+
     for op in ops or ():
         k = op.get("op")
         index = _tree_index(scene)
@@ -1111,6 +1677,10 @@ def apply_scene(scene, ops, assets_dir=None, names=None):
                 elif k == "visible":
                     if not op["on"]:
                         n.keyframes = [(1, 0)]
+                    elif n.keyframes and all(not v for _f, v in n.keyframes):
+                        # an earlier Write hid it on this card (PAD-535): shown again, as
+                        # every layer the game draws whenever its group is
+                        n.keyframes = [(1, 1)]
                 elif k == "order":
                     sibs.remove(n)
                     sibs.insert(max(0, min(len(sibs), int(op["index"]))), n)
@@ -1177,6 +1747,71 @@ def apply_scene(scene, ops, assets_dir=None, names=None):
                         notes.append(note)
                         continue
                 applied += 1
+            elif k == "anim":
+                nid = fresh.get(op["node"])
+                got = index.get(nid) if nid is not None else None
+                if got is None:
+                    notes.append("anim: the added picture %s is not on this card's scene; "
+                                 "left alone" % op["node"])
+                    continue
+                n = got[0]
+                if nid not in anim0:
+                    bmp = [c for c in n.components if c.obj.kind == "Bitmap"]
+                    if not bmp:
+                        notes.append("anim: node %s is not a picture; left alone" % op["node"])
+                        continue
+                    anim0[nid] = (list(n.keyframes), list(n.colors), bmp[0])
+                kf0, col0, bmp = anim0[nid]
+                fol = op.get("follow")
+                follow = None
+                if fol not in (None, ""):
+                    follow = stock_tl.get(int(fol))
+                    want = names.get(int(fol))
+                    if follow is None or (want is not None and follow[2] != want):
+                        notes.append("anim: the layer to follow (%s) is not on this card's "
+                                     "scene; the picture shows all the time" % (want or fol))
+                        follow = None
+                    else:
+                        follow = follow[:2]
+                kf, col = _anim_timing(op, follow, kf0, col0)
+                n.keyframes = [(int(f), int(v)) for f, v in kf]
+                n.colors = [(int(f), [float(v) for v in m], [float(v) for v in a])
+                            for f, m, a in col]
+                loop = anim_loop(op)
+                if loop is None:
+                    n.components = [bmp]
+                else:
+                    src = next((o for o in ops if o.get("op") == "add_picture"
+                                and o.get("id") == op["node"]), {})
+                    from ...core import colour_profile
+                    pics = [bmp.obj]
+                    for im in loop["images"]:
+                        w, h, fmt, blob = _texture_from_png(
+                            os.path.join(assets_dir, "images", *im["image"].split("/")),
+                            colour=colour_profile.added_picture_colour(
+                                assets_dir, {"image": im["image"], "color": src.get("color")}))
+                        tid = alloc()
+                        scene.textures[tid] = dict(w=w, h=h, fmt=fmt, name="", blob=blob,
+                                                   data_off=None)
+                        pics.append(T.Obj(alloc(), "Bitmap",
+                                          dict(sym=bmp.obj.body["sym"], name="", w=w, h=h,
+                                               tex=tid)))
+                    kids = []
+                    for i, (ckf, ccol) in enumerate(_loop_children(loop)):
+                        kids.append(T.Node(
+                            alloc(), "%s_%d" % (n.name, i + 1), 1,
+                            [(int(f), int(v)) for f, v in ckf],
+                            [(int(f), list(m), list(a)) for f, m, a in ccol],
+                            [(1, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])],
+                            [T.Component(1, bmp.cls, pics[i])]))
+                    sym = _symbol_of(scene, "Sprite")
+                    if sym is None:
+                        sym = scene.root.get("sym", 0)
+                    spr = T.Obj(alloc(), "Sprite", dict(sym=sym, name="",
+                                                        frames=loop["frames"], kids=kids,
+                                                        labels=[]))
+                    n.components = [T.Component(1, _class(scene, "Sprite"), spr)]
+                applied += 1
             elif k in ("add_picture", "add_text"):
                 parent = op.get("parent")
                 kids = _tree_kids_of(index, fresh, parent, scene)
@@ -1185,10 +1820,14 @@ def apply_scene(scene, ops, assets_dir=None, names=None):
                                  % (k, parent))
                     continue
                 if k == "add_picture":
+                    # PAD-1278: a scene of words only (143 of Godzilla's 194) has no Bitmap
+                    # to copy the symbol key from: 0, the key every scene's root has
                     sym = _symbol_of(scene, "Bitmap")
-                    if sym is None or not assets_dir:
-                        notes.append("add_picture: this scene draws no picture of its own to "
-                                     "take the kind from; not added")
+                    if sym is None:
+                        sym = 0
+                    if not assets_dir:
+                        notes.append("add_picture: no project folder to take the picture "
+                                     "from; not added")
                         continue
                     from ...core import colour_profile
                     w, h, fmt, blob = _texture_from_png(
@@ -1224,6 +1863,8 @@ def apply_scene(scene, ops, assets_dir=None, names=None):
                               [T.Component(1, cid, obj)])
                 kids.insert(max(0, min(len(kids), int(op.get("index", len(kids))))), node)
                 applied += 1
+            elif k == "text_colour":
+                pass        # PAD-514: its line_colour edits (text_colour.line_ops) set it
             else:
                 notes.append("unknown edit %r" % k)
         except (KeyError, TypeError, ValueError, OSError, ZeroDivisionError) as e:
@@ -1342,16 +1983,32 @@ def _r(v):
     return round(float(v), 3)
 
 
+def _shadows_before(sibs, n, name_of):
+    """How many shadows (PAD-452: a node named ``<name>_Shadow`` just before it) node *n* of
+    the kids list *sibs* has."""
+    i = next((i for i, s in enumerate(sibs) if s is n), 0)
+    k = 0
+    while k < i and name_of(sibs[i - k - 1]) == name_of(n) + "_Shadow":
+        k += 1
+    return k
+
+
 class _Base:
     """What a scene shows of the nodes edits touch, read off a preview manifest or off a card's
-    scene tree: a node's *fingerprint* (its tracks' affines, its text box, hidden or not) and
-    how many nodes carry a name."""
+    scene tree: a node's *fingerprint* (its tracks' affines, its text box, hidden or not, its
+    colour track and its shadows) and how many nodes carry a name."""
 
-    def __init__(self, fps, names):
-        self._fps, self._names = fps, names
+    def __init__(self, fps, names, pics=None):
+        self._fps, self._names, self._pics = fps, names, pics
 
     def fp(self, nid):
         return self._fps(nid)
+
+    def pic(self, nid):
+        """``(bitmap id, w, h)`` of the one picture node *nid* draws (every part of it a
+        Bitmap of the same texture: the nodes a Write fits a picture kept at its own size
+        into, :func:`radium_grow.keep_boxes`), else None."""
+        return self._pics(nid) if self._pics else None
 
     def count(self, name):
         return self._names.get(name, 0)
@@ -1367,15 +2024,24 @@ class _Base:
             got = index.get(nid)
             if got is None:
                 return None
-            n = got[0]
+            n, sibs = got
             rect = None
             for _s, oid in n["comps"]:
                 o = man["objects"].get(str(oid)) or {}
                 if o.get("kind") == "Text" and o.get("rect") is not None:
                     rect = [_r(v) for v in o["rect"]]
             return {"m": [[_r(v) for v in m[:6]] for _f, m in n["tr"] or ()],
-                    "r": rect, "h": [list(k) for k in n["kf"] or ()] == [[1, 0]]}
-        return cls(fps, names)
+                    "r": rect, "h": [list(k) for k in n["kf"] or ()] == [[1, 0]],
+                    "c": _col_fp(n["col"]),
+                    "s": _shadows_before(sibs, n, lambda x: x.get("name"))}
+
+        def pics(nid):
+            got = index.get(nid)
+            objs = [(oid, man["objects"].get(str(oid)) or {}) for _s, oid in got[0]["comps"]] \
+                if got else []
+            return _one_picture([(oid, o.get("kind"), o.get("tex"), o.get("w"), o.get("h"))
+                                 for oid, o in objs])
+        return cls(fps, names, pics)
 
     @classmethod
     def of_tree(cls, scene):
@@ -1388,25 +2054,254 @@ class _Base:
             got = index.get(nid)
             if got is None:
                 return None
-            n = got[0]
+            n, sibs = got
             rect = None
             for c in n.components:
                 if c.obj.kind == "Text" and c.obj.body.get("rect") is not None:
                     rect = [_r(v) for v in c.obj.body["rect"]]
             return {"m": [[_r(v) for v in _m6_of16(m)] for _f, m in n.tracks or ()],
-                    "r": rect, "h": [list(k) for k in n.keyframes or ()] == [[1, 0]]}
-        return cls(fps, names)
+                    "r": rect, "h": [list(k) for k in n.keyframes or ()] == [[1, 0]],
+                    "c": _col_fp(n.colors), "s": _shadows_before(sibs, n, lambda x: x.name)}
+
+        def pics(nid):
+            got = index.get(nid)
+            return _one_picture([(c.obj.id, c.obj.kind, c.obj.body.get("tex"),
+                                  c.obj.body.get("w"), c.obj.body.get("h"))
+                                 for c in got[0].components]) if got else None
+        return cls(fps, names, pics)
+
+
+def _one_picture(comps):
+    """``(bitmap id, w, h)`` when *comps* (``(id, kind, tex, w, h)`` each) are all Bitmaps of
+    one texture, else None."""
+    if not comps or any(k != "Bitmap" for _i, k, _t, _w, _h in comps):
+        return None
+    if len({t for _i, _k, t, _w, _h in comps}) != 1:
+        return None
+    oid, _k, _t, w, h = comps[0]
+    return (int(oid), w, h) if w and h else None
+
+
+def _fit_of(base, nid, st, want=None, near=()):
+    """PAD-1320 (DragonRR, round 3): the fit (``a, b, c, d, tx, ty``) a Write put inside node
+    *nid*'s tracks on the scene *base*, against where *st* (a file's states) was made, or None.
+
+    A picture kept at its own size is written at twice the box it shows in (PAD-1200) and
+    fitted into that box by the node that draws it (:func:`radium_grow.keep_boxes`): his
+    Battle Select cards, built into his 2.3 card, read back at half the size his file's edits
+    left them, so each looked moved and resized, and a resize of 200 % went on every one of
+    them.  Only a node drawing one picture the file has a size for (*st*'s ``pics``,
+    ``{bitmap id: [w, h]}``) is looked at.  With the look *want* (a fingerprint) the node
+    should have, the fit is what takes *want* to what the scene shows, when that is a fit: one
+    scale, the picture centred in a box, flush on one side, the box the file's size (a size
+    read off a picture's name, ``pics_named``, is its texture's, a few pixels over) or the
+    picture twice the box.  Else (a node the user changed since) the scale read off the
+    nearest of the looks *near* it shows but for a move, centred in the file's size (read off
+    a name, a pixel or two out); else the fit into that size, when the picture is another."""
+    sizes = (st or {}).get("pics") if isinstance(st, dict) else None
+    if not sizes or base is None:
+        return None
+    if isinstance(st.get("fits"), dict) and nid in st["fits"]:
+        return st["fits"][nid]          # worked out on the card as read (:func:`_card_fits`)
+    got = base.pic(nid)
+    if got is None or str(got[0]) not in sizes:
+        return None
+    try:
+        bw, bh = float(sizes[str(got[0])][0]), float(sizes[str(got[0])][1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    w, h = float(got[1]), float(got[2])
+    named = bool(st.get("pics_named"))
+    fp = base.fp(nid)
+    wm = (want or {}).get("m") if isinstance(want, dict) else None
+    if wm and isinstance(fp, dict) and fp.get("m"):
+        fit = _fit_between(wm[0], fp["m"][0], w, h)
+        if fit is not None and abs(fit[0] - 1.0) < 1e-3 and not (fit[4] or fit[5]):
+            return None                 # it shows the look as it is: no fit inside it
+        if fit is not None:
+            k, _b, _c, _d, tx, ty = fit
+            fw, fh = k * w + 2 * tx, k * h + 2 * ty
+            slack = 6.0 if named else 1.0
+            if ((abs(fw - bw) <= slack and abs(fh - bh) <= slack)
+                    or abs(k * _keep_headroom() - 1.0) <= 0.01):
+                return fit
+    slack = 6.0 if named else 0.5
+    if (abs(w - bw) <= slack and abs(h - bh) <= slack) or bw <= 0 or bh <= 0:
+        return None
+    gm = fp.get("m") if isinstance(fp, dict) else None
+    for look in near:
+        lm = (look or {}).get("m") if isinstance(look, dict) else None
+        if not gm or not lm:
+            continue
+        k = _scale_between(lm[0], gm[0])
+        if k is None or not (abs(k * _keep_headroom() - 1.0) <= 0.01 or (
+                k * w <= bw + slack and k * h <= bh + slack
+                and min(bw - k * w, bh - k * h) <= slack)):
+            continue
+        ox, oy = max(0.0, (bw - k * w) / 2.0), max(0.0, (bh - k * h) / 2.0)
+        return (k, 0.0, 0.0, k, 0.0 if ox <= oy else ox, 0.0 if oy < ox else oy)
+    from . import radium_grow
+    return radium_grow.fit_box(w, h, bw, bh)
+
+
+def _keep_headroom():
+    """How many texture pixels a Write keeps per box pixel of a picture kept at its own size
+    (:data:`radium_grow.KEEP_HEADROOM`)."""
+    from . import radium_grow
+    return radium_grow.KEEP_HEADROOM
+
+
+def _scale_between(want, got):
+    """The one scale ``k`` with which the affine *got* is *want* scaled inside (a move aside),
+    or None."""
+    a, b, c, d = (float(v) for v in want[:4])
+    det = a * d - b * c
+    if abs(det) < 1e-9:
+        return None
+    ga, gb, gc, gd = (float(v) for v in got[:4])
+    la, lb = (d * ga - c * gb) / det, (-b * ga + a * gb) / det
+    lc, ld = (d * gc - c * gd) / det, (-b * gc + a * gd) / det
+    k = (la + ld) / 2.0
+    if k <= 0 or abs(lb) > 2e-3 or abs(lc) > 2e-3 or abs(la - ld) > 2e-3 * max(1.0, k):
+        return None
+    return k
+
+
+def _fit_between(want, got, w, h):
+    """The fit ``(k, 0, 0, k, tx, ty)`` with ``want`` then the fit giving ``got`` (affines), when
+    it is one :func:`radium_grow.fit_box` gives a *w* x *h* picture: one positive scale, the
+    picture centred, flush on one side; else None."""
+    a, b, c, d, tx, ty = (float(v) for v in want[:6])
+    det = a * d - b * c
+    if abs(det) < 1e-9:
+        return None
+    ia, ib, ic, idd = d / det, -b / det, -c / det, a / det
+    inv = (ia, ib, ic, idd, -(ia * tx + ic * ty), -(ib * tx + idd * ty))
+    g = _composed(inv, tuple(float(v) for v in got[:6]))
+    k = (g[0] + g[3]) / 2.0
+    if k <= 0 or abs(g[1]) > 2e-3 or abs(g[2]) > 2e-3 or abs(g[0] - g[3]) > 2e-3 * max(1.0, k):
+        return None
+    ox, oy = g[4], g[5]
+    if min(ox, oy) < -0.75 or min(abs(ox), abs(oy)) > 0.75:
+        return None
+    return (k, 0.0, 0.0, k, ox if abs(ox) > 0.75 else 0.0, oy if abs(oy) > 0.75 else 0.0)
+
+
+def _card_fits(base, ops, st):
+    """``{node: fit or None}`` (:func:`_fit_of`) of the nodes *ops* edit, on the scene *base* as
+    read off the card, each against the look of *st*'s it shows: what judges that scene with
+    edits on it too (a doubled project's 200 % resizes undo the fit, not show the file)."""
+    kinds, steps, out = _kinds(ops), {}, {}
+    for i, op in enumerate(ops):
+        if op.get("node") in kinds:
+            steps.setdefault(op["node"], []).append(i)
+    for nid, idx in steps.items():
+        if base.fp(nid) is None:
+            continue
+        looks = [st["before"].get(str(nid))] + [st["after"][i] for i in idx
+                                                if i < len(st["after"])]
+        j = next((j for j in range(len(looks) - 1, -1, -1)
+                  if looks[j] is not None and _close(
+                      _fp_for(_seen(base, nid, st, looks[j]), kinds[nid]), looks[j])), None)
+        out[nid] = (_fit_of(base, nid, st, looks[j]) if j is not None
+                    else _fit_of(base, nid, st, near=looks[::-1]))
+    return out
+
+
+def _unfit(m6, fit):
+    """Affine *m6* with *fit* (a uniform scale and a shift) taken back out on its right."""
+    s, _b, _c, _d, tx, ty = fit
+    return _composed(tuple(m6), (1.0 / s, 0.0, 0.0, 1.0 / s, -tx / s, -ty / s))
+
+
+def _seen(base, nid, st, want=None):
+    """Node *nid*'s fingerprint on *base* as the edits of *st* would see it (looking for the
+    look *want*): a picture kept at its own size has its fit (:func:`_fit_of`) taken out."""
+    fp = base.fp(nid)
+    fit = _fit_of(base, nid, st, want) if isinstance(fp, dict) and fp.get("m") else None
+    if fit is None:
+        return fp
+    return dict(fp, m=[[_r(v) for v in _unfit(m[:6], fit)] for m in fp["m"]])
+
+
+def _into_fit(op, fit):
+    """Op *op* (one of a node a fit is inside) as it does the same on the scene: a resize's
+    point is in the node's own units, which the fit changed; a move is the parent's."""
+    if fit is None or op.get("op") != "scale":
+        return op
+    s, _b, _c, _d, tx, ty = fit
+    return dict(op, px=round((op["px"] - tx) / s, 3), py=round((op["py"] - ty) / s, 3))
+
+
+def _pic_sizes(base, nids):
+    """``{bitmap id: [w, h]}`` of the pictures the nodes *nids* draw on *base*."""
+    out = {}
+    for nid in nids:
+        got = base.pic(nid)
+        if got is not None:
+            out[str(got[0])] = [got[1], got[2]]
+    return out
 
 
 def _near(x, y):
     return abs(x - y) <= 0.01 + 1e-5 * abs(y)
 
 
+def _near_px(x, y):
+    """Two positions the same to well under a pixel.  PAD-1320 (DragonRR): a card's 32-bit
+    floats, and a scale kept to 3 decimals in a fingerprint, times a pivot hundreds of pixels
+    away, put a node a Write built 0.02 px off its fingerprint, past :func:`_near`; that one
+    node made the whole scene read as not built, and all 136 edits went on a second time.
+    Edits applied twice are off by their own moves, a pixel and more."""
+    return abs(x - y) <= 0.25 + 1e-4 * abs(y)
+
+
+def _near_affine(p, q):
+    """Two affines ``[a, b, c, d, tx, ty]`` the same: their linear parts by :func:`_near`,
+    their positions by :func:`_near_px`."""
+    return len(p) == len(q) and all(
+        (_near_px if i >= 4 else _near)(x, y) for i, (x, y) in enumerate(zip(p, q)))
+
+
+def _col_fp(steps):
+    return [[int(f), [_r(v) for v in m], [_r(v) for v in a]] for f, m, a in _tint_steps(steps)]
+
+
+#: PAD-502: the parts of a fingerprint only these edits change, kept for the nodes they touch
+#: alone (a line's colour track is also what a colour profile writes, PAD-438, which must not
+#: make a moved line look unlike its move)
+_FP_ONLY = {"c": ("tint",), "s": ("shadow",)}
+
+
+def _fp_for(fp, kinds):
+    """Fingerprint *fp* with the parts none of the edit *kinds* change left out."""
+    if not isinstance(fp, dict):
+        return fp
+    return {k: v for k, v in fp.items()
+            if k not in _FP_ONLY or any(x in kinds for x in _FP_ONLY[k])}
+
+
+def _kinds(ops):
+    """``{node: {op kinds}}`` of the game's own nodes *ops* edit."""
+    out = {}
+    for op in ops:
+        if _stock_node(op):
+            out.setdefault(op["node"], set()).add(op["op"])
+    return out
+
+
 def _close(a, b):
-    """Two fingerprints the same within what the card's 32-bit floats keep."""
+    """Two fingerprints the same within what the card's 32-bit floats keep (a part only one
+    of them has, as a file saved before PAD-502 has no colour track, is left out)."""
     if a is None or b is None:
         return a is b
     if a.get("h") != b.get("h") or (a.get("r") is None) != (b.get("r") is None):
+        return False
+    if "s" in a and "s" in b and a["s"] != b["s"]:
+        return False
+    if "c" in a and "c" in b and (len(a["c"]) != len(b["c"]) or not all(
+            p[0] == q[0] and all(_near(x, y) for x, y in zip(p[1] + p[2], q[1] + q[2]))
+            for p, q in zip(a["c"], b["c"]))):
         return False
     if a.get("r") is not None and (len(a["r"]) != len(b["r"]) or
                                    not all(_near(x, y) for x, y in zip(a["r"], b["r"]))):
@@ -1415,8 +2310,7 @@ def _close(a, b):
     if not ma or not mb:                      # no track = the identity
         ma = ma or [[1, 0, 0, 1, 0, 0]] * max(1, len(mb))
         mb = mb or [[1, 0, 0, 1, 0, 0]] * max(1, len(ma))
-    return len(ma) == len(mb) and all(
-        len(p) == len(q) and all(_near(x, y) for x, y in zip(p, q)) for p, q in zip(ma, mb))
+    return len(ma) == len(mb) and all(_near_affine(p, q) for p, q in zip(ma, mb))
 
 
 def _stock_node(op):
@@ -1442,15 +2336,17 @@ def states_of(man, ops):
     beside the edits so a scene that already shows some of them is told exactly."""
     ops = [dict(op) for op in ops or ()]
     base = _Base.of_manifest(man)
+    kinds = _kinds(ops)
     before = {}
     for op in ops:
         if _stock_node(op) and str(op["node"]) not in before:
-            before[str(op["node"])] = base.fp(op["node"])
+            before[str(op["node"])] = _fp_for(base.fp(op["node"]), kinds[op["node"]])
     after, cur = [], man
     for op in ops:
         cur, _n = apply_manifest(cur, [op])
-        after.append(_Base.of_manifest(cur).fp(op["node"]) if _stock_node(op) else None)
-    return {"ops": ops, "before": before, "after": after}
+        after.append(_fp_for(_Base.of_manifest(cur).fp(op["node"]), kinds[op["node"]])
+                     if _stock_node(op) else None)
+    return {"ops": ops, "before": before, "after": after, "pics": _pic_sizes(base, kinds)}
 
 
 def _shows(base, ops, k, states=None):
@@ -1463,12 +2359,14 @@ def _shows(base, ops, k, states=None):
         if base.count(name) != names.get(name, 0):
             return False
     if states is not None:
-        for nid in {op["node"] for op in ops if _stock_node(op)}:
+        # PAD-1301: and a node an add made that the states know (:func:`_as_mine`)
+        for nid in {op["node"] for op in ops if _stock_node(op) or (
+                isinstance(op.get("node"), int) and str(op["node"]) in states["before"])}:
             want = states["before"].get(str(nid))
             for i in range(k):
                 if ops[i].get("node") == nid and states["after"][i] is not None:
                     want = states["after"][i]
-            if want is not None and not _close(base.fp(nid), want):
+            if want is not None and not _close(_seen(base, nid, states, want), want):
                 return False
         return True
     told = bool(names)
@@ -1496,19 +2394,44 @@ def _states_for(states, ops):
         n += 1
     if n == 0:
         return None
-    return {"ops": ops[:n], "before": states["before"], "after": states["after"][:n]}
+    out = {"ops": ops[:n], "before": states["before"], "after": states["after"][:n]}
+    if isinstance(states.get("pics"), dict):
+        out["pics"] = states["pics"]
+        out["pics_named"] = bool(states.get("pics_named"))
+        if isinstance(states.get("fits"), dict):
+            out["fits"] = states["fits"]
+    return out
+
+
+def _told(states, i):
+    """Whether the *i*-th of *states*' ops changes what its node shows, so that a scene
+    showing it can be told from one that does not (PAD-502: a shadow or a tint saved before
+    their fingerprint parts were, a re-order, a Text's spacing, cannot)."""
+    after = states["after"][i]
+    if after is None:
+        return True
+    ops = states["ops"]
+    nid = ops[i].get("node")
+    was = states["before"].get(str(nid))
+    for j in range(i):
+        if ops[j].get("node") == nid and states["after"][j] is not None:
+            was = states["after"][j]
+    return was is None or not _close(after, was)
 
 
 def shown_count(base, ops, states=None):
     """How many leading *ops* the scene *base* (:class:`_Base`) already shows: 0 for a scene
-    as shipped.  Exact with *states* (:func:`states_of`); else the most leading ops nothing on
-    the scene goes against, when something on it tells (a text box, a node an add made)."""
+    as shipped.  Exact with *states* (:func:`states_of`), as far as the scene tells: the last
+    op counted is one it can tell (PAD-502: a stock scene "showed" a file's shadows, its
+    nodes looking the same with them, and they were never drawn); else the most leading ops
+    nothing on the scene goes against, when something on it tells (a text box, a node an add
+    made)."""
     ops = list(ops or ())
     st = _states_for(states, ops)
     if st is not None:
         n = len(st["ops"])
         for k in range(n, -1, -1):
-            if _shows(base, ops[:n], k, st):
+            if (k == 0 or _told(st, k - 1)) and _shows(base, ops[:n], k, st):
                 return k
     for k in range(len(ops), 0, -1):
         if _shows(base, ops, k):
@@ -1516,9 +2439,327 @@ def shown_count(base, ops, states=None):
     return 0
 
 
+def starts_elsewhere(man, ops, states):
+    """Whether the scene *man* (a preview manifest) neither looks as it did where *ops* were
+    made (*states*, :func:`states_of`) nor shows some of them: a project of another card, one
+    a Write built with other changes (PAD-552, DragonRR: a file saved from the project of his
+    own built card, loaded on a PC with a project of another card, put his moves in other
+    places).  False when *states* cannot tell (a file saved before PAD-403)."""
+    ops = list(ops or ())
+    st = _states_for(states, ops)
+    if st is None or man is None:
+        return False
+    base = _Base.of_manifest(man)
+    n = len(st["ops"])
+    return not any(_shows(base, ops[:n], k, st) for k in range(n + 1))
+
+
+def on_top_of(man, mine, theirs, states):
+    """PAD-552 (DragonRR, computer B): the edits of a file (*theirs*, made on a project of a
+    card a Write built with *mine*) still to add after *mine* on the scene *man* here, or None
+    when they were not made on top of *mine*.  The scene as shipped starts out otherwise than
+    where the file was saved, the scene with *mine* applied does not: the file carries only
+    what was changed since, so it goes after *mine* rather than in place of it.  ``[]`` when
+    *mine* already ends with all of it (the same file loaded again)."""
+    theirs = list(theirs or ())
+    st = _states_for(states, theirs)
+    if not mine or st is None or man is None or not starts_elsewhere(man, theirs, states):
+        return None
+    # PAD-1301: the card it was saved from gave the nodes mine adds ids of its own
+    theirs, states = _as_mine(man, mine, theirs, states)
+    st = _states_for(states, theirs)
+    if st is not None and st.get("pics"):
+        # PAD-1320 (round 3): a picture kept at its own size has its fit in the card's scene
+        states = dict(states, fits=_card_fits(_Base.of_manifest(man), theirs, st))
+        st = _states_for(states, theirs)
+    for k in range(len(mine) + 1):
+        # the same file loaded before: mine ends with (some of) its edits, applied after mine[:k]
+        head, tail = list(mine[:k]), list(mine[k:])
+        if tail and tail == theirs[:len(tail)]:
+            built, _n = apply_manifest(man, head)
+            if not starts_elsewhere(built, theirs, states):
+                return theirs[len(tail):]
+    built, _n = apply_manifest(man, list(mine))
+    if starts_elsewhere(built, theirs, states):
+        return None
+    n = len(st["ops"])
+    base = _Base.of_manifest(built)
+    k = 0
+    for j in range(n, -1, -1):
+        if (j == 0 or _told(st, j - 1)) and _shows(base, theirs[:n], j, st):
+            k = j
+            break
+    return _renumbered(theirs[k:], mine)
+
+
+#: the fields of an op that name a node
+_NODE_KEYS = ("node", "parent", "like", "follow")
+
+
+def _as_mine(man, mine, theirs, states):
+    """PAD-1301 (DragonRR and DoomWalrus666): *theirs* and its *states* with the nodes the card
+    they were made on had in place of the ones *mine* adds named as *mine* names them.
+
+    A Write puts each picture, text or shadow *mine* adds on the card as a node of the game's
+    own, numbered after the scene's last (``1247``, ``1250``, ...: three ids a picture); here
+    the same node is still the add's (``FIRST_ADDED_ID`` and up).  A node the file's states
+    know that the scene as shipped does not have is matched to the next node *mine* makes, in
+    the order mine makes them (a Write numbers them in that order), that looks as the file says
+    it did.  Unmatched, *theirs* and *states* come back as they were."""
+    before = (states or {}).get("before") if isinstance(states, dict) else None
+    if not isinstance(before, dict):
+        return theirs, states
+    base = _Base.of_manifest(man)
+    unknown = sorted(int(k) for k in before
+                     if str(k).lstrip("-").isdigit() and base.fp(int(k)) is None)
+    if not unknown:
+        return theirs, states
+    kinds = _kinds(theirs)
+    mine = list(mine)
+    # all of mine, else mine less what the same file added when loaded before (at its end)
+    for k in [len(mine)] + list(range(len(mine) - 1, max(-1, len(mine) - len(theirs) - 1), -1)):
+        remap = _made_as(man, mine[:k], unknown, before, kinds)
+        if remap is not None:
+            break
+    else:
+        return theirs, states
+    out = []
+    for op in theirs:
+        op = dict(op)
+        for key in _NODE_KEYS:
+            v = op.get(key)
+            if isinstance(v, int) and not isinstance(v, bool) and v in remap:
+                op[key] = remap[v]
+        out.append(op)
+    st = dict(states)
+    st["before"] = {str(remap.get(int(k), k)) if str(k).lstrip("-").isdigit() else k: v
+                    for k, v in before.items()}
+    if isinstance(states.get("ops"), list):
+        n = len(theirs)
+        st["ops"] = [out[i] if i < n and states["ops"][i] == theirs[i] else op
+                     for i, op in enumerate(states["ops"])]
+    return out, st
+
+
+def _made_as(man, mine, unknown, before, kinds):
+    """``{node of the file: node *mine* adds}`` for every one of *unknown* (ascending), each
+    the next node mine makes that looks as *before* says it did, or None."""
+    made = []
+    for op in mine:
+        nid = op.get("id") if op.get("op") in _MAKES else None
+        if isinstance(nid, int) and nid not in made:
+            made.append(nid)
+    if len(made) < len(unknown):
+        return None
+    mbase = _Base.of_manifest(apply_manifest(man, mine)[0])
+    remap, j = {}, 0
+    for nid in unknown:
+        want = before[str(nid)]
+        while j < len(made):
+            cand = made[j]
+            j += 1
+            got = mbase.fp(cand)
+            if got is not None and (want is None or _close(
+                    _fp_for(got, kinds.get(nid, ())), want)):
+                remap[nid] = cand
+                break
+        else:
+            return None
+    return remap
+
+
+def _renumbered(ops, mine):
+    """*ops* with every node an add of theirs makes given an id no op of *mine* uses."""
+    used = {op["id"] for op in mine if isinstance(op.get("id"), int)}
+    used |= {op["node"] for op in mine if isinstance(op.get("node"), int)
+             and op["node"] >= FIRST_ADDED_ID}
+    clash = sorted({op["id"] for op in ops if isinstance(op.get("id"), int)} & used)
+    if not clash:
+        return [dict(op) for op in ops]
+    nxt = max(used | {op["id"] for op in ops if isinstance(op.get("id"), int)}
+              | {FIRST_ADDED_ID - 1}) + 2
+    remap = {}
+    for old in clash:
+        remap[old], nxt = nxt, nxt + 2
+    out = []
+    for op in ops:
+        op = dict(op)
+        for key in ("id", "node"):
+            if isinstance(op.get(key), int) and op[key] in remap:
+                op[key] = remap[op[key]]
+        out.append(op)
+    return out
+
+
+def start_differences(man, ops, states):
+    """What of the nodes *ops* edit looks otherwise on the scene *man* than where they were
+    made (*states*), for the load report (PAD-552): ``[{"node", "name", "what"}]``, *what* in
+    a few words (``not in this scene``, ``off by -12.0,+30.5 px``, ``118 % of the size``,
+    ``hidden``, ``shown``, ``another text box``, ``another color``, ``looks otherwise``)."""
+    st = _states_for(states, list(ops or ()))
+    if st is None or man is None:
+        return []
+    base = _Base.of_manifest(man)
+    index = _man_index(man)
+    out = []
+    for nid, want in sorted(st["before"].items(), key=lambda kv: int(kv[0])):
+        got = _seen(base, int(nid), st, want)
+        if want is None or _close(got, want):
+            continue
+        name = (index.get(int(nid)) or ({"name": ""}, None))[0].get("name") or ""
+        words = []
+        if got is None:
+            words.append("not in this scene")
+        else:
+            gm, wm = got.get("m") or [], want.get("m") or []
+            if gm and wm and len(gm[0]) == 6 and len(wm[0]) == 6:
+                dx, dy = gm[0][4] - wm[0][4], gm[0][5] - wm[0][5]
+                if not (_near_px(gm[0][4], wm[0][4]) and _near_px(gm[0][5], wm[0][5])):
+                    words.append("off by %+.1f,%+.1f px" % (dx, dy))
+                ws = (wm[0][0] ** 2 + wm[0][1] ** 2) ** 0.5
+                gs = (gm[0][0] ** 2 + gm[0][1] ** 2) ** 0.5
+                if ws and not _near(gs, ws):
+                    words.append("%d %% of the size" % round(100.0 * gs / ws))
+            elif len(gm) != len(wm):
+                words.append("other movement")
+            if got.get("h") != want.get("h") and "h" in want:
+                words.append("hidden" if got.get("h") else "shown")
+            if want.get("r") is not None and (got.get("r") is None or len(got["r"]) != len(
+                    want["r"]) or not all(_near(x, y) for x, y in zip(got["r"], want["r"]))):
+                words.append("another text box")
+            if "c" in want and "c" in got and got["c"] != want["c"]:
+                words.append("another color")
+        out.append({"node": int(nid), "name": name,
+                    "what": ", ".join(words) or "looks otherwise"})
+    return out
+
+
+def _placed_fix(nid, got, want):
+    """PAD-1320 (DragonRR, round 2): a move and a resize that take node *nid* from the place
+    the scene shows it in (*got*, a fingerprint) to the one a file's edits leave it in
+    (*want*), or None when its look differs otherwise (another text box, colour, hidden) or a
+    turn or a skew would be needed."""
+    if got is None or want is None:
+        return None
+    rest = {k: v for k, v in want.items() if k != "m"}
+    if not _close(dict(got, m=want.get("m") or []), dict(rest, m=want.get("m") or [])):
+        return None
+    ident = [[1, 0, 0, 1, 0, 0]]
+    gm, wm = got.get("m") or ident, want.get("m") or ident
+    if len(gm) != len(wm):
+        gm = gm * len(wm) if len(gm) == 1 else gm
+        if len(gm) != len(wm):
+            return None
+    a, b, c, d = gm[0][:4]
+    det = a * d - b * c
+    if abs(det) < 1e-9:
+        return None
+    # the local scale that takes the first keyframe's linear part to the wanted one
+    wa, wb, wc, wd = wm[0][:4]
+    la, lb = (d * wa - c * wb) / det, (-b * wa + a * wb) / det
+    lc, ld = (d * wc - c * wd) / det, (-b * wc + a * wd) / det
+    if abs(lb) > 1e-4 or abs(lc) > 1e-4 or la <= 0 or ld <= 0:
+        return None
+    s, sy = round(la, 6), round(ld, 6)
+    scaled = abs(s - 1.0) > 1e-6 or abs(sy - 1.0) > 1e-6
+    # the local offset of the first keyframe's wanted place from its own
+    ex, ey = wm[0][4] - gm[0][4], wm[0][5] - gm[0][5]
+    ltx, lty = (d * ex - c * ey) / det, (-b * ex + a * ey) / det
+
+    def scale(px, py):
+        op = {"op": "scale", "node": nid, "px": round(px, 3), "py": round(py, 3), "s": s}
+        if abs(sy - s) > 1e-6:
+            op["sy"] = sy
+        return op
+
+    def then_move(ops):
+        m0 = tuple(gm[0])
+        for op in ops:
+            m0 = _scaled(m0, op["s"], op["px"], op["py"], op.get("sy"))
+        dx, dy = round(wm[0][4] - m0[4], 3), round(wm[0][5] - m0[5], 3)
+        return ops + ([{"op": "move", "node": nid, "dx": dx, "dy": dy}] if dx or dy else [])
+
+    tries = []
+    if scaled and abs(1.0 - s) > 1e-6 and abs(1.0 - sy) > 1e-6:
+        # about the node's own point, as the Scenes window resizes it
+        tries.append(then_move([scale(ltx / (1.0 - s), lty / (1.0 - sy))]))
+    tries.append(then_move([scale(0.0, 0.0)] if scaled else []))
+    for ops in tries:
+        if all(_near_affine([_r(v) for v in _ops_on(g, ops)], w) for g, w in zip(gm, wm)):
+            return ops
+    return None
+
+
+def _ops_on(m6, ops):
+    """Affine *m6* with :func:`_placed_fix`'s moves and resizes applied."""
+    m = tuple(m6)
+    for op in ops:
+        m = (_scaled(m, op["s"], op["px"], op["py"], op.get("sy")) if op["op"] == "scale"
+             else _moved(m, op["dx"], op["dy"]))
+    return m
+
+
+def rebased(man, ops, states):
+    """PAD-1320 (DragonRR, round 2): *ops* (a loaded file's, with its *states*) as edits to the
+    scene *man* that already shows a version of them, or None.
+
+    A card built with a file, whose file was then changed (his map dragged on: the drag folds
+    into the edit it follows, so the file still has 136), shows no run of the file's edits
+    from its first: :func:`shown_count` found none, and all 136 went on a second time, doubled
+    in place and size.  Here each node is looked at on its own: the edits of it the scene
+    already shows are left out; one it shows in another place or size than any of the file's
+    steps gets the move and resize that take it to where the file's last step leaves it.  The
+    scene must show at least one node as the file's edits changed it (else it is a scene of
+    another card, PAD-552); a node of the file's that this scene does not have, or one of an
+    add, leaves it to that."""
+    ops = [dict(op) for op in ops or ()]
+    st = _states_for(states, ops)
+    if man is None or st is None or len(st["ops"]) != len(ops):
+        return None
+    if not ops or not all(_stock_node(op) for op in ops):
+        return None
+    base = _Base.of_manifest(man)
+    kinds = _kinds(ops)
+    steps = {}
+    for i, op in enumerate(ops):
+        steps.setdefault(op["node"], []).append(i)
+    keep, extra, built, fits = set(), {}, 0, {}
+    for nid, idx in steps.items():
+        if base.fp(nid) is None:
+            return None
+        looks = [st["before"].get(str(nid))] + [st["after"][i] for i in idx]
+        j = next((j for j in range(len(looks) - 1, -1, -1)
+                  if looks[j] is not None and _close(
+                      _fp_for(_seen(base, nid, st, looks[j]), kinds[nid]), looks[j])), None)
+        fits[nid] = (_fit_of(base, nid, st, looks[j]) if j is not None
+                     else _fit_of(base, nid, st, near=looks[::-1]))
+        got = _fp_for(_seen(base, nid, dict(st, fits=fits)), kinds[nid])
+        if j is not None:
+            keep.update(idx[j:])
+            if j and not _close(looks[j], looks[0]):
+                built += 1
+            continue
+        fix = (_placed_fix(nid, got, looks[-1])
+               if kinds[nid] <= {"move", "scale"} and looks[-1] is not None else None)
+        if fix is None:
+            keep.update(idx)
+        else:
+            extra[idx[-1]] = fix
+    if not built:
+        return None
+    out = []
+    for i, op in enumerate(ops):
+        fit = fits.get(op.get("node"))
+        if i in keep:
+            out.append(_into_fit(op, fit))
+        out.extend(_into_fit(x, fit) for x in extra.get(i, ()))
+    return None if out == ops else out
+
+
 def _base_info(base, ops):
     """What *base* shows of the nodes *ops* touch, to know the same scene again."""
-    return ({str(op["node"]): base.fp(op["node"]) for op in ops if _stock_node(op)},
+    kinds = _kinds(ops)
+    return ({str(nid): _fp_for(base.fp(nid), ks) for nid, ks in kinds.items()},
             {name: base.count(name) for name in _added_names(ops)})
 
 
@@ -1581,18 +2822,41 @@ def _trees_stamp(assets_dir):
     return [st.st_size, st.st_mtime_ns]
 
 
+#: What a project's finding of the edits its scenes already show was worked out with: one
+#: older (none = before PAD-1320, whose too-tight positions found a built scene showing none
+#: of them; 2 = before :func:`rebased`) is worked out again once
+CARRIED_REV = 3
+
+
 def _look_again(assets_dir):
-    """The project's scenes read (again) off a card since they were last looked at: every
-    edited scene is looked at together (:func:`note_shown`)."""
+    """The project's scenes read (again) off a card since they were last looked at, or looked
+    at by an older :data:`CARRIED_REV`: every edited scene is looked at together
+    (:func:`note_shown`)."""
     stamp = _trees_stamp(assets_dir)
     data = _carried_load(assets_dir)
-    if stamp is None or data.get("trees") == stamp:
+    if stamp is None or (data.get("trees") == stamp and data.get("rev") == CARRIED_REV):
         return
     trees = trees_of(assets_dir)
     edits = load(assets_dir)
-    note_shown(assets_dir, {c: trees[c] for c in edits if c in trees}, edits=edits)
+    found = note_shown(assets_dir, {c: trees[c] for c in edits if c in trees}, edits=edits)
+    # PAD-1320 (round 2): a scene a loaded file's edits went on whole, that already showed a
+    # version of them (a card built with the file before it was changed), gets only what it
+    # lacked: the project heals itself
+    states, healed = _carried_load(assets_dir)["states"], {}
+    for c, k in found.items():
+        st = states.get(c)
+        if k or not st or not starts_elsewhere(trees[c], edits[c], st):
+            continue
+        ops = rebased(trees[c], edits[c], st)
+        if ops:
+            edits[c] = ops
+            healed[c] = states_of(trees[c], ops)
+    if healed:
+        save(assets_dir, edits)
+        note_shown(assets_dir, {c: trees[c] for c in healed}, states=healed, edits=edits)
     data = _carried_load(assets_dir)
     data["trees"] = stamp
+    data["rev"] = CARRIED_REV
     _carried_save(assets_dir, data)
 
 
@@ -1612,10 +2876,11 @@ def to_apply(assets_dir, card, man, ops=None):
     """*card*'s edits (or *ops*) less the leading ones its preview manifest *man* already
     shows.  The first look at the project's scenes, or at scenes read again off a card, finds
     them; a scene first edited after that is looked at on its own."""
+    if man is not None:
+        _look_again(assets_dir)        # PAD-1320: it can change the list (:func:`rebased`)
     ops = ops_for(assets_dir, card) if ops is None else list(ops)
     if not ops or man is None:
         return ops
-    _look_again(assets_dir)
     rec = _carried_load(assets_dir)["carried"].get(card)
     if rec is None or not _same_base(_Base.of_manifest(man), rec):
         note_shown(assets_dir, {card: man}, edits={card: ops})
@@ -1630,6 +2895,7 @@ def to_apply_on_card(assets_dir, card, scene, ops):
     ops = list(ops or ())
     if not ops or not assets_dir:
         return ops
+    _look_again(assets_dir)            # PAD-1320: a finding of an older rev is redone first
     data = _carried_load(assets_dir)
     base = _Base.of_tree(scene)
     rec = data["carried"].get(card)

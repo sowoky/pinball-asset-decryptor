@@ -11,6 +11,8 @@ version        1.18
 # ---- functions ----
 site tick             0x0015cd00 0xe92d4038 0xe3a00037
 site sound_lookup     0x003c5948 0xe92d4038 0xe1a05000
+# PAD-494/724 music modes: get_asset_descriptor, WRAPPED (sounds.cfg)
+site sound_resolve    0x0032beb4 0xe92d41f0 0xe1a05820
 site score_add        0x002e7fa8 0xe3041aa2 0xe3401063
 site callout          0x0032d068 0xe92d4010 0xe306ed18
 site callout_nth      0x0032d21c 0xe92d4010 0xe306ed18
@@ -50,6 +52,13 @@ site surface_find     0x0049d350 0xe92d4070 0xe24dd008
 site surface_set_video 0x00494a34 0xe5d030d4 0xe92d4ff0
 site surface_play     0x00492840 0xe5d030d4 0xe92d43f0
 site surface_stop     0x00491ff0 0xe5d030d4 0xe92d40f0
+# PAD-725: the surface's own seek, length and position (PAD-530's, from Bond 1.06): a mode's clip the game's own
+# clip took the surface from comes back where it would be by then. Placed by the James Bond LE 1.06 recipe at
+# its distances from surface_play (-0x36c / -0x6b4 / -0x510), each proven by its call: the player function it
+# calls calls gst_element_seek / query_duration / query_position.
+site surface_seek     0x004924d4 0xe92d43f0 0xe1a07003
+site surface_duration 0x0049218c 0xe5d030d4 0xe92d40f0
+site surface_position 0x00492330 0xe5d030d4 0xe92d40f0
 site agent_header     0x004ea0a0 0xe92d40f8 0xe2505000
 site agent_begin      0x004f4a0c 0xe590c004 0xe1a00001
 site balls_in_play    0x00220e6c 0xe92d4010 0xe3054524
@@ -492,3 +501,105 @@ text shake_tap              0:100:0
 text shake_short            0:200:0
 text shake_medium           0:334:0
 text shake_rumble           0:2000:1
+
+# ---- PAD-473: the game's own mini-wizards (MODE_SDK.md "The game's own mini-wizards on the other titles"): each one's
+# mode object, started by its own START (v[8]) as the game's rules start it and asked its ACTIVE (v[15]);
+# the names and what earns each are the game's rulesheet's, the objects this build's own (stock_scan_cpp).
+data  wizard_obj_1    0x0060e5c4   # cmode_two_minutes_to_midnight
+text  wizard_name_1   2 Minutes to Midnight
+text  wizard_film_1   all five Eddie battles
+data  wizard_obj_2    0x0060ea18   # cmode_number_of_the_beast
+text  wizard_name_2   Number of the Beast
+text  wizard_film_2   all four Eddie cards
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+value challenge_on_flag   18
+site  challenge_balls     0x001efa0c 0xe92d4030 0xe1a05000
+site  challenge_extra_ball 0x001deed0 0xe3013b8c 0xe3403063
+site  challenge_menu      0x000a41b8 0xe1a07000 0xe3170080
+site  challenge_menu_pick 0x000a4384 0xe2433001 0xe3530006
+value challenge_menu_list_at   240
+value challenge_menu_count_at  28
+value challenge_menu_cap       8
+value challenge_menu_entry     12
+value challenge_menu_kind      3
+value challenge_menu_slot      -1
+value challenge_menu_caption   1921
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x00222fb8 0xe3042aa2 0xe3402063
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x0021ee28 0xe92d4010 0xe3054524
+value ball_launch_flag       12
+value ball_launch_wait_flag  13
+
+# ---- PAD-663: the game's champions for a mode's challenge game, read off this build's own code (portchallenge.py) ----
+# PAD-640: the game's end-of-game high scores (a mode's challenge game keeps the mode's own)
+site  challenge_scores       0x0024e6e0 0xe92d4ff0 0xe24dd0bc
+site  challenge_score_entry  0x0024dc14 0xe1a03000 0xe30e088c
+# PAD-663: its question to the bus before it files a player under a category's entry ({player, category +2, entry +4}): in a mode's challenge game only the mode's record says yes
+site  challenge_scores_gate  0x0024e94c 0xeb018339 0xe3500000
+value challenge_scores_gate_id       91
+value challenge_scores_gate_cat_at   2
+value challenge_scores_gate_entry_at 4
+# PAD-663: the category table (36 bytes each; +28 the entry list a category's insert shifts) and its count
+data  challenge_scores_table 0x005dab70
+data  challenge_scores_count 0x0050e90c
+# PAD-663: HIGHEST SCORES, whose first entry a mode's challenge game goes in as the mode's own record
+value challenge_scores_cat   1
+# PAD-663: the champion page function(s) (each called per category; the attract mode's is the one it calls): a mode's challenge champion is shown on it after the lowest category the attract mode shows
+site  challenge_pages_0     0x000434c0 0xe30e388c 0xe340305b
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x0024e6e0 0xe92d4ff0 0xe24dd0bc
+
+# PAD-710: the game's own mode framework (mode_framework.py, from this build's program): what one of its
+# modes writes as it starts and stops, so a mode of ours in one's place counts as it
+site  mode_player            0x001ef9dc 0xe3043e58 0xe340305c
+value mode_slot_stop         12
+value mode_stopped_at        0x17
+value mode_starts_at         0x28
+site  mode_started           0x0007cbc0 0xe351000e 0xe92d4008
+data  mode_manager           0x0060db5c
+value mode_id_at             4
+
+# PAD-782: the attract mode's page table (portattract.py); an owner's attract items play between its pages
+data  attract_table       0x005bf9bc
+value attract_entry_size  12
+value attract_page_at     4
+value attract_count       31
+site  attract_sleep       0x0011e3c0 0xe3003d80 0xe3403061
+# PAD-782: the scene show an attract item's page puts the video bank's scene on the glass with
+site  attract_show        0x001a7638 0xe92d4070 0xe3004d84
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x004c7f0c 0xe5d13000 0xe3530008
+site coil_off              0x004c3ff8 0xe3510008 0xe1a02001
+data sw_struct             0x00684570
+
+# ---- PAD-1017: co-op play (portcoop.py, read off this build's program) ----
+site  coop_player_change 0x001efb3c 0xe92d41f0 0xe24dd008
+site  coop_add_player    0x001ef97c 0xe92d4038 0xe3a00051
+data  coop_player        0x005c4e58
+data  coop_players       0x00632520
+site  coop_first_ball    0x000f8a4c 0xeb03dc07 0xe1a04000
+site  coop_icon_draw         0x0029a1d8 0xebfffdf3 0xe1560004
+
+# ---- PAD-1202: co-op play - the ball start's "player N, you're up" call's read of the player up (portcoop.py) ----
+site  coop_up_call           0x0002ffe0 0xeb06fe7d 0xe3a01064
+
+# ---- PAD-1017: more for co-op play (the message table and its BALL line; the end-of-game high scores) ----
+data  message_table          0x005de5f0
+value coop_ball_msg          1255
+
+# ---- PAD-1316: co-op play - the game start's adds of the Insider lobby's players, made while ball 1 waits (portcoop.py) ----
+site  coop_start_game        0x000f8c6c 0xe92d47f0 0xe30f4861
+site  coop_lobby_add         0x000f8d94 0xebfffea3 0xe2506000
+
+# ---- PAD-1028: co-op awards - the game's audit add (portcoop.py, read off this build's program) ----
+site  audit_add              0x001ea304 0xe92d43f0 0xe2505000

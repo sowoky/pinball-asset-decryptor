@@ -4,7 +4,7 @@
 // page of its numbers, the shots that count as its own and its rewrite in C), a five-page
 // editor, a code mode's Code/Assets panes, every game mode's numbers in one dialog too,
 // the video cutter, a pinned Try it footer, and the progress of reading a card's game
-// build the first time the tab sees it. Everything that makes a mode is under New; the
+// build the first time the tab sees it. Everything that makes a mode is under New mode; the
 // page head carries no buttons, and every tool sits on the page of the mode it changes.
 //
 // Python (tabs/modes.py) owns every decision; this page renders modes.* and edits the
@@ -13,8 +13,16 @@
 import { html, useEffect, useRef, useState, Button, Field, Select, Check, Radio, Chip, Note, Empty,
          InfoBadge, Icon, Progress, tip, cx, call, setField, openMenu, mediaUrl, fmtClock } from "../core/ui.js";
 import { useNs } from "../core/store.js";
-import { StockDialog, FilmDialog, NewCodeDialog, ClipDialog, PlayButton } from "./modes_dialogs.js";
-import { BlocksEditor, BlocksCode, BLOCKS_WORDS } from "./modes_blocks.js";
+import { StockDialog, FilmDialog, ClipDialog, PlayButton, CoopAwardsDialog, CoopCharsDialog,
+         HandicapLevelsDialog, RecordsDialog } from "./modes_dialogs.js";
+import { NewModeWizard, KindTiles } from "./modes_new.js";
+import { BlocksEditor, BlocksCode, ProgramBar, useModeProgram } from "./modes_blocks.js";
+import { PlayfieldView } from "./modes_playfield.js";
+import { LightShowsView } from "./modes_lightshows.js";
+import { RuleCardsView, StoryView, ShotTableView, TimelineView, NodeGraphView } from "./modes_rules.js";
+import { ScriptView, CodeView, CEditor } from "./modes_script.js";
+import { RulesSheetDialog } from "./modes_sheet.js";
+import { JjpModes } from "./modes_jjp.js";        // PAD-1350: the tab on a JJP game
 
 export const css = true;
 
@@ -23,6 +31,7 @@ const T = {
   name: "What the mode is called. It is the title on its screen and clip unless you give those their own.",
   startShot: "The shot that starts the mode.",
   itsShot: "The mode starts when its shot is made that many times in one ball.",
+  startOr: "Another shot whose hits count toward starting the mode, together with its shot's: pick the three pop bumpers and 120 starts it on the 120th hit of any of them.",
   alsoShot: "Another shot the player has to make as well, that many times in the same ball, before the mode starts. The shots can be made in any order.",
   sequence: "The mode starts when the player makes these shots in this order, in one ball: a combo of your own. A shot of the sequence made out of turn sends the player back to the start (it counts as the first shot again if it is the first). Pick a shot in the next list to add one; up to 8.",
   seqReset: "On: every other shot of the game made out of turn sends the player back to the start too, so only the sequence, cleanly, starts the mode. Off: other shots do not matter, only the order of these.",
@@ -32,9 +41,9 @@ const T = {
   clock: "The mode keeps running into the next ball until its time runs out.",
   endEvent: "The mode ends when the game does this, when its time runs out, or when the ball drains, whichever comes first.",
   award: "Points for the first scoring shot. The second pays twice this, the third three times, and so on. The game's own scoring is used, so its playfield multiplier applies. Advanced can change this: Award ladder Fixed pays every shot once, and Points per shot gives a shot its own points.",
-  raw: "Replace the colour sweep with light commands of your own, in the game's own light language. Leave both empty to use the colour above.",
+  raw: "Replace the color sweep with light commands of your own, in the game's own light language. Leave both empty to use the color above.",
   screenTitle: "The title on the panel. Empty uses the mode's name. Under it, the mode writes what each shot paid, and the total at the end.",
-  clipTitle: "The title card's words, over the panel colour with a sweep in the title colour. Empty uses the mode's name.",
+  clipTitle: "The title card's words, over the panel color with a sweep in the title color. Empty uses the mode's name.",
   cooldown: "0 = no wait. The wait runs from the moment the mode ends, and carries on through the end of a ball.",
   starts: "Counted for each player. Once a ball starts again on the player's next ball; once a game, and up to N times, start again in the next game.",
   stack: "On: the mode starts whenever its shot is made, even during one of the game's own battles or multiballs. Off: it waits until the game's own battle or multiball ends, and the next start shot after that starts it.",
@@ -45,16 +54,19 @@ const T = {
   balls: "How many balls are in play together, 2 to 6. A machine with fewer balls serves what it has.",
   ballSave: "For this many seconds after the balls are served, a drained ball is served back.",
   startSave: "When the mode starts, the game's own ball saver is on for this many seconds: a ball that drains in that time is served back, and the ball does not end. A multiball uses its own ball save instead.",
-  coils: "Holds this mechanism the same way as the magnet: one command at the power the game itself uses for it, for this long (0.1 to 5 seconds), then it is let go. As the mode starts, or on every hit of a shot while it runs. The same limits as the magnet: one hold at a time, 3 seconds between holds, at most 6 a minute, never while the game is using it, and let go when the mode or the ball ends or the game tilts.",
-  shaker: "Shakes the cabinet's shaker motor: as the mode starts, on every hit of a shot while it runs, or as it ends (that one runs out after the mode). A shake is one of the game's own (on Godzilla its jackpot shake, its multiball start...; on the other games the one it plays most of each length) or one of the mode's own at a strength the game itself shakes at (some games have one only), never longer than the game's own longest at that strength (shown beside the time). It goes the way the game shakes, so the operator's Shaker Motor setting always applies: switched off (or no shaker fitted), nothing shakes. The limits are the app's and cannot be changed: one shake at a time, never over one of the game's own, at most 20 shakes and 15 seconds of shaking a minute, stopped when the mode, the ball or the game ends.",
+  coilWait: "The mode's seconds stand still while this holds, and its clock starts when it lets go. Hold the ball at a post as the mode starts (James Bond's right return up post when the mode starts at the Right ramp, as the game's own mini-wizards do) and the start clip plays with the ball held, then the ball is let go and the clock starts. Not when the mode starts as a challenge: that ball starts in the shooter lane, so it does not hold and the clock runs.",
+  coils: "Holds this mechanism the same way as the magnet: one command at the power the game itself uses for it, for this long (0.1 to 5 seconds; a post the game keeps up itself as long as the game's own longest hold there), then it is let go. As the mode starts, or on every hit of a shot while it runs. The same limits as the magnet: one hold at a time, 3 seconds between holds, at most 6 a minute, never while the game is using it, and let go when the mode or the ball ends or the game tilts.",
+  shaker: "Shakes the cabinet's shaker motor: as the mode starts, on every hit of a shot while it runs, or as it ends (that one runs out after the mode). A shake is one of the game's own (on Godzilla its jackpot shake, its multiball start...; on the other games the one it plays most of each length) or one of the mode's own at a strength the game itself shakes at (some games have one only), never longer than the game's own longest at that strength (shown beside the time). It goes the way the game shakes, so the operator's Shaker Motor setting always applies: switched off (or no shaker fitted), nothing shakes. The limits are the app's and cannot be changed: one shake at a time (a longer one takes over, a shorter one is skipped, as in the game), never over one of the game's own, the motor running at most 30 seconds a minute (the game's own shakes count too); it runs out when the mode ends and stops when the ball or the game ends.",
   shield: "While the mode runs, the shield targets face the player: the platform turns 1.5 seconds after the mode starts (once the ball that started it is clear of it) and turns back when the mode ends, the ball drains, or the game ends or tilts. The game's ball search swings the platform when no switch closes for a while; it is turned back after that. The limits are the app's and cannot be changed: never while one of the game's own modes or multiballs runs, 1.5 seconds between moves, at most 12 a minute. It stays turned only while the game's modes cannot start and its own shield feature does not keep counting: that feature turns the platform back about 2 seconds after every move. An operator who switched the shield motor off in the game's settings keeps it where it is.",
+  battle: "The mode takes the place of one of the game's battles on its selection screen: when the player picks that battle (its ramps lit, then the scoop), this mode starts instead, once the screen has closed, and the game's own battle never runs. The game counts the mode as that battle: won when its end shot ends it (with no end shot, when its clock runs out) - Completed on the screen, the city won, the battle's audits - and lost any other way, when the next lit scoop plays the mode again, as the game does with a lost battle. One mode per battle. The screen keeps the battle's picture and name, and the battle's own callout is silent. King of the Monsters, the operator menu and the audits still name the old battle.",
+  building: "Moves the building to one of the game's own floors (the ones the game itself uses; floor 3 is the furthest it ever goes), 1.5 seconds after the mode starts or on every hit of a shot while it runs, at the speed the operator set. When the mode ends, the ball drains, or the game ends or tilts, it goes back to the floor it was on, unless the game has moved it since. The limits are the app's and cannot be changed: never while the building is already moving or the game is using it, 3 seconds between moves, at most 6 a minute. It moves only while the game's modes cannot start and its own building locks do not keep counting. An operator who switched the building off in the game's settings keeps it where it is.",
   scoop: "While the mode runs, a ball that lands in the scoop stays there this long once the game is done with it (its own awards and screens always come first), then the game kicks it out the way it always does, at the kick power the operator set. Your mode never fires the scoop itself. 0.1 to 10 seconds; the ball goes at once when the mode ends or the game tilts.",
   magnet: "While the mode runs, every hit of the shot the magnet sits at (the one that starts the mode too) holds the ball on the magnet for this long, then lets it go. The magnet runs at the power the operator set for it in the game's settings. To keep the coil safe, the app always holds the same limits: 0.1 to 5 seconds a grab, one grab at a time, 3 seconds between grabs, at most 6 a minute, never while the game is using the magnet itself, and it lets go when the mode or the ball ends or the game tilts. A grab it refuses is skipped and the mode carries on.",
   addBall: "A shot that puts one more ball in play while the multiball runs, up to that many times. It still scores if it is also a scoring shot.",
   mbOn: "When the game serves the balls. On a shot (the Action button, say), the mode's clock is the time the player has to hit it: time up ends the mode with no multiball. Once the balls come, the clock stops and one ball left ends it. Light the shots that score lights that shot too.",
-  wizard: "Make this mode the game's own mini-wizard: when it starts (on its shot, an event such as a film done, or shots in order), the player gets the game's mode itself, with its own shots, lights, screens, sounds and award. Lit, it waits for the game's own start shot, as when the game lights one; started, it begins at once, or the moment the game would start one (when the film's last part came from one of its own modes, once that mode is done), and if the ball ends first it stays lit for the start shot. Until it starts it is the only one lit, so the game's own choosing cannot swap it for another. The game no longer lights this one by itself (its own way: a henchman, villain, Q Branch or gadget in all six films), so only this mode hands it out; it still lights the ones no mode hands out. A mini-wizard the player has already played this game plays again.",
-  gameShows: "One of the game's own playfield light shows as the mode starts, and another as it ends: flashy ones suit a start, subdued ones an end. Each plays for its own few seconds, one at a time (a new one takes the place of one still playing). The one at the end is skipped when the mode ends because the ball drained: the game stops its own shows then.",
-  lit: "While the mode runs, the insert in front of every shot that scores (and every shot with its own points) shows this colour and pattern, over the game's own light shows; every other insert keeps doing what the game wants. They go back to the game the moment the mode ends. Blink and Pulse repeat about twice a second and every 1.6 s; Chase lights one of them at a time.",
+  wizard: "Make this mode the game's own mini-wizard: when it starts (on its shot, an event such as a film done, or shots in order), the player gets the game's mode itself, with its own shots, lights, screens, sounds and award. Lit (where the game lights that one for a start shot), it waits for the game's own start shot, as when the game lights one; started, it begins at once, or the moment none of the game's own modes is in its way, and if the ball ends first it is lit for the start shot where the game has one. On James Bond 007 it is the only one lit until it starts, so the game's own choosing cannot swap it for another, and the game no longer lights it by itself (its own way: a henchman, villain, Q Branch or gadget in all six films), so only this mode hands it out. On the other games the game's own rules still light and start it too. A mini-wizard the player has already played this game plays again.",
+  gameShows: "One of the game's own playfield light shows as the mode starts, another as it ends, and one on each hit of a shot that scores: flashy ones suit a start, subdued ones an end, accents a hit (one on a hit plays in place of the shot's white flash). Each plays for its own few seconds, one at a time (a new one takes the place of one still playing). The one at the end is skipped when the mode ends because the ball drained: the game stops its own shows then.",
+  lit: "While the mode runs, the insert in front of every shot that scores (and every shot with its own points) shows this color and pattern, over the game's own light shows; every other insert keeps doing what the game wants. They go back to the game the moment the mode ends. Blink and Pulse repeat about twice a second and every 1.6 s; Chase lights one of them at a time.",
   priority: "Kept for modes made before it changed: it no longer holds the game's displays back. A mode never makes the game's screens wait (holding one kept Godzilla's Magna-Grab magnet on until the machine was switched off), so the game's awards, starts and jackpots always come through, and the mode's screen is back when they end. 0 = none.",
   film: "Cut this mode's clip, its sound or its screen's picture from a video file of your own (a film, an episode, anything): pick the video, a start time and a length (up to 30 seconds), and whether to keep its letterbox or fill the frame. The mode keeps only the cut (clip.mp4, end.wav, art.png), never the video.",
   rising: "The Nth scoring shot pays N times its points: 1x, 2x, 3x...",
@@ -70,8 +82,11 @@ const T = {
   startNow: "Start the mode open on the left in the running game, without its starting shots. A game must be in play.",
   endNow: "End whichever of this project's modes is running.",
   codeMode: "A mode written in C, for what the form cannot do: a copy of the Mode SDK's template in this project's modes folder. Try it builds it in with the others.",
-  cutFilms: "Cut this example's clip, picture, music and calls from your own copy of the films. Pick the folder that holds them; the app keeps only the cuts.",
-  countsAs: "A shot of your choosing counts as one of this mode's own while it runs: a Left ramp can reach the battle vs Ebirah as a left spin (its points, and the count down by one). One ramp is one spin, so a ramp standing in for a spinner needs the spinner's count of hits. Saved with this project and put on the card by Write with the modes; with no rows the mode plays as it always did.",
+  challengeLaunch: "The challenge's ball waits in the shooter lane as the mode starts. The game launches it for the player once the mode's start clip is over (at once with no start clip), a set number of seconds after the mode starts, or not at all: the player launches it. Otherwise the ball starts as any other ball does: on James Bond, the left flipper button held at the launch opens the loop.",
+  done: "The mode starts once the player has completed this many of the game's own modes in one game, counting only the ones ticked. A mode counts when the game itself records it completed (as its audits do), once a game, whichever ball it was. When the count is reached and something is in the way (another mode of yours, or one of the game's modes this one waits for), it starts as soon as nothing is, that game. A mode of yours running in a game mode's place counts as that mode when it ends completed. Use it for a mini-wizard after a few of the game's modes and a bigger wizard after all of them: two modes, each with its own count.",
+  place: "The mode runs in the place of one of the game's own modes: when the game starts that mode (the player earned it, as in any game), this mode starts instead and the game's own never runs. Where the app knows the game's mode framework, the game counts the mode as its own: the mode's start counts as the game's mode starting (its start count, its STARTED audit), and when the mode ends, its end shot ending it (or, with no end shot, its clock running out) counts as the game's mode completed - its COMPLETED audit, its wins, and the wizards and unlocks the game opens for it - and anything else counts as not completed. One mode per game mode.",
+  challenge: "The mode is played in the game's own Player Challenge mode: a one-ball game, picked on the game's start menu (both flipper buttons held in attract) as a game starts, or every game when the service menu's Default Game Mode is set to a challenge. Pick one of the game's own challenges and this mode starts as the ball starts in its place, the game's own never running, and the start menu shows the mode's name there; or pick A new challenge of its own and the start menu lists the mode after the game's own entries. The game ends when the ball ends. A quick way to play a mode that is hard to reach in a normal game. One mode per challenge.",
+  countsAs: "A shot of your choosing counts as one of this mode's own while it runs: a Left ramp can reach the battle vs Ebirah as a left spin (its points, and the count down by one). One ramp is one spin, so a ramp standing in for a spinner needs the spinner's count of hits. \"Instead of\" moves the mode's shot: yours counts, and the mode's own no longer does while it is lit (its insert stays dark, yours blinks): the battle vs Gigan can take the Big loop instead of the Left ramp. Saved with this project and put on the card by Write with the modes; with no rows the mode plays as it always did.",
   rewrite: "This mode is compiled into the game. A rewrite is a mode in C of this project whose code runs INSTEAD of this mode's shot handling: which shots, in what order and what they pay is yours, while its start, clock, screens and ending stay the game's own. It starts from the SDK's example for the mode; delete it and the mode plays as it always did.",
   leaveOut: "Build this Try it without the modes' own sounds: the game's own calls play, and the sound bank is not grown (the slow part of a build). A card Written from the project still carries them.",
   pointsFor: (n) => `What ${n} pays instead of the first shot's points. Blank = the usual points. A shot with its own points scores even when it is not ticked under Shots that score. A minus number takes that many points away each time ${n} is hit while the mode runs: a wrong shot costs the player, never below 0.`,
@@ -79,6 +94,10 @@ const T = {
 };
 
 // PAD-323: the Show page's way into the Scenes editor with the mode's screen in it
+// PAD-707: a new monster on the battle selection screen, in one battle's place (modes.py MORE_PREFIX)
+const MORE_PREFIX = "A new monster, in ";
+const MORE_FORM_NOTE = "This mode is a new monster on the battle selection screen: the card build adds its tile and portrait to the game's screen beside the seven battles, and picking it there starts this mode. It stands in the place of the battle picked here and counts as that battle, won or lost. Its picture is monster.png in the mode's folder (else its screen's picture, else a tile lettered with its name).";
+
 const LAYOUT_TIP = "Opens the Scenes editor on the game's HUD with this screen in it: drag it, size it, move its words on their own, or send it to the back to put it under the HUD's own pictures. Saved into the mode as you go; without it the app places the screen itself.";
 const PAGES = [["mode", "Mode"], ["show", "Show"], ["lights", "Lights"], ["sounds", "Sounds"], ["scoring", "Scoring"]];
 const PATTERNS = ["Solid", "Blink", "Pulse", "Chase"];
@@ -97,16 +116,19 @@ function useStored(key, init) {
 }
 
 // ---------------------------------------------------------------- small pieces
-function Reason({ text }) {
+// A reason a part is off: yellow while the app may still find what it needs, grey (limit) when it is the
+// game's own limit and nothing is left to find (PAD-479).
+function Reason({ text, limit }) {
   if (!text) return null;
-  return html`<div class="modes-reason small">${text}</div>`;
+  return html`<div class=${cx("modes-reason small", limit && "limit")}>${text}</div>`;
 }
 
-function Sec({ title, reason, children, extra, tipText }) {
+function Sec({ title, reason, limit, note, children, extra, tipText }) {
   return html`<section class="modes-sec">
     <div class="modes-sec-hd"><span class="lbl" ...${tip(tipText)}>${title}</span><span class="grow"></span>${extra}</div>
     ${children}
-    <${Reason} text=${reason} />
+    <${Reason} text=${reason} limit=${limit} />
+    <${Reason} text=${note} limit />
   </section>`;
 }
 
@@ -190,47 +212,8 @@ function ReadingPanel({ r }) {
 }
 
 // ------------------------------------------------------------------ the list
-// New ▾: everything that makes a mode. A blank mode, one from an example, a mode made of
-// blocks (PAD-232), and under
-// Advanced a mode written in C (a blank one from the SDK's template, or one of the C
-// examples) with the Mode SDK's document. With no project, Mode in C's Blank gives Tk's
-// own sentence.
-function exampleItems(s) {
-  return (s.examples || []).filter((x) => !x.code).map((x) => ({ label: x.name, disabled: x.disabled,
-    title: x.name === "KAIJU RUSH" ? "The example that has run on a real machine." : "",
-    onClick: () => call("modes.example", x.name) }));
-}
-
-function codeItems(s, onNewCode) {
-  const code = (s.examples || []).filter((x) => x.code);
-  return [
-    { label: "Blank mode in C…", icon: "edit", title: s.project && s.no_port ? s.no_port : T.codeMode,
-      disabled: !!(s.project && s.no_port),
-      onClick: () => (s.project ? onNewCode() : call("modes.new_code_mode", "")) },
-    ...(code.length ? [{ sep: true }, { header: "Examples in C" },
-      ...code.map((x) => ({ label: x.name, onClick: () => call("modes.code_example", x.name) }))] : []),
-    { sep: true },
-    { label: "Open MODE_SDK.md", icon: "file", title: s.sdk_doc, onClick: () => call("modes.open_sdk_doc") },
-  ];
-}
-
-function newMenuItems(s, onNewCode, onNewBlocks) {
-  const ex = exampleItems(s);
-  return [
-    { label: "Blank mode", icon: "plus", disabled: !s.new_ok, onClick: () => call("modes.new"),
-      title: s.new_ok ? "" : (s.cap_text || s.project_label) },
-    { label: "From an example", icon: "list", disabled: !s.ex_ok || !ex.length, submenu: ex,
-      title: s.ex_ok ? "" : s.ex_tip },
-    { label: "Mode from blocks…", icon: "blocks", disabled: !!(s.project && s.no_port),
-      title: s.project && s.no_port ? s.no_port : BLOCKS_WORDS.newTip,
-      onClick: () => (s.project ? onNewBlocks() : call("modes.new_blocks_mode", "")) },
-    { sep: true },
-    { header: "Advanced" },
-    { label: "Mode in C", icon: "edit", submenu: codeItems(s, onNewCode) },
-    { sep: true },
-    { label: "What a mode can and can't do", icon: "help", title: "Opens the Tips for this tab", onClick: () => call("modes.open_limits_doc") },
-  ];
-}
+// New opens the new-mode wizard (modes_new.js, PAD-652): Blocks, C or the form, then that
+// way's own step. It used to be a drop-down of every way in.
 
 // One row of the list: the person's modes (form, and code with a C pill) and the game's own
 // modes (kind "game", with a count of staged changes).
@@ -240,7 +223,7 @@ function ListRow({ r, i, selIdx, isSel }) {
     : r.kind === "game" ? "One of the game's own modes: its timers and awards" : "modes/" + r.slug;
   return html`<button type="button" role="option" key=${r.kind + r.slug}
       aria-selected=${isSel(r)} tabindex=${i === Math.max(0, selIdx) ? 0 : -1}
-      class=${cx("li", isSel(r) && "sel", r.kind === "game" && "game")}
+      class=${cx("li", isSel(r) && "sel", r.kind === "game" && "game", r.bare && "bare")}
       onClick=${() => call("modes.select", r.slug, r.kind)}
       ...${tip(where + (r.chip_tip ? "\n" + r.chip_tip : ""))}>
       <span class="ellip">${r.name}</span>
@@ -256,7 +239,7 @@ function ListRow({ r, i, selIdx, isSel }) {
 // GAME_FOLD_AT of them (a person's choice to open or fold them is kept in this browser).
 const GAME_FOLD_AT = 6;
 
-function ModeList({ s, onNewCode, onNewBlocks, onAllNumbers }) {
+function ModeList({ s, onNew, onAllNumbers, onSheet, onCoopAwards, onCoopChars, onHandLevels, onRecords }) {
   const [fold, setFold] = useStored("pad.modes.game_fold2", "auto");
   const sel = s.sel || {};
   const allGame = s.game_rows || [];
@@ -285,15 +268,14 @@ function ModeList({ s, onNewCode, onNewBlocks, onAllNumbers }) {
   };
   return html`<section class="card modes-list">
     <div class="hd"><span class="h2">Modes</span><span class="sp"></span>
-      <${Button} kind="primary" size="sm" iconRight="down" onClick=${(e) => openMenu(e.currentTarget, newMenuItems(s, onNewCode, onNewBlocks))}>New<//></div>
+      <${Button} kind="primary" size="sm" icon="plus" title="Make a new mode: from blocks, in C, or with the form" onClick=${() => onNew("")}>New mode<//></div>
     <div class="bd modes-list-bd">
       ${rows.length || allGame.length ? html`<div class="list" role="listbox" aria-label="Modes in this project" onKeyDown=${onKey} ref=${listRef}>
         ${allGame.length ? html`<div class="modes-list-grp" role="presentation">Yours</div>` : null}
         ${own.map((r, i) => html`<${ListRow} key=${r.kind + r.slug} r=${r} i=${i} selIdx=${selIdx} isSel=${isSel} />`)}
         ${allGame.length && !own.length && s.project ? html`<div class="small muted modes-list-empty">No modes of your own yet.</div>` : null}
         ${allGame.length ? html`<button type="button" class="modes-list-grp" aria-expanded=${!folded}
-            title=${(folded ? "Show the game's own modes: their timers and awards" : "Fold the game's own modes away")
-              + (s.game_hidden ? `\n${s.game_hidden} more have nothing to change here (the game's own timers and awards dialog lists every number).` : "")}
+            title=${folded ? "Show the game's own modes: their timers and awards" : "Fold the game's own modes away"}
             onClick=${() => setFold(folded ? "open" : "closed")}>
             <${Icon} name=${folded ? "right" : "down"} /> The game's own (${allGame.length})</button>` : null}
         ${game.map((r, i) => html`<${ListRow} key=${"g" + r.slug} r=${r} i=${i + own.length} selIdx=${selIdx} isSel=${isSel} />`)}
@@ -303,10 +285,28 @@ function ModeList({ s, onNewCode, onNewBlocks, onAllNumbers }) {
       </div>` : s.project ? html`<div class="small muted modes-list-empty">No modes yet.</div>` : null}
     </div>
     <div class="ft modes-list-ft">
+      ${s.coop_shown ? html`<div class="stack modes-coop">
+        <${Check} checked=${s.coop_on} disabled=${s.coop_locked} wrap label="Co-op play" title=${s.coop_tip}
+          onChange=${(v) => call("modes.set_coop", v)} />
+        ${s.coop_on ? html`<${Check} checked=${s.coop_menu} wrap label="Switch it on and off in the service menu"
+          title=${s.coop_menu_tip} onChange=${(v) => call("modes.set_coop_menu", v)} />` : null}
+        ${s.coop_note ? html`<span class=${cx("small", s.coop_note_kind === "err" ? "err-ink" : "muted")}>${s.coop_note}</span>` : null}
+        ${s.coop_awards_ok ? html`<div class="row modes-coop-btns">
+          <${Button} size="sm" icon="star" onClick=${onCoopAwards} title=${s.coop_awards_tip}>Awards…<//>
+          <${Button} size="sm" icon="list" onClick=${onCoopChars} title=${s.coop_chars_tip}>Characters…<//>
+          <${Button} size="sm" icon="save" onClick=${() => call("modes.coop_settings_save")} title=${s.coop_save_tip}>Save…<//>
+          <${Button} size="sm" icon="folder" onClick=${() => call("modes.coop_settings_load")} title=${s.coop_load_tip}>Load…<//>
+        </div>` : null}
+      </div>` : null}
       ${s.cap_text ? html`<span class="small muted">${s.cap_text}</span>` : null}
+      ${s.recs_shown ? html`<div class="row modes-rec-btn">
+        <${Button} size="sm" icon="star" onClick=${onRecords}
+          title="Records of your own on the game's high-score table: points or shots during one of the game's modes, one of yours, or the whole game. A player who beats one enters their initials for it after the game.">High scores…<//>
+        ${s.recs_n ? html`<span class="small dim">${s.recs_n} record${s.recs_n === 1 ? "" : "s"}</span>` : null}
+      </div>` : null}
       <div class="row modes-list-acts">
         <${Button} size="sm" disabled=${!s.dup_ok} onClick=${() => call("modes.duplicate")}>Duplicate<//>
-        <${Button} size="sm" disabled=${!s.copy_ok} onClick=${() => call("modes.copy_to")}
+        <${Button} drop size="sm" disabled=${!s.copy_ok} onClick=${() => call("modes.copy_to")}
           title="Copy every mode here into another card's project: pick that project's folder. Each is matched to that card's shots by name, and the app says which need a look there.">Copy to…<//>
         ${s.port_shown ? html`<${Button} size="sm" iconRight="down" disabled=${!s.port_ok}
           title=${`Every mode here, made to run on this game's ${s.port_word || "other model"} in one go: shots matched by their switches, mechanisms that model does not have left out. Each mode keeps its version for this model, and porting again replaces the earlier port and keeps what you set there.`}
@@ -338,6 +338,8 @@ function ModeList({ s, onNewCode, onNewBlocks, onAllNumbers }) {
               title: "The modes on a card the app wrote modes onto, in one .zip file to keep or load into another project",
               onClick: () => call("modes.save_card") },
           ])}>Save / load<//>
+        <${Button} size="sm" icon="file" disabled=${!s.project || !own.length} onClick=${onSheet}
+          title="The printable rules sheet of this project's modes, made from the mode files: how each starts, its stages and its cash out. Save it as a PDF or a web page.">Rules sheet…<//>
         <${Button} size="sm" kind="ghost" icon="trash" disabled=${!s.del_ok} onClick=${() => call("modes.delete")}>Delete<//>
       </div>
     </div>
@@ -345,7 +347,7 @@ function ModeList({ s, onNewCode, onNewBlocks, onAllNumbers }) {
 }
 
 // ------------------------------------------------------------------ the pages
-function ModePage({ s, f, off, dis, rs }) {
+function ModePage({ s, f, off, dis, rs, lim }) {
   const hide = s.hide || {};   // PAD-420: the parts this machine has no hardware for
   const prof = s.profile || {};
   const shots = prof.shots || [];
@@ -363,6 +365,10 @@ function ModePage({ s, f, off, dis, rs }) {
   const alsoOpts = (v) => withValue([{ value: ALSO_NONE, label: ALSO_NONE }, ...shots.map((x) => ({ value: x, label: x }))], v);
   const afterOpts = withValue([{ value: AFTER_NONE, label: AFTER_NONE }, ...(s.other_modes || []).map((x) => ({ value: x, label: x }))], f.after_mode);
   const afterOff = off || !f.after_mode || f.after_mode === AFTER_NONE;
+  // PAD-518: up to two more shots whose hits count with the start shot's
+  const OR_NONE = "(no other shot)";
+  const orOpts = (v) => withValue([{ value: OR_NONE, label: OR_NONE }, ...shots.filter((x) => x !== f.start_shot).map((x) => ({ value: x, label: x }))], v);
+  const orSet = [0, 1].some((i) => f["start_or_" + i] && f["start_or_" + i] !== OR_NONE);
   const mbOff = off || dis.multiball;
   const mbIn = mbOff || !f.multiball;
   const bsOff = off || dis.ball_save || f.multiball;
@@ -373,6 +379,11 @@ function ModePage({ s, f, off, dis, rs }) {
   const shieldFeature = prof.shield_rule || "shield";
   const shieldLive = (f.game_modes || "block") !== "block" || (!!prof.shield_rule && (s.keep_on || []).includes(prof.shield_rule));
   const shieldOff = off || dis.shield || (shieldLive && !f.shield);
+  // PAD-589: the building moves only while the game's own building locks see no shots
+  const BUILDING_NONE = "(leave it where it is)";
+  const buildingLive = (f.game_modes || "block") !== "block" || (!!prof.building_rule && (s.keep_on || []).includes(prof.building_rule));
+  const buildingSet = !!f.building_floor && f.building_floor !== BUILDING_NONE;
+  const buildingOff = off || dis.building || (buildingLive && !buildingSet);
   // PAD-414: the shaker - a shake of the mode's own at a strength, or one of the game's
   const shakeOff = off || dis.shaker;
   const shakeWhat = (v) => withValue(prof.shakes || [], v);
@@ -401,6 +412,29 @@ function ModePage({ s, f, off, dis, rs }) {
   const seqSet = Array.from({ length: SEQ_MAX }, (_, i) => !!f["seq_shot_" + i] && f["seq_shot_" + i] !== SEQ_NONE);
   const seqRows = Math.min(SEQ_MAX, Math.max(2, seqSet.lastIndexOf(true) + 2));
   const seqOn = f.starts_kind === "sequence";
+  const battleOn = f.starts_kind === "battle";                                  // PAD-589
+  const roster = prof.roster || [];
+  const battleOff = off || dis.roster || !roster.length;
+  // PAD-707: "A new monster, in <battle>'s place" - its own tile on the screen, in that battle's place
+  const rosterOpts = withValue([{ value: "", label: "(choose a battle)", disabled: true }, ...roster.map((x) => ({ value: x, label: x })),
+    ...roster.map((x) => ({ value: MORE_PREFIX + x + "'s place", label: MORE_PREFIX + x + "'s place" }))], f.roster_slot);
+  const moreOn = String(f.roster_slot || "").startsWith(MORE_PREFIX);
+  const challengeOn = f.starts_kind === "challenge";                            // PAD-615
+  const challenges = prof.challenges || [];
+  const challengeNew = prof.challenge_new || "";                                // round 2: one of its own
+  const challengeOff = off || dis.challenge || (!challenges.length && !challengeNew);   // PAD-619: or only its own
+  const challengeOpts = withValue([{ value: "", label: "(choose a challenge)", disabled: true }, ...challenges.map((x) => ({ value: x, label: x })),
+    ...(challengeNew ? [{ value: challengeNew, label: challengeNew }] : [])], f.challenge);
+  const challengeIsNew = challengeOn && !!challengeNew && f.challenge === challengeNew;
+  const placeOn = f.starts_kind === "game_mode";                                // PAD-710
+  const places = prof.places || [];
+  const placeOff = off || dis.place || !places.length;
+  const placeOpts = withValue([{ value: "", label: "(choose one of its modes)", disabled: true }, ...places.map((x) => ({ value: x.name, label: x.name }))], f.place_mode);
+  const placeCounts = (places.find((x) => x.name === f.place_mode) || {}).counts;
+  const doneOn = f.starts_kind === "completed";                                  // PAD-747
+  const doneModes = prof.done_modes || [];
+  const doneOff = off || dis.done || !doneModes.length;
+  const doneSet = new Set(s.done_on || []);
   const END_PICK = "(these shots)";
   const endOpts = withValue((prof.end_shots || ["(no shot)"]).map((x) => ({ value: x, label: x })), f.end_shot);
   const endOn = new Set(s.end_shots_on || []);
@@ -415,6 +449,7 @@ function ModePage({ s, f, off, dis, rs }) {
   // PAD-436: the game's own mini-wizard instead of a mode of its own
   const wizOff = off || dis.wizard;
   const handOff = handsOver(f, dis);
+  const canLight = !handOff || (prof.wizard_lights || []).includes(f.game_wizard);   // PAD-473: the rest are started
   const wizOpts = withValue([{ value: WIZ_NONE, label: "(nothing: this mode runs)" },
     ...(prof.game_wizards || []).map((w) => ({ value: w.name, label: w.film ? `${w.name} (${w.film})` : w.name }))], f.game_wizard);
   const nameRow = html`<div class="stack">
@@ -427,17 +462,23 @@ function ModePage({ s, f, off, dis, rs }) {
           <${Select} value=${f.game_wizard || WIZ_NONE} options=${wizOpts} ns="modes" k="f:game_wizard" disabled=${wizOff} width=${320} title=${T.wizard} />
         </div>
         <div class="row wrap" style="padding-left:26px">
-          <${Radio} name="m-wiz" value="light" label=${`Light it: the ${prof.wizard_shot || "game's start shot"} starts it`} checked=${f.wizard_how !== "start"} disabled=${wizOff || !handOff} title=${T.wizard} onChange=${(v) => setF("wizard_how", v, true)} />
-          <${Radio} name="m-wiz" value="start" label="Start it at once" checked=${f.wizard_how === "start"} disabled=${wizOff || !handOff} title=${T.wizard} onChange=${(v) => setF("wizard_how", v, true)} />
+          <${Radio} name="m-wiz" value="light" label=${`Light it: the ${prof.wizard_shot || "game's start shot"} starts it`} checked=${canLight && f.wizard_how !== "start"} disabled=${wizOff || !handOff || !canLight} title=${T.wizard} onChange=${(v) => setF("wizard_how", v, true)} />
+          <${Radio} name="m-wiz" value="start" label="Start it at once" checked=${!canLight || f.wizard_how === "start"} disabled=${wizOff || !handOff} title=${T.wizard} onChange=${(v) => setF("wizard_how", v, true)} />
         </div>
-        ${handOff ? html`<div class="small muted wrap">When it starts, the player gets the game's own ${f.game_wizard}, with its shots, lights, screens and sounds. Nothing of this mode's own runs, so the other pages are not used. The game no longer lights it by itself: only this mode hands it out.</div>` : null}
+        ${handOff ? html`<div class="small muted wrap">When it starts, the player gets the game's own ${f.game_wizard}, with its shots, lights, screens and sounds. Nothing of this mode's own runs, so the other pages are not used. ${prof.wizard_claims ? "The game no longer lights it by itself: only this mode hands it out." : "The game's own rules can still start it too."}${canLight ? "" : " The game lights it for no start shot of its own, so it is started: at once, or the moment none of the game's own modes is in its way, that ball."}</div>` : null}
       <//>`;
   const startsSec = html`<${Sec} title="Starts on" reason=${rs.events}>
         <div class="row wrap">
-          <${Radio} name="m-starts" value="shot" label="its shot" checked=${f.starts_kind !== "event" && !seqOn} disabled=${off} title=${T.itsShot} onChange=${(v) => setF("starts_kind", v, true)} />
+          <${Radio} name="m-starts" value="shot" label="its shot" checked=${f.starts_kind !== "event" && !seqOn && !battleOn && !challengeOn && !placeOn && !doneOn} disabled=${off} title=${T.itsShot} onChange=${(v) => setF("starts_kind", v, true)} />
           <${Select} value=${f.start_shot} options=${shotOpts} ns="modes" k="f:start_shot" disabled=${off || !shots.length} width=${180} title=${T.startShot} />
+        </div>
+        <div class="row wrap" style="padding-left:26px">
+          ${[0, 1].map((i) => html`<span key=${"or" + i} class="row nw" style="gap:8px"><span class="dim nw">or</span>
+            <${Select} value=${f["start_or_" + i] || OR_NONE} options=${orOpts(f["start_or_" + i])} ns="modes" k=${"f:start_or_" + i} disabled=${off || !shots.length} width=${170} title=${T.startOr} /></span>`)}
+        </div>
+        <div class="row wrap" style="padding-left:26px">
           <span class="row nw" style="gap:8px"><${Num} k="start_count" value=${f.start_count} disabled=${off} width=${64} />
-          <span class="dim nw">times in one ball</span></span>
+          <span class="dim nw">${orSet ? "hits in one ball, all of them together" : "times in one ball"}</span></span>
         </div>
         <div class="row wrap">
           <${Radio} name="m-starts" value="event" label="an event" checked=${f.starts_kind === "event"} disabled=${evOff} onChange=${(v) => setF("starts_kind", v, true)} />
@@ -450,6 +491,44 @@ function ModePage({ s, f, off, dis, rs }) {
         <div class="row wrap" style="padding-left:26px">
           <${Check} label="any other shot starts the sequence over" checked=${f.seq_reset_any} disabled=${off || !seqOn} title=${T.seqReset} ns="modes" k="f:seq_reset_any" />
         </div>
+        ${!prof.roster_found ? null : html`<div class="row wrap">
+          <${Radio} name="m-starts" value="battle" label="the player picking" checked=${battleOn} disabled=${battleOff && !battleOn} title=${T.battle} onChange=${(v) => setF("starts_kind", v, true)} />
+          <${Select} value=${f.roster_slot || ""} options=${rosterOpts} ns="modes" k="f:roster_slot" disabled=${battleOff || !battleOn} width=${330} title=${T.battle} />
+          <span class="dim nw">on the battle selection screen</span>
+        </div>
+        ${battleOn && !dis.roster && moreOn ? html`<div class="small muted wrap" style="padding-left:26px">${MORE_FORM_NOTE}</div>` : null}
+        ${battleOn && !dis.roster && !moreOn ? html`<div class="small muted wrap" style="padding-left:26px">${prof.roster_counts ? "Picking it starts this mode instead of that battle, 3 seconds later once the screen has closed. The game counts it as that battle: its end shot ending it wins the battle (with no end shot, its clock running out does), and the battle shows Completed and counts for the city and its audits; anything else loses it, and the next lit scoop plays the mode again. The screen shows the battle's own picture and name until you change them on the Scenes tab." : "Picking it starts this mode instead of that battle, 3 seconds later once the screen has closed. It counts toward the player's city as the battle would, and when the mode ends the ramps light a battle again. The screen shows the battle's own picture and name until you change them on the Scenes tab."}</div>` : null}
+        ${rs.roster ? html`<div class="small muted wrap" style="padding-left:26px">${rs.roster}</div>` : null}`}
+        ${!prof.challenge_found ? null : html`<div class="row wrap">
+          <${Radio} name="m-starts" value="challenge" label="a challenge game of" checked=${challengeOn} disabled=${challengeOff && !challengeOn} title=${T.challenge} onChange=${(v) => setF("starts_kind", v, true)} />
+          <${Select} value=${f.challenge || ""} options=${challengeOpts} ns="modes" k="f:challenge" disabled=${challengeOff || !challengeOn} width=${250} title=${T.challenge} />
+        </div>
+        ${challengeOn && !dis.challenge && challengeIsNew ? html`<div class="small muted wrap" style="padding-left:26px">The game's start menu (both flipper buttons in attract) lists it after the game's own entries, under this mode's name. Picked, the game is a one-ball challenge game and this mode starts as the ball starts. The menu has room for ${prof.challenge_room} of these.</div>` : null}
+        ${challengeOn && !dis.challenge && !challengeIsNew ? html`<div class="small muted wrap" style="padding-left:26px">In a Player Challenge game with this challenge picked, this mode starts as the ball starts, in place of the game's own challenge, and the game ends when the ball ends.${challengeNew ? " The game's start menu shows this mode's name in that challenge's place." : ""}${prof.challenge_by_default ? " To start every game this way, set Default Game Mode in the service menu to this challenge." : ""}</div>` : null}
+        ${challengeOn && !dis.challenge ? html`<div class="row wrap" style="padding-left:26px">
+          <span class="dim nw" title=${T.challengeLaunch}>its ball launched</span>
+          <${Select} value=${f.challenge_launch || "clip"} options=${[{ value: "clip", label: "when its start clip ends" }, { value: "time", label: "a set time after it starts" }, { value: "player", label: "by the player" }]} ns="modes" k="f:challenge_launch" disabled=${off} width=${200} title=${T.challengeLaunch} />
+          ${f.challenge_launch === "time" ? html`<div class="row"><${Num} k="challenge_launch_s" value=${f.challenge_launch_s} disabled=${off} width=${56} title=${T.challengeLaunch} /><span class="dim">s</span></div>` : null}
+        </div>` : null}
+        ${rs.challenge ? html`<div class="small muted wrap" style="padding-left:26px">${rs.challenge}</div>` : null}`}
+        ${!prof.place_found ? null : html`<div class="row wrap">
+          <${Radio} name="m-starts" value="game_mode" label="the game starting its" checked=${placeOn} disabled=${placeOff && !placeOn} title=${T.place} onChange=${(v) => setF("starts_kind", v, true)} />
+          <${Select} value=${f.place_mode || ""} options=${placeOpts} ns="modes" k="f:place_mode" disabled=${placeOff || !placeOn} width=${260} title=${T.place} />
+          <span class="dim nw">(it runs in that one's place)</span>
+        </div>
+        ${placeOn && !dis.place && f.place_mode ? html`<div class="small muted wrap" style="padding-left:26px">${placeCounts ? "When the game starts that mode, this one starts instead. The game counts it as its own: its end shot ending it (with no end shot, its clock running out) counts as that mode completed - its audits, its wins, and what the game opens for it - and anything else as not completed." : "When the game starts that mode, this one starts instead. The app does not know this build's mode framework, so the game does not count it as its own mode: it is played, not completed."}</div>` : null}
+        ${rs.place ? html`<div class="small muted wrap" style="padding-left:26px">${rs.place}</div>` : null}`}
+        ${!prof.done_found ? null : html`<div class="row wrap">
+          <${Radio} name="m-starts" value="completed" label="the player completing" checked=${doneOn} disabled=${doneOff && !doneOn} title=${T.done} onChange=${(v) => setF("starts_kind", v, true)} />
+          <span class="row nw" style="gap:8px"><${Num} k="done_count" value=${f.done_count} disabled=${doneOff || !doneOn} width=${64} title=${T.done} />
+          <span class="dim nw">of the game's modes ticked, in one game</span></span>
+        </div>
+        ${doneOn && !dis.done ? html`<div class="modes-shots" style="padding-left:26px;grid-template-columns:repeat(auto-fill, minmax(220px, 1fr))">
+          ${doneModes.map((m) => html`<${Check} key=${"d" + m.id} label=${m.name} checked=${doneSet.has(m.id)} disabled=${off || (doneSet.size === 1 && doneSet.has(m.id))} title=${T.done}
+              onChange=${(v) => setField("modes", "done:" + m.id, v, { flush: true })} />`)}
+        </div>` : null}
+        ${doneOn && !dis.done ? html`<div class="small muted wrap" style="padding-left:26px">It starts the moment the player has completed ${f.done_count || "?"} of the ${doneSet.size} ticked in one game. Each counts once, when the game records it completed.</div>` : null}
+        ${rs.done ? html`<div class="small muted wrap" style="padding-left:26px">${rs.done}</div>` : null}`}
         ${[0, 1].map((i) => html`<div class="row wrap">
           <span class="dim nw">and also</span>
           <${Select} value=${f["also_shot_" + i]} options=${alsoOpts(f["also_shot_" + i])} ns="modes" k=${"f:also_shot_" + i} disabled=${off || !shots.length} width=${180} title=${T.alsoShot} />
@@ -486,7 +565,7 @@ function ModePage({ s, f, off, dis, rs }) {
         <div class="row"><span class="dim">the game's own ${f.game_wizard}</span></div>
       </div>
       ${startsSec}
-      ${wizSec}
+      ${hide.wizard ? null : wizSec}
       ${oftenSec}
     </div>`;
   }
@@ -516,7 +595,7 @@ function ModePage({ s, f, off, dis, rs }) {
         </div>` : null}
       <//>
       ${oftenSec}
-      <${Sec} title="The game's own modes" reason=${rs.stack}>
+      <${Sec} title="The game's own modes" reason=${rs.stack} limit=${lim.stack}>
         <div class="row wrap">
           <span class="dim nw">While it runs, the game's modes</span>
           <${Select} value=${f.game_modes || "block"} options=${gmOpts} ns="modes" k="f:game_modes" disabled=${off} width=${260} title=${T.gameModes} />
@@ -542,7 +621,7 @@ function ModePage({ s, f, off, dis, rs }) {
         </div>
         ${f.multiball && !dis.ball_save ? html`<div class="small muted">A multiball has its own ball save, below.</div>` : null}
       <//>
-      ${hide.magnet ? null : html`<${Sec} title="Magnet" reason=${rs.magnet}>
+      ${hide.magnet ? null : html`<${Sec} title="Magnet" reason=${rs.magnet} limit=${lim.magnet}>
         <${Check} label=${`Hold the ball on the magnet when ${prof.magnet_shot ? `the ${prof.magnet_shot}` : "its shot"} is hit`} checked=${f.magnet} disabled=${magOff} title=${T.magnet} ns="modes" k="f:magnet" />
         <div class="row wrap" style="padding-left:26px">
           <span class="dim nw">for</span>
@@ -561,14 +640,28 @@ function ModePage({ s, f, off, dis, rs }) {
           <${Check} label=${`Hold the ${c.label}`} checked=${f["coil_on_" + i]} disabled=${coilsOff} title=${T.coils} ns="modes" k=${"f:coil_on_" + i} />
           <div class="row wrap" style="padding-left:26px">
             <span class="dim nw">for</span>
-            <${Num} k=${"coil_s_" + i} value=${f["coil_s_" + i]} disabled=${coilsOff || !f["coil_on_" + i]} width=${64} title=${T.coils} /><span class="dim nw">seconds,</span>
+            <${Num} k=${"coil_s_" + i} value=${f["coil_s_" + i]} disabled=${coilsOff || !f["coil_on_" + i]} width=${64} title=${T.coils} /><span class="dim nw">seconds (up to ${c.max_s || 5}),</span>
             <${Select} value=${f["coil_when_" + i]} options=${withValue((prof.mb_on_shots || ["(when it starts)"]).map((x) => ({ value: x, label: x === "(when it starts)" ? x : "on " + x })), f["coil_when_" + i])} ns="modes" k=${"f:coil_when_" + i} disabled=${coilsOff || !f["coil_on_" + i]} width=${180} title=${T.coils} />
+          </div>
+          <div style="padding-left:26px">
+            <${Check} label="Its clock waits until it lets go" checked=${f["coil_wait_" + i]} disabled=${coilsOff || !f["coil_on_" + i]} title=${T.coilWait} ns="modes" k=${"f:coil_wait_" + i} />
           </div>
         </div>`) : html`<div class="small muted">This game has no other mechanism a mode can hold.</div>`}
       <//>`}
       ${hide.shield ? null : html`<${Sec} title="Shield targets" reason=${rs.shield}>
         <${Check} label="Turn the shield targets toward the player while it runs" checked=${f.shield} disabled=${shieldOff} title=${T.shield} ns="modes" k="f:shield" />
         ${!dis.shield && shieldLive ? html`<div class="small muted" style="padding-left:26px">Only while the game's modes cannot start and ${shieldFeature} does not keep counting: otherwise the game turns them back.</div>` : null}
+      <//>`}
+      ${hide.building ? null : html`<${Sec} title="The building" reason=${rs.building}>
+        <div class="row wrap">
+          <span class="dim nw">Move the building to</span>
+          <${Select} value=${f.building_floor || BUILDING_NONE} options=${withValue((prof.building_floors || [BUILDING_NONE]).map((x) => ({ value: x, label: x })), f.building_floor)} ns="modes" k="f:building_floor" disabled=${buildingOff} width=${280} title=${T.building} />
+        </div>
+        <div class="row wrap" style="padding-left:26px">
+          <${Select} value=${f.building_shot || "(when it starts)"} options=${withValue((prof.mb_on_shots || ["(when it starts)"]).map((x) => ({ value: x, label: x === "(when it starts)" ? x : "on every hit of " + x })), f.building_shot)} ns="modes" k="f:building_shot" disabled=${buildingOff || !buildingSet} width=${240} title=${T.building} />
+        </div>
+        ${!dis.building ? html`<div class="small muted">It goes back where it was when the mode ends.</div>` : null}
+        ${!dis.building && buildingLive ? html`<div class="small muted">Only while the game's modes cannot start and ${prof.building_rule || "the building locks"} does not keep counting: otherwise it stays where it is.</div>` : null}
       <//>`}
       ${hide.shaker ? null : html`<${Sec} title="Shaker" reason=${rs.shaker}>
         ${shakeRow("start", "Shake the cabinet as it starts")}
@@ -592,7 +685,7 @@ function ModePage({ s, f, off, dis, rs }) {
           <span class="dim nw">up to</span><${Num} k="add_ball_max" value=${f.add_ball_max} disabled=${mbIn} width=${56} title=${T.addBall} /><span class="dim nw">times</span>
         </div>
       <//>
-      ${wizSec}
+      ${hide.wizard ? null : wizSec}
     </div>
     <${Sec} title="Shots that score while it runs"
       extra=${html`<span class="muted small">${on.size} of ${shots.length}</span>
@@ -624,13 +717,13 @@ function ShowPage({ s, f, off, dis, rs, labels, files, showClip }) {
         <${Field} ns="modes" k="f:screen_title" value=${f.screen_title} disabled=${scrOff} title=${T.screenTitle} placeholder=${f.name} />
         <span class="lbl">Picture</span>
         <div class="row wrap">
-          ${radio("m-art", "art_mode", "panel", "A panel in these colours", { disabled: scrOff })}
+          ${radio("m-art", "art_mode", "panel", "A panel in these colors", { disabled: scrOff })}
           ${radio("m-art", "art_mode", "file", "My picture…", { disabled: scrOff, choose: "art" })}
         </div>
-        <span class="lbl">Colours</span>
+        <span class="lbl">Colors</span>
         <div class="row">
-          <span class="dim">Panel</span><${Swatch} k="panel_color" value=${f.panel_color} disabled=${scrOff} title="Panel colour" />
-          <span class="dim" style="margin-left:10px">Title</span><${Swatch} k="title_color" value=${f.title_color} disabled=${scrOff} title="Title colour" />
+          <span class="dim">Panel</span><${Swatch} k="panel_color" value=${f.panel_color} disabled=${scrOff} title="Panel color" />
+          <span class="dim" style="margin-left:10px">Title</span><${Swatch} k="title_color" value=${f.title_color} disabled=${scrOff} title="Title color" />
         </div>
       </div>
       ${labels.art ? html`<div class="row small"><span class="dim">${labels.art}</span>
@@ -726,8 +819,8 @@ function LightsPage({ s, f, off, dis, rs }) {
   const sOff = off || dis.shows;
   return html`<div class="modes-grid2">
     <${Sec} title="Sweep the playfield" reason=${rs.lights}>
-      <${Check} label="Sweep the playfield in a colour while it runs" checked=${f.lights} disabled=${lOff} ns="modes" k="f:lights" />
-      <div class="row"><span class="lbl">Colour</span><${Swatch} k="light_color" value=${f.light_color} disabled=${lOff} title="Light colour" />
+      <${Check} label="Sweep the playfield in a color while it runs" checked=${f.lights} disabled=${lOff} ns="modes" k="f:lights" />
+      <div class="row"><span class="lbl">Color</span><${Swatch} k="light_color" value=${f.light_color} disabled=${lOff} title="Light color" />
         <span class="mono small muted">${f.light_color}</span></div>
       <${Check} label="Advanced" checked=${f.advanced} disabled=${lOff} title=${T.raw} ns="modes" k="f:advanced" />
       ${f.advanced ? html`<div class="modes-kv">
@@ -738,7 +831,7 @@ function LightsPage({ s, f, off, dis, rs }) {
     <${Sec} title="The shots that score" reason=${rs.lit_shots}>
       <div class="row wrap">
         <${Check} label="Light the shots that score" checked=${f.light_shots_on} disabled=${off || dis.lit_shots} title=${T.lit} ns="modes" k="f:light_shots_on" />
-        <${Swatch} k="light_shots_color" value=${f.light_shots_color} disabled=${off || dis.lit_shots} title="Colour of the lit shots" />
+        <${Swatch} k="light_shots_color" value=${f.light_shots_color} disabled=${off || dis.lit_shots} title="Color of the lit shots" />
         <${Select} value=${f.light_shots_pattern} options=${PATTERNS.includes(f.light_shots_pattern) ? PATTERNS : [f.light_shots_pattern, ...PATTERNS]}
           ns="modes" k="f:light_shots_pattern" disabled=${off || dis.lit_shots} width=${110} sm />
       </div>
@@ -750,13 +843,15 @@ function LightsPage({ s, f, off, dis, rs }) {
           ns="modes" k="f:show_start" disabled=${sOff} width=${240} sm />
         <span class="lbl">When it ends</span><${Select} value=${f.show_end} options=${showOptions(shows, f.show_end)}
           ns="modes" k="f:show_end" disabled=${sOff} width=${240} sm />
+        <span class="lbl">When a shot is hit</span><${Select} value=${f.show_hit} options=${showOptions(shows, f.show_hit)}
+          ns="modes" k="f:show_hit" disabled=${sOff} width=${240} sm />
       </div>
       ${dis.shows ? null : html`<div class="small muted wrap">${T.gameShows}</div>`}
     <//>
   </div>`;
 }
 
-function SoundsPage({ s, f, off, dis, rs, labels, files }) {
+function SoundsPage({ s, f, off, dis, rs, lim, labels, files }) {
   const prof = s.profile || {};
   const choices = prof.callouts || [];
   const pickMenu = (e, i) => openMenu(e.currentTarget, choices.length
@@ -766,7 +861,7 @@ function SoundsPage({ s, f, off, dis, rs, labels, files }) {
                ["music", "music_mode", "Music underneath"]];
   return html`<div class="modes-grid2">
     <div class="stack" style="gap:14px">
-      <${Sec} title="Sound" reason=${rs.sound}>
+      <${Sec} title="Sound" reason=${rs.sound} note=${rs.sound_limit}>
         <${Check} label="Count down the last seconds in the game's own voice" checked=${f.countdown} disabled=${off || dis.countdown} ns="modes" k="f:countdown" />
         <div class="row wrap">
           <span class="lbl nw">When time is up</span>
@@ -789,7 +884,7 @@ function SoundsPage({ s, f, off, dis, rs, labels, files }) {
               ${attr === "sound_shot" ? html`<div class="row"><span class="dim nw">on every</span><${Num} k="sound_shot_every" value=${f.sound_shot_every} disabled=${off || dis.own_extra} width=${64} /><span class="dim nw">scoring shot(s)</span></div>` : null}
               ${labels[attr] ? html`<div class="row small"><span class="dim">${labels[attr]}</span><${PlayButton} path=${files[attr]} />
                 ${!offA ? html`<${Button} size="xs" kind="ghost" onClick=${() => call("modes.choose", attr)}>Change…<//>` : null}</div>` : null}
-              ${attr === "music" && rs.own_music ? html`<div class="modes-reason small">${rs.own_music}</div>` : null}
+              ${attr === "music" ? html`<${Reason} text=${rs.own_music} limit=${lim.own_music} />` : null}
             </div>`; })}
         </div>
         ${dis.own_extra ? null : html`<div class="small muted wrap">Each plays in place of a stock call the game never makes. Write puts them on the card, and names any it cannot carry.</div>`}
@@ -844,6 +939,7 @@ function Editor({ s, showClip }) {
   const off = !s.editor_on;
   const dis = s.dis || {};
   const rs = s.reasons || {};
+  const lim = s.limits || {};
   const labels = s.labels || {};
   const files = s.files || {};
   const ready = !!s.ready;
@@ -852,7 +948,7 @@ function Editor({ s, showClip }) {
     : s.save_state === "saved" ? (s.write_waits ? "Saved · Write carries it after a Try it" : "Saved · put on the card by Write") : "";
   const handOff = handsOver(f, dis);                                           // PAD-436
   const offPages = new Set(handOff ? ["show", "lights", "sounds", "scoring"] : dis.show_order ? ["show"] : []);
-  const props = { s, f, off, dis, rs, labels, files, showClip };
+  const props = { s, f, off, dis, rs, lim, labels, files, showClip };
   const P = { mode: ModePage, show: ShowPage, lights: LightsPage, sounds: SoundsPage, scoring: ScoringPage }[page] || ModePage;
   const offTip = handOff ? "This mode is the game's own mini-wizard: nothing on this page is used."
     : "Nothing on this page works on this game yet: the page says why.";
@@ -874,9 +970,22 @@ function Editor({ s, showClip }) {
   </section>`;
 }
 
-// A mode made of blocks (PAD-232): the block editor, and the C it makes.
+// A mode made of blocks (PAD-232): its views, and the C it makes. PAD-612: each view is a tab over the one program
+// (David, 2026-10-18: "switch visualizations at any point and not be beholden to one or another"), with one Undo and
+// Redo for the mode beside the tabs; switching never converts or asks.
+// PAD-614: Rule cards, Story, Script, Shot table, Timeline and Node graph (PAD-611's plan, steps 3-6).
+const BLOCKS_PAGES = [["blocks", "Blocks", "The mode's rules as snapped blocks, with its settings.", BlocksEditor],
+  ["cards", "Rule cards", "Each rule as a card that reads When … Then, with a choice in every blank.", RuleCardsView],
+  ["story", "Story", "The mode's life: what starts it, what each rule does while it waits and while it runs, and what ends it.", StoryView],
+  ["playfield", "Playfield", "The game's playfield with the mode's lit shots: press a shot to see and change what it does.", PlayfieldView],
+  ["shows", "Light shows", "The mode's own light shows: made step by step from a ready-made one or blank, played on the playfield picture, run by name from any rule.", LightShowsView],   // PAD-646
+  ["table", "Shot table", "One row per shot, one column for each time it can count: what every shot does, and which do nothing yet.", ShotTableView],
+  ["timeline", "Timeline", "The mode's clock as a track: what happens at its start, at each moment and at its end.", TimelineView],
+  ["graph", "Node graph", "Every rule wired to the variables and timers it shares with the others.", NodeGraphView],
+  ["script", "Script", "The same mode as text, to type: it goes to blocks and back with nothing lost.", ScriptView],
+  ["c", "C it makes", "What Try it and Write build: the C the blocks make, to read.", null]];
+
 function BlocksPane({ s }) {
-  const [page, setPage] = useStored("pad.modes.blockspage", "blocks");
   const c = s.code || {};
   const b = c.blocks || {};
   const ready = c.status === "Ready to build.";
@@ -888,13 +997,25 @@ function BlocksPane({ s }) {
     </div>
     ${c.status && !ready ? html`<div class="modes-status warn">${c.status}</div>` : null}
     ${c.error || b.error ? html`<div class="modes-status warn">${c.error || b.error}</div>` : null}
-    <div class="pages" role="tablist">
-      ${[["blocks", "Blocks"], ["c", "C it makes"]].map(([k, l]) => html`<button type="button" role="tab" aria-selected=${page === k} class=${page === k ? "on" : ""} onClick=${() => setPage(k)}>${l}</button>`)}
+    ${b.program ? html`<${BlocksViews} s=${s} c=${c} key=${c.slug} />` : null}
+  </section>`;
+}
+
+function BlocksViews({ s, c }) {
+  const [stored, setPage] = useStored("pad.modes.blockspage", "blocks");
+  const page = BLOCKS_PAGES.some(([k]) => k === stored) ? stored : "blocks";
+  const View = BLOCKS_PAGES.find(([k]) => k === page)[3];
+  const pg = useModeProgram(c);
+  return html`<div class="bk-views row">
+      <div class="pages" role="tablist">
+        ${BLOCKS_PAGES.map(([k, l, t]) => html`<button type="button" role="tab" aria-selected=${page === k} class=${page === k ? "on" : ""}
+          title=${t} onClick=${() => setPage(k)}>${l}</button>`)}
+      </div>
+      <${ProgramBar} pg=${pg} />
     </div>
     <div class="bd modes-editor-bd bk-pane-bd">
-      ${b.program ? (page === "c" ? html`<${BlocksCode} c=${c} />` : html`<${BlocksEditor} s=${s} c=${c} key=${c.slug} />`) : null}
-    </div>
-  </section>`;
+      ${View ? html`<${View} s=${s} c=${c} pg=${pg} />` : html`<${BlocksCode} c=${c} View=${CodeView} />`}
+    </div>`;
 }
 
 function CodePane({ s }) {
@@ -909,11 +1030,6 @@ function CodePane({ s }) {
     </div>
     ${c.status && !ready ? html`<div class="modes-status warn">${c.status}</div>` : null}
     ${c.error ? html`<div class="modes-status warn">${c.error}</div>` : null}
-    ${c.needs_films ? html`<div class="modes-status warn row modes-films" role="status">
-        <span class="grow">This example's clip, picture and music are cut from ${c.needs_films}, which can't ship with the app. Until then it plays the game's own sounds on a plain panel.</span>
-        <${Button} size="sm" icon="film" disabled=${!s.cut_ok} title=${T.cutFilms + (c.needs_files ? "\nIt looks for: " + c.needs_files : "")}
-          onClick=${() => call("modes.cut_films", c.slug)}>Choose your films folder…<//>
-      </div>` : null}
     <div class="pages" role="tablist">
       ${[["code", "Code"], ["assets", "Assets"]].map(([k, l]) => html`<button type="button" role="tab" aria-selected=${page === k} class=${page === k ? "on" : ""} onClick=${() => setPage(k)}>${l}</button>`)}
     </div>
@@ -925,11 +1041,12 @@ function CodePane({ s }) {
           <span class="k">Summary</span><span class="small">${c.summary || ""}</span>
         </div>
         <div class="row wrap">
-          <${Button} icon="edit" onClick=${() => call("modes.open_code")}>Open ${c.slug}.c<//>
+          <${Button} icon="edit" title="Open it in the editor your computer uses for .c files" onClick=${() => call("modes.open_code")}>Open ${c.slug}.c in my editor<//>
           <${Button} icon="file" onClick=${() => call("modes.open_sdk_doc")}>Open MODE_SDK.md<//>
         </div>
         <${Note}>${s.code_words}<//>
-        <div class="small muted wrap">${T.codeMode}</div>`
+        <div class="small muted wrap">${T.codeMode}</div>
+        <${CEditor} c=${c} key=${c.slug} />`
       : html`
         <div class="kv">
           <span class="k">Runs for</span><span>${c.seconds != null ? c.seconds + " seconds" : ""}</span>
@@ -938,8 +1055,6 @@ function CodePane({ s }) {
           <span class="k">Clip</span><span class="row">${c.clip || "none"}${c.files && c.files.clip ? html`<${Button} size="xs" kind="ghost" icon="play" onClick=${() => s._showClip(c.files.clip, c.name)}>Play<//>` : null}</span>
           <span class="k">Music</span><span class="row">${c.music || "none"}<${PlayButton} path=${c.files && c.files.music} /></span>
           ${c.game_modes ? html`<span class="k">The game's modes</span><span class="small wrap">${c.game_modes}</span>` : null}
-          <span class="k">Film recipe</span><span class="stack small" style="gap:2px">${(c.recipe || []).length
-            ? c.recipe.map((line) => html`<span class="wrap" key=${line}>${line}</span>`) : "none"}</span>
         </div>
         ${c.files && c.files.art ? html`<div class="thumb modes-preview"><img src=${mediaUrl(c.files.art)} alt="The mode's picture" /></div>` : null}
         ${c.screen ? html`<div class="row small modes-layout">
@@ -987,6 +1102,7 @@ function CountsAsSec({ s, g }) {
   const mine = (st.rows || []).filter((r) => r.rule === g.id);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [how, setHow] = useState("instead of");
   useEffect(() => {
     if (!from && shots.length) setFrom(shots[0]);
     if (!to && shots.length > 1) setTo(shots[1]);
@@ -994,9 +1110,9 @@ function CountsAsSec({ s, g }) {
   const note = st.note && (st.sel == null || mine.some((r) => r.i === st.sel)) ? st.note : "";
   return html`<${Sec} title="Shots" tipText=${T.countsAs}>
     ${!st.on ? html`<div class="small muted wrap">${st.msg}</div>` : html`
-      <div class="small muted wrap">A shot of your choosing can count as one of this mode's own while it runs.</div>
+      <div class="small muted wrap">A shot of your choosing can count as one of this mode's own while it runs, or take its place.</div>
       ${mine.length ? html`<div class="stack" style="gap:4px">${mine.map((r) => html`<div class="row modes-ca-row" key=${r.i}>
-          <span><b>${r.from}</b> <span class="dim">counts as</span> <b>${r.to}</b></span>
+          <span><b>${r.from}</b> <span class="dim">${r.verb || "counts as"}</span> <b>${r.to}</b></span>
           ${r.problem ? html`<${Chip} kind="warn" sm title=${r.problem}>cannot be written<//>` : null}
           <span class="grow"></span>
           <${Button} size="xs" kind="ghost" icon="trash" title="Take this row out."
@@ -1004,9 +1120,10 @@ function CountsAsSec({ s, g }) {
         </div>`)}</div>` : html`<div class="small dim">No shot counts as another here: the mode plays as it always did.</div>`}
       <div class="row wrap">
         <${Select} sm width=${160} value=${from} onChange=${setFrom} options=${shots} title="The shot the player makes." />
-        <span class="dim">counts as</span>
+        <${Select} sm width=${110} value=${how} onChange=${setHow} options=${["instead of", "counts as"]}
+          title="Instead of: the mode's own shot no longer counts while yours stands in for it. Counts as: both count." />
         <${Select} sm width=${160} value=${to} onChange=${setTo} options=${shots} title="The mode's own shot it stands in for." />
-        <${Button} size="sm" disabled=${!from || !to} onClick=${() => call("modes.remap_add", g.id, from, to)}>Add<//>
+        <${Button} size="sm" disabled=${!from || !to} onClick=${() => call("modes.remap_add", g.id, from, to, how === "instead of")}>Add<//>
       </div>
       ${note ? html`<div class="small muted wrap">${note}</div>` : null}`}
   <//>`;
@@ -1032,7 +1149,35 @@ function RewriteSec({ s, g }) {
   <//>`;
 }
 
-function GameModePage({ g, s }) {
+// PAD-1064: what the app reads off the game program about one of its own modes - what starts it, the clips and the
+// sounds its own code plays - read-only (there is no source to show: the game's modes are compiled into it)
+function HowSec({ h, onClip }) {
+  const starts = h.starts || [], clips = h.clips || [], sounds = h.sounds || [];
+  // PAD-1274: a clip with an extracted file plays on a click, Previous / Next walk the mode's other clips
+  const playable = clips.filter((c) => c.path);
+  const clipEl = (c) => (c.path && onClip
+    ? html`<button type="button" key=${c.key} class="modes-how-clip mono link" ...${tip(c.tip)}
+        onClick=${() => onClip(playable, playable.indexOf(c))}><${Icon} name="play" /> ${c.text}</button>`
+    : html`<span key=${c.key} class="modes-how-clip mono" ...${tip(c.tip)}>${c.text}</span>`);
+  return html`<${Sec} title="How it works" tipText=${h.note}>
+    <div class="modes-how">
+      <div class="modes-how-k">What starts it</div>
+      ${starts.length ? html`<ul class="modes-how-list">${starts.map((t) => html`<li key=${t}>${t}</li>`)}</ul>`
+        : html`<div class="small muted">The app did not find what starts it in the game program.</div>`}
+      ${h.unread ? html`<div class="small muted">${h.unread}</div>` : html`
+        <div class="modes-how-k">Clips it plays <span class="muted">(${clips.length || "none found"})</span></div>
+        ${clips.length ? html`<div class="modes-how-clips">${clips.map(clipEl)}</div>` : null}
+        ${h.clips_more ? html`<div class="small muted">${h.clips_more}</div>` : null}
+        <div class="modes-how-k">Sounds and callouts it plays <span class="muted">(${sounds.length || "none found"})</span></div>
+        ${sounds.length ? html`<ul class="modes-how-list">${sounds.map((x) => html`<li key=${x.key} ...${tip(x.tip)}>
+          ${x.path ? html`<${PlayButton} path=${x.path} />` : null} <b>${x.text}</b>${x.name ? html` <span class="muted">${x.name}</span>` : null}</li>`)}</ul>` : null}
+        ${h.sounds_more ? html`<div class="small muted">${h.sounds_more}</div>` : null}
+        <div class="small muted wrap">${h.sounds_note}</div>`}
+    </div>
+  <//>`;
+}
+
+function GameModePage({ g, s, onClip }) {
   const rows = g.rows || [];
   return html`<section class="card modes-editor">
     <div class="hd">
@@ -1043,6 +1188,7 @@ function GameModePage({ g, s }) {
     </div>
     <div class="modes-status info" role="status">${g.about}</div>
     <div class="bd modes-editor-bd">
+      ${g.how ? html`<${HowSec} h=${g.how} onClip=${onClip} />` : null}
       <${Sec} title="Timers and awards">
         ${rows.length ? html`<div class="modes-gm">${rows.map((r) => html`<${GameRow} key=${r.key} r=${r} />`)}</div>`
           : html`<div class="small muted">No numbers to show.</div>`}
@@ -1112,7 +1258,7 @@ function TryFooter({ s }) {
           <${Field} value=${emu.card} mono readOnly=${!emu.box} placeholder=${NO_CARD}
             onCommit=${(v) => setField("modes", "try_on", v, { flush: true })} title=${emu.card ? emu.card + "\n" + TRY_ON_TIP : TRY_ON_TIP} />
         </div>
-        <${Button} kind=${emu.box && !emu.card && s.project ? "primary" : undefined} disabled=${!emu.box || working}
+        <${Button} drop kind=${emu.box && !emu.card && s.project ? "primary" : undefined} disabled=${!emu.box || working}
           title=${emu.card ? "Pick another card image to try the modes on." : NO_CARD}
           onClick=${() => call("modes.browse_card")}>Browse…<//>
         ${emu.verdict ? html`<${Chip} kind=${emu.verdict_kind} dot title=${emu.verdict_tip}>${emu.verdict}<//>` : null}
@@ -1123,7 +1269,7 @@ function TryFooter({ s }) {
           disabled=${!s.project || (!working && !!s.no_port)} onClick=${() => call("modes.tryit")}>${working ? "Cancel" : "Try it"}<//>
         <${Check} label=${html`leave out own sounds<span class="modes-long"> (the game's calls play; skips the sound bank)</span>`} title=${T.leaveOut}
           checked=${s.leave_out} disabled=${working} ns="modes" k="leave_out" />
-        <button type="button" class="chip modes-tryon-chip" disabled=${!emu.box || working} onClick=${() => call("modes.browse_card")}
+        <button type="button" class="chip modes-tryon-chip" data-drop disabled=${!emu.box || working} onClick=${() => call("modes.browse_card")}
           ...${tip((emu.card ? emu.card + "\n" : "") + TRY_ON_TIP + " Click to pick another.")}>
           <${Icon} name="file" /><span class="ellip">${emu.card ? emu.card.split(/[\\/]/).pop() : "Pick a card…"}</span></button>
         <span class="vsep"></span>
@@ -1186,10 +1332,9 @@ function CheckNote({ s }) {
 }
 
 // ------------------------------------------------------------------ the first mode
-// A project with no mode of its own yet: the three ways in, the easiest first.
-function FirstMode({ s, onNewCode, onNewBlocks }) {
-  const ex = exampleItems(s);
-  const off = !!s.no_port;
+// A project with no mode of its own yet: the new-mode wizard's three ways, in place. A way
+// opens the wizard at its own step.
+function FirstMode({ s, onNew }) {
   return html`<section class="card modes-editor modes-first">
     <div class="bd modes-editor-bd">
       <div class="stack" style="gap:4px">
@@ -1202,33 +1347,7 @@ function FirstMode({ s, onNewCode, onNewBlocks }) {
       </div>
       ${s.check_wanted && !(s.check || {}).working ? html`<${Note} kind="warn" action=${html`<span class="row nw modes-note-act"><${CheckButton} s=${s} /></span>`}>
         <b>Check this game first.</b> What the app knows of ${s.title_label || "this game"} has never run in the emulator. The check plays one game by itself (about two minutes) and says which shots and events work, before you make a mode.<//>` : null}
-      <div class="modes-first-grid">
-        <div class="modes-first-opt rec">
-          <div class="row wrap"><${Icon} name="list" /><b>From an example</b><${Chip} kind="ok" sm>recommended<//></div>
-          <div class="small muted wrap">A finished mode to play and change.${ex.some((x) => x.label === "KAIJU RUSH") ? " KAIJU RUSH is the one that has run on a real machine." : ""}</div>
-          <div class="row wrap">${ex.length ? ex.map((x) => html`<${Button} key=${x.label} size="sm" kind=${x.label === "KAIJU RUSH" ? "primary" : ""}
-              disabled=${off || x.disabled} title=${x.title} onClick=${x.onClick}>${x.label}<//>`)
-            : html`<span class="small dim">${s.ex_tip || "No example for this game yet."}</span>`}</div>
-        </div>
-        <div class="modes-first-opt">
-          <div class="row"><${Icon} name="plus" /><b>Blank mode</b></div>
-          <div class="small muted wrap">Start empty and fill in the form, page by page.</div>
-          <div class="row"><${Button} size="sm" disabled=${!s.new_ok || off} onClick=${() => call("modes.new")}>Blank mode<//></div>
-        </div>
-        <div class="modes-first-opt">
-          <div class="row wrap"><${Icon} name="blocks" /><b>Build with blocks</b></div>
-          <div class="small muted wrap">${BLOCKS_WORDS.pick}</div>
-          <div class="row"><${Button} size="sm" disabled=${off} title=${s.no_port || BLOCKS_WORDS.newTip} onClick=${onNewBlocks}>Mode from blocks…<//></div>
-        </div>
-        <div class="modes-first-opt">
-          <div class="row wrap"><${Icon} name="edit" /><b>Write one in C</b><${Chip} sm>advanced<//></div>
-          <div class="small muted wrap">For what the form can't do. It starts from the Mode SDK's template.</div>
-          <div class="row wrap">
-            <${Button} size="sm" disabled=${off} title=${s.no_port || T.codeMode} onClick=${onNewCode}>Blank mode in C…<//>
-            <${Button} size="sm" kind="ghost" icon="file" onClick=${() => call("modes.open_sdk_doc")}>MODE_SDK.md<//>
-          </div>
-        </div>
-      </div>
+      <${KindTiles} s=${s} onPick=${onNew} compact />
       ${(s.game_rows || []).length ? html`<div class="small muted wrap">Or change one of the game's own modes: they're listed on the left, under yours, each with its timers, awards and shots.</div>` : null}
     </div>
   </section>`;
@@ -1239,11 +1358,18 @@ export default function ModesTab() {
   const s = useNs("modes");
   if (s.spin) SPIN = s.spin;
   const [stock, setStock] = useState(false);
-  const [newCode, setNewCode] = useState(false);     // "code" | "blocks" | false
+  const [coopAw, setCoopAw] = useState(false);                                // PAD-1028
+  const [recs, setRecs] = useState(false);                                    // PAD-1280
+  const [coopCh, setCoopCh] = useState(false);                                // PAD-1031
+  const [handLv, setHandLv] = useState(false);                                // PAD-1033
+  const [sheet, setSheet] = useState(false);        // PAD-664: the rules sheet dialog
+  const [newMode, setNewMode] = useState(null);      // the wizard: { kind: "" | "blocks" | "c" | "form" }
   const [clip, setClip] = useState(null);
   const showClip = (path, title) => setClip({ path, title });
+  const showClips = (list, at) => setClip({ list, at, path: (list[at] || {}).path });   // PAD-1274
   const withClip = Object.assign({}, s, { _showClip: showClip });
   const hasProject = !!s.project;
+  if (s.jjp && s.jjp.on) return html`<${JjpModes} s=${s} />`;
   return html`<div class="page modes-page">
     <${Head} s=${s} />
     <${ReadingPanel} r=${s.reading} />
@@ -1251,12 +1377,15 @@ export default function ModesTab() {
     <${CheckNote} s=${s} />
     ${s.insider_note ? html`<div class="modes-note"><${Note} kind="info">${s.insider_note}<//></div>` : null}
     <div class="modes-body">
-      <${ModeList} s=${s} onNewCode=${() => setNewCode("code")} onNewBlocks=${() => setNewCode("blocks")} onAllNumbers=${() => setStock(true)} />
-      ${s.game_mode ? html`<${GameModePage} g=${s.game_mode} s=${s} />`
+      <${ModeList} s=${s} onNew=${(k) => setNewMode({ kind: k })} onAllNumbers=${() => setStock(true)}
+        onSheet=${() => { setSheet(true); call("modes.sheet_open"); }} onCoopAwards=${() => setCoopAw(true)}
+        onCoopChars=${() => setCoopCh(true)} onRecords=${() => setRecs(true)}
+        onHandLevels=${() => setHandLv(true)} />
+      ${s.game_mode ? html`<${GameModePage} g=${s.game_mode} s=${s} onClip=${showClips} />`
         : s.code && s.code.blocks ? html`<${BlocksPane} s=${withClip} />`
         : s.code ? html`<${CodePane} s=${withClip} />`
         : s.open ? html`<${Editor} s=${s} showClip=${showClip} />`
-        : hasProject && !(s.rows || []).length ? html`<${FirstMode} s=${s} onNewCode=${() => setNewCode("code")} onNewBlocks=${() => setNewCode("blocks")} />`
+        : hasProject && !(s.rows || []).length ? html`<${FirstMode} s=${s} onNew=${(k) => setNewMode({ kind: k })} />`
         : html`<section class="card modes-editor modes-empty">
             <${Empty} icon="modes" title=${hasProject ? "No mode open" : "No project"}>
               ${hasProject ? (s.status || "Pick a mode on the left.") : s.project_label}
@@ -1265,8 +1394,14 @@ export default function ModesTab() {
     </div>
     <${TryFooter} s=${s} />
     ${stock ? html`<${StockDialog} s=${s} onClose=${() => setStock(false)} />` : null}
+    ${coopAw ? html`<${CoopAwardsDialog} s=${s} onClose=${() => setCoopAw(false)} />` : null}
+    ${recs ? html`<${RecordsDialog} s=${s} onClose=${() => setRecs(false)} />` : null}
+    ${coopCh ? html`<${CoopCharsDialog} s=${s} onClose=${() => setCoopCh(false)} />` : null}
+    ${handLv ? html`<${HandicapLevelsDialog} s=${s} onClose=${() => setHandLv(false)} />` : null}
+    ${sheet && s.sheet ? html`<${RulesSheetDialog} s=${s} onClose=${() => setSheet(false)} />` : null}
     ${s.film ? html`<${FilmDialog} film=${s.film} key=${s.film.seq} />` : null}
-    ${newCode ? html`<${NewCodeDialog} blocks=${newCode === "blocks"} onClose=${() => setNewCode(false)} />` : null}
-    ${clip ? html`<${ClipDialog} path=${clip.path} title=${clip.title} onClose=${() => setClip(null)} />` : null}
+    ${newMode ? html`<${NewModeWizard} s=${s} start=${newMode.kind} onClose=${() => setNewMode(null)} />` : null}
+    ${clip ? html`<${ClipDialog} path=${clip.path} title=${clip.title} list=${clip.list} at=${clip.at}
+      proxy=${s.clip_proxy} onClose=${() => setClip(null)} />` : null}
   </div>`;
 }

@@ -201,10 +201,10 @@ def test_cancel_logs_and_clears_the_start_stamp():
     me._set_scanning(False)
     texts = [t for t, _lv in me.logs]
     assert sum("Images scan started" in t for t in texts) == 2
-    assert sum("Images scan cancelled" in t for t in texts) == 1
+    assert sum("Images scan canceled" in t for t in texts) == 1
     assert sum("Images scan finished" in t for t in texts) == 1
     # Order: started, cancelled, started, finished.
-    assert "cancelled" in texts[1] and "finished" in texts[3]
+    assert "canceled" in texts[1] and "finished" in texts[3]
 
 
 def test_cancel_bumps_the_scan_id_so_results_drop():
@@ -274,6 +274,9 @@ class _NoteStub:
         self._m_clips = None              # no mode reading yet (PAD-444)
         if rep and mode is not None:
             self._conv_cache[self._conv_key(slot.rel_path, rep)] = mode
+
+    def _m_seen_preview(self, rel):
+        return None                       # no emulator record of clips (PAD-827)
 
     def _mfr_key(self):
         return "stern"

@@ -1,0 +1,7968 @@
+"""The Visual Pinball bridge (PAD-775): tools/spike2_emu/vpx.
+
+What is worth failing on, none of it needing Windows, VPX or a run:
+
+  * THE .vpx DIGEST RULE. vpxfile reproduces VPX's MD2 MAC (proven bit-for-bit
+    on marty02's table on 2026-10-27); the rule it encodes is pinned here on a
+    synthetic BIFF stream: the record SIZE is never hashed, the TAG is, CODE's
+    payload is hashed WITHOUT its length word, ENDB ends the object. A change
+    to any of these ships a table VPX refuses to load.
+  * CODE IS NOT A PLAIN RECORD: [4]["CODE"][len][text]. biff_records must
+    yield the script whole and biff_record must write it back the same way,
+    or script() returns "" and the patcher silently patches nothing (it did).
+  * A CLONED ITEM MOVES WHOLE: every VCEN in the stream (centre and drag
+    points) shifts by the same delta, and NAME is replaced.
+  * padled VERSION 7 (the coil rule plane) sits where padled.h says it does,
+    after every older plane, and coilmap.rule() reads it.
+  * THE MAP IS CONSISTENT: every number the controller derives is unique,
+    every switch id is one godzilla_le has, every coil index fits a board.
+  * THE PATCHER'S REWRITES on a miniature of marty02's script: the Sega
+    numbers become Spike 2 ids + 1000, dropped ones become 0, the per-object
+    overrides win, the solenoid block appears once, UpdateLamps is regenerated.
+"""
+import glob
+import json
+import os
+import math
+import re
+import shutil
+import subprocess
+import struct
+import tempfile
+import sys
+
+import pytest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EMU = os.path.join(ROOT, "tools", "spike2_emu")
+VPX = os.path.join(EMU, "vpx")
+for p in (EMU, VPX):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+pytestmark = pytest.mark.skipif(not os.path.isdir(VPX), reason="rig not present")
+
+
+@pytest.fixture(scope="module")
+def vpxfile():
+    return pytest.importorskip("vpxfile")
+
+
+# ---------------------------------------------------------------- BIFF -----
+
+def _code(text):
+    b = text.encode("utf-8")
+    return struct.pack("<I", 4) + b"CODE" + struct.pack("<I", len(b)) + b
+
+
+def _rec(tag, payload):
+    return struct.pack("<I", 4 + len(payload)) + tag.encode() + payload
+
+
+def test_code_record_parses_whole(vpxfile):
+    gd = _rec("LEFT", struct.pack("<f", 0)) + _code("Option Explicit\nDim x") + \
+        _rec("SEDT", struct.pack("<i", 7)) + _rec("ENDB", b"")
+    tags = [(t, p) for t, p, _ in vpxfile.biff_records(gd)]
+    assert [t for t, _ in tags] == ["LEFT", "CODE", "SEDT", "ENDB"]
+    code = dict(tags)["CODE"]
+    assert code[4:] == b"Option Explicit\nDim x"
+    assert vpxfile.biff_record("CODE", code) == _code("Option Explicit\nDim x")
+
+
+def test_digest_rule_hashes_tag_payload_not_size(vpxfile):
+    md2 = pytest.importorskip("Crypto.Hash.MD2")
+    gd = _rec("LEFT", b"\x01\x02") + _code("abc") + _rec("ENDB", b"") + b"TRAILING JUNK"
+    h = md2.new()
+    vpxfile.biff_hash_update(h, gd)
+    want = md2.new()
+    want.update(b"LEFT" + b"\x01\x02" + b"CODE" + b"abc" + b"ENDB")
+    assert h.digest() == want.digest()
+
+
+def test_replace_script_keeps_other_records(vpxfile):
+    gd = _rec("LEFT", b"\x01") + _code("old") + _rec("SEDT", struct.pack("<i", 3)) + _rec("ENDB", b"")
+    gd2 = vpxfile.with_script(gd, "new script")
+    gd3 = vpxfile.with_item_count(gd2, 40)
+    tags = {t: p for t, p, _ in vpxfile.biff_records(gd3)}
+    assert tags["CODE"][4:] == b"new script"
+    assert struct.unpack("<i", tags["SEDT"])[0] == 40
+    assert tags["LEFT"] == b"\x01"
+
+
+def test_clone_item_shifts_every_vcen_and_renames(vpxfile):
+    # a light with TWO drag points, each its own nested object with its own
+    # ENDB, then the light's ENDB - exactly the shape that truncated the
+    # first clones (VPX never finished loading them)
+    item = struct.pack("<i", 7) + _rec("VCEN", struct.pack("<ff", 100, 200)) + \
+        _rec("NAME", vpxfile.wide("L21")) + \
+        _rec("DPNT", b"") + _rec("VCEN", struct.pack("<ff", 110, 205)) + _rec("ENDB", b"") + \
+        _rec("DPNT", b"") + _rec("VCEN", struct.pack("<ff", 90, 195)) + _rec("ENDB", b"") + \
+        _rec("ENDB", b"")
+    out = vpxfile.clone_item(item, "PL_NEW", 300, 400)
+    assert struct.unpack_from("<i", out, 0)[0] == 7
+    recs = [(t, p) for t, p, _ in vpxfile.item_records(out, 4)]
+    vcens = [struct.unpack("<ff", p) for t, p in recs if t == "VCEN"]
+    assert vcens == [(300.0, 400.0), (310.0, 405.0), (290.0, 395.0)]
+    assert [t for t, _ in recs].count("ENDB") == 3, "both points and the item close"
+    assert len(out) == len(item) + (len(vpxfile.wide("PL_NEW")) - len(vpxfile.wide("L21")))
+    assert vpxfile.unwide([p for t, p in recs if t == "NAME"][0]) == "PL_NEW"
+
+
+def test_reshape_item_moves_every_drag_point_and_the_centre(vpxfile):
+    # PAD-922: a trigger cloned into a shape the table has nothing of
+    item = struct.pack("<i", 6) + _rec("VCEN", struct.pack("<ff", 100, 200)) +         _rec("NAME", vpxfile.wide("T1")) +         b"".join(_rec("DPNT", b"") + _rec("VCEN", struct.pack("<ff", 100 + k, 200)) + _rec("ENDB", b"")
+                 for k in range(4)) + _rec("ENDB", b"")
+    pts = [(0, 0), (40, 0), (40, 20), (0, 20)]
+    out = vpxfile.reshape_item(item, pts)
+    recs = [(t, p) for t, p, _ in vpxfile.item_records(out, 4)]
+    assert [struct.unpack("<ff", p) for t, p in recs if t == "VCEN"] == [(20.0, 10.0)] + pts
+    assert len(out) == len(item) and [t for t, _ in recs].count("ENDB") == 5
+    with pytest.raises(ValueError):
+        vpxfile.reshape_item(item, pts[:3])
+
+
+def test_shadow_retrofit_trigger_is_live_invisible_and_on_the_playfield(vpxfile):
+    # PAD-922: John Wick's car has no object the ball hits; the map adds one,
+    # cloned from a trigger that is off, drawn and on a ramp (SURF)
+    vs = pytest.importorskip("vpxshadow")
+    src = struct.pack("<i", 6) + _rec("VCEN", struct.pack("<ff", 5, 5)) +         _rec("SURF", struct.pack("<i", 7) + b"Ramp023") + _rec("EBLD", struct.pack("<i", 0)) +         _rec("SHAP", struct.pack("<i", 2)) + _rec("RADI", struct.pack("<f", 25)) + _rec("NAME", vpxfile.wide("Tarche2")) +         b"".join(_rec("DPNT", b"") + _rec("VCEN", struct.pack("<ff", k, k)) + _rec("ENDB", b"")
+                 for k in range(4)) + _rec("ENDB", b"")
+
+    class Table:
+        items = [src]
+        item_info = staticmethod(vpxfile.VpxTable.item_info)
+    m = {"retrofit_triggers": {"_": "", "PadCarHit": {"clone": "Tarche2",
+                                                      "shape": [[478, 474], [557, 449], [571, 492], [492, 517]]}}}
+    (item,) = vs.retrofit_items(Table, m)
+    assert vpxfile.VpxTable.item_info(item)[:2] == ("Trigger", "PadCarHit")
+    top = {t: p for t, p, _ in vpxfile.biff_records(item, 4)}
+    assert top["EBLD"] == struct.pack("<i", 1) and top["SHAP"] == struct.pack("<i", 0)
+    assert top["SURF"] == struct.pack("<i", 0), "on the playfield, not the clone's ramp"
+    # PAD-925: or on a ramp the map names, with a radius (a cvpmMagnet's reach)
+    ramp = struct.pack("<i", 12) + _rec("NAME", vpxfile.wide("Ramp023")) + _rec("ENDB", b"")
+    Table.items = [src, ramp]
+    m["retrofit_triggers"]["PadCarHit"].update(surface="Ramp023", radius=40)
+    (item,) = vs.retrofit_items(Table, m)
+    top = {t: p for t, p, _ in vpxfile.biff_records(item, 4)}
+    assert top["SURF"] == struct.pack("<i", 7) + b"Ramp023"
+    assert struct.unpack("<f", top["RADI"]) == (40.0,)
+    m["retrofit_triggers"]["PadCarHit"]["surface"] = "Tarche2"
+    with pytest.raises(AssertionError):
+        vs.retrofit_items(Table, m)                       # a trigger is no surface
+    out, _ = vs.patch(MINI_TRIBUTE, dict(json.loads(json.dumps(MINI_SHADOW)),
+                                        switches={"PadCarHit": {"id": 77, "event": "hit"}}))
+    assert "Sub PadCarHit_Hit : vpmTimer.PulseSw 1077 : End Sub" in out
+
+
+def test_shadow_leaves_out_lights_the_table_does_not_have():
+    # PAD-1127: a copy of JP's Deadpool without li044a001 stopped in Visual
+    # Pinball with "Variable is undefined: 'li044a001'": the bridge named it
+    # bare in PadLampsInit. The light is left out; its insert's others stay
+    vs = pytest.importorskip("vpxshadow")
+    m = {"switches": {}, "solenoids": {},
+         "lamps": {"_": "", "li044": {"leds": [[8, 3]]}, "li044a": {"leds": [[8, 3]]},
+                   "li044a001": {"leds": [[8, 3], [8, 4]]}, "LiGone": {"leds": [[9, 1]]}},
+         "dark": ["li099", "LIGONE2", "liGone"]}
+    names = {"li044", "li044a", "li099"}
+    assert vs.drop_missing_lights(m, names) == ["li044a001", "LiGone", "LIGONE2"]
+    assert list(m["lamps"]) == ["_", "li044", "li044a"] and m["dark"] == ["li099"]
+    out, _ = vs.patch(MINI_TRIBUTE, dict(json.loads(json.dumps(MINI_SHADOW)),
+                                        lamps=m["lamps"], dark=m["dark"]))
+    assert '\tPadLamps.Add "1803", Array(li044, li044a)' in out
+    assert "li044a001" not in out.lower() and "ligone" not in out.lower()
+    assert "\tPadDark = Array(li099)" in out
+    assert vs.drop_missing_lights({"lamps": {"li1": {"leds": [[1, 1]]}}}, {"li1"}) == []
+
+
+def test_shadow_retrofit_clone_missing_takes_any_of_its_kind(vpxfile):
+    # PAD-1127: the clone is a template only; a copy of the table without it
+    # (or naming it in another case) copies another light, not a KeyError
+    vs = pytest.importorskip("vpxshadow")
+    light = struct.pack("<i", 7) + _rec("VCEN", struct.pack("<ff", 5, 5)) + \
+        _rec("NAME", vpxfile.wide("li010")) + _rec("ENDB", b"")
+
+    class Table:
+        items = [light]
+        item_info = staticmethod(vpxfile.VpxTable.item_info)
+    for clone in ("li071", "LI010"):
+        m = {"retrofit_lights": {"lights": {"PadFlash": {"clone": clone, "at": [400, 246]}}}}
+        (item,) = vs.retrofit_items(Table, m)
+        assert vpxfile.VpxTable.item_info(item)[:2] == ("Light", "PadFlash")
+    m = {"retrofit_timers": {"PadTick": {"clone": "tmrGone", "interval_ms": 10}}}
+    with pytest.raises(AssertionError, match="no Timer"):
+        vs.retrofit_items(Table, m)                       # nothing of the kind at all
+
+
+# ---------------------------------------------------------------- padled v7 -
+
+def test_rule_plane_offsets_match_padled_h():
+    import coilmap
+    hdr = open(os.path.join(EMU, "padled.h"), encoding="utf-8").read()
+    m = re.search(r"rule_pwr (\d+), rule_in (\d+),\s*\*?\s*rule_sets (\d+)", hdr)
+    assert m, "padled.h names the version-7 offsets"
+    assert (coilmap.RULE_PWR_OFF, coilmap.RULE_IN_OFF, coilmap.RULE_SETS_OFF) == \
+        tuple(int(x) for x in m.groups())
+    assert coilmap.RULE_READ <= int(re.search(r"#define PADLED_BYTES (\d+)", hdr).group(1))
+    assert coilmap.RULE_PWR_OFF >= coilmap.PAINT_READ            # after every older plane
+    assert "#define PADLED_VERSION 8" in hdr
+
+
+def test_rule_reads_power_and_input():
+    import coilmap
+    data = bytearray(coilmap.RULE_READ)
+    struct.pack_into("<I", data, 0, coilmap.PADLED_MAGIC)
+    struct.pack_into("<I", data, 4, 7)
+    o = 8 * coilmap.COIL_N + 5                                   # node 8 coil 5
+    data[coilmap.RULE_PWR_OFF + o] = 0xff
+    data[coilmap.RULE_IN_OFF + o] = 0x40 | 25                    # input 25
+    assert coilmap.rule(bytes(data), 8, 5) == {"power": 255, "input": 25}
+    assert coilmap.rule(bytes(data), 8, 0) == {"power": 0, "input": None}
+    struct.pack_into("<I", data, 4, 6)
+    assert coilmap.rule(bytes(data), 8, 5) is None               # a v6 block has no plane
+
+
+# ---------------------------------------------------------------- the map ---
+
+@pytest.fixture(scope="module")
+def gzmap():
+    return json.load(open(os.path.join(VPX, "godzilla_le.vpxmap.json"), encoding="utf-8"))
+
+
+def test_map_numbers_are_unique_and_in_range(gzmap):
+    lamp_nums = []
+    for sect in (gzmap["lamps"], gzmap["retrofit_lights"]["lights"]):
+        for name, v in sect.items():
+            if name == "_":
+                continue
+            node, idx = v["leds"][0]
+            assert 0 <= node < 16 and 0 <= idx < 480, name
+            lamp_nums.append(1000 + node * 100 + idx)
+    assert len(lamp_nums) == len(set(lamp_nums)), "two lights on one LED number"
+    coils = []
+    for num, s in gzmap["solenoids"].items():
+        if num == "_":
+            continue
+        node, idx = s["coil"]
+        assert 1 <= int(num) <= gzmap["solenoid_max"] <= 68, "core.vbs's SolCallback(68)"
+        assert 0 <= idx < 16
+        coils.append((node, idx))
+    assert len(coils) == len(set(coils)), "one small number per coil"
+    assert {"46", "48", "36"} <= set(gzmap["solenoids"]), "core.vbs's flipper Consts"
+    assert 1 <= gzmap["game_on"]["number"] <= gzmap["solenoid_max"]
+    ids = {int(v) for k, v in gzmap["switch_rewrite"].items() if k != "_"}
+    ids |= {int(v) for k, v in gzmap["switch_by_object"].items() if k != "_"}
+    ids |= set(gzmap["switch_holds"]["trough"])
+    assert all(0 <= i <= 97 for i in ids), "godzilla_le has switch ids 1..97"
+
+
+def test_patcher_rewrites_a_miniature(gzmap):
+    patch = pytest.importorskip("patch_godzilla")
+    mini = "\n".join([
+        'On Error Resume Next',
+        'ExecuteGlobal GetTextFile("controller.vbs")',
+        'If Err Then MsgBox "You need the controller.vbs in order to run this table"',
+        'Const cGameName="godzilla",UseSolenoids=1,UseLamps=0,UseGI=0, SCoin="coin"',
+        'LoadVPM "01000000","SEGA.VBS",3.10',
+        'sub Table1_Exit:Controller.Stop:End Sub',
+        ' SolCallBack(1) = "SolRelease"',
+        'SolCallback(3) = "solTopMagnet"',
+        '',
+        'SolCallback(sLRFlipper) = "SolRFlipper"',
+        'Sub SolRelease(Enabled)',
+        '\tbsTrough.ExitSol_On',
+        '\tvpmTimer.PulseSw 15',
+        'End Sub',
+        'Sub sw17_hit:vpmTimer.pulseSw 17 : playsound"targethaut" : End Sub',
+        'Sub sw41_Hit : Controller.Switch(41)=1 : End Sub',
+        'Sub sw62_Spin:vpmTimer.PulseSw 62 : End Sub',
+        'Sub RightSlingShot_Slingshot',
+        '\tvpmTimer.PulseSw 62',
+        'End Sub',
+        'Sub Bumper2_Hit : vpmTimer.PulseSw(50) : End Sub',
+        'Sub K9_hit()',
+        'k9.destroyball',
+        'end Sub',
+        'sub timer009_timer',
+        '\tTimer009.enabled=0',
+        'end Sub',
+        'Dim LampState(200), FadingLevel(200)',
+        'Dim FlashSpeedUp(200), FlashSpeedDown(200), FlashMin(200), FlashMax(200), FlashLevel(200)',
+        'Sub UpdateLamps',
+        ' NFadeL 1, l1',
+        'End Sub',
+        '\t\tbsTrough.InitSw 0,14,13,12,11,0,0,0',
+        '\t\tbsTrough.Balls = 4',
+        '\t\tbsTrough.InitExitSnd SoundFX("ballrelease",DOFContactors), SoundFX("Solenoid",DOFContactors)',
+        '\t\tmTopMagnet.Solenoid = 3',
+        'Set mMagnaSave2 = New cvpmMagnet : With mMagnaSave2',
+        '\t.InitMagnet Magna2, 15',
+        'End With',
+        'Sub Table1_KeyDown(ByVal KeyCode)',
+        '\tIf KeyCode=PlungerKey Then Controller.Switch(53)=1',
+        'End Sub',
+    ])
+    out, rep = patch.patch_script(mini, gzmap)
+    assert 'GetTextFile("PADSPIKE2.vbs")' in out and "SEGA.VBS" not in out
+    assert 'cGameName="godzilla_le",UseSolenoids=2' in out
+    # PAD-852: the backglass keeps the table's ROM name, and goes with the table
+    assert 'PadB2SName = "godzilla"' in out
+    assert "sub Table1_Exit:Controller.Stop : PadStopB2S:End Sub" in out
+    assert out.count("PAD: Spike 2 coils") == 1
+    assert 'SolCallback(1) = "SolRelease"' in out and "solTopMagnet" not in out
+    assert 'SolCallback(sLLFlipper) = "SolLFlipper"' in out
+    assert "PulseSw 15" not in out                       # the trough switches say it
+    assert "pulseSw 1078" in out                         # sw17 -> PWRLINE LEFT TGT
+    assert "Controller.Switch(0)=1" in out               # sw41: no Stern switch
+    assert "Sub sw62_Spin:vpmTimer.PulseSw 1085" in out  # by object: TOP SPINNER
+    assert "\tvpmTimer.PulseSw 1063\n" in out            # right slingshot, not 62
+    assert "PulseSw(1049)" in out                        # the pop bumper
+    assert "Controller.Switch(1034)=1" in out            # launch = Action Button
+    assert "bsScoop.AddBall Me" in out and "k9.destroyball" not in out
+    assert "timer009" not in out.lower().replace("timer009.enabled", "")
+    assert "InitSw 0,1071,1070,1069,1068,1067,1066,1072" in out
+    assert "bsTrough.Balls = 6" in out
+    assert "mTopMagnet.Solenoid = 0" in out
+    assert "NFadeL 1939, L1    ' TANKS" in out and " NFadeL 1, l1" not in out
+    assert "Dim LampState(3000), FadingLevel(3000)" in out
+    assert "FlashSpeedUp(3000), FlashSpeedDown(3000), FlashMin(3000), FlashMax(3000), FlashLevel(3000)" in out
+    assert "(200)" not in out
+    assert "mMechaMagnet.Solenoid = 6" in out and ".Solenoid = 5   ' GODZILLA MAGNET" in out
+    assert out.count("End Sub") + out.count("end Sub") == \
+        len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out)), "every Sub closes once"
+
+
+# ----------------------------------------------- the shadow patcher -----
+#
+# A scripted tribute (Rush, Foo Fighters) keeps its whole script as a shadow
+# game; vpxshadow.py renames its event subs, generates the bridge, neuters its
+# ball creation and makes PinUP Player optional. What matters is pinned on a
+# miniature of such a script.
+
+MINI_TRIBUTE = """Option Explicit
+Dim PuPlayer, bBallInPlungerLane
+Sub Table1_Init
+    Set PuPlayer = CreateObject("PinUpPlayer.PinDisplay")
+    PuPlayer.B2SInit "", "rush"
+    PuPlayer.LabelSet 1, "Title", "x", 1, ""
+    BallRelease.CreateBall
+    BallRelease.Kick 90, 4
+End Sub
+Sub Table1_KeyDown(ByVal keycode)
+    If keycode = LeftFlipperKey And bGameInPlay Then SolLFlipper 1
+End Sub
+Sub Table1_KeyUp(ByVal keycode) : End Sub
+Sub SolLFlipper(Enabled) : LeftFlipper.RotateToEnd : End Sub
+Sub SolRFlipper(Enabled) : RightFlipper.RotateToEnd : End Sub
+Sub Drain_Hit : PlungerIM.AutoFire : End Sub
+Sub Trigger1_Hit : bBallInPlungerLane = True : End Sub
+Sub sw001_Hit : AddScore 100 : End Sub
+Sub LeftSlingShot_Slingshot : AddScore 10 : End Sub
+Sub Kicker1_Hit : AddScore 500 : End Sub
+"""
+
+MINI_SHADOW = {
+    "title": "rush_le",
+    "cabinet": {"start": 1036, "launch": 1034, "launch_key": "LockBarKey",
+                "left_flipper": 1065, "right_flipper": 1064, "up_right_flipper": 1066, "coin": 1039},
+    "keys_skip_orig": ["StartGameKey", "AddCreditKey", "LockBarKey"],
+    "switches": {"sw001": {"id": 53, "event": "hit"},
+                 "LeftSlingShot": {"id": 69, "event": "slingshot"},
+                 "Spinner": {"id": 83, "event": "spin"},
+                 "Opto1": {"id": 85, "event": "hold"}},
+    "plunger": {"lane_trigger": "Trigger1", "lane_switch": 67, "autoplunge": "plungerIM"},
+    "trough": {"release": "BallRelease", "drain": "Drain",
+               "switches": [76, 75, 74, 73, 72, 71, 77], "balls": 6, "kick": [90, 4]},
+    "saucers": {"Kicker1": {"switch": 78, "dir": 190, "power": 15, "kickz": 1.4}},
+    "solenoids": {"1": {"coil": [8, 1], "name": "TROUGH", "callback": "bsTrough.SolOut"},
+                  "2": {"coil": [8, 4], "name": "AUTO PLUNGER", "callback": "PadAutoPlunge"},
+                  "3": {"coil": [9, 1], "name": "SIDE SCOOP", "callback": "bsKicker1.SolOut"},
+                  "7": {"coil": [8, 6], "name": "UP POST", "callback": None}},
+    "pup_stub": True,
+    "neuter": ["BallRelease.CreateBall", "BallRelease.Kick", "PlungerIM.AutoFire"],
+}
+
+
+@pytest.fixture(scope="module")
+def shadow():
+    vs = pytest.importorskip("vpxshadow")
+    text, rep = vs.patch(MINI_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))
+    return text, rep
+
+
+def test_shadow_keeps_the_original_subs_behind_the_bridge(shadow):
+    out, rep = shadow
+    assert "Sub Table1_Init_orig" in out and "\tTable1_Init_orig" in out
+    assert "Sub sw001_Hit_orig" in out
+    assert "Sub sw001_Hit : vpmTimer.PulseSw 1053 : sw001_Hit_orig : End Sub" in out
+    assert "Sub LeftSlingShot_Slingshot : vpmTimer.PulseSw 1069 : LeftSlingShot_Slingshot_orig : End Sub" in out
+    assert "Sub Spinner_Spin : vpmTimer.PulseSw 1083 : End Sub" in out      # no original to call
+    assert "Sub Opto1_Hit : Controller.Switch(1085) = True : End Sub" in out
+    assert "Sub Opto1_UnHit : Controller.Switch(1085) = False : End Sub" in out
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out)), \
+        "every Sub closes once"
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_shadow_spinner_as_an_opto_pulses_once_a_pass(tmp_path):
+    # PAD-887: Jurassic Park 4.02 has spinners where the machine has optos (the
+    # right orbit's mouth, the right half pipe); a ball spins one a dozen
+    # times, and the opto must see one pass. Run for real under VBScript
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["switches"]["Spinner"]["event"] = "pass"
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    assert "Sub Spinner_Spin : PadPassSw 1083 : End Sub" in out
+    assert "PadPassSw" not in vs.patch(MINI_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))[0]
+    lines = out.split("\n")
+    a = lines.index("Dim PadPassAt")
+    b = lines.index("End Sub", a)
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Dim GameTime, Pulses",
+        "Class FakeTimer : Public Sub PulseSw(n) : Pulses = Pulses & n & \"@\" & GameTime & \" \" : End Sub : End Class",
+        "Dim vpmTimer : Set vpmTimer = New FakeTimer",
+        "\n".join(lines[a:b + 1]),
+        # a pass: twelve spins 40 ms apart; 700 ms quiet; the next pass
+        "Dim i : For i = 0 To 11 : GameTime = 1000 + i * 40 : PadPassSw 1083 : Next",
+        "For i = 0 To 5 : GameTime = 2140 + i * 40 : PadPassSw 1083 : Next",
+        "GameTime = 2400 : PadPassSw 1056",
+        "WScript.Echo Pulses"]), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.split() == ["1083@1000", "1083@2140", "1056@2400"], r.stdout + r.stderr
+
+
+RAINBOW = """
+\tDim RGBStep, RGBFactor, rRed, rGreen, rBlue, RainbowLights, OtherLights
+\tSub StartRainbow(n)
+\t\tset RainbowLights = n
+\t\tRainbowTimer.Enabled = 1
+\tEnd Sub
+\tSub StopRainbow(n)
+\t\tDim obj
+\t\t\tFor each obj in RainbowLights
+\t\t\t\tSetLightColor obj, white, 0
+\t\t\tNext
+\tEnd Sub
+\tSub RainbowTimer_Timer 'rainbow led light color changing
+\t\tDim obj
+\t\trRed = rRed + 1
+\t\t\tFor each obj in RainbowLights
+\t\t\t\tobj.color = RGB(rRed, rGreen, rBlue)
+\t\t\tNext
+\tEnd Sub
+\tSub StartOther(n) : Set OtherLights = n : End Sub
+\tSub OtherToo : Set OtherLights = aLights : End Sub
+\tSub OtherTimer_Timer : Dim o : For Each o In OtherLights : o.State = 1 : Next : End Sub
+"""
+
+
+def test_shadow_quieted_set_leaves_an_empty_list(tmp_path):
+    # PAD-1102: Munsters saves RainbowTimer enabled, and only StartRainbow
+    # (quieted: the machine runs the lights) gave RainbowLights its lights;
+    # the first tick stopped Visual Pinball on "Object not a collection".
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["quiet_subs"] = ["StartRainbow", "StartOther"]
+    out, rep = vs.patch(MINI_TRIBUTE + RAINBOW, m)
+    lines = out.split("\n")
+    assert "RainbowLights = Array()" in lines
+    assert "OtherLights = Array()" not in lines        # OtherToo, still running, sets it too
+    assert any(r.startswith("RainbowLights starts as an empty list: only the quieted StartRainbow set it, "
+                            "and RainbowTimer_Timer, StopRainbow still walk it") for r in rep), rep
+    # what a loop inside the quieted Sub itself walks is never filled in
+    q = json.loads(json.dumps(MINI_SHADOW))
+    q["quiet_subs"] = ["StopRainbow", "RainbowTimer_Timer", "StartRainbow"]
+    assert "RainbowLights = Array()" not in vs.patch(MINI_TRIBUTE + RAINBOW, q)[0].split("\n")
+    # a local Dim is not the module's variable
+    local = "Sub Fill(n) : Dim Mine : Set Mine = n : End Sub\nSub Walk : Dim o : For Each o In Mine : Next : End Sub\n"
+    assert "Mine = Array()" not in vs.patch(MINI_TRIBUTE + local, dict(m, quiet_subs=["Fill"]))[0]
+    if not (sys.platform == "win32" and shutil.which("cscript")):
+        return
+    a = lines.index("\tDim RGBStep, RGBFactor, rRed, rGreen, rBlue, RainbowLights, OtherLights")
+    b = lines.index("\tEnd Sub", lines.index("\tSub RainbowTimer_Timer 'rainbow led light color changing"))
+    stand_in = next(ln for ln in lines if ln.startswith("Sub StartRainbow(n) : End Sub"))
+    # the table's block as patched (StartRainbow_orig is never called) and the stand-in
+    run = ["Dim aLights, white"] + lines[a:b + 1] + [stand_in]
+    tick = "StartRainbow aLights : RainbowTimer_Timer : StopRainbow aLights : WScript.Echo \"ran \" & rRed"
+    for name, guard in (("after", ["RainbowLights = Array()"]), ("before", [])):
+        vbs = tmp_path / ("%s.vbs" % name)
+        vbs.write_text("\n".join(run + guard + [tick]), encoding="latin-1")
+        r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+        if guard:
+            assert r.stdout.strip() == "ran 1" and not r.stderr.strip(), r.stdout + r.stderr
+        else:   # the table as v1.388.7 patched it: the reporter's error (cscript still exits 0)
+            assert "ran" not in r.stdout and "Object not a collection" in r.stderr, r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_shadow_up_only_opto_pulses_on_the_way_up(tmp_path):
+    # PAD-907: Rush's time machine (tm2) is LIFT RAMP OPTO; the tribute's ball
+    # rolls back down over it, which the machine's magnet would have kept.
+    # One pulse a shot, on the way up. Run for real under VBScript
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["switches"]["sw001"]["up"] = True
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    lines = out.split("\n")
+    a = lines.index("Sub sw001_Hit")
+    # the pulse waits for the way up; the table's own sub runs on every hit
+    assert lines[a + 1:a + 4] == ["\tIf ActiveBall.VelY < 0 Then vpmTimer.PulseSw 1053",
+                                  "\tsw001_Hit_orig", "End Sub"]
+    assert "Sub sw001_Hit : vpmTimer.PulseSw 1053 : sw001_Hit_orig : End Sub" in vs.patch(
+        MINI_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))[0]
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Dim Pulses",
+        "Class FakeTimer : Public Sub PulseSw(n) : Pulses = Pulses & n & \" \" : End Sub : End Class",
+        "Class FakeBall : Public VelY : End Class",
+        "Dim vpmTimer : Set vpmTimer = New FakeTimer",
+        "Dim ActiveBall : Set ActiveBall = New FakeBall",
+        "Dim Hits : Hits = 0",
+        "Sub sw001_Hit_orig : Hits = Hits + 1 : End Sub",
+        "\n".join(lines[a:a + 4]),
+        "ActiveBall.VelY = -12 : sw001_Hit",       # up the ramp
+        "ActiveBall.VelY = 9 : sw001_Hit",         # back down over it
+        "WScript.Echo \"[\" & Pulses & \"] \" & Hits"]), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.strip() == "[1053 ] 2", r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_shadow_switches_ignore_the_tributes_helper_balls(tmp_path):
+    # PAD-974: Batman 66's bat disc posts are unseen balls riding the turntable;
+    # at the phone they sat on the lock trigger, the table said TURNTABLE LOCK 3
+    # and the machine turned home and out again for good. A helper ball
+    # neither makes nor breaks a switch; the player's ball still does both.
+    # Run for real under VBScript
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["helper_balls"] = ["postBall1", "postBall2"]
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    lines = out.split("\n")
+    f = lines.index("Function PadHelperBall()   ' ActiveBall is one of the tribute's unseen helper balls")
+    h = lines.index("Sub Opto1_Hit")
+    u = lines.index("Sub Opto1_UnHit")
+    s = lines.index("Sub sw001_Hit")
+    assert lines[u + 1] == lines[h + 1] == lines[s + 1] == "\tIf PadHelperBall() Then Exit Sub"
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Dim Log",
+        "Class FakeCtl : Public Property Let Switch(n, v) : Log = Log & n & \"=\" & v & \" \" : End Property : End Class",
+        "Class FakeTimer : Public Sub PulseSw(n) : Log = Log & n & \" \" : End Sub : End Class",
+        "Class FakeBall : Public VelY : End Class",
+        "Dim Controller : Set Controller = New FakeCtl",
+        "Dim vpmTimer : Set vpmTimer = New FakeTimer",
+        "Dim postBall1, postBall2, ActiveBall, Hits : Hits = 0",
+        "Set postBall1 = New FakeBall",            # postBall2 never made: Empty
+        "Sub sw001_Hit_orig : Hits = Hits + 1 : End Sub",
+        "\n".join(lines[f:lines.index("End Function", f) + 1]),
+        "\n".join(lines[h:u + 4]),
+        "\n".join(lines[s:s + 4]),
+        "Set ActiveBall = postBall1 : Opto1_Hit : Opto1_UnHit : sw001_Hit",
+        "Set ActiveBall = New FakeBall : Opto1_Hit : Opto1_UnHit : sw001_Hit",
+        # the tribute's own call, with no ball at all: still the machine's switch
+        "Set ActiveBall = Nothing : Opto1_UnHit",
+        "ActiveBall = Empty : Opto1_UnHit",
+        "WScript.Echo \"[\" & Log & \"] \" & Hits"]), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.strip() == "[1085=True 1085=False 1053 1085=False 1085=False ] 1", r.stdout + r.stderr
+    # a map without helper balls generates what it always did
+    assert "Sub Opto1_Hit : Controller.Switch(1085) = True : End Sub" in vs.patch(
+        MINI_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))[0]
+
+
+#: PAD-977, VPW's Game of Thrones: the shadow game never got a Start, so its
+#: House objects were never made; and a renamed sub is no event handler, so
+#: its `Me` is not the object
+GOT_LIKE = MINI_TRIBUTE + """Dim House(4), CurrentPlayer
+Sub Kicker37_Hit
+    House(CurrentPlayer).RegisterHit 1
+    Me.Kick 190, 55
+End Sub
+Sub Spinner_Spin : Me.TimerEnabled = False : Me.TimerInterval = 1000 : House(CurrentPlayer).AddGold 5 : Me.TimerEnabled = True : End Sub
+Sub sw001_UnHit
+    Dim s : s = "Me" ' Me in a string or a comment stays
+End Sub
+"""
+
+
+def test_shadow_renamed_subs_name_their_object_and_cannot_stop_the_table():
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["switches"]["Kicker37"] = {"id": 120, "event": "hit"}
+    out, _ = vs.patch(GOT_LIKE, m)
+    lines = out.split("\n")
+    k = lines.index("Sub Kicker37_Hit_orig")
+    assert lines[k + 1:k + 4] == ["\tOn Error Resume Next   ' PAD: the shadow game's rules never stop the table",
+                                  "    House(CurrentPlayer).RegisterHit 1", "    Kicker37.Kick 190, 55"]
+    assert ("Sub Spinner_Spin_orig : On Error Resume Next : Spinner.TimerEnabled = False : Spinner.TimerInterval"
+            " = 1000 : House(CurrentPlayer).AddGold 5 : Spinner.TimerEnabled = True : End Sub") in lines
+    assert "Sub Kicker37_Hit : vpmTimer.PulseSw 1120 : Kicker37_Hit_orig : End Sub" in lines
+    assert "    Dim s : s = \"Me\" ' Me in a string or a comment stays" in lines     # not renamed: untouched
+    t = lines.index("Sub Table1_Init_orig")
+    assert lines[t + 1].endswith("' PAD: the shadow game's rules never stop the table")
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out)), \
+        "every Sub closes once"
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_shadow_renamed_subs_run_on_past_the_shadow_games_missing_state(tmp_path):
+    # the scoop still kicks and the spinner's timer still runs, with no error
+    # for Visual Pinball to stop the table on. Run for real under VBScript
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["switches"]["Kicker37"] = {"id": 120, "event": "hit"}
+    lines = vs.patch(GOT_LIKE, m)[0].split("\n")
+    k = lines.index("Sub Kicker37_Hit_orig")
+    s = [ln for ln in lines if ln.startswith("Sub Spinner_Spin_orig")][0]
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Dim Log, House(4), CurrentPlayer",
+        "Class FakeKicker : Public Sub Kick(a, p) : Log = Log & \"kick \" & a & \" \" & p & \" \" : End Sub : End Class",
+        "Class FakeSpinner : Public TimerInterval",
+        "\tPublic Property Let TimerEnabled(v) : Log = Log & \"timer \" & v & \" \" : End Property",
+        "End Class",
+        "Dim Kicker37 : Set Kicker37 = New FakeKicker",
+        "Dim Spinner : Set Spinner = New FakeSpinner",
+        "\n".join(lines[k:lines.index("End Sub", k) + 1]),
+        s,
+        "Kicker37_Hit_orig : Spinner_Spin_orig",    # an error out of either ends the script here
+        "WScript.Echo Log & \"|\""]), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.split() == ["kick", "190", "55", "timer", "False", "timer", "True", "|"], r.stdout + r.stderr
+    assert r.returncode == 0 and not r.stderr
+
+
+def test_batmans_unseen_balls_are_helpers():
+    # PAD-974: the tribute's Table1_Init makes three balls it never shows
+    # (bShowBalls = False): the bat disc's two posts and the crane's spring
+    m = json.load(open(os.path.join(VPX, "batman.shadow.json"), encoding="utf-8"))
+    assert m["helper_balls"] == ["postBall1", "postBall2", "craneBall"]
+    assert m["switches"]["trgBallLock3"]["event"] == "hold"
+
+
+def test_jaws_shark_arrows_carry_the_beach_shots():
+    # PAD-1311: the five shark-shaped shot arrows (JP's Lnight lights) never lit:
+    # the beaches' RGB went to the small beachgoer lights under them
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    lamps = m["lamps"]
+    for arrows, base in ((["Lnight1"], 8), (["Lnight4", "Light25"], 16), (["Lnight3"], 24),
+                         (["Lnight5", "Light45a"], 32), (["Lnight2", "Light47"], 40)):
+        for a in arrows:
+            assert lamps[a]["leds"] == [[9, base], [9, base + 1], [9, base + 2]] and lamps[a]["rgb"]
+    # each beach's three round lights are its rescue lights, the sign its SHARK,
+    # the circle its CLOSED X: none of them on the arrow's RGB any more
+    assert lamps["Lswimmer1"]["leds"] == [[9, 11]] and "rgb" not in lamps["Lswimmer1"]
+    assert lamps["Lnightsmim"]["leds"] == [[9, 14]] and lamps["Lbeach1"]["leds"] == [[9, 15]]
+    assert lamps["Lballcaptive"]["leds"] == [[8, 52]] and lamps["Lbounty"]["leds"] == [[8, 53]]
+
+
+def test_jaws_fireball_bulbs_stay_dark():
+    # PAD-1311: JP's five stacked fireball bulbs over the shark (radius up to 380)
+    # were wired to BOAT HIT CENTER/RIGHT: each boat hit bloomed the whole middle
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    for n in ("fcroco", "fcroco1", "fcroco2", "fcroco3", "fcroco4"):
+        assert n not in m["lamps"] and n in m["dark"]
+
+
+def test_jaws_fin_target_triangles_light_once():
+    # PAD-1383: each FIN TARGET lit two of JP's lights - its triangle over the
+    # harpoon below the black arc (Lchum1-7) and a second light at the fin's
+    # spot above the arc (PAD-1311). The machine lights the triangles only.
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    lamps = m["lamps"]
+    for i in range(1, 8):
+        name = "FIN TARGET %d" % i
+        on = [k for k, v in lamps.items() if k != "_" and v["name"].startswith(name)]
+        assert on == ["Lchum%d" % i], (name, on)
+    for n in ("Lbeachfinal", "Lnightfinal", "Lbarrelshark", "Ljackpotchum", "Lsharkfinal",
+              "Lhammerfinal", "Lsmimerfinal", "Lbeachfinal1", "Lnightfinal1",
+              "Lbarrelshark1", "Lhammerfinal1", "Lsmimerfinal1"):
+        assert n not in lamps and n in m["dark"]
+
+
+def test_jaws_shark_and_fin_follow_the_machine():
+    # PAD-1311: the shark follows SHARK UP-MAG / DOWN-MAG (no visible pop-up
+    # targets in front of it); the fin is the chum line target at SHARK
+    # POSITION 1..7 while SHARK FIN UP/DOWN holds it up, and a hit is SHARK FIN TGT
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    fins = ["Tbeachfinal", "Tnightfinal", "Tbarrelshark", "Tjackpot", "Tsharkfinal",
+            "Thammerfinal", "Tsmimerfinal"]
+    assert all(m["switches"][f]["id"] == 105 for f in fins)
+    vbs = m["extra_vbs"]
+    assert "PadFins = Array(%s)" % ", ".join(fins) in vbs
+    assert "PadSw(1105 - i)" in vbs and "PadSw(1079)" in vbs and "PadSw(1080)" in vbs
+    assert "PadNewtonTick" in vbs and "PadSharkMotor" not in vbs
+    assert m["solenoids"]["6"]["callback"] == "PadFinUpDown"
+    assert m["solenoids"]["3"]["callback"] is None
+    assert m["retrofit_timers"]["PadMechTimer"]["interval_ms"] == 50
+
+
+def test_jaws_center_ramp_reel_and_upper_deck_lights():
+    # PAD-1331: the middle (SCARS / NORTH BEACH) shot runs up JP's middle lane
+    # through Target2 to the upper playfield - Tcloseshark is on the shark's
+    # return wire above it, where no shot from the flippers passes - so
+    # CENTER RAMP MADE never fired; JP's reel in THE POND's U-turn (Spinner2)
+    # spun with no switch; the deck's RADIO/FLASH lights sat beside and off
+    # its red circles, and its upper arrow was dark
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    sw = m["switches"]
+    assert sw["Target2"] == {"id": 94, "event": "hit", "name": sw["Target2"]["name"]}
+    assert sw["Spinner2"]["id"] == 90 and sw["Spinner2"]["event"] == "spin"
+    assert sw["Spinner4"]["id"] == 83 and sw["Spinner4"]["event"] == "spin"
+    assert "PyramidKicker" not in sw, "Quint's hole is not the reel"
+    assert "PyramidKicker" in m["orig_keep"], "it still ejects on its own"
+    assert [k for k, v in sw.items() if k != "_" and v["id"] == 90] == ["Spinner2"]
+    lamps = m["lamps"]
+    assert lamps["Light48"]["leds"] == [[9, 83], [9, 84], [9, 85]] and lamps["Light48"]["rgb"]
+    assert lamps["Light14"]["leds"] == [[9, 80], [9, 81], [9, 82]]
+    retro = m["retrofit_lights"]["lights"]
+    # on the deck (a clone of a deck light), centred on its two red circles
+    assert retro["PadUpperPfRadio"]["at"] == [85, 342] and retro["PadUpperPfRadio"]["clone"] == "Light14"
+    assert retro["PadUpperPfFlash"]["at"] == [127, 392] and retro["PadUpperPfFlash"]["clone"] == "Light14"
+    assert {"gi001", "gi006"} <= set(m["round_lights"])
+    assert any(r["old"] == "Sub PyramidKicker_Hit : vpmTimer.PulseSw 1090" for r in m["repatch"])
+
+
+def test_jaws_no_kickback_no_loop_kicker_round_sling_glow():
+    # PAD-1339: JP's bait bucket (KsaveR) under the left outlane fired the ball
+    # back up while the green save arrow (Lightsave) was lit, and KrampBoucle on
+    # the Scars lane's top channel swallowed every ball and fired a new one round
+    # the loop at 30: the machine has neither. The sling GI pairs lit half
+    # circles cut 31-41 units from the bulb (the square yellow glow), and the
+    # lanterns' falloff ran 3-5x past their outlines
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    f = m["item_fields"]
+    assert f["KsaveR"] == {"EBLD": 0}
+    # PAD-1356: KrampBoucle is on again - Mike: a ball cannot make the Scars loop without it
+    assert "KrampBoucle" not in f
+    assert "Lightsave" in m["dark"] and "Lightsave" not in m["lamps"]
+    assert {"gi1", "gi2", "gi4", "gi5"} <= set(m["round_lights"])
+    assert all(f[g]["BWTH"] < 25 for g in ("gi1", "gi2", "gi4", "gi5"))
+    for n in range(1, 5):
+        assert f["Lightlantern%d" % n]["RADI"] <= 10 and f["Lightlantern%d" % n]["BWTH"] <= 10
+    assert "If Not Rsaveball.Collidable Then Rsaveball.Collidable = True" in m["extra_vbs"]
+    assert any(r["old"] == "PadStand Targetshark1, PadSharkSt(0), PadSharkUp" for r in m["repatch"])
+    assert "PadStand Targetshark1" not in m["extra_vbs"]
+
+
+JAWS_TABLE = r"C:\tmp\vpx_new\JAWS_50Th_Anniversary.3.2\JAWS_50Th_Anniversary.vpx"
+
+
+@pytest.mark.skipif(not os.path.exists(JAWS_TABLE), reason="JP's JAWS 50th 3.2 is not on this machine")
+def test_jaws_real_table_has_no_hard_glow_edge():
+    # PAD-1339 on the real table: after item_fields (round_lights included), no
+    # GI bulb and no lantern stops its glow at an outline while it is still
+    # bright - the falloff at the outline's nearest edge, times the intensity
+    vs = pytest.importorskip("vpxshadow")
+    vf = pytest.importorskip("vpxfile")
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    t = vf.VpxTable(JAWS_TABLE)
+    items = list(t.items)
+    for k, data in vs.item_fields(t, m).items():
+        items[int(k[len("GameItem"):])] = data
+
+    def seg(p, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        u = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / ((dx * dx + dy * dy) or 1)))
+        return math.hypot(a[0] + u * dx - p[0], a[1] + u * dy - p[1])
+
+    seen = set()
+    for data in items:
+        kind, name, pos = vf.VpxTable.item_info(data)
+        if kind != "Light" or not (name.lower().startswith("gi") or name.startswith("Lightlantern")):
+            continue
+        pts, f, first = [], {}, True
+        for tag, p, _ in vf.item_records(data):
+            if tag == "VCEN" and len(p) >= 8:
+                if first:
+                    first = False
+                    continue
+                pts.append(struct.unpack_from("<ff", p))
+            elif tag in ("RADI", "FAPO", "BWTH"):
+                f[tag] = struct.unpack_from("<f", p)[0]
+        near = min(seg(pos, pts[i], pts[i - 1]) for i in range(len(pts)))
+        edge = f["BWTH"] * max(0.0, 1 - near / f["RADI"]) ** f["FAPO"]
+        assert edge < 0.5, "%s: glow %.2f where its outline cuts it" % (name, edge)
+        seen.add(name)
+    assert {"gi1", "gi2", "gi4", "gi5", "Lightlantern1", "Lightlantern4"} <= seen
+
+
+def test_jaws_backboard_sign_and_quint_shack_follow_the_machine():
+    # PAD-1356: JP's backboard sign (SHARK ENCOUNTER / COLLECT MYSTERY / SHARK
+    # ATTACK / COLLECT JACKPOT) is four lenses stacked at one place, as Stern's
+    # SHARK BB 1 TOP..4 BOT are; Quint's shack top right (QUINT'S MYSTERY /
+    # BOUNTY HUNT / COLLECT GEAR) is QUINT'S BB 1 TOP..3 BOT. The four SHARK BB
+    # LEDs used to light one stray stand-in light below the sign
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    lamps = m["lamps"]
+    assert [lamps[k]["leds"] for k in ("Lsharkht1", "Light61a", "Lsharkht3", "Lsharkht4")] ==         [[[8, 75]], [[8, 76]], [[8, 77]], [[8, 78]]]
+    assert [lamps[k]["leds"] for k in ("Light61", "Light24", "Light46")] == [[[8, 67]], [[8, 68]], [[8, 69]]]
+    assert "PadSharkBb1Top" not in m["retrofit_lights"]["lights"]
+    mark = [r for r in m["repatch"] if r.get("absent")]
+    assert mark and mark[-1]["absent"] in m["extra_vbs"]
+
+
+@pytest.mark.skipif(not os.path.exists(JAWS_TABLE), reason="JP's JAWS 50th 3.2 is not on this machine")
+def test_jaws_real_table_lanterns_and_sign_order():
+    # PAD-1356 on the real table: the lanterns on the inlane plastics show no
+    # bulb mesh (the bloom), burn steady and dim; the sign's and the shack's
+    # lenses are mapped top to bottom by the height of the wall each stands on
+    vs = pytest.importorskip("vpxshadow")
+    vf = pytest.importorskip("vpxfile")
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    t = vf.VpxTable(JAWS_TABLE)
+    items = list(t.items)
+    for k, data in vs.item_fields(t, m).items():
+        items[int(k[len("GameItem"):])] = data
+    walls, surf, lant = {}, {}, {}
+    for data in items:
+        kind, name, pos = vf.VpxTable.item_info(data)
+        rec = {tag: p for tag, p, _ in vf.item_records(data)}
+        if kind == "Wall" and "HTTP" in rec:
+            walls[name] = struct.unpack_from("<f", rec["HTTP"])[0]
+        if kind == "Light" and "SURF" in rec:
+            surf[name] = rec["SURF"][4:].decode("latin1")
+        if kind == "Light" and name.startswith("Lightlantern"):
+            lant[name] = (struct.unpack_from("<i", rec["SHBM"])[0], struct.unpack_from("<i", rec["STAT"])[0],
+                          struct.unpack_from("<f", rec["STTF"])[0], struct.unpack_from("<f", rec["BWTH"])[0])
+    assert sorted(lant) == ["Lightlantern%d" % n for n in range(1, 5)]
+    assert all(v[0] == 0 and v[1] == 1 and v[2] == 1.0 and v[3] <= 10 for v in lant.values()), lant
+    for group in (("Lsharkht1", "Light61a", "Lsharkht3", "Lsharkht4"), ("Light61", "Light24", "Light46")):
+        heights = [walls[surf[n]] for n in group]
+        assert heights == sorted(heights, reverse=True), (group, heights)
+        leds = [m["lamps"][n]["leds"][0][1] for n in group]
+        assert leds == sorted(leds), (group, leds)
+
+
+#: PAD-1362: the LEDs jaws_le 1.02 holds lit all game long (emulator, a game
+#: with slings, inlanes and the bumper hit: 99-100% of the time, against
+#: 0-60% in attract) that are not inserts on JP's table
+JAWS_GAME_LONG = {(8, 13): "LEFT RETURN 1", (8, 15): "LEFT RETURN 3", (8, 16): "RIGHT RETURN 1",
+                  (8, 18): "RIGHT RETURN 3", (8, 20): "LOWER LEFT SPOTLIGHT", (8, 21): "LOWER RIGHT SPOTLIGHT",
+                  (8, 56): "MID RIGHT SPOTLIGHT", (8, 70): "ORCA BB LEFT", (8, 71): "ORCA BB RIGHT",
+                  (8, 55): "FISHING REEL FLASH", (9, 88): "UPPER PF FLASH"}
+
+
+def test_jaws_game_long_lights_are_jps_lanterns_and_flashers():
+    # PAD-1362 (Mike: in attract the lights under the playfield sit with the
+    # inserts, once a game starts they are out of whack): the return lanes,
+    # spotlights and Orca board are lit all game, and they were stand-in
+    # lights cloned from inserts and dropped where Stern's are, on bare art -
+    # the right return lanes as three squares (clones of the apron's SHOOT
+    # AGAIN box) beside JP's inlane lanterns. They are his lanterns and his
+    # flashers now; the three stand-ins left (no light of JP's near) are round
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    lamps, retro = m["lamps"], m["retrofit_lights"]["lights"]
+    assert lamps["Lightlantern3"]["leds"] == [[8, 13], [8, 14]] and lamps["Lightlantern4"]["leds"] == [[8, 15]]
+    assert lamps["Lightlantern1"]["leds"] == [[8, 16], [8, 17]] and lamps["Lightlantern2"]["leds"] == [[8, 18]]
+    assert [lamps[k]["leds"] for k in ("f7", "f9", "f2", "f4", "f5")] == \
+        [[[8, 20]], [[8, 21]], [[8, 56]], [[8, 70]], [[8, 71]]]
+    assert sorted(k for k in retro if k != "_") == ["PadFishingReelFlash", "PadUpperPfFlash", "PadUpperPfRadio"]
+    for k, v in retro.items():
+        if k != "_":
+            assert v["round"] is True and v["fields"]["RADI"] <= 20, k
+    # every game-long LED is on one light only, and none of them a stand-in but the round three
+    owners = {}
+    for sect in (lamps, retro):
+        for k, v in sect.items():
+            if k != "_":
+                for led in v["leds"]:
+                    owners.setdefault(tuple(led), []).append(k)
+    for led, what in JAWS_GAME_LONG.items():
+        assert len(owners.get(led, [])) == 1, (what, owners.get(led))
+    # JP's own rules that still ran on a sling or bumper hit and lit lights
+    # the machine never did (Light9, beside OVERBOARD, kept LEFT OUTLANE's state)
+    assert {"ChangeOutlanes", "CheckBumpers"} <= set(m["quiet_subs"])
+    assert m["item_fields"]["f4"] == {"BWTH": 15.0} and m["item_fields"]["f5"] == {"BWTH": 15.0}
+    mark = [r for r in m["repatch"] if r.get("absent", "").startswith("' PAD-1362")]
+    assert len(mark) == 1 and mark[0]["absent"] in m["extra_vbs"]
+
+
+@pytest.mark.skipif(not os.path.exists(JAWS_TABLE), reason="JP's JAWS 50th 3.2 is not on this machine")
+def test_jaws_real_table_game_long_lights_have_no_hard_edge():
+    # PAD-1362 on the real table: every light that burns all game (the lanterns,
+    # JP's five flashers, the round stand-ins after their `fields` and `round`)
+    # fades out before its outline - no square, no arrow - and each stand-in's
+    # outline is a circle of its new falloff about where it goes
+    vs = pytest.importorskip("vpxshadow")
+    vf = pytest.importorskip("vpxfile")
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    t = vf.VpxTable(JAWS_TABLE)
+    items = list(t.items)
+    for k, data in vs.item_fields(t, m).items():
+        items[int(k[len("GameItem"):])] = data
+    items += vs.retrofit_items(t, m)
+    want = {k for sect in (m["lamps"], m["retrofit_lights"]["lights"]) for k, v in sect.items()
+            if k != "_" and any(tuple(x) in JAWS_GAME_LONG for x in v["leds"])}
+
+    def seg(p, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        u = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / ((dx * dx + dy * dy) or 1)))
+        return math.hypot(a[0] + u * dx - p[0], a[1] + u * dy - p[1])
+
+    seen = set()
+    for data in items:
+        kind, name, pos = vf.VpxTable.item_info(data)
+        if kind != "Light" or name not in want:
+            continue
+        pts, f, first = [], {}, True
+        for tag, p, _ in vf.item_records(data):
+            if tag == "VCEN" and len(p) >= 8:
+                if first:
+                    first = False
+                    continue
+                pts.append(struct.unpack_from("<ff", p))
+            elif tag in ("RADI", "FAPO", "BWTH") and tag not in f:
+                f[tag] = struct.unpack_from("<f", p)[0]
+        near = min(seg(pos, pts[i], pts[i - 1]) for i in range(len(pts)))
+        edge = f["BWTH"] * max(0.0, 1 - near / f["RADI"]) ** f["FAPO"]
+        assert edge < 0.5, "%s: glow %.2f where its outline cuts it" % (name, edge)
+        r = m["retrofit_lights"]["lights"].get(name)
+        if r:
+            assert (round(pos[0]), round(pos[1])) == tuple(r["at"]) and f["RADI"] == r["fields"]["RADI"]
+            assert all(abs(math.hypot(x - pos[0], y - pos[1]) - f["RADI"] / math.cos(math.pi / len(pts))) < 0.01
+                       for x, y in pts), name
+        seen.add(name)
+    assert seen == want and len(want) == 11, sorted(want)
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the map's VBScript under cscript")
+def test_jaws_newton_ball_is_shark_hit_under_vbscript(tmp_path):
+    # PAD-1339: SHARK HIT is the newton ball (JP's captive ball beside
+    # CaptiveKick) being knocked while the shark is up - not two unseen targets
+    # standing at the ends of the SHARK! insert. One pulse per knock; nothing
+    # while the shark is down; the pop-up targets stay down and JP's outlane
+    # save wire stays shut. PAD-1374: the other captive ball (CaptiveKick1) is
+    # the chum bucket's newton ball: CHUM BUCKET TGT on a knock at any angle,
+    # not when it reached Tchum1 up its lane; slowing at the top of its swing
+    # does not count it again; neither ball counts before it has settled
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    assert "Tchum1" not in m["switches"] and 89 not in [v["id"] for k, v in m["switches"].items() if k != "_"]
+    vbs = m["extra_vbs"].replace("On Error Resume Next", "")     # an error ends the run here
+    tick = "\n".join(["Sub Tick : PadMechTimer_Timer : End Sub",
+                      "Sub Settle : Dim j : For j = 1 To 12 : Tick : Next : End Sub"])
+    script = "\n".join([
+        "Dim Log, Sw(2000), Balls",
+        "Class FakeObj : Public IsDropped, Visible, Enabled, Collidable, Name : End Class",
+        "Class FakeBall : Public X, Y, VelX, VelY : End Class",
+        "Class FakeController : Public Default Property Get Switch(n) : Switch = Sw(n) : End Property : End Class",
+        "Class FakeTimer : Public Sub PulseSw(n) : Log = Log & \"pulse\" & n & \" \" : End Sub : End Class",
+        "Function GetBalls : GetBalls = Balls : End Function",
+        "Function Obj(d) : Set Obj = New FakeObj : Obj.IsDropped = d : Obj.Collidable = True : End Function",
+        "Function Ball(x, y) : Set Ball = New FakeBall : Ball.X = x : Ball.Y = y : Ball.VelX = 0 : Ball.VelY = 0 : End Function",
+        "Dim Controller : Set Controller = New FakeController",
+        "Dim vpmTimer : Set vpmTimer = New FakeTimer",
+        "Dim o_",
+        "\n".join("Dim %s : Set %s = Obj(False)" % (n, n) for n in (
+            "Tquick1", "Tquick2", "Tquick3", "Tquick4", "Tbeachfinal", "Tnightfinal", "Tbarrelshark", "Tjackpot",
+            "Tsharkfinal", "Thammerfinal", "Tsmimerfinal", "Targetshark1", "Targetshark2", "Targetshark3",
+            "Targetshark4", "shark", "Rsaveball", "lockpostG", "lockpostD")),
+        vbs, tick,
+        "Dim newton, bucket : Set newton = Ball(546, 490) : Set bucket = Ball(325, 582)",
+        "Balls = Array(bucket, newton)",
+        "Tick",                                                   # finds both newton balls
+        "newton.VelY = -12 : bucket.VelY = -12 : Tick : Log = Log & \"unsettled \"",   # not yet at rest: nothing
+        "newton.VelY = 0 : bucket.VelY = 0 : Settle",
+        "newton.VelY = -12 : Tick : newton.VelY = 0 : Settle : Log = Log & \"down \"",   # shark down: no SHARK HIT
+        "Sw(1079) = 1 : Tick : Sw(1079) = 0",                    # SHARK UP-MAG: up
+        "newton.VelY = -12 : Dim i : For i = 1 To 20 : Tick : Next",          # one knock, however long it swings
+        "newton.VelY = 9 : Tick : newton.VelY = -3 : Tick : Log = Log & \"knock \"",
+        "newton.VelY = 0 : Settle : newton.VelY = -15 : Tick : newton.VelY = 0 : Settle : Log = Log & \"again \"",   # settled, knocked again
+        "bucket.VelX = 1.8 : bucket.VelY = -1.5 : Tick : Tick : Log = Log & \"glancing \"",   # off the straight: counts once
+        "bucket.Y = 500 : bucket.VelX = 0 : bucket.VelY = 0 : Tick : Tick : Tick",           # the top of its swing
+        "bucket.VelY = 8 : Tick : Log = Log & \"swing \"",                                 # rolling back: no second hit
+        "bucket.Y = 584 : bucket.VelY = 0 : Tick : Tick : Tick : bucket.VelY = -2.5 : Tick : Log = Log & \"back \"",   # home again: a new knock
+        "Rsaveball.Collidable = False : Tick",                   # JP's Targetsave_Hit opened it
+        "Log = Log & Targetshark1.IsDropped & Targetshark2.IsDropped & Targetshark3.IsDropped & Targetshark4.IsDropped",
+        "Log = Log & \" \" & Rsaveball.Collidable",
+        "WScript.Echo Log & \" |\""])
+    (tmp_path / "t.vbs").write_text(script, encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(tmp_path / "t.vbs")], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and not r.stderr, r.stdout + r.stderr
+    assert r.stdout.split() == ["unsettled", "down", "pulse1081", "knock", "pulse1081", "again",
+                                "pulse1089", "glancing", "swing", "pulse1089", "back",
+                                "TrueTrueTrueTrue", "True", "|"], r.stdout
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_shadow_unless_lets_a_hit_by(tmp_path):
+    # PAD-1366: `unless` - a VBScript condition under which a hit is not the
+    # machine's switch; the table's own sub still runs. Evaluated once a hit
+    # (a condition that counts down counts once), alone and with `up`
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["switches"]["sw001"]["unless"] = "Skip()"
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    lines = out.split("\n")
+    a = lines.index("Sub sw001_Hit")
+    assert lines[a + 1:a + 4] == ["\tIf Not (Skip()) Then vpmTimer.PulseSw 1053", "\tsw001_Hit_orig", "End Sub"]
+    one = "\n".join(lines[a:a + 4])
+    m["switches"]["sw001"]["up"] = True
+    lines2 = vs.patch(MINI_TRIBUTE, m)[0].split("\n")
+    b = lines2.index("Sub sw001_Hit")
+    assert lines2[b + 1:b + 6] == ["\tIf ActiveBall.VelY < 0 Then", "\t\tIf Not (Skip()) Then vpmTimer.PulseSw 1053",
+                                   "\tEnd If", "\tsw001_Hit_orig", "End Sub"]
+    both = "\n".join(lines2[b:b + 6]).replace("sw001_Hit", "sw002_Hit")
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Dim Pulses, Skips, Asked, Hits",
+        "Class FakeTimer : Public Sub PulseSw(n) : Pulses = Pulses & n & \" \" : End Sub : End Class",
+        "Class FakeBall : Public VelY : End Class",
+        "Dim vpmTimer : Set vpmTimer = New FakeTimer",
+        "Dim ActiveBall : Set ActiveBall = New FakeBall",
+        "Skips = 1 : Asked = 0 : Hits = 0",
+        "Function Skip() : Asked = Asked + 1 : Skip = Skips > 0 : Skips = Skips - 1 : End Function",
+        "Sub sw001_Hit_orig : Hits = Hits + 1 : End Sub",
+        "Sub sw002_Hit_orig : Hits = Hits + 1 : End Sub",
+        one, both,
+        "sw001_Hit : sw001_Hit",                                   # skipped once, then the switch
+        "Skips = 1 : ActiveBall.VelY = 9 : sw002_Hit",            # on the way down: not even asked
+        "ActiveBall.VelY = -9 : sw002_Hit : sw002_Hit",           # up: skipped once, then the switch
+        "WScript.Echo \"[\" & Pulses & \"] \" & Hits & \" \" & Asked"]), encoding="latin-1")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.strip() == "[1053 1053 ] 5 4", r.stdout + r.stderr
+
+
+def test_item_fields_writes_a_list_as_floats():
+    # PAD-1366: a vector field - JAWS 50th's spinner moved off the table
+    vs = pytest.importorskip("vpxshadow")
+    vf = pytest.importorskip("vpxfile")
+    name = "Spinner1"
+    data = (struct.pack("<i", 8) + vf.biff_record("VCEN", struct.pack("<ff", 852.0, 511.0))
+            + vf.biff_record("NAME", struct.pack("<I", 2 * len(name)) + name.encode("utf-16-le"))
+            + vf.biff_record("SVIS", struct.pack("<i", 1)) + vf.biff_record("ENDB", b""))
+
+    class Table:
+        items = [data]
+        item_info = staticmethod(vf.VpxTable.item_info)
+
+    streams = vs.item_fields(Table, {"item_fields": {"Spinner1": {"SVIS": 0, "VCEN": [-400.0, -400]}}})
+    recs = {t: p for t, p, _ in vf.item_records(streams["GameItem0"])}
+    assert struct.unpack("<ff", recs["VCEN"]) == (-400.0, -400.0)
+    assert struct.unpack("<i", recs["SVIS"])[0] == 0
+
+
+def test_jaws_far_right_lane_is_the_right_ramp():
+    # PAD-1366 (Mike): a shot up the far right lane (EAST BEACH, Raft Attack)
+    # only gave what a LEFT ramp gives. JP raises a ramp in that lane at every
+    # ball; the ball climbs into Krampquint, comes back at Krampquint1 on the
+    # left ramp's return wire and rolls over LeftRampDone - nothing in the lane
+    # itself was a switch. The upper deck's helix (RightRampDone) was the
+    # right ramp, sw5 under the deck its stand-in UP PF RAMP MADE, and JP's
+    # spinner at the lane's mouth is not on Stern's game
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    sw = m["switches"]
+    assert sw["Krampquint"]["id"] == 68 and sw["Krampquint"]["also"] == "PadQuintIn"
+    assert sw["LeftRampDone"]["id"] == 67 and sw["LeftRampDone"]["unless"] == "PadQuintBall()"
+    assert sw["RightRampDone"]["id"] == 93
+    assert "sw5" not in sw and "sw5_Hit" in m["quiet_subs"], "JP's own sw5 sub put the Orca board out"
+    assert "Krampquint" not in m["orig_keep"], "its flash is JP's rules; PadQuintIn moves the ball"
+    ids = lambda n: sorted(k for k, v in sw.items() if k != "_" and v["id"] == n)   # noqa: E731
+    assert ids(68) == ["Krampquint"] and ids(67) == ["LeftRampDone"] and ids(93) == ["RightRampDone"]
+    assert m["item_fields"]["Spinner1"] == {"SVIS": 0, "VCEN": [-400.0, -400.0]}
+    assert m["item_fields"]["Primitive89"] == {"TVIS": 0}
+    assert "Spinner1" not in sw
+    mark = "' PAD-1366: the far right ramp is RIGHT RAMP MADE"
+    assert mark in m["extra_vbs"]
+    assert any(r.get("absent", "").startswith(mark) and r["absent"] in m["extra_vbs"] for r in m["repatch"])
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_jaws_far_right_ball_is_no_left_ramp_under_vbscript(tmp_path):
+    # PAD-1366: RIGHT RAMP MADE at Krampquint and the ball goes on from
+    # Krampquint1 as JP's did; that ball over LeftRampDone is let by, once a
+    # ball (two far right shots, two balls); a real left ramp after it is the
+    # left ramp, and a far right ball that never came round is forgotten
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    tribute = MINI_TRIBUTE + "Sub Krampquint_Hit : AddScore 1 : End Sub\nSub LeftRampDone_Hit : AddScore 1 : End Sub\n"
+    mini = json.loads(json.dumps(MINI_SHADOW))
+    mini["switches"] = {k: m["switches"][k] for k in ("Krampquint", "LeftRampDone")}
+    mini["orig_hits"] = False
+    out = vs.patch(tribute, mini)[0].split("\n")
+    subs = [ln for ln in out if ln.startswith("Sub Krampquint_Hit ")]
+    a = out.index("Sub LeftRampDone_Hit")
+    subs += out[a:a + 3]
+    assert subs[0].startswith("Sub Krampquint_Hit : vpmTimer.PulseSw 1068") and subs[0].endswith(" : PadQuintIn : End Sub")
+    vbs = m["extra_vbs"]
+    start = vbs.index("' PAD-1366")
+    script = "\n".join([
+        "Dim Log",
+        "Class FakeTimer : Public Sub PulseSw(n) : Log = Log & n & \" \" : End Sub : End Class",
+        "Class FakeKicker : Public Nm",
+        "  Public Sub DestroyBall : Log = Log & Nm & \".destroy \" : End Sub",
+        "  Public Sub CreateBall : Log = Log & Nm & \".create \" : End Sub",
+        "  Public Sub Kick(a, s) : Log = Log & Nm & \".kick\" & a & \"/\" & s & \" \" : End Sub",
+        "End Class",
+        "Dim vpmTimer : Set vpmTimer = New FakeTimer",
+        "Dim Krampquint : Set Krampquint = New FakeKicker : Krampquint.Nm = \"K\"",
+        "Dim Krampquint1 : Set Krampquint1 = New FakeKicker : Krampquint1.Nm = \"K1\"",
+        "Sub PlaySound(s) : End Sub",
+        vbs[start:]] + subs + [
+        "Krampquint_Hit : LeftRampDone_Hit : Log = Log & \"| \"",           # far right: no left ramp
+        "LeftRampDone_Hit : Log = Log & \"| \"",                             # a real left ramp
+        "Krampquint_Hit : Krampquint_Hit : LeftRampDone_Hit : LeftRampDone_Hit : LeftRampDone_Hit : Log = Log & \"| \"",
+        "Krampquint_Hit : PadQuintAt = Timer - 20 : LeftRampDone_Hit",     # never came round: forgotten
+        "WScript.Echo Log"])
+    (tmp_path / "t.vbs").write_text(script, encoding="latin-1")
+    r = subprocess.run(["cscript", "//nologo", str(tmp_path / "t.vbs")], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and not r.stderr, r.stdout + r.stderr
+    k = "1068 K.destroy K1.create K1.kick270/5"
+    assert r.stdout.split() == (k.split() + ["|", "1067", "|"] + k.split() + k.split() + ["1067", "|"]
+                                + k.split() + ["1067"]), r.stdout
+
+
+@pytest.mark.skipif(not os.path.exists(r"C:\tmp\vpx_new\JAWS_50Th_Anniversary.3.2\JAWS_50Th_Anniversary.vpx"),
+                    reason="JP's JAWS 50th 3.2 is not on this machine")
+def test_jaws_real_table_far_right_ramp_and_spinner():
+    # PAD-1366, read off JP's table: Krampquint is on the far right lane's
+    # ramp (Ramphouse); Krampquint1, Quint's hole and LeftRampDone are on one
+    # wire (Ramp051); RightRampDone is on the deck's helix (Ramp026), which
+    # starts on the deck (WallHautJaw, 110 high) the upper flipper plays; the
+    # spinner and its bracket at the lane's mouth leave the table
+    vs = pytest.importorskip("vpxshadow")
+    vf = pytest.importorskip("vpxfile")
+    t = vf.VpxTable(r"C:\tmp\vpx_new\JAWS_50Th_Anniversary.3.2\JAWS_50Th_Anniversary.vpx")
+
+    def surf(d):
+        p = [pl for tag, pl, _ in vf.item_records(d) if tag == "SURF"][0]
+        return p[4:4 + struct.unpack_from("<I", p)[0]].decode("latin-1")
+    by = {t.item_info(d)[1]: d for d in t.items}
+    assert surf(by["Krampquint"]) == "Ramphouse"
+    assert {surf(by[n]) for n in ("Krampquint1", "PyramidKicker", "LeftRampDone")} == {"Ramp051"}
+    assert surf(by["RightRampDone"]) == "Ramp026" and surf(by["LeftFlipperG"]) == "WallHautJaw"
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    streams = vs.item_fields(t, m)
+    out = {t.item_info(d)[1]: d for d in streams.values()}
+    recs = {tag: pl for tag, pl, _ in vf.item_records(out["Spinner1"])}
+    x, y = struct.unpack("<ff", recs["VCEN"])
+    assert x < 0 and y < 0 and struct.unpack("<i", recs["SVIS"])[0] == 0
+    recs = {tag: pl for tag, pl, _ in vf.item_records(out["Primitive89"])}
+    assert struct.unpack("<i", recs["TVIS"])[0] == 0
+
+
+def test_jaws_copy_patched_before_the_far_right_ramp_asks_for_a_new_patch(tmp_path):
+    vsu = pytest.importorskip("vpxsetup")
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    why = [r["why"] for r in m["repatch"] if "far right lane" in r["why"]]
+    assert len(why) == 1
+    name = "JAWS_50Th_Anniversary (PAD).vpx"
+    (tmp_path / (name[:-4] + ".script.vbs")).write_text("Sub LeftRampDone_Hit : vpmTimer.PulseSw 1067 : End Sub\n",
+                                                        encoding="utf-8")
+    assert why[0] in vsu.missed_fixes(str(tmp_path), name, m["repatch"])
+    (tmp_path / (name[:-4] + ".script.vbs")).write_text(m["extra_vbs"], encoding="utf-8")
+    assert why[0] not in vsu.missed_fixes(str(tmp_path), name, m["repatch"])
+
+
+def test_round_lights_gives_a_light_a_round_outline():
+    # PAD-1331: a bulb's halo is drawn inside its outline; JAWS 50th's sling GI
+    # (falloff 110, a box 33 from its centre) hung a square of light over each
+    # sling. round_lights: the same number of drag points, a regular polygon
+    # about the centre whose inscribed circle is the falloff
+    vs = pytest.importorskip("vpxshadow")
+    vf = pytest.importorskip("vpxfile")
+
+    def light(name, centre, radius, pts):
+        out = struct.pack("<i", 7) + vf.biff_record("NAME", struct.pack("<I", 2 * len(name)) + name.encode("utf-16-le"))
+        out += vf.biff_record("VCEN", struct.pack("<ff", *centre)) + vf.biff_record("RADI", struct.pack("<f", radius))
+        for p in pts:
+            out += vf.biff_record("DPNT", b"") + vf.biff_record("VCEN", struct.pack("<ff", *p)) + vf.biff_record("ENDB", b"")
+        return out + vf.biff_record("BHHI", struct.pack("<f", 55.0)) + vf.biff_record("ENDB", b"")
+
+    box = [(160, 1500), (230, 1500), (230, 1580), (160, 1580), (150, 1540)]
+
+    class Table:
+        items = [light("gi1", (100, 100), 50.0, [(50, 50), (150, 50), (100, 150)]),
+                 light("gi001", (190, 1541), 110.0, box)]
+        item_info = staticmethod(vf.VpxTable.item_info)
+
+    streams = vs.item_fields(Table, {"round_lights": ["GI001"]})
+    assert list(streams) == ["GameItem1"]
+    recs = list(vf.item_records(streams["GameItem1"]))
+    cen = [struct.unpack_from("<ff", p) for t, p, _ in recs if t == "VCEN"]
+    assert len(cen) == 1 + len(box), "the same drag points, one each"
+    cx, cy = cen[0]
+    assert (round(cx), round(cy)) == (190, 1541), "the halo's centre stays"
+    n = len(box)
+    for x, y in cen[1:]:
+        assert abs(math.hypot(x - cx, y - cy) - 110.0 / math.cos(math.pi / n)) < 0.01
+    assert struct.unpack("<f", [p for t, p, _ in recs if t == "BHHI"][0])[0] == 55.0, "the rest as it was"
+    with pytest.raises(KeyError):
+        vs.item_fields(Table, {"round_lights": ["NoSuchLight"]})
+
+
+def test_retrofit_light_fields_and_round():
+    # PAD-1362: a retrofit light is a clone, and kept its source's outline and
+    # falloff (JAWS 50th's deck lights: arrows lit over round red circles).
+    # `fields` set its records as item_fields does; `round` then makes its
+    # outline a circle of the NEW falloff about where it goes
+    vs = pytest.importorskip("vpxshadow")
+    vf = pytest.importorskip("vpxfile")
+    name = "Light14"
+    src = struct.pack("<i", 7) + vf.biff_record("NAME", struct.pack("<I", 2 * len(name)) + name.encode("utf-16-le"))
+    src += vf.biff_record("VCEN", struct.pack("<ff", 100, 100)) + vf.biff_record("RADI", struct.pack("<f", 50.0))
+    src += vf.biff_record("BWTH", struct.pack("<f", 20.0))
+    arrow = [(100, 60), (130, 130), (70, 130)]
+    for p in arrow:
+        src += vf.biff_record("DPNT", b"") + vf.biff_record("VCEN", struct.pack("<ff", *p)) + vf.biff_record("ENDB", b"")
+    src += vf.biff_record("ENDB", b"")
+
+    class Table:
+        items = [src]
+        item_info = staticmethod(vf.VpxTable.item_info)
+
+    lights = {"Plain": {"clone": "Light14", "at": [300, 400]},
+              "Round": {"clone": "Light14", "at": [300, 400], "round": True, "fields": {"RADI": 16.0}}}
+    plain, rnd = vs.retrofit_items(Table, {"retrofit_lights": {"lights": lights}})
+
+    def look(item):
+        recs = list(vf.item_records(item))
+        cen = [struct.unpack_from("<ff", p) for t, p, _ in recs if t == "VCEN"]
+        radi = [struct.unpack_from("<f", p)[0] for t, p, _ in recs if t == "RADI"][0]
+        bwth = [struct.unpack_from("<f", p)[0] for t, p, _ in recs if t == "BWTH"][0]
+        return cen, radi, bwth
+    cen, radi, _ = look(plain)
+    assert cen[1:] == [(x + 200, y + 300) for x, y in arrow] and radi == 50.0, "no keys: the clone as it was"
+    cen, radi, bwth = look(rnd)
+    assert cen[0] == (300, 400) and radi == 16.0 and bwth == 20.0
+    assert len(cen) == 1 + len(arrow)
+    for x, y in cen[1:]:
+        assert abs(math.hypot(x - 300, y - 400) - 16.0 / math.cos(math.pi / len(arrow))) < 0.01
+
+
+def test_vpxlamps_reads_a_webp_holding_a_jpeg_marker():
+    # PAD-1311: JAWS 50th's playfield is a WebP whose bytes hold a stray JPEG
+    # marker; the picture starts at the FIRST magic, not at the JPEG one
+    sys.path.insert(0, VPX)
+    import vpxfile
+    import vpxlamps
+    from PIL import Image
+    import io
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 80), (10, 200, 30)).save(buf, "WEBP", lossless=True)
+    data = (b"\0" * 4 + vpxfile.biff_record("NAME", struct.pack("<I", 2) + b"pf")
+            + buf.getvalue() + b"\xff\xd8\xff junk")
+
+    class Stream:
+        def read(self):
+            return data
+
+    class Ole:
+        def exists(self, name):
+            return name == "GameStg/Image0"
+
+        def openstream(self, name):
+            return Stream()
+
+    class Table:
+        ole = Ole()
+
+        def gamedata_field(self, tag):
+            return {"IMAG": struct.pack("<I", 2) + b"pf", "RGHT": struct.pack("<f", 40.0),
+                    "BOTM": struct.pack("<f", 80.0)}[tag]
+
+    img, right, bottom = vpxlamps.table_image(Table())
+    assert img.size == (40, 80) and img.getpixel((5, 5))[1] > 150
+
+
+def test_rushs_time_machine_is_the_lift_ramp_opto():
+    # PAD-907: the game starts its modes and multiballs at the time machine,
+    # LIFT RAMP OPTO (82); the tribute's time machine trigger is tm2. LL3 is
+    # the VUK lane, no longer a stand-in for it
+    m = json.load(open(os.path.join(VPX, "rush_le.shadow.json"), encoding="utf-8"))
+    assert m["switches"]["tm2"] == {"id": 82, "event": "hit", "up": True,
+                                    "name": "LIFT RAMP OPTO (the time machine shot)"}
+    assert [k for k, v in m["switches"].items() if k != "_" and v["id"] == 82] == ["tm2"]
+
+
+def test_rushs_right_return_lanes_match_their_inserts():
+    # PAD-921: TRightInlane is the inner lane (its insert I96 is RIGHT RETURN
+    # LANE INNER), TRightInlane2 the outer; each pressed the other's switch
+    m = json.load(open(os.path.join(VPX, "rush_le.shadow.json"), encoding="utf-8"))
+    sw, lamps = m["switches"], m["lamps"]
+    assert sw["TRightInlane"]["id"] == 63 and sw["TRightInlane2"]["id"] == 61
+    assert lamps["I96"]["leds"] == [[8, 5]] and "INNER" in lamps["I96"]["name"]
+    assert lamps["I97"]["leds"] == [[8, 6]] and "OUTER" in lamps["I97"]["name"]
+
+
+def test_rushs_time_machine_magnet_follows_its_coil():
+    # PAD-925: the tribute has no magnet; the game's MAGNET (coil 9) found a
+    # null callback. A trigger added on the time machine ramp finds the ball.
+    # PAD-1240: the hold is inside the time machine, past the ramp's end
+    # (y 473), not on the ramp; a timer of the map's own keeps it there
+    m = json.load(open(os.path.join(VPX, "rush_le.shadow.json"), encoding="utf-8"))
+    assert m["solenoids"]["9"] == {"coil": [9, 7], "name": "MAGNET", "callback": "PadTimeMachineMagnet"}
+    t = m["retrofit_triggers"]["PadTMMagnet"]
+    assert t["clone"] == "tm2" and t["surface"] == "Ramp011", "on the ramp tm2 sits on"
+    xs, ys = zip(*t["shape"])
+    assert min(ys) < 589 - 40, "up the ramp from tm2 (y 589), the shot the game turns it on at"
+    assert m["retrofit_timers"]["PadTMTimer"] == {"clone": "PulseTimer", "interval_ms": 1}
+    ev = m["extra_vbs"]
+    assert "Sub PadTimeMachineMagnet(e)" in ev and "Sub PadTMTimer_Timer" in ev
+    assert "cvpmMagnet" not in ev, "core.vbs's magnet holds a ball only where its trigger is, on the ramp"
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the map's VBScript under cscript")
+def test_rushs_time_machine_holds_the_ball_inside_and_lets_it_back_down(tmp_path):
+    # PAD-1240: the map's own extra_vbs, a ball shot up Ramp011 (y 659 up to
+    # 473, 80 units high: gravity pulls it back down; past the top it flies
+    # on and bounces off tm1 at y 394), its timer at 10 ms (a slow frame), and
+    # coil 9 as the emulator fires it for a multiball start (lift ramp up):
+    # on 20 ms after the ball passes tm2, off 4.1 s later, a 20 ms pulse
+    # 0.17 s after that. Every shot from one that barely reaches the trigger
+    # to one that flies off the top is pulled in past the ramp's end and held
+    # inside the machine (517,435, at the ramp's height) at 1 s and 4 s.
+    # PAD-1250: let go, it rolls back down the ramp past tm2 (the reporter's
+    # ask), never out onto the wire return (364,418) as PAD-1240 sent it. A
+    # 60 ms ball-search pulse puts a ball it caught back: back down as well.
+    # No coil: never held. Not Visual Pinball's physics: the map's logic on a
+    # ball that moves like one
+    m = json.load(open(os.path.join(VPX, "rush_le.shadow.json"), encoding="utf-8"))
+    t = m["retrofit_triggers"]["PadTMMagnet"]
+    xs, ys = zip(*t["shape"])
+    # the hold looks its ball up by the trigger's own box
+    assert "b.X > %d And b.X < %d And b.Y > %d And b.Y < %d" % (min(xs), max(xs), min(ys), max(ys)) in m["extra_vbs"]
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Class FakeBall : Public Dead, mX, Y, Z, VelX, VelY, VelZ",
+        "\tPublic Property Get X : If Dead Then Err.Raise 424 Else X = mX",
+        "\tEnd Property",
+        "\tPublic Property Let X(v) : If Dead Then Err.Raise 424 Else mX = v",
+        "\tEnd Property",
+        "End Class",
+        "Dim ActiveBall, GameTime, Balls",
+        "Function GetBalls : GetBalls = Balls : End Function",
+        m["extra_vbs"],
+        "Function Shot(v0, xoff, mode)",
+        "\tDim b, t, inside, was, tOn, held1, held4, out, back, ok, d",
+        "\tSet b = New FakeBall : b.X = 517 + xoff : b.Y = 650 : b.Z = 25 : b.VelX = 0 : b.VelY = -v0 : b.VelZ = 0",
+        "\tSet ActiveBall = b : Balls = Array(b) : was = False : tOn = -1 : held1 = False : held4 = False : out = False : back = False",
+        "\tPadTMState = 0 : Set PadTMBall = Nothing : PadTMOn = False",
+        "\tFor t = 0 To 9000",
+        "\t\tGameTime = t",
+        "\t\tIf b.X > 400 Then",
+        "\t\t\tIf b.Y > 400 Then b.VelY = b.VelY + 0.089 Else b.Y = 400 : b.VelY = Abs(b.VelY) * 0.5",
+        "\t\t\tb.X = b.X + b.VelX / 10 : b.Y = b.Y + b.VelY / 10",
+        "\t\t\tIf b.Y >= 473 Then b.Z = 25 + 80 * (659 - b.Y) / 186",
+        "\t\tEnd If",
+        "\t\tinside = b.X > %r And b.X < %r And b.Y > %r And b.Y < %r" % (min(xs), max(xs), min(ys), max(ys)),
+        "\t\tIf inside And Not was Then PadTMMagnet_Hit",
+        "\t\twas = inside",
+        "\t\tIf tOn < 0 And b.Y < 589 And b.VelY < 0 Then tOn = t + 20",
+        "\t\tIf mode = 1 And t = tOn Then PadTimeMachineMagnet 1",
+        "\t\tIf mode = 1 And t = tOn + 4100 Then PadTimeMachineMagnet 0",
+        "\t\tIf mode = 1 And t = tOn + 4270 Then PadTimeMachineMagnet 1",
+        "\t\tIf mode = 1 And t = tOn + 4290 Then PadTimeMachineMagnet 0",
+        "\t\tIf mode = 2 And inside And tOn > 0 And ok = 0 Then PadTimeMachineMagnet 1 : ok = t",
+        "\t\tIf mode = 2 And ok > 0 And t = ok + 60 Then PadTimeMachineMagnet 0",
+        "\t\tIf t Mod 10 = 0 Then PadTMTimer_Timer",
+        "\t\tIf tOn > 0 And t = tOn + 1000 Then held1 = Abs(b.X - 517) + Abs(b.Y - 435) + Abs(b.Z - 105) < 1",
+        "\t\tIf tOn > 0 And t = tOn + 4000 Then held4 = Abs(b.X - 517) + Abs(b.Y - 435) + Abs(b.Z - 105) < 1",
+        "\t\tIf Abs(b.X - 364) + Abs(b.Y - 418) < 1 Then out = True",
+        "\t\tIf b.Y > 600 And b.VelY > 0 And tOn > 0 And PadTMState = 0 Then back = True : d = t - tOn : Exit For",
+        "\tNext",
+        "\tShot = held1 & \"/\" & held4 & \"/\" & out & \"/\" & back & \"@\" & Int(d / 100) / 10",
+        "End Function",
+        # PAD-1250: the reporter's runtime error. A ball the trigger saw that
+        # left it by being moved (no UnHit) and then drained is not a ball any
+        # more: the next MAGNET must not reach for it; nor for a ball in play
+        # anywhere but the ramp's top (below it on the playfield, on the wire)
+        "Function Stale",
+        "\tDim b, c, e",
+        "\tPadTMState = 0 : Set PadTMBall = Nothing : PadTMOn = False",
+        "\tSet b = New FakeBall : b.X = 517 : b.Y = 500 : b.Z = 95 : Set ActiveBall = b : Balls = Array(b)",
+        "\tPadTMMagnet_Hit",
+        "\tb.X = 364 : b.Y = 418 : b.Z = 100 : b.Dead = True : Balls = Array()",
+        "\tOn Error Resume Next",
+        "\tPadTimeMachineMagnet 1 : PadTMTimer_Timer : PadTimeMachineMagnet 0",
+        "\te = Err.Number : On Error GoTo 0",
+        "\tSet c = New FakeBall : c.X = 517 : c.Y = 500 : c.Z = 25",
+        "\tSet b = New FakeBall : b.X = 364 : b.Y = 418 : b.Z = 100 : Balls = Array(c, b)",
+        "\tPadTimeMachineMagnet 1 : GameTime = GameTime + 100 : PadTMTimer_Timer",
+        "\tStale = e & \"/\" & PadTMState & \"/\" & c.Y & \"/\" & b.Y : PadTimeMachineMagnet 0",
+        "End Function",
+        "Dim xoff, v, s",
+        "For Each xoff In Array(-12, -3, 6, 11) : For v = 15 To 160 Step 5",
+        "\ts = s & v & \"/\" & xoff & \":\" & Shot(v, xoff, 1) & \" \"",
+        "Next : Next",
+        "WScript.Echo s & \"search:\" & Shot(60, 6, 2) & \" nocoil:\" & Shot(60, 6, 0) & \" stale:\" & Stale",
+    ]), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=120)
+    got = r.stdout.split()
+    assert len(got) == 4 * 30 + 3, r.stdout + r.stderr
+    for s in got[:-3]:
+        flags, after = s.split(":")[1].split("@")
+        assert flags == "True/True/False/True", s           # held inside at 1 s and 4 s, then back down the ramp
+        assert 4.1 <= float(after) <= 4.9, s                 # rolling down soon after the magnet let go
+    assert got[-3].split(":")[1].split("@")[0] == "False/False/False/True", got[-3]   # a search pulse: back down
+    assert got[-2].split(":")[1].split("@")[0] == "False/False/False/True", got[-2]   # no coil: straight back down
+    assert got[-1] == "stale:0/0/500/418", got[-1]   # no error, nothing held, neither ball moved
+
+
+def test_rushs_side_scoop_rests_on_the_lower_switch():
+    # PAD-910: the game fires SIDE SCOOP from LOWER SIDE SCOOP (85); SIDE
+    # SCOOP OPTO (78) is the way in. Held on 78 it never kicked (emulator)
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, "rush_le.shadow.json"), encoding="utf-8"))
+    k = m["saucers"]["Kicker1"]
+    assert (k["switch"], k["enter"]) == (85, 78)
+    assert m["solenoids"]["3"]["callback"] == "bsKicker1.SolOut"
+    t = json.loads(json.dumps(MINI_SHADOW))
+    t["saucers"]["Kicker1"]["enter"] = 77
+    out, _ = vs.patch(MINI_TRIBUTE, t)
+    assert "bsKicker1.InitSaucer Kicker1, 1078, 190, 15" in out
+    assert "Sub Kicker1_Hit : vpmTimer.PulseSw 1077 : bsKicker1.AddBall Me" in out
+    t["saucers"]["Kicker1"]["stack"] = [79]
+    out, _ = vs.patch(MINI_TRIBUTE, t)
+    lines = out.split("\n")
+    a = lines.index("Sub Kicker1_Hit")
+    assert lines[a + 1:a + 3] == ["\tvpmTimer.PulseSw 1077", "\tIf bsKicker1.Balls >= 2 Then"]
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out))
+    plain, _ = vs.patch(MINI_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))
+    assert "Sub Kicker1_Hit : bsKicker1.AddBall Me" in plain
+
+
+def vs_events():
+    """The switch events the patcher knows (vpxshadow.EVENT_SUBS)."""
+    return tuple(pytest.importorskip("vpxshadow").EVENT_SUBS)
+
+
+def _rush_1228_vbs(vs):
+    """The Rush map's PAD-1228 code: the instrument bank's hit subs as the
+    patcher writes them, and the map's drop, reset and drum clock subs."""
+    m = json.load(open(os.path.join(VPX, "rush_le.shadow.json"), encoding="utf-8"))
+    t = json.loads(json.dumps(MINI_SHADOW))
+    for k in ("sw13", "sw12", "sw11"):
+        t["switches"][k] = m["switches"][k]
+    out, _ = vs.patch(MINI_TRIBUTE, t)
+    hits = [ln for ln in out.split("\n") if re.match(r"Sub sw1[123]_Hit ", ln)]
+    ev = m["extra_vbs"]
+    own = ev[ev.index("Sub PadDrop(t)"):ev.index("' PAD-1240")]
+    return m, hits, own
+
+
+def test_rushs_instrument_bank_is_a_drop_bank_on_its_reset_coil():
+    # PAD-1228: sw13/sw12/sw11 are stand-up HitTargets the tribute's own hit
+    # subs hid; with those out of the way they stood and their switches only
+    # blinked. Each drops on a hit and holds its switch; 3 BANK DROP (coil 6)
+    # stands them up and opens them, without the tribute's own light rules
+    vs = pytest.importorskip("vpxshadow")
+    m, hits, own = _rush_1228_vbs(vs)
+    assert {k: (m["switches"][k]["id"], m["switches"][k]["event"]) for k in ("sw13", "sw12", "sw11")} == \
+        {"sw13": (47, "drop"), "sw12": (48, "drop"), "sw11": (49, "drop")}
+    assert sorted(hits) == ["Sub sw11_Hit : Controller.Switch(1049) = True : PadDrop sw11 : End Sub",
+                            "Sub sw12_Hit : Controller.Switch(1048) = True : PadDrop sw12 : End Sub",
+                            "Sub sw13_Hit : Controller.Switch(1047) = True : PadDrop sw13 : End Sub"]
+    assert m["solenoids"]["6"] == {"coil": [8, 8], "name": "3 BANK DROP", "callback": "PadResetDrops"}
+    ev = m["extra_vbs"]
+    reset = ev[ev.index("Sub PadResetDrops(e)"):]
+    reset = reset[:reset.index("End Sub")]
+    assert "ResetDropTargets" not in reset, "the tribute's reset starts its own target lights"
+    assert m["switches"]["sw20"]["id"] == 52 and m["switches"]["sw20"]["event"] == "hit"
+
+
+def test_rushs_drum_clock_is_the_boards_stepper():
+    # PAD-1228: the drum clock hand is node 10 stepper 0 (DRUM CLOCK HOME 94)
+    m = json.load(open(os.path.join(VPX, "rush_le.shadow.json"), encoding="utf-8"))
+    assert m["mechs"]["0"]["stepper"] == [10, 0]
+    assert m["retrofit_timers"]["PadDrumClockTimer"] == {"clone": "PulseTimer", "interval_ms": 100}
+    assert "Controller.GetMech(0)" in m["extra_vbs"]
+    pc = pytest.importorskip("padcontroller")
+    assert pc.VpxMap("rush_le").mechs == {0: (10, 0)}
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_rushs_drops_and_drum_clock_under_vbscript(tmp_path):
+    # PAD-1228, run for real: a hit drops its target (hidden, the way the
+    # tribute did it) and holds its switch; the reset coil off does nothing,
+    # on stands all three up and opens them. The drum face follows the
+    # stepper: home 6:00, 200 steps an hour the negative way (emulator: the
+    # game's panel read 7:10 PM at -234, CLOCK 7 lit from -201)
+    vs = pytest.importorskip("vpxshadow")
+    _, hits, own = _rush_1228_vbs(vs)
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Const DOFPulse = 2",
+        "Dim Dofs, Mech",
+        "Sub DOF(n, how) : Dofs = Dofs & n & \",\" : End Sub",
+        "Class FakeCtl",
+        "\tPrivate sw",
+        "\tPrivate Sub Class_Initialize : Set sw = CreateObject(\"Scripting.Dictionary\") : End Sub",
+        "\tPublic Property Let Switch(n, v) : sw(n) = v : End Property",
+        "\tPublic Property Get Switch(n) : Switch = CBool(sw(n)) : End Property",
+        "\tPublic Function GetMech(n) : GetMech = Mech : End Function",
+        "End Class",
+        "Class FakeTarget : Public IsDropped, Visible : End Class",
+        "Class FakePrim : Public Image : End Class",
+        "Dim Controller : Set Controller = New FakeCtl",
+        "Dim sw11, sw12, sw13, Primitive027",
+        "Set sw11 = New FakeTarget : Set sw12 = New FakeTarget : Set sw13 = New FakeTarget",
+        "sw11.IsDropped = False : sw12.IsDropped = False : sw13.IsDropped = False",
+        "sw11.Visible = 1 : sw12.Visible = 1 : sw13.Visible = 1",
+        "Set Primitive027 = New FakePrim : Primitive027.Image = \"drumtemplate\"",
+        "\n".join(hits),
+        own,
+        "Function Bank()",
+        "\tBank = sw13.IsDropped & \"/\" & sw12.IsDropped & \"/\" & sw11.IsDropped & \"|\" & _",
+        "\t\tsw13.Visible & sw12.Visible & sw11.Visible & \"|\" & _",
+        "\t\tController.Switch(1047) & \"/\" & Controller.Switch(1048) & \"/\" & Controller.Switch(1049)",
+        "End Function",
+        "Dim s : s = Bank()",
+        "sw12_Hit : s = s & \" \" & Bank()",
+        "sw13_Hit : sw11_Hit : s = s & \" \" & Bank()",
+        "PadResetDrops 0 : s = s & \" \" & Bank()",
+        "PadResetDrops 1 : s = s & \" \" & Bank() & \" dof=\" & Dofs",
+        "Dim p",
+        "For Each p In Array(0, -1, -184, -201, -234, -1199, -1200, -1400, -2399, -2400, -2600, 200)",
+        "\tMech = p : PadDrumClockTimer_Timer : s = s & \" \" & p & \"=\" & Primitive027.Image",
+        "Next",
+        "WScript.Echo s",
+    ]), encoding="latin-1")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.split() == [
+        "False/False/False|111|False/False/False",
+        "False/True/False|101|False/True/False",
+        "True/True/True|000|True/True/True",
+        "True/True/True|000|True/True/True",               # the coil let go: nothing moves
+        "False/False/False|111|False/False/False", "dof=111,",
+        "0=drum_6", "-1=drum_6", "-184=drum_6", "-201=drum_7", "-234=drum_7",
+        "-1199=drum_11", "-1200=drum_12", "-1400=drum_1", "-2399=drum_5", "-2400=drum_6",
+        "-2600=drum_7", "200=drum_5"], r.stdout + r.stderr
+
+
+def test_rushs_side_scoop_gate_lets_a_resting_ball_out(tmp_path):
+    # PAD-1239: TROUGH LOCK (coil 10, node 9 coil 0) is the side scoop's gate.
+    # The game sometimes opens it and waits for the ball to roll out past SIDE
+    # SCOOP OPTO, never firing SIDE SCOOP; with no callback the ball sat and
+    # the game said SIDE SCOOP DEVICE MALFUNCTION (reporter's photos). On the
+    # emulator a release + 78 pulse made the game clear its rule 0.6 s later
+    # and serve no new ball
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, "rush_le.shadow.json"), encoding="utf-8"))
+    assert m["solenoids"]["10"] == {"coil": [9, 0], "name": "TROUGH LOCK", "callback": "PadSideScoopGate"}
+    t = json.loads(json.dumps(MINI_SHADOW))
+    t["solenoids"]["10"] = m["solenoids"]["10"]
+    t["saucers"]["Kicker1"] = m["saucers"]["Kicker1"]
+    t["extra_vbs"] = m["extra_vbs"]
+    out, _ = vs.patch(MINI_TRIBUTE, t)
+    assert re.search(r'(?m)^SolCallback\(10\) = "PadSideScoopGate"', out), out
+    ev = m["extra_vbs"]
+    a = ev.index("Sub PadSideScoopGate(e)")
+    gate = ev[a:ev.index("End Sub", a) + len("End Sub")]
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Dim Log",
+        "Class FakeStack : Public Balls",
+        "\tPublic Sub ExitSol_On : Balls = Balls - 1 : Log = Log & \"out,\" : End Sub",
+        "End Class",
+        "Class FakeTimer",
+        "\tPublic Sub PulseSw(n) : Log = Log & \"pulse\" & n & \",\" : End Sub",
+        "End Class",
+        "Dim bsKicker1 : Set bsKicker1 = New FakeStack",
+        "Dim vpmTimer : Set vpmTimer = New FakeTimer",
+        gate,
+        "bsKicker1.Balls = 0 : PadSideScoopGate True : Log = Log & \"|\"",       # empty: nothing
+        "bsKicker1.Balls = 1 : PadSideScoopGate False : Log = Log & \"|\"",      # let go: nothing
+        "PadSideScoopGate True : Log = Log & \"|\"",                             # a ball rolls out
+        "PadSideScoopGate True : Log = Log & \"|\"",                             # the re-send: empty now
+        "WScript.Echo Log & bsKicker1.Balls",
+    ]), encoding="latin-1")
+    if sys.platform == "win32" and shutil.which("cscript"):                  # the VBScript runs on Windows only
+        r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+        assert r.stdout.strip() == "||out,pulse1078,||0", r.stdout + r.stderr
+    # a Rush table patched before is asked to patch again; one patched now is not
+    vsu = pytest.importorskip("vpxsetup")
+    why = "its side scoop can keep the ball and the game calls it a device malfunction"
+    (tmp_path / "R (PAD).script.vbs").write_text(out.replace(gate, ""), encoding="utf-8")
+    assert why in vsu.missed_fixes(str(tmp_path), "R (PAD).vpx", m["repatch"])
+    (tmp_path / "R (PAD).script.vbs").write_text(out, encoding="utf-8")
+    assert why not in vsu.missed_fixes(str(tmp_path), "R (PAD).vpx", m["repatch"])
+
+
+def test_stepper_plane_offsets_match_padled_h():
+    # PAD-1228: padled version 8, each node board's stepper place
+    import coilmap
+    hdr = open(os.path.join(EMU, "padled.h"), encoding="utf-8").read()
+    m = re.search(r"step_cfg (\d+), step_pos (\d+)", hdr)
+    assert m, "padled.h names the version-8 offsets"
+    assert (coilmap.STEP_CFG_OFF, coilmap.STEP_POS_OFF) == tuple(int(x) for x in m.groups())
+    assert coilmap.STEP_CFG_OFF == coilmap.RULE_READ             # after every older plane
+    assert coilmap.STEP_READ <= int(re.search(r"#define PADLED_BYTES (\d+)", hdr).group(1))
+    shim = open(os.path.join(EMU, "hwshim.c"), encoding="utf-8").read()
+    assert "unsigned char step_cfg[16];\n    int step_pos[16][4];\n};" in shim, "the shim's twin of padled.h"
+    assert "led_shm->version = (led_shm_len >= 16384) ? 8" in shim
+
+
+def _stepper_block(coilmap, version=8):
+    data = bytearray(coilmap.STEP_READ)
+    struct.pack_into("<I", data, 0, coilmap.PADLED_MAGIC)
+    struct.pack_into("<I", data, 4, version)
+    data[coilmap.STEP_CFG_OFF + 10] = 0b11                       # node 10: motors 0 and 1
+    struct.pack_into("<i", data, coilmap.STEP_POS_OFF + (10 * coilmap.STEPPERS + 0) * 4, -234)
+    struct.pack_into("<i", data, coilmap.STEP_POS_OFF + (10 * coilmap.STEPPERS + 1) * 4, 94)
+    return data
+
+
+def test_stepper_reads_a_motors_place():
+    import coilmap
+    data = _stepper_block(coilmap)
+    assert coilmap.stepper(bytes(data), 10, 0) == -234
+    assert coilmap.stepper(bytes(data), 10, 1) == 94
+    assert coilmap.stepper(bytes(data), 10, 2) is None           # never homed or moved
+    assert coilmap.stepper(bytes(data), 9, 0) is None
+    assert coilmap.stepper(bytes(_stepper_block(coilmap, 7)), 10, 0) is None   # an older shim
+    assert coilmap.stepper(bytes(data[:coilmap.STEP_POS_OFF]), 10, 0) is None
+
+
+def test_getmech_answers_the_maps_stepper(monkeypatch, tmp_path):
+    # PAD-1228: Controller.GetMech(n) was always 0; now the stepper the map's
+    # `mechs` names for n, read with the rest of the block each poll
+    import coilmap
+    pc = pytest.importorskip("padcontroller")
+    monkeypatch.setattr(pc, "log", lambda s: None)
+    monkeypatch.setattr(pc, "LOG", str(tmp_path / "padcontroller.log"))
+    assert pc.READ_N >= coilmap.STEP_READ, "one read takes the stepper plane too"
+    b = pc.Bridge()
+    b.map = pc.VpxMap("rush_le")
+    b.rig = type("R", (), {"led_path": lambda s: "led", "sw_path": lambda s: "sw"})()
+    block = bytes(_stepper_block(coilmap)) + bytes(pc.READ_N - coilmap.STEP_READ)
+    monkeypatch.setattr(pc, "read_block", lambda path, n: block if path == "led" else None)
+    assert b.get_mech(0) == 0                                    # nothing read yet
+    b._poll_once()
+    assert b.get_mech(0) == -234
+    assert b.get_mech(1) == 0                                    # a number the map does not name
+    ctl = pc.PadController.__new__(pc.PadController)
+    ctl.bridge, ctl.props = b, {}
+    assert ctl._get("getmech", (0,)) == -234
+
+
+def _lock_stack_shadow():
+    # PAD-901: Deadpool's Katana Handle lock is one kicker in JP's table and
+    # LOCK 1-4 on the machine, under a post the game holds down for seconds
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["saucers"]["Kicker1"].update({"stack": [79, 80, 81], "held_ms": 600})
+    return m
+
+
+def test_shadow_lock_lane_is_a_stack_on_every_lock_switch():
+    vs = pytest.importorskip("vpxshadow")
+    out, _ = vs.patch(MINI_TRIBUTE, _lock_stack_shadow())
+    assert "bsKicker1.InitSw 0,1078,1079,1080,1081,0,0,0" in out
+    assert "bsKicker1.InitKick Kicker1, 190, 15" in out and "InitSaucer Kicker1" not in out
+    assert "\tIf bsKicker1.Balls >= 4 Then\n\t\tMe.Kick 190, 15" in out, "a full lane sends the ball back"
+    assert 'SolCallback(3) = "PadHeldKicker1_Sol"' in out, "the post's coil holds, not pulses"
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out))
+    plain, _ = vs.patch(MINI_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))
+    assert "PadHeld" not in plain and 'SolCallback(3) = "bsKicker1.SolOut"' in plain
+
+
+def test_shadow_saucer_kicks_from_another_kicker():
+    # PAD-905: JPSalas's John Wick teleports its VUK's ball (Krampcoude ->
+    # Krampcoude1) and its arch lock's (Karche -> KArche1-3): the ball the
+    # machine's coil kicks leaves by the table's own exit kicker
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["saucers"]["Kicker1"]["kick_from"] = "Kicker2"
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    assert "bsKicker1.InitSw 0,1078,0,0,0,0,0,0" in out
+    assert "bsKicker1.InitKick Kicker2, 190, 15" in out and "InitSaucer" not in out
+    assert "bsKicker1.KickZ = 1.4" in out
+    assert "Sub Kicker1_Hit : bsKicker1.AddBall Me" in out, "the ball in the entry kicker is taken in"
+    m = _lock_stack_shadow()
+    m["saucers"]["Kicker1"]["kick_from"] = "Kicker2"
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    assert "bsKicker1.InitSw 0,1078,1079,1080,1081,0,0,0" in out
+    assert "bsKicker1.InitKick Kicker2, 190, 15" in out
+    assert ("\tIf bsKicker1.Balls >= 4 Then\n\t\tMe.DestroyBall : vpmCreateBall Kicker2\n"
+            "\t\tKicker2.Kick 190, 15\n\t\tExit Sub") in out, "a full lane sends the ball out the exit"
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out))
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_shadow_held_lock_post_lets_every_ball_out(tmp_path):
+    # the emulator (PAD-901): a held post, one ball out per coil edge, left two
+    # balls on LOCK 1/2 under it; held, the lock must empty, then stop
+    vs = pytest.importorskip("vpxshadow")
+    out, _ = vs.patch(MINI_TRIBUTE, _lock_stack_shadow())
+    lines = out.split("\n")
+    a = lines.index("Dim PadHeldKicker1, PadHeldKicker1Run")
+    b = lines.index("End Sub", lines.index("Sub PadHeldKicker1_Next"))
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Dim Log, Pending",
+        "Class FakeStack : Public Balls : Public Sub ExitSol_On : Balls = Balls - 1 : Log = Log & \"out \" : End Sub : End Class",
+        "Class FakeTimer : Public Sub AddTimer(ms, cb) : Pending = Pending + 1 : Log = Log & \"t\" & ms & \" \" : End Sub : End Class",
+        "Dim bsKicker1 : Set bsKicker1 = New FakeStack : bsKicker1.Balls = 3",
+        "Dim vpmTimer : Set vpmTimer = New FakeTimer",
+        "\n".join(lines[a:b + 1]),
+        "Sub Tick : If Pending > 0 Then Pending = Pending - 1 : PadHeldKicker1_Next",
+        "End Sub",
+        "PadHeldKicker1_Sol 1",           # the post goes down
+        "Tick : Tick : Tick : Tick",       # the timer runs out of balls
+        "Log = Log & \"| \"",
+        "PadHeldKicker1_Sol 0 : bsKicker1.Balls = 2 : PadHeldKicker1_Sol 1 : PadHeldKicker1_Sol 0 : Tick",
+        "WScript.Echo Log & bsKicker1.Balls"]), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    # three balls out 600 ms apart while held; then a short pulse lets one go
+    assert r.stdout.split() == ["out", "t600", "out", "t600", "out", "t600", "|", "out", "t600", "1"], \
+        r.stdout + r.stderr
+
+
+def test_shadow_neuters_the_tributes_own_balls(shadow):
+    out, rep = shadow
+    assert "'PAD neutered: BallRelease.CreateBall" in out
+    assert "'PAD neutered: BallRelease.Kick 90, 4" in out
+    assert "Sub Drain_Hit_orig : On Error Resume Next : If False Then PlungerIM.AutoFire : End Sub" in out   # one-liner kept whole
+    assert "Sub PadAutoPlunge(e) : If e Then plungerIM.AutoFire : End If : End Sub" in out
+    assert "neutered 3 line(s)" in " ".join(rep)
+    assert "Sub Drain_Hit\n\tbsTrough.AddBall Me" in out
+    assert "bsTrough.InitSw 0,1076,1075,1074,1073,1072,1071,1077" in out
+    assert "bsTrough.InitKick BallRelease, 90, 4" in out
+    assert "bsKicker1.InitSaucer Kicker1, 1078, 190, 15" in out and "bsKicker1.KickZ = 1.4" in out
+    assert "Sub Kicker1_Hit : bsKicker1.AddBall Me" in out and "Sub Kicker1_Hit_orig" in out
+    assert "Sub Trigger1_Hit : Controller.Switch(1067) = True : Trigger1_Hit_orig : End Sub" in out
+    assert "Sub Trigger1_UnHit : Controller.Switch(1067) = False : End Sub" in out
+
+
+def test_shadow_flippers_are_the_machines_coils(shadow):
+    # JP's and drhotwing's tables flip from the keyboard only while THEIR game
+    # is in play, which it never is: the machine's flipper coils call the
+    # table's own flipper subs, and the keys stop reaching the shadow game.
+    out, rep = shadow
+    assert 'SolCallback(sLLFlipper) = "SolLFlipper"' in out
+    assert 'SolCallback(sLRFlipper) = "SolRFlipper"' in out
+    assert "sURFlipper" not in out                          # the table has no such sub
+    assert "Case StartGameKey, AddCreditKey, LockBarKey, LeftFlipperKey, RightFlipperKey" in out
+    assert "If KeyCode = RightFlipperKey Then Controller.Switch(1064) = True" in out
+    assert "If KeyCode = RightFlipperKey Then Controller.Switch(1066) = True" in out
+    assert "If KeyCode = LockBarKey Then Controller.Switch(1034) = True" in out
+    assert "If KeyCode = LockBarKey Then Controller.Switch(1034) = False" in out
+    assert "If KeyCode = AddCreditKey Then vpmTimer.PulseSw 1039" in out
+    assert "Sub Table1_Init_orig" in out and "Table1_KeyDown_orig KeyCode" in out
+    assert 'SolCallback(1) = "bsTrough.SolOut"' in out and "SolCallback(7)" not in out
+    assert "Const UseSolenoids = 1, UseLamps = 0, UseGI = 0, UsePdbLeds = 0" in out
+
+
+def test_pup_stub_counts_each_call_on_a_line_on_its_own():
+    """PAD-1207: Batman 66 runs two LabelSets in one VPMTimer string, joined by
+    `:`. They read as one 9-argument call and every patch log said "LabelSet
+    is called with [5, 9] arguments"; a method called only second on its
+    line was never stubbed."""
+    vs = pytest.importorskip("vpxshadow")
+    lines = ['Set PuPlayer = CreateObject("PinUpPlayer.PinDisplay")',
+             'PuPlayer.LabelSet screen,"GeneralTop1",msgs(0),1,"{\'mt\':2,\'color\':"&RGB(247, 170, 51)&",\'size\':6}"',
+             'VPMTimer.AddTimer 3000, "bPlay=False:puPlayer.LabelSet pBackglass,""GeneralCenter1"", """" ,1,"""":'
+             'puPlayer.LabelSet pBackglass,""GeneralCenter2"", """" ,1,"""" \'"',
+             'x = 1 : PuPlayer.playlistplayex(pBackglass, "a", "b", 100, 1) : PuPlayer.SetBackground 5, 1']
+    rep = []
+    stub = vs.pup_stub(lines, rep)
+    assert not any("WARNING" in s for s in rep), rep
+    assert "Public Sub LabelSet(a0, a1, a2, a3, a4) : End Sub" in stub
+    assert "Public Sub playlistplayex(a0, a1, a2, a3, a4) : End Sub" in stub
+    assert "Public Sub SetBackground(a0, a1) : End Sub" in stub
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the PuP stub under cscript")
+@pytest.mark.parametrize("force", [False, True])
+def test_pup_stub_getroot_is_a_folder_string(tmp_path, force):
+    """PAD-1346: Munsters (Original 2020) reads `PupVideos=PuPlayer.getroot`
+    outside any On Error. The stand-in's getroot returned Nothing, and the
+    patched table stopped at load: "Line 924: Object variable not set". Every
+    table joins getroot with "\\" as PinUP's folder path, so it is a string."""
+    vs = pytest.importorskip("vpxshadow")
+    lines = [   # Munsters 1.05's PuP start, verbatim
+        'Dim HasPup:HasPuP = True', 'Dim pGameName : pGameName="mmunsters"',
+        'Dim cGameName : cGameName="mmunsters"', 'Dim PupVideos, Folder', 'Dim PuPlayer',
+        'Const pBackglass=1',
+        'if HasPuP Then', 'on error resume next',
+        'Set PuPlayer = CreateObject("PinUpPlayer.PinDisplay") ',
+        'PuPlayer.B2SInit "", pGameName', 'on error goto 0',
+        'if not IsObject(PuPlayer) then HasPuP = False', 'end If',
+        'PupVideos=PuPlayer.getroot',
+        'Folder=PupVideos & "\\" &  cGameName & "\\"',
+        'PuPlayer.LabelInit pBackglass',
+        'if HasPuP Then', 'PupVideos=PuPlayer.getroot', 'End if',
+        'WScript.Echo "ok:" & Folder']
+    rep = []
+    stub = vs.pup_stub(lines, rep, force=force)
+    assert 'Public Function getroot() : getroot = "" : End Function' in stub
+    vbs = tmp_path / "pup.vbs"
+    vbs.write_text("\n".join(lines) + "\n" + stub, encoding="utf-8")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    if not force and r.stdout.startswith("ok:") and r.stdout.strip() != "ok:\\mmunsters\\":
+        pytest.skip("PinUP Player is installed here: the stand-in never ran")
+    assert r.stdout.strip() == "ok:\\mmunsters\\", r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the PuP stub against a present player under cscript")
+def test_forced_pup_stub_silences_both_creations_when_pinup_is_installed(tmp_path):
+    vs = pytest.importorskip("vpxshadow")
+    lines = ['Set PuPlayer = CreateObject("PinUpPlayer.PinDisplay")',
+             'PuPlayer.Play 1, "song.mp3", 0, 0, 0',
+             'Sub LoadCoreFiles',
+             'Set PuPlayer = CreateObject("PinUpPlayer.PinDisplay")',
+             'PuPlayer.Play 1, "callout.mp3", 0, 0, 0',
+             'End Sub', 'LoadCoreFiles']
+    rep = []
+    stub = vs.pup_stub(lines, rep, force=True)
+    harness = '''Dim created, played, PuPlayer
+created = 0 : played = 0
+Function CreateObject(progid)
+created = created + 1
+Set CreateObject = New InstalledPlayer
+End Function
+Class InstalledPlayer
+Public Sub Play(a,b,c,d,e)
+played = played + 1
+End Sub
+End Class
+'''
+    vbs = tmp_path / "pup.vbs"
+    vbs.write_text(harness + "\n".join(lines) + stub + '\nWScript.Echo created & "," & played\n', encoding="utf-8")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["0,0"]
+    assert any("disabled at 2 place(s)" in s for s in rep)
+
+
+def test_shadow_map_can_require_a_silent_player_even_with_pinup_installed():
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["pup_stub"] = "always"
+    out, rep = vs.patch(MINI_TRIBUTE, m)
+    assert 'CreateObject("PinUpPlayer.PinDisplay")' not in out
+    assert "Set PuPlayer = New PadNoPuP" in out and "Class PadNoPuP" in out
+    for title in ("batman", "iron_maiden_le"):
+        m = json.load(open(os.path.join(VPX, title + ".shadow.json"), encoding="utf-8"))
+        assert m["pup_stub"] == "always"
+        assert any("If Err Then Err.Clear : Set PuPlayer" in r["old"] and r["since"].startswith("PAD-1164")
+                   for r in m["repatch"])
+
+
+def test_shadow_makes_pinup_player_optional(shadow):
+    out, rep = shadow
+    assert "Class PadNoPuP" in out
+    assert "Public Sub B2SInit(a0, a1) : End Sub" in out
+    assert "Public Sub LabelSet(a0, a1, a2, a3, a4) : End Sub" in out
+    i = out.index('CreateObject("PinUpPlayer.PinDisplay")')
+    assert "On Error Resume Next" in out[i - 60:i]
+    assert "Set PuPlayer = New PadNoPuP" in out[i:i + 200]
+
+
+B2S_TRIBUTE = """Option Explicit
+ExecuteGlobal GetTextFile("controller.vbs")
+Sub Table1_Init : LoadEM : End Sub
+Sub Table1_Exit : If B2SOn Then Controller.Stop
+End Sub
+Sub Lights : If B2SOn Then Controller.B2SSetData 50, 1 : B2SController.B2SSetData 9, 1
+End Sub
+"""
+
+
+def test_shadow_keeps_dof_on_the_b2s_server():
+    # PAD-841: LoadEM puts B2S.Server in Controller; Table1_Init then gives
+    # Controller to PAD.Controller, and every DOF event (controller.vbs's DOF
+    # sub, the table's own B2SSetData) went to PAD instead of B2S.
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    out, rep = vs.patch(B2S_TRIBUTE, m)
+    assert 'ExecuteGlobal PadB2SText(GetTextFile("controller.vbs"))' in out
+    assert "PadB2SCtl.B2SSetData 50, 1 : B2SController.B2SSetData 9, 1" in out
+    assert "If B2SOn Then Controller.Stop" in out        # Stop/Pause stay PAD's
+    i = out.index("If Not Controller Is Nothing Then Set PadB2S = Controller")
+    assert i < out.index('Set Controller = CreateObject("PAD.Controller")')
+    assert "If IsObject(PadB2S) Then PadB2S.Stop" in out
+    assert "1 call(s) in the script, and controller.vbs's" in " ".join(rep)
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out))
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_shadow_dof_reaches_b2s_under_vbscript(tmp_path):
+    # the generated helpers and Init swap, run for real: a controller.vbs
+    # shaped DOF sub, loaded through PadB2SText, must reach the B2S server
+    vs = pytest.importorskip("vpxshadow")
+    out, _ = vs.patch(B2S_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))
+    lines = out.split("\n")
+    a = lines.index("Dim PadB2S")
+    b = next(n for n in range(a, len(lines)) if lines[n].startswith("End Function")
+             and "PadB2SText" in "".join(lines[a:n]))
+    helpers = "\n".join(lines[a:b + 1])
+    k = out.index("\tOn Error Resume Next\n\tIf IsObject(Controller)")
+    swap = out[k:out.index("\tController.GameName", k)]
+    lib = ('Dim Controller, B2SController, B2SOn\\n'
+           'Sub LoadEM : Set Controller = New FakeB2S : Controller.B2SName = "x" : B2SOn = True : End Sub\\n'
+           'Sub DOF(e, s)\\nIf B2SOn Then\\nIf s = 2 Then\\n'
+           'Controller.B2SSetData e, 1:Controller.B2SSetData e, 0\\nElse\\n'
+           'Controller.B2SSetData e, s\\nEnd If\\nEnd If\\nEnd Sub')
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Class FakeB2S", "Public Log",
+        "Public Property Let B2SName(v) : Log = Log & \"name \" : End Property",
+        "Public Sub B2SSetData(a, b) : Log = Log & a & \"=\" & b & \" \" : End Sub", "End Class",
+        "Class FakePad", "Public Sub B2SSetData(a, b) : WScript.Echo \"PAD got \" & a : End Sub", "End Class",
+        "Function CreateObject(p) : Set CreateObject = New FakePad : End Function",
+        helpers,
+        "ExecuteGlobal PadB2SText(Replace(\"%s\", \"\\n\", vbNewLine))" % lib.replace('"', '""'),
+        "Sub PadSwap", swap, "End Sub",
+        "LoadEM : PadSwap : DOF 101, 1 : DOF 110, 2",
+        "WScript.Echo \"B2S got \" & PadB2S.Log"]), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.strip() == "B2S got name 101=1 110=1 110=0", r.stdout + r.stderr
+
+
+GATED_B2S_TRIBUTE = """Option Explicit
+ExecuteGlobal GetTextFile("controller.vbs")
+Const DMDMode = 2
+Dim bUseFlexDMD
+Sub Table1_Init
+    If DMDMode = 1 Then bUseFlexDMD = True
+    if bUseFlexDMD Then
+        LoadEM   ' only with FlexDMD
+    end if
+    If b2son then
+        Controller.B2SSetData 1,1
+    End If
+End Sub
+"""
+
+
+def test_shadow_starts_b2s_when_the_table_gates_loadem():
+    # PAD-1094: Aerosmith calls LoadEM only under `If bUseFlexDMD` and ships
+    # on PinUP: no B2S.Server, so no backglass and every DOF call a no-op
+    vs = pytest.importorskip("vpxshadow")
+    out, rep = vs.patch(GATED_B2S_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))
+    assert "        PadLoadEM   ' only with FlexDMD" in out and "\n        LoadEM" not in out, "the table's own call runs once at most"
+    assert "Sub PadLoadEM\n\tOn Error Resume Next" in out and "\tIf IsEmpty(B2SOn) Then LoadEM" in out
+    init = out[out.index("\nSub Table1_Init\n"):]
+    assert init.index("\tPadLoadEM") < init.index("\tTable1_Init_orig"), "before the table's If B2SOn set-up"
+    assert init.index("Set PadB2S = Controller") < init.index('CreateObject("PAD.Controller")')
+    assert "made PadLoadEM" in " ".join(rep)
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out))
+    # a table that loads B2S outright is patched as before
+    plain, rep = vs.patch(B2S_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))
+    assert "PadLoadEM" not in plain and "made PadLoadEM" not in " ".join(rep)
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_shadow_gated_loadem_reaches_b2s_under_vbscript(tmp_path):
+    # the generated Init, run for real: B2S.Server starts once, the table's
+    # If B2SOn set-up reaches it, and a DOF call after the swap does too
+    vs = pytest.importorskip("vpxshadow")
+    out, _ = vs.patch(GATED_B2S_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))
+    lines = out.split("\n")
+    a = lines.index("Dim PadB2S")
+    b = next(n for n in range(a, len(lines)) if lines[n].startswith("End Function")
+             and "PadB2SText" in "".join(lines[a:n]))
+    c = lines.index("Sub PadLoadEM")
+    d = lines.index("End Sub", c)
+    i = lines.index("Sub Table1_Init_orig")
+    j = lines.index("End Sub", i)
+    k = lines.index("Sub Table1_Init")
+    e = next(n for n in range(k, len(lines)) if 'CreateObject("PAD.Controller")' in lines[n])
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Const DMDMode = 2",
+        "Dim bUseFlexDMD, Controller, B2SOn, Loads",
+        "Class FakeB2S", "Public Log, B2SName",
+        "Public Sub B2SSetData(a, b) : Log = Log & a & \"=\" & b & \" \" : End Sub", "End Class",
+        "Class FakePad : Public Sub B2SSetData(a, b) : WScript.Echo \"PAD got \" & a : End Sub : End Class",
+        "Function CreateObject(p) : Set CreateObject = New FakePad : End Function",
+        "Sub LoadEM : Loads = Loads + 1 : Set Controller = New FakeB2S : B2SOn = True : End Sub",
+        "\n".join(lines[a:b + 1]),
+        "Sub DOF(e, s) : If B2SOn Then PadB2SCtl.B2SSetData e, s",
+        "End Sub",
+        "\n".join(lines[c:d + 1]),
+        "\n".join(lines[i:j + 1]).replace("Controller.B2SSetData", "PadB2SCtl.B2SSetData"),
+        "\n".join(lines[k:e + 1]), "End Sub",
+        "Table1_Init : DOF 125, 1",
+        "WScript.Echo Loads & \" \" & PadB2S.Log"]), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.strip() == "1 1=1 125=1", r.stdout + r.stderr
+
+
+def test_shadow_saucer_lift_raises_the_ball_before_the_kick():
+    # PAD-1094: Aerosmith's elevator kick bounced off the elevator and fell
+    # back in; the table's own eject raises the ball (Z 35) before it kicks
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["saucers"]["Kicker1"]["lift"] = 35
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    assert "Sub Kicker1_Hit : Set PadLiftBallKicker1 = ActiveBall : bsKicker1.AddBall Me" in out
+    assert "\t\tIf bsKicker1.Balls > 0 Then PadLiftBallKicker1.Z = 35" in out, "only a ball it holds"
+    sol = out[out.index("Sub PadLiftKicker1_Sol(e)"):]
+    assert sol.index("PadLiftBallKicker1.Z = 35") < sol.index("\tbsKicker1.SolOut e")
+    assert 'SolCallback(3) = "PadLiftKicker1_Sol"' in out
+    assert "bsKicker1.KickZ = 1.4" in out
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out))
+    plain, _ = vs.patch(MINI_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))
+    assert "PadLift" not in plain and 'SolCallback(3) = "bsKicker1.SolOut"' in plain
+
+
+def test_shadow_flipper_dof_from_the_machines_flipper_coil():
+    # PAD-1094: Aerosmith's script names its flipper DOF events (101/102) but
+    # never fires them on a flip
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["flipper_dof"] = {"_": "x", "sLLFlipper": 101}
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    assert ("Sub PadFlip_sLLFlipper(e)\n\tSolLFlipper e\n\tOn Error Resume Next   "
+            "' a table without controller.vbs has no DOF\n"
+            "\tIf e Then PadDOF 101, 1, DOFFlippers Else PadDOF 101, 0, DOFFlippers\nEnd Sub") in out
+    assert 'SolCallback(sLLFlipper) = "PadFlip_sLLFlipper"' in out
+    assert 'SolCallback(sLRFlipper) = "SolRFlipper"' in out, "a flipper without an event as before"
+    assert "Sub PadDOF(e, s, toy)" in out
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out))
+
+
+def test_shadow_flipper_flag_held_for_the_tables_own_flip():
+    # PAD-1096: Batman 66's flipper subs play their sound and DOF 101/102 only
+    # `if bGameInPlay`, which only the table's own game sets
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["flipper_flag"] = {"_": "x", "flag": "bGameInPlay"}
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    for const, sub in (("sLLFlipper", "SolLFlipper"), ("sLRFlipper", "SolRFlipper")):
+        assert ("Sub PadFlipOn_%s(e)\n\tDim was : was = bGameInPlay\n\tbGameInPlay = True\n"
+                "\t%s e\n\tbGameInPlay = was\nEnd Sub" % (const, sub)) in out
+        assert 'SolCallback(%s) = "PadFlipOn_%s"' % (const, const) in out
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out))
+    # with flipper_dof too, the DOF wrapper calls the flag wrapper
+    m["flipper_dof"] = {"sLLFlipper": 101}
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    assert "Sub PadFlip_sLLFlipper(e)\n\tPadFlipOn_sLLFlipper e\n" in out
+    assert 'SolCallback(sLLFlipper) = "PadFlip_sLLFlipper"' in out
+    # a bare name works; anything but a variable name is refused
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["flipper_flag"] = "bGameInPlay"
+    assert "Sub PadFlipOn_sLLFlipper(e)" in vs.patch(MINI_TRIBUTE, m)[0]
+    m["flipper_flag"] = "x : Quit"
+    with pytest.raises(ValueError):
+        vs.patch(MINI_TRIBUTE, m)
+    plain, _ = vs.patch(MINI_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))
+    assert "PadFlipOn" not in plain
+
+
+def test_batman_map_holds_its_game_flag_for_flips():
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, "batman.shadow.json"), encoding="utf-8"))
+    assert vs.flipper_flag(m) == "bGameInPlay"
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the map's VBScript under cscript")
+def test_batmans_control_gate_is_not_the_turntable_diverter(tmp_path):
+    # PAD-1120: CONTROL GATE (6) is the game's LEFT control gate at the top of
+    # the orbit, DIVERTER POWER (7) the turntable diverter. Both opened the
+    # tribute's lock door, so a combo that opened the left gate (12 times in
+    # 4 minutes on the emulator, with the turntable at the phone) dropped the
+    # orbit ball behind the turntable, stuck behind the Bat Phone. And the lane
+    # behind the turntable leads on only at the TV (its lock) and the Batcave
+    # (the game holds 7 there for many seconds): 7 at the Phone, or while the
+    # turntable turns (ball search pulses it anywhere), keeps the door shut.
+    m = json.load(open(os.path.join(VPX, "batman.shadow.json"), encoding="utf-8"))
+    ev = m["extra_vbs"].split("\n")
+
+    def sub(name):
+        i = next(k for k, ln in enumerate(ev) if ln.startswith("Sub %s" % name))
+        return "\n".join(ev[i:ev.index("End Sub", i) + 1])
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Class Wall : Public Collidable, Visible : End Class",
+        "Class Gate : Public Open : End Class",
+        "Class Tmr : Public Enabled : End Class",
+        "Const kTT_TV = -8 : Const kTT_Phone = 49 : Const kTT_Batcave = 174",
+        "Dim WallDoor1, WallDoor2, Gate002, tmrTurntable, CurMechPos, PadGateA, PadGateB",
+        "Set WallDoor1 = New Wall : Set WallDoor2 = New Wall : Set Gate002 = New Gate : Set tmrTurntable = New Tmr",
+        "WallDoor1.Collidable = False : WallDoor2.Collidable = True : Gate002.Open = False : tmrTurntable.Enabled = False",
+        "PadGateA = False : PadGateB = False",
+        sub("PadControlGate"), sub("PadDiverterPower"), sub("PadApplyGate"),
+        "Dim Log",
+        "Sub S(t) : Log = Log & t & \":\" & Abs(WallDoor1.Collidable) & Abs(WallDoor2.Collidable) & Abs(Gate002.Open) & \" \" : End Sub",
+        "CurMechPos = kTT_Phone",
+        "PadControlGate 1 : S \"6on@phone\" : PadControlGate 0 : S \"6off\"",
+        "PadDiverterPower 1 : S \"7on@phone\" : PadDiverterPower 0",
+        "CurMechPos = kTT_TV : tmrTurntable.Enabled = True",
+        "PadDiverterPower 1 : S \"7on@turning\"",
+        "tmrTurntable.Enabled = False : PadApplyGate : S \"7on@tv\"",
+        "PadDiverterPower 0 : S \"7off\"",
+        "CurMechPos = kTT_Batcave : PadDiverterPower 1 : S \"7on@batcave\" : PadDiverterPower 0",
+        "WScript.Echo Log"]), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.split() == ["6on@phone:011", "6off:010", "7on@phone:010",
+                                "7on@turning:010", "7on@tv:100", "7off:010", "7on@batcave:100"], r.stdout + r.stderr
+    # a table patched before is asked to patch again; one patched now is not
+    vsu = pytest.importorskip("vpxsetup")
+    why = "a ball going round the right orbit can fall behind the Bat Phone and stay there"
+    (tmp_path / "B (PAD).script.vbs").write_text("Sub PadApplyGate\n\tDim o\n\to = PadGateA Or PadGateB\nEnd Sub\n", encoding="utf-8")
+    assert why in vsu.missed_fixes(str(tmp_path), "B (PAD).vpx", m["repatch"])
+    (tmp_path / "B (PAD).script.vbs").write_text(m["extra_vbs"], encoding="utf-8")
+    assert why not in vsu.missed_fixes(str(tmp_path), "B (PAD).vpx", m["repatch"])
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the map's VBScript under cscript")
+def test_batmans_mech_follow_says_when_the_tributes_own_call_fails(tmp_path):
+    # PAD-1251: PadMechTimer follows the machine's turntable and crane
+    # switches under On Error Resume Next, so a call of the tribute's that
+    # failed (TurnTable_Goto here) left the mech still and said nothing; a
+    # reporter's held ball moved neither and his log could not say why.
+    # PadNote hands each distinct error to the controller once, and the rest
+    # of the tick (the crane) still runs.
+    m = json.load(open(os.path.join(VPX, "batman.shadow.json"), encoding="utf-8"))
+    ev = m["extra_vbs"].split("\n")
+
+    def sub(name, kind="Sub"):
+        i = next(k for k, ln in enumerate(ev) if ln.startswith("%s %s" % (kind, name)))
+        return "\n".join(ev[i:ev.index("End %s" % kind, i) + 1])
+
+    def run(name, broken):
+        vbs = tmp_path / name
+        vbs.write_text("\n".join([
+            "Class Trg : Public Enabled : End Class",
+            "Class Tmr : Public Enabled, UserValue : End Class",
+            "Class Ctl",
+            "  Public Notes, Sw",
+            "  Public Property Get Switch(n) : Switch = (InStr(Sw, \",\" & n & \",\") > 0) : End Property",
+            "  Public Property Let PadNote(t) : Notes = Notes & t & \"|\" : End Property",
+            "End Class",
+            "Class VT : Public Sub PulseSw(n) : End Sub : Public Sub AddTimer(a, b) : End Sub : End Class",
+            "Const kTT_TV = -8 : Const kTT_Phone = 49 : Const kTT_Batcave = 174",
+            "Dim trgBallLock1, trgBallLock2, trgBallLock3, tmrTurntable, Controller, vpmTimer",
+            "Set trgBallLock1 = New Trg : Set trgBallLock2 = New Trg : Set trgBallLock3 = New Trg",
+            "Set tmrTurntable = New Tmr : Set Controller = New Ctl : Set vpmTimer = New VT",
+            "Dim CurMechPos, CranePosIdx, discLastPos, discSpinSpeed, Turns",
+            "CurMechPos = kTT_TV : CranePosIdx = 0 : discLastPos = 0 : discSpinSpeed = 0 : Turns = 0",
+            "Dim PadNoteLast, PadGateA, PadGateB, PadTTWant, PadCraneWant, PadDiscLast",
+            "PadTTWant = 0 : PadCraneWant = -1 : PadDiscLast = 0",
+            "Sub PadApplyGate : End Sub",
+            "Sub TurnTable_Goto(p)",
+            "  If p = CurMechPos Then Exit Sub",
+            "  Turns = Turns + 1",
+            "  If %s Then Err.Raise 438, \"stub\", \"Object doesn't support this property or method\"" % broken,
+            "  CurMechPos = p",
+            "End Sub",
+            "Sub CraneGoto(p) : CranePosIdx = p : End Sub",
+            sub("PadSw", "Function"), sub("PadNote"), sub("PadMechTimer_Timer"),
+            "Controller.Sw = \",1077,1087,\"",
+            "PadMechTimer_Timer",
+            "Controller.Sw = \",1078,1082,\"     ' the Bat Phone, the crane away",
+            "Dim i : For i = 1 To 5 : PadMechTimer_Timer : Next",
+            "WScript.Echo CurMechPos & \" \" & CranePosIdx & \" \" & Turns",
+            "WScript.Echo \"[\" & Controller.Notes & \"]\""]), encoding="latin-1")
+        r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stdout + r.stderr
+        return r.stdout.strip().splitlines()
+
+    import subprocess
+    out = run("broken.vbs", "True")
+    # the turntable could not go (asked again every tick), the crane did
+    assert out[0] == "-8 5 6", out
+    notes = out[1].strip("[]").split("|")[:-1]
+    assert notes == ["TurnTable_Goto 49: VBScript error 438 (Object doesn't support this property or method)",
+                     "turntable to 49: VBScript error 438 (Object doesn't support this property or method)"], out
+    # a table whose calls work follows both and says nothing
+    out = run("ok.vbs", "False")
+    assert out == ["49 5 1", "[]"], out
+    # a table patched before this is asked to patch again; one patched now is not
+    vsu = pytest.importorskip("vpxsetup")
+    why = "when its crane or turntable does not follow the game, the log does not say why"
+    (tmp_path / "B (PAD).script.vbs").write_text("Sub PadMechTimer_Timer\nEnd Sub\n", encoding="utf-8")
+    assert why in vsu.missed_fixes(str(tmp_path), "B (PAD).vpx", m["repatch"])
+    (tmp_path / "B (PAD).script.vbs").write_text(m["extra_vbs"], encoding="utf-8")
+    assert why not in vsu.missed_fixes(str(tmp_path), "B (PAD).vpx", m["repatch"])
+
+
+def test_controller_logs_a_tables_padnote(monkeypatch):
+    # PAD-1251: Controller.PadNote = "..." is a line in the controller log
+    # (capped), not a property kept and never read
+    pc = pytest.importorskip("padcontroller")
+    got = []
+    monkeypatch.setattr(pc, "log", lambda s: got.append(s))
+    c = pc.PadController.__new__(pc.PadController)
+    c.props = {}
+    c.bridge = None
+    c._put("padnote", ("CraneGoto 5: VBScript error 438 (x)",))
+    assert got == ["table: CraneGoto 5: VBScript error 438 (x)"]
+    for _ in range(100):
+        c._put("padnote", ("again",))
+    assert len(got) == 50
+
+DOF_TRIBUTE ="""Option Explicit
+ExecuteGlobal GetTextFile("controller.vbs")
+Const cGameName = "rushle"   ' DOF's name
+Sub Table1_Init : LoadEM : End Sub
+Sub Drain_Hit : DOF 127, DOFOff : End Sub
+Sub sw001_Hit()
+    DOF 107, DOFPulse
+    If BumperLevel = 0 Then DOF 99, DOFPulse : AddScore 10
+    If bGameOn Then
+        DOF 98, DOFPulse
+    Else
+        DOF 97, DOFPulse
+    End If
+    PlaySoundAt SoundFXDOF("Bump_" & Int(Rnd * 5) + 1, 141, DOFPulse, DOFContactors), sw001 ' x
+End Sub
+Sub LeftSlingShot_Slingshot : DOF 103, DOFPulse : End Sub
+Sub kicker1_Timer
+    kicker1.Kick 190, 15
+    PlaySoundAt SoundFXDOF("fx_kicker", 113, DOFPulse, DOFContactors), Kicker1
+End Sub
+Sub CreateNewBall()
+    BallRelease.CreateBall
+    PlaySoundAt SoundFXDOF("fx_Ballrel", 123, DOFPulse, DOFContactors), BallRelease
+    BallRelease.Kick 90, 4
+End Sub
+Sub Trigger1_Hit()
+    If bAutoPlunger Then
+        PlungerIM.AutoFire
+        DOF 110, DOFPulse
+    End If
+    DOF 77, DOFPulse
+End Sub
+"""
+
+
+def _dof_shadow():
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m.update(orig_hits=False, orig_keep=["LeftSlingShot"], b2s_name="rush_le")
+    return m
+
+
+def test_shadow_carries_the_tables_dof_into_its_own_subs():
+    # PAD-847: with orig_hits false a bumper's own Hit sub never runs, and the
+    # kickers, trough and plunger fire on the machine's coils through
+    # cvpmBallStack: the table's DOF calls there were lost. The unconditional
+    # ones come along; a branch of the shadow game's rules does not.
+    vs = pytest.importorskip("vpxshadow")
+    out, rep = vs.patch(DOF_TRIBUTE, _dof_shadow())
+    # PAD-1212: and its playfield sound, its SoundFXDOF's DOF already a PadDOF
+    assert ("Sub sw001_Hit : vpmTimer.PulseSw 1053 : PadDOF 107, DOFPulse, Empty"
+            " : PadDOF 141, DOFPulse, DOFContactors : On Error Resume Next"
+            ' : PlaySoundAt PadFXSound("Bump_" & Int(Rnd * 5) + 1, DOFContactors), sw001 : End Sub') in out
+    # the trough and a saucer kick with the table's own release sound, after
+    # the DOF (a sound that fails never costs the contactor)
+    assert ('Sub PadSol1(e)\n\tbsTrough.SolOut e\n\tIf e Then\n\t\tPadDOF 123, DOFPulse, DOFContactors\n'
+            '\t\tOn Error Resume Next\n\t\tPlaySoundAt PadFXSound("fx_Ballrel", DOFContactors), BallRelease\n'
+            '\tEnd If') in out
+    assert '\t\tPlaySoundAt PadFXSound("fx_kicker", DOFContactors), Kicker1' in out
+    assert "Function PadFXSound(snd, toy)" in out
+    assert "sounds carried into the bridge: sw001_Hit (Bump_), sol:1 (fx_Ballrel), sol:3 (fx_kicker)" in rep
+    for n in (99, 98, 97):
+        assert "PadDOF %d," % n not in out
+    # PAD-1099: the plunger lane's own sub no longer runs either; its
+    # unconditional DOF comes along, the auto-plunge branch's does not
+    assert "Sub Trigger1_Hit : Controller.Switch(1067) = True : PadDOF 77, DOFPulse, Empty : End Sub" in out
+    # its own sub still runs, so its DOF is not doubled
+    assert "Sub LeftSlingShot_Slingshot : vpmTimer.PulseSw 1069 : LeftSlingShot_Slingshot_orig : End Sub" in out
+    assert "PadDOF 103," not in out
+    assert "\tPlaySoundAt \"fx_drain\", Drain\n\tPadDOF 127, DOFOff, Empty\nEnd Sub" in out
+    # the coils: beside kicker1.Kick, BallRelease.Kick (neutered by now) and
+    # PlungerIM.AutoFire in the same branch
+    assert "Sub PadSol2(e)\n\tPadAutoPlunge e\n\tIf e Then\n\t\tPadDOF 110, DOFPulse, Empty\n\tEnd If" in out
+    assert "Sub PadSol3(e)\n\tbsKicker1.SolOut e\n\tIf e Then\n\t\tPadDOF 113, DOFPulse, DOFContactors" in out
+    assert 'SolCallback(1) = "PadSol1"' in out and 'SolCallback(3) = "PadSol3"' in out
+    assert "SolCallback(7)" not in out
+    assert 'Const cGameName = "rush_le"   \' DOF\'s name' in out
+    assert "Sub PadDOF(e, s, toy)" in out
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out))
+    # a table with no DOF anywhere gets none of it
+    plain, _ = vs.patch(MINI_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))
+    assert "PadDOF" not in plain and 'SolCallback(1) = "bsTrough.SolOut"' in plain
+
+
+def test_shadow_carries_dof_behind_a_not_tilted_guard():
+    # PAD-1117: Munsters' (and JAWS') pop bumpers fire their DOF only inside
+    # `If NOT Tilted Then`, so the bridge carried none and the bumpers' toys
+    # stayed still. The shadow game never tilts: the guard is always true.
+    vs = pytest.importorskip("vpxshadow")
+    script = "\n".join([
+        "Sub Bumper001_Hit", "\tDim p", "\tIf NOT Tilted Then",
+        "\t\tPlaySoundAt SoundFXDOF(\"fx_bumper\", 109, DOFPulse, DOFContactors), ActiveBall",
+        "\t\tDOF 302, DOFPulse",
+        "\t\tIf SuperPopsTimer.Enabled Then", "\t\t\tDOF 90, DOFPulse", "\t\tEnd If",
+        "\tElse", "\t\tDOF 91, DOFPulse", "\tEnd If", "End Sub",
+        "Sub B2_Hit", "\tIf Tilted = False Then DOF 110, DOFPulse", "End Sub",
+        "Sub B3_Hit", "\tIf Not (bTilted) Then", "\t\tDOF 111, DOFPulse", "\tEnd If", "End Sub",
+        # a guard that is not "not tilted" stays a branch of the shadow game's
+        "Sub B4_Hit", "\tIf Tilted Then", "\t\tDOF 92, DOFPulse", "\tEnd If",
+        "\tIf Not Tilted And Mode = 2 Then", "\t\tDOF 93, DOFPulse", "\tEnd If", "End Sub"])
+    st = list(vs._walk(script.split("\n")))
+    assert [c.split()[1].rstrip(",") for c in vs.dof_of_sub(st, "Bumper001_Hit")] == ["109", "302"]
+    assert vs.dof_of_sub(st, "B2_Hit") == ["PadDOF 110, DOFPulse, Empty"]
+    assert vs.dof_of_sub(st, "B3_Hit") == ["PadDOF 111, DOFPulse, Empty"]
+    assert vs.dof_of_sub(st, "B4_Hit") == []
+
+
+def test_munsters_herman_opto_stays_closed_under_the_magnet():
+    # PAD-1117: the table's Herman magnet holds the ball inside sw45, and the
+    # game reads a ball on the magnet as HERMAN OPTO staying closed (emulator:
+    # pulsed, the hurry-up never served its second ball). Old patches re-patch.
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, "munsters_pro.shadow.json"), encoding="utf-8"))
+    assert m["switches"]["sw45"]["event"] == "hold" and m["switches"]["sw45"]["id"] == 82
+    old = {r["old"] for r in m["repatch"] if r["since"].startswith("PAD-1117")}
+    assert old == {"Sub sw45_Hit : vpmTimer.PulseSw 1082 : End Sub",
+                   "Sub Bumper001_Hit : vpmTimer.PulseSw 1086 : End Sub"}
+    script = "\n".join(["Sub sw45_Hit", "\tHermanShake", "End Sub", "Sub sw45_unhit()", "\tCaptured=False",
+                        "End Sub", "Sub Bumper001_Hit", "\tIf NOT Tilted Then",
+                        "\t\tPlaySoundAt SoundFXDOF(\"fx_bumper\", 109, DOFPulse, DOFContactors), ActiveBall",
+                        "\tEnd If", "End Sub"])
+    gen, _ = vs.patch(script, m)
+    # held while a ball sits in it (PAD-1121 counts the balls: see below)
+    assert "Sub sw45_Hit\n\tPadIn_sw45 = PadIn_sw45 + 1" in gen
+    assert "\tController.Switch(1082) = Not CBool(PadKnocked_sw45)\nEnd Sub" in gen
+    assert "Sub sw45_UnHit\n\tPadIn_sw45 = PadIn_sw45 - 1" in gen
+    assert ("Sub Bumper001_Hit : vpmTimer.PulseSw 1086 : PadDOF 109, DOFPulse, DOFContactors : On Error Resume Next"
+            ' : PlaySoundAt PadFXSound("fx_bumper", DOFContactors), ActiveBall : End Sub') in gen   # PAD-1212
+    for r in m["repatch"]:
+        if r["since"].startswith("PAD-1117"):
+            assert r["old"] not in gen
+
+
+def _munsters_herman(vs):
+    m = json.load(open(os.path.join(VPX, "munsters_pro.shadow.json"), encoding="utf-8"))
+    script = "\n".join(["Dim mHMagnet", "Sub sw45_Hit", "\tHermanShake", "End Sub",
+                        "Sub HMagnet_Hit", "\tIf mHMagnet.MagnetOn=true then", "\t\tDOF 135, DOFOn",
+                        "\tEnd If", "End Sub"])
+    gen, _ = vs.patch(script, m)
+    return m, gen
+
+
+def test_munsters_second_ball_knocks_hermans_ball_loose():
+    # PAD-1121: HERMAN HURRY UP says HIT THE BALL - the next ball knocks the
+    # held one off the opto and the game drops the magnet and starts Herman
+    # Multiball at once (emulator). The table's magnet grabs that ball too, so
+    # the opto opens when a second ball arrives while the magnet is on; and the
+    # magnet coil turning off ends the shaker HMagnet_Hit started (DOF 135).
+    vs = pytest.importorskip("vpxshadow")
+    m, gen = _munsters_herman(vs)
+    assert m["switches"]["sw45"]["knock"] == "mHMagnet.MagnetOn"
+    assert "Dim PadIn_sw45, PadKnocked_sw45" in gen
+    assert "\t\tIf mHMagnet.MagnetOn Then PadKnocked_sw45 = True" in gen
+    assert "\tController.Switch(1082) = (PadIn_sw45 > 0) And Not CBool(PadKnocked_sw45)" in gen
+    assert "\tmHMagnet.MagnetOn = e\n" in gen and "\tIf Not CBool(e) Then DOF 135, DOFOff\n" in gen
+    marks = {r["old"] for r in m["repatch"] if r["since"].startswith("PAD-1121")}
+    assert marks == {"Sub sw45_Hit : Controller.Switch(1082) = True : End Sub"}
+    assert not any(k in gen for k in marks)
+
+
+def test_hold_without_knock_is_unchanged():
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, "munsters_pro.shadow.json"), encoding="utf-8"))
+    del m["switches"]["sw45"]["knock"]
+    gen, _ = vs.patch("Sub sw45_Hit\n\tHermanShake\nEnd Sub", m)
+    assert "Sub sw45_Hit : Controller.Switch(1082) = True : End Sub" in gen
+    assert "PadIn_" not in gen
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_munsters_herman_knock_under_vbscript(tmp_path):
+    vs = pytest.importorskip("vpxshadow")
+    _, gen = _munsters_herman(vs)
+    subs = gen[gen.index("Dim PadIn_sw45"):gen.index("End Sub", gen.index("Sub sw45_UnHit")) + 7]
+    mag = gen[gen.index("Sub PadMagnet(e)"):gen.index("End Sub", gen.index("Sub PadMagnet(e)")) + 7]
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Class Ctl", "Public sw",
+        "Private Sub Class_Initialize : Set sw = CreateObject(\"Scripting.Dictionary\") : End Sub",
+        "Public Property Let Switch(n, v) : sw(n) = CBool(v) : End Property",
+        "Public Property Get Switch(n) : Switch = sw(n) : End Property", "End Class",
+        "Class Mag", "Public MagnetOn", "End Class",
+        "Dim Controller, mHMagnet, Log : Set Controller = New Ctl : Set mHMagnet = New Mag",
+        "Const DOFOff = 0",
+        "Sub DOF(n, s) : Log = Log & \"DOF\" & n & \"=\" & s & \" \" : End Sub",
+        "Sub S : Log = Log & Controller.Switch(1082) & \" \" : End Sub",
+        subs, mag,
+        "mHMagnet.MagnetOn = False",
+        "sw45_Hit : S",                          # Herman catches ball 1: closed
+        "PadMagnet 1 : sw45_Hit : S",            # ball 2 while the magnet holds: knocked loose
+        "PadMagnet 0 : sw45_UnHit : S : sw45_UnHit : S",
+        "sw45_Hit : sw45_Hit : S : sw45_UnHit : S : sw45_UnHit : S",   # two balls, no magnet
+        "WScript.Echo Log"]).replace("\n", "\r\n"), encoding="latin-1")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.split() == ["True", "False", "DOF135=0", "False", "False",
+                                "True", "True", "False"], r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_shadow_carried_dof_reaches_b2s_under_vbscript(tmp_path):
+    # the bridge's generated subs, run for real against a controller.vbs
+    # shaped DOF sub: a bumper hit and the coils pulse the B2S server, and a
+    # toy set to sound only (DOFeffects 0) stays still, as SoundFXDOF does
+    vs = pytest.importorskip("vpxshadow")
+    out, _ = vs.patch(DOF_TRIBUTE, _dof_shadow())
+    tail = out[out.index("Dim bsTrough"):out.index("Sub PadTestTimer_Timer")]
+    lib = ('Dim Controller, B2SOn, DOFeffects(9)\\n'
+           'Const DOFOff = 0, DOFOn = 1, DOFPulse = 2, DOFContactors = 1\\n'
+           'Sub DOF(e, s)\\nIf B2SOn Then\\nIf s = 2 Then\\n'
+           'Controller.B2SSetData e, 1:Controller.B2SSetData e, 0\\nElse\\n'
+           'Controller.B2SSetData e, s\\nEnd If\\nEnd If\\nEnd Sub')
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Dim Log, SolCallback(68), sLLFlipper, sLRFlipper",
+        "Class FakeB2S", "Public Sub B2SSetData(a, b) : Log = Log & a & \"=\" & b & \" \" : End Sub", "End Class",
+        "Class FakePad", "Public Sub B2SSetData(a, b) : Log = Log & \"PAD\" & a & \" \" : End Sub", "End Class",
+        "Class FakeStack", "Public Sub SolOut(e) : Log = Log & \"kick \" : End Sub", "End Class",
+        "Class FakeTimer", "Public Sub PulseSw(n) : Log = Log & \"sw\" & n & \" \" : End Sub", "End Class",
+        "Class FakeImpulse", "Public Sub AutoFire : Log = Log & \"fire \" : End Sub", "End Class",
+        "Dim vpmTimer : Set vpmTimer = New FakeTimer",
+        "Dim plungerIM : Set plungerIM = New FakeImpulse",
+        tail,
+        "ExecuteGlobal PadB2SText(Replace(\"%s\", \"\\n\", vbNewLine))" % lib.replace('"', '""'),
+        "Set PadB2S = New FakeB2S : Set Controller = New FakePad : B2SOn = True",
+        "Set bsTrough = New FakeStack : Set bsKicker1 = New FakeStack",
+        "DOFeffects(DOFContactors) = 2",
+        "sw001_Hit : Log = Log & \"| \"",
+        "Execute SolCallback(1) & \" True\" : Execute SolCallback(1) & \" False\" : Log = Log & \"| \"",
+        "Execute SolCallback(2) & \" True\" : Execute SolCallback(3) & \" True\" : Log = Log & \"| \"",
+        "DOFeffects(DOFContactors) = 0",
+        "sw001_Hit",
+        "WScript.Echo Log"]), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.strip() == ("sw1053 107=1 107=0 141=1 141=0 | kick 123=1 123=0 kick | "
+                                "fire 110=1 110=0 kick 113=1 113=0 | sw1053 107=1 107=0"), r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated VBScript under cscript")
+def test_shadow_carried_sounds_play_as_the_cabinets_dof_settings_say(tmp_path):
+    """PAD-1212: Foo Fighters' drops, targets, spinner and trough kick were
+    silent behind the machine: a stood-in sub carried the table's DOF but not
+    its sound. The sound comes along now; its SoundFXDOF's DOF is a PadDOF of
+    its own, and PadFXSound plays the sound unless the cabinet's toy stands
+    in for it (DOFeffects 1), as SoundFXDOF did."""
+    vs = pytest.importorskip("vpxshadow")
+    out, _ = vs.patch(DOF_TRIBUTE, _dof_shadow())
+    tail = out[out.index("Dim bsTrough"):out.index("Sub PadTestTimer_Timer")]
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Dim Log, SolCallback(68), sLLFlipper, sLRFlipper, DOFeffects(9), sw001, BallRelease, Kicker1",
+        "Const DOFOff = 0, DOFOn = 1, DOFPulse = 2, DOFContactors = 1",
+        "Sub DOF(e, s) : Log = Log & e & \" \" : End Sub",
+        "Sub PlaySoundAt(s, o) : Log = Log & \"[\" & s & \"] \" : End Sub",
+        "Class FakeStack", "Public Sub SolOut(e) : Log = Log & \"kick \" : End Sub", "End Class",
+        "Class FakeTimer", "Public Sub PulseSw(n) : Log = Log & \"sw\" & n & \" \" : End Sub", "End Class",
+        "Dim vpmTimer : Set vpmTimer = New FakeTimer",
+        tail,
+        "Set bsTrough = New FakeStack : Set bsKicker1 = New FakeStack",
+        "Randomize 1",
+        "For Each t In Array(1, 2, 0)",
+        "DOFeffects(DOFContactors) = t",
+        "Execute SolCallback(1) & \" True\" : Execute SolCallback(1) & \" False\" : Log = Log & \"| \"",
+        "Next",
+        "Execute SolCallback(3) & \" True\" : Log = Log & \"| \"",
+        "sw001_Hit",
+        "WScript.Echo Log"]), encoding="latin-1")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    got = r.stdout.strip()
+    # toy only: the contactor, no sound (an empty name, as SoundFXDOF gave the
+    # table); both; sound only (the toy is off). Only the coil's on edge sounds
+    assert got.startswith("kick 123 [] kick | kick 123 [fx_Ballrel] kick | kick [fx_Ballrel] kick | "
+                          "kick [fx_kicker] | "), got + r.stderr
+    assert re.search(r"\| sw1053 107 \[Bump_\d\]$", got), got + r.stderr
+
+
+def test_a_tribute_patched_before_its_sounds_were_carried_asks_for_a_new_patch(tmp_path):
+    """PAD-1212: every script vpxshadow writes says, in a line of its own,
+    that the table's playfield sounds are carried; a scripted tribute's copy
+    whose script lacks that line was patched before, and its row says Patch
+    again. The ROM tables other patchers make never carry the mark."""
+    vs = pytest.importorskip("vpxshadow")
+    vset = pytest.importorskip("vpxsetup")
+    (mark,) = vset.SHADOW_REPATCH
+    assert mark["absent"] == vs.SOUNDS_NOTE
+    out, _ = vs.patch(DOF_TRIBUTE, _dof_shadow())
+    assert "\n" + vs.SOUNDS_NOTE + "\n" in out
+    name = "T (PAD).vpx"
+    script = tmp_path / "T (PAD).script.vbs"
+    script.write_text(out.replace(vs.SOUNDS_NOTE + "\n", ""), encoding="utf-8")
+    assert vset.missed_fixes(str(tmp_path), name, vset.SHADOW_REPATCH) == [mark["why"]]
+    script.write_text(out, encoding="utf-8")
+    assert vset.missed_fixes(str(tmp_path), name, vset.SHADOW_REPATCH) == []
+    # no script beside the copy: nothing is claimed
+    script.unlink()
+    assert vset.missed_fixes(str(tmp_path), name, vset.SHADOW_REPATCH) == []
+
+
+FOO_DROPS = "\n".join([
+    "Sub dt1_Hit:PlaySoundAt \"fx_droptarget\", dt1:End Sub",
+    "Sub dt2_Hit:PlaySoundAt \"fx_droptarget\", dt2:End Sub",
+    "Sub dt3_Hit:PlaySoundAt \"fx_droptarget\", dt3:End Sub",
+    "Sub dt1_Dropped 'Engine", "    CheckDT", "End Sub",
+    "Sub CheckDT", "    If dt1.IsDropped AND dt2.IsDropped AND dt3.IsDropped Then ResetDTTimer.Enabled = 1", "End Sub",
+    "Sub ResetDT", "    PlaySoundAt \"fx_resetdrop\", dt2", "    dt1.IsDropped = 0", "End Sub",
+    "Sub StartMODulatorFrenzy", "    dt1.IsDropped = 1", "End Sub",
+    "Sub largetarget_Hit", "    PlaySoundAtBall \"fx_target\"", "    If Tilted Then Exit Sub", "    LTShake",
+    "    Addscore 5000", "End Sub",
+    "Sub LTShake:LTShakePos = 8:largetarget.TimerEnabled = 1:End Sub",
+    "Sub LightningTarget_Slingshot", "    PlaySoundAt \"fx_slingshot_EM\", Target004", "End Sub",
+    "Sub Spinner_Spin", "    PlaySoundAt \"fx_spinner\", Spinner", "    Addscore 100", "End Sub"])
+
+
+@pytest.mark.parametrize("title,ids", [("foo_fighters_pro", (87, 88, 89, 90)),
+                                       ("foo_fighters_le", (90, 91, 92, 93))])
+def test_foo_fighters_drops_stay_down_until_the_bank_resets(tmp_path, title, ids):
+    """PAD-1212: the game reads its 3 DROP optos as made while a target is
+    down and holds the bank down for the MOD TARGET behind it (emulator,
+    1.04.0: all three made, no reset; a down one opened, the 3 BANK DROP coil
+    fires). The table pulsed them, so the bank never read down, and JP's
+    paddle behind them (largetarget) reached no switch. JP's own rules that
+    raise or drop the bank are quiet; the machine's coil stands it up."""
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, title + ".shadow.json"), encoding="utf-8"))
+    for n in ("dt1", "dt2", "dt3"):
+        assert m["switches"][n]["event"] == "drop" and not m["switches"][n].get("up_closed")
+    assert m["switches"]["largetarget"]["id"] == ids[3]
+    assert m["drop_resets"]["PadDropsUp"] == ["dt1", "dt2", "dt3"]
+    out, rep = vs.patch(FOO_DROPS, m)
+    for i, n in enumerate(("dt1", "dt2", "dt3")):
+        assert ('Sub %s_Hit : Controller.Switch(%d) = True : On Error Resume Next : PlaySoundAt "fx_droptarget", %s'
+                ' : End Sub' % (n, 1000 + ids[i], n)) in out
+    assert ('Sub largetarget_Hit : vpmTimer.PulseSw %d : On Error Resume Next : PlaySoundAtBall "fx_target"'
+            ' : LTShake : End Sub' % (1000 + ids[3])) in out
+    # the kick target's coil sounds it (PAD-1119), not its switch as well
+    assert "Sub LightningTarget_Slingshot : vpmTimer.PulseSw %d : End Sub" % (1000 + ids[3] + 1) in out
+    assert 'Sub Spinner_Spin : vpmTimer.PulseSw' in out and 'PlaySoundAt "fx_spinner", Spinner : End Sub' in out
+    for q in ("dt1_Dropped", "ResetDT", "StartMODulatorFrenzy"):
+        assert "quieted Sub %s (the machine runs that now)" % q in rep
+    (mark,) = [r for r in m["repatch"] if r["since"].startswith("PAD-1212")]
+    assert mark["old"] not in out and mark["old"] == "Sub dt1_Hit : vpmTimer.PulseSw %d : End Sub" % (1000 + ids[0])
+    if not (sys.platform == "win32" and shutil.which("cscript")):
+        return
+    tail = out[out.index("Dim bsTrough"):out.index("Sub PadTestTimer_Timer")]
+    tail = tail[:tail.index("Sub Table1_Init")] + tail[tail.index("Sub Drain_Hit"):]
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Dim Log, SolCallback(68), sLLFlipper, sLRFlipper, LTShakePos",
+        "Class Ctl", "Public Property Let Switch(n, v) : Log = Log & n & \"=\" & CInt(v) & \" \" : End Property",
+        "End Class",
+        "Class Drop", "Public IsDropped, TimerEnabled", "End Class",
+        "Class FakeTimer", "Public Sub PulseSw(n) : Log = Log & \"sw\" & n & \" \" : End Sub", "End Class",
+        "Dim Controller : Set Controller = New Ctl",
+        "Dim vpmTimer : Set vpmTimer = New FakeTimer",
+        "Dim dt1, dt2, dt3, largetarget, Drain, swPlungerRest, plungerIM",
+        "Set dt1 = New Drop : Set dt2 = New Drop : Set dt3 = New Drop : Set largetarget = New Drop",
+        "Sub PlaySoundAt(s, o) : Log = Log & \"[\" & s & \"] \" : End Sub",
+        "Sub PlaySoundAtBall(s) : Log = Log & \"[\" & s & \"] \" : End Sub",
+        "Sub LTShake : Log = Log & \"shake \" : End Sub",
+        tail, m["extra_vbs"],
+        "dt1.IsDropped = 1 : dt1_Hit : dt2.IsDropped = 1 : dt2_Hit : dt3.IsDropped = 1 : dt3_Hit : Log = Log & \"| \"",
+        "largetarget_Hit : Log = Log & \"| \"",
+        "Execute SolCallback(5) & \" True\" : Execute SolCallback(5) & \" False\"",
+        "Log = Log & \"| \" & dt1.IsDropped & dt2.IsDropped & dt3.IsDropped",
+        "WScript.Echo Log"]), encoding="latin-1")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    a, b, c, d = (1000 + i for i in ids)
+    assert r.stdout.strip() == (
+        "%d=-1 [fx_droptarget] %d=-1 [fx_droptarget] %d=-1 [fx_droptarget] | "
+        "sw%d [fx_target] shake | [fx_resetdrop] %d=0 %d=0 %d=0 | 000" % (a, b, c, d, a, b, c)), r.stdout + r.stderr
+
+
+def test_shadow_flipper_subs_are_found_whole_word_only():
+    vs = pytest.importorskip("vpxshadow")
+    lines = ["Sub SolLFlipperX(e)", "  Private Sub SolRFlipper (Enabled) ' x", "Function SolURFlipper()"]
+    assert not vs.has_sub(lines, "SolLFlipper")
+    assert vs.has_sub(lines, "SolRFlipper") and vs.has_sub(lines, "SolURFlipper")
+    had = {"SolRFlipper": True, "SolURFlipper": True}
+    assert vs.flipper_subs({}, had) == {"sLRFlipper": "SolRFlipper", "sURFlipper": "SolURFlipper"}
+    assert vs.flipper_subs({"flippers": {"_": "x", "sLLFlipper": "MyFlipL"}}, had) == {"sLLFlipper": "MyFlipL"}
+
+
+def test_shadow_warns_when_the_flipper_coils_move_nothing():
+    # PAD-1112: Munsters flips inline in its key handlers, only while its own
+    # game runs, and has no SolLFlipper: with no `flippers` in the map the
+    # machine's flipper coils called nothing and the flippers never moved
+    vs = pytest.importorskip("vpxshadow")
+    inline = ["Sub Table1_KeyDown_orig(ByVal Keycode)", "\tIf bGameInPlay Then LF.Fire", "End Sub"]
+    rep = vs.flipper_warnings({}, {}, inline)
+    assert rep and rep[0].startswith("WARNING: the machine's flipper coils move nothing"), rep
+    assert vs.flipper_warnings({}, {"SolLFlipper": True}, ["Sub SolLFlipper(e)", "End Sub"]) == []
+    named = {"flippers": {"_": "x", "sLLFlipper": "PadLFlip", "sLRFlipper": "PadRFlip"},
+             "extra_vbs": "Sub PadLFlip(e)\n\tLF.Fire\nEnd Sub\n"}
+    assert vs.flipper_warnings(named, {}, inline) == [
+        "WARNING: the map's flipper sub PadRFlip is in neither the table's script nor extra_vbs"]
+    assert vs.flipper_warnings(named, {}, inline + ["Sub PadRFlip(e)", "End Sub"]) == []
+
+
+def test_shadow_maps_define_the_flipper_subs_they_name():
+    # a map's own `Pad...` flipper body lives in its extra_vbs; a typo there
+    # is a table whose flippers never move
+    vs = pytest.importorskip("vpxshadow")
+    for path in glob.glob(os.path.join(VPX, "*.shadow.json")):
+        m = json.load(open(path, encoding="utf-8"))
+        extra = (m.get("extra_vbs") or "").split("\n")
+        for sub in vs.flipper_subs(m, {}).values():
+            if sub.startswith("Pad"):
+                assert vs.has_sub(extra, sub), (os.path.basename(path), sub)
+
+
+def test_munsters_flips_on_the_machines_coils():
+    # PAD-1112: the machine's LEFT FLIPPER (48) and RIGHT FLIPPER (46) coils
+    # flip Munsters' flippers the way its key handlers did: LF/RF.Fire up,
+    # RotateToStart down, with the table's flipper sounds and DOF 101/102
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, "munsters_pro.shadow.json"), encoding="utf-8"))
+    assert vs.flipper_subs(m, {}) == {"sLLFlipper": "PadLFlip", "sLRFlipper": "PadRFlip"}
+    assert vs.flipper_warnings(m, {}, []) == []
+    assert any(r["since"].startswith("PAD-1112") for r in m["repatch"])
+    if not (sys.platform == "win32" and shutil.which("cscript")):
+        return
+    harness = "\n".join([
+        "Option Explicit", "Dim calls : calls = \"\"",
+        "Const DOFOff = 0", "Const DOFOn = 1", "Const DOFFlippers = 7",
+        "Dim DOFeffects(10) : DOFeffects(7) = 2",
+        "Sub DOF(ev, st) : calls = calls & \"DOF \" & ev & \"=\" & st & \" \" : End Sub",
+        "Sub PlaySound(n, a, b, c, d, e, f, g, h) : calls = calls & n & \" \" : End Sub",
+        "Function AudioPan(o) : AudioPan = 0 : End Function",
+        "Function AudioFade(o) : AudioFade = 0 : End Function",
+        # the table's own SoundFXDOF, as its script has it
+        "Function SoundFXDOF(Sound, DOFevent, State, Effect)",
+        "\tIf DOFeffects(Effect) = 2 Then SoundFXDOF = Sound : DOF DOFevent, State",
+        "End Function",
+        "Class Obj : Public Name",
+        "\tSub Fire : calls = calls & Name & \".Fire \" : End Sub",
+        "\tSub RotateToStart : calls = calls & Name & \".RotateToStart \" : End Sub",
+        "End Class",
+        "Dim LF : Set LF = New Obj : LF.Name = \"LF\"",
+        "Dim RF : Set RF = New Obj : RF.Name = \"RF\"",
+        "Dim LeftFlipper : Set LeftFlipper = New Obj : LeftFlipper.Name = \"LeftFlipper\"",
+        "Dim RightFlipper : Set RightFlipper = New Obj : RightFlipper.Name = \"RightFlipper\"",
+        m["extra_vbs"].split("' the flippers (PAD-1112)")[1].split("\n", 1)[1],
+        "PadLFlip True : PadLFlip False : PadRFlip 1 : PadRFlip 0",
+        "WScript.Echo calls"])
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        vbs = os.path.join(d, "flip.vbs")
+        open(vbs, "w", encoding="latin-1").write(harness)
+        r = subprocess.run(["cscript", "//nologo", vbs], capture_output=True, text=True, timeout=60)
+    assert r.stdout.strip() == (
+        "LF.Fire DOF 101=1 fx_flipperup LeftFlipper.RotateToStart DOF 101=0 fx_flipperdown "
+        "RF.Fire DOF 102=1 fx_flipperup RightFlipper.RotateToStart DOF 102=0 fx_flipperdown"), r.stdout + r.stderr
+
+
+def test_shadow_lamps_drive_the_tables_lights():
+    # with `lamps` the machine lights the table: a dictionary from the lamp
+    # number (1000 + node*100 + index, the FIRST LED of an RGB insert) to the
+    # table lights, filled from ChangedLamps every tick; the tribute's own
+    # light shows are quieted and its hit subs stay out of the way
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["lamps"] = {"_": "x",
+                  "L1": {"leds": [[9, 59]], "name": "(R)USH TARGET"},
+                  "L2": {"leds": [[8, 32], [8, 33], [8, 34]], "name": "SHOOT ME LEFT ORBIT"},
+                  "gi1": {"leds": [[8, 1]], "name": "BOTTOM GI"},
+                  "gi2": {"leds": [[8, 1]], "name": "BOTTOM GI"}}
+    m["quiet_subs"] = ["LightEffect", "NoSuchSub"]
+    m["orig_hits"] = False
+    m["orig_keep"] = ["LeftSlingShot"]
+    m["_lightseqs"] = ["LightSeqAttract"]
+    script = MINI_TRIBUTE + "Sub LightEffect(n)\n    LightSeqInserts.Play SeqRandom\nEnd Sub\n"
+    out, rep = vs.patch(script, m)
+    assert 'PadLamps.Add "1959", Array(L1)' in out
+    assert 'PadLamps.Add "1832", Array(L2)' in out                 # the first LED names the insert
+    assert 'PadLamps.Add "1801", Array(gi1, gi2)' in out           # several lights on one LED
+    assert "\tLightSeqAttract.StopPlay\n\tPadLampsInit\n\tSet LampCallback = GetRef(\"PadUpdateLamps\")" in out
+    assert "chg = Controller.ChangedLamps" in out and "PadLampSet o, chg(ii, 1)" in out
+    assert "Sub LightEffect_orig(n)" in out and "Sub LightEffect(n) : End Sub" in out
+    assert any("NoSuchSub" in r for r in rep)
+    assert "Sub sw001_Hit : vpmTimer.PulseSw 1053 : End Sub" in out               # no _orig: its rules are quiet
+    assert "Sub LeftSlingShot_Slingshot : vpmTimer.PulseSw 1069 : LeftSlingShot_Slingshot_orig : End Sub" in out
+    assert "Sub PadDumpLamps(path)" in out and 'If parts(0) = "lamps" Then PadDumpLamps parts(1)' in out
+    assert "PadLampState(k) = chg(ii, 1)" in out and "If PadTick Mod 5 = 0 Then PadReassertLamps" in out
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out))
+
+
+def test_board_run_takes_the_newest_run_of_a_title(tmp_path, monkeypatch):
+    # a library sweep had foo_fighters_le up on another slot while the
+    # table's own run came up: the title alone named the wrong rig
+    pc = pytest.importorskip("padcontroller")
+    monkeypatch.setattr(pc, "BOARD", str(tmp_path))
+    runs = [{"emu": "spike2", "slot": 2, "game": "foo_fighters_le", "started": 100},     # a sweep's: no hidden flag
+            {"emu": "spike2", "slot": 4, "game": "foo_fighters_le", "hidden": True, "started": 200},
+            {"emu": "spike2", "slot": 5, "game": "rush_le", "hidden": False, "started": 300}]
+    for r in runs:
+        (tmp_path / ("slot-%d.run" % r["slot"])).write_text(json.dumps(r), encoding="utf-8")
+    assert pc.Rig.board_run("foo_fighters_le")["slot"] == 4          # the newest, hidden or not
+    assert pc.Rig.board_run("rush_le")["slot"] == 5
+    assert pc.Rig.board_run("godzilla_le") is None                    # several runs, none of it
+
+
+def test_the_users_own_map_is_found_first(tmp_path, monkeypatch):
+    pc = pytest.importorskip("padcontroller")
+    monkeypatch.setattr(pc, "USER_MAPS", str(tmp_path))
+    assert pc.VpxMap("nosuchtitle").path is None
+    (tmp_path / "nosuchtitle.shadow.json").write_text(json.dumps(
+        {"solenoids": {"1": {"coil": [8, 1]}}, "cabinet": {"start": 1036}}), encoding="utf-8")
+    m = pc.VpxMap("nosuchtitle")
+    assert m.path and m.solenoids[1] == (8, 1) and m.cabinet["start"] == 1036
+    assert pc.VpxMap("rush_le").path.endswith("rush_le.shadow.json")       # the kit's own still answer
+
+
+def test_lcd_window_goes_where_the_kit_says():
+    # Visual Pinball comes up full screen: the game's LCD window is put on
+    # top, in the upper middle of the main screen by default, or on the
+    # monitor / at the rectangle the kit names
+    pc = pytest.importorskip("padcontroller")
+    mons = [(0, 0, 2560, 1440), (2560, 0, 4480, 1080)]
+    assert pc.lcd_rect(None, mons) == (768, 0, 1024, 576)              # 40% wide, 16:9, centred
+    assert pc.lcd_rect({"monitor": 2}, mons) == (2560, 0, 1920, 1080)
+    assert pc.lcd_rect({"monitor": 9}, mons) == (768, 0, 1024, 576)     # no such screen: the default
+    assert pc.lcd_rect({"x": 10, "y": 20, "w": 300, "h": 200, "topmost": False}, mons) == (10, 20, 300, 200)
+    assert pc.lcd_rect({}, []) == (576, 0, 768, 432)                     # no monitor answer: 1920x1080 assumed
+
+
+def test_board_slot_reads_one_record(tmp_path, monkeypatch):
+    pc = pytest.importorskip("padcontroller")
+    monkeypatch.setattr(pc, "BOARD", str(tmp_path))
+    assert pc.Rig.board_slot(3) is None                                  # watch.sh has not written it
+    (tmp_path / "slot-3.run").write_text('{"slot": 3, "game": "rush_le"}', encoding="utf-8")
+    assert pc.Rig.board_slot(3) is None                                  # no root yet: not a run
+    (tmp_path / "slot-3.run").write_text(
+        '{"slot": 3, "game": "rush_le", "root": "/home/pad/padslots/3/root", "distro": "PAD-Runtime"}',
+        encoding="utf-8")
+    rig = pc.Rig("rush_le", record=pc.Rig.board_slot(3))
+    assert rig.slot == 3 and rig.distro == "PAD-Runtime" and "padslots" in rig.dump
+
+
+# ------------------------------------------------- the launcher + kit -----
+
+def test_launcher_finds_the_card_env_then_kit_then_library(tmp_path, monkeypatch):
+    pl = pytest.importorskip("padlaunch")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.delenv("PAD_VPX_CARD", raising=False)
+    monkeypatch.delenv("PAD_VPX_LIBRARY", raising=False)
+    assert pl.card_for("rush_le") is None
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    for n in ("rush_le-1_18_0.Release.16G.sdcard.raw", "rush_le-1_19_0.Release.16G.sdcard.raw",
+              "rush_pro-1_19_0.Release.16G.sdcard.raw", "rush_le-1_9_0.Release.16G.sdcard.raw"):
+        (lib / n).write_bytes(b"x")
+    monkeypatch.setenv("PAD_VPX_LIBRARY", str(lib))
+    assert pl.card_for("rush_le").endswith("rush_le-1_19_0.Release.16G.sdcard.raw")   # newest, 1.19 > 1.9
+    assert pl.card_for("foo_fighters_le") is None
+    mine = tmp_path / "my_rush.raw"
+    mine.write_bytes(b"x")
+    pl.remember_card("rush_le", str(mine))                              # the kit beats the library
+    assert pl.card_for("rush_le") == str(mine)
+    assert pl.kit_load()["cards"]["rush_le"] == str(mine)
+    monkeypatch.setenv("PAD_VPX_CARD", str(lib / "rush_le-1_18_0.Release.16G.sdcard.raw"))
+    assert pl.card_for("rush_le").endswith("1_18_0.Release.16G.sdcard.raw")   # the env beats both
+    assert pl._version_key("x-1_19_0.raw") == (1, 19, 0) and pl._version_key("x.raw") == (0, 0, 0)
+
+
+def test_launcher_run_is_visible_audible_and_without_the_rigs_playfield(tmp_path, monkeypatch):
+    pl = pytest.importorskip("padlaunch")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(pl, "win_python", lambda: None)
+    la = pl.Launch("rush_le", "/mnt/d/cards/rush_le-1_19_0.raw", dist="PAD-Runtime")
+    la.slot = 4
+    env = la.env()
+    assert "PAD_SLOT=4" in env and "PAD_LABEL=PAD-VPX" in env
+    assert "PAD_HIDDEN=0" in env and "PAD_AUDIO=1" in env and "PAD_PLAYFIELD=0" in env
+    assert "PAD_CARD=/mnt/d/cards/rush_le-1_19_0.raw" in env
+    assert pl.wsl_head("PAD-Runtime", root=True) == ["wsl.exe", "-d", "PAD-Runtime", "-u", "root"]
+    monkeypatch.setattr(pl, "account", lambda d=None: ("pad", "/home/pad"))
+    head, root = la.head()
+    assert root and head[:7] == ["wsl.exe", "-d", "PAD-Runtime", "-u", "root", "-e", "env"]
+    assert "HOME=/home/pad" in head and "PAD_PIVOT=1" in head
+    monkeypatch.setattr(pl, "account", lambda d=None: ("root", ""))
+    head, root = la.head()
+    assert not root and "-u" not in head
+
+
+def test_launcher_takes_its_rig_as_root_on_the_apps_board(tmp_path, monkeypatch):
+    """PAD-803: the take ran as the plain user on the board riglock.sh guessed
+    from an installed rig (the Linux home's ~/.pad-rig, root's after the app's
+    runs), and refused with every slot free. It runs as root, like the run,
+    and every rig command names the board the app and the controller read."""
+    pl = pytest.importorskip("padlaunch")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(pl, "win_python", lambda: None)
+    monkeypatch.setattr(pl, "account", lambda d=None: ("pad", "/home/pad"))
+    monkeypatch.setattr(pl, "app_home", lambda d: "/mnt/wsl/paddata/spike2")
+    monkeypatch.setattr(pl.padpath, "to_wsl", lambda p, distro=None: "/mnt/c/Users/me/.pad-rig")
+    calls = []
+
+    class R:
+        returncode, stdout, stderr = 0, b"slot=3\n", b""
+
+    monkeypatch.setattr(pl, "_run", lambda cmd, timeout=60: calls.append(cmd) or R())
+    la = pl.Launch("foo_fighters__le", "/mnt/d/cards/ff.raw", dist="PAD-Runtime")
+    assert la.take_slot() == 3
+    cmd = calls[0]
+    assert cmd[:7] == ["wsl.exe", "-d", "PAD-Runtime", "-u", "root", "-e", "env"]
+    assert "HOME=/home/pad" in cmd and "PAD_HOME=/mnt/wsl/paddata/spike2" in cmd
+    if sys.platform == "win32":
+        assert "PAD_BOARD=/mnt/c/Users/me/.pad-rig" in cmd
+        assert "PAD_BOARD=/mnt/c/Users/me/.pad-rig" in la.env()
+    assert cmd[-4:] == ["take", "--any", "PAD-VPX", "foo_fighters__le for Visual Pinball"]
+    assert "PAD_HOME=/mnt/wsl/paddata/spike2" in la.env()
+    # riglock's own last words come back whole, not cut to the slot table
+    R.returncode, R.stdout = 1, b""
+    R.stderr = (b"x" * 400) + b"\nriglock: cannot write the board at /home/pad/.pad-rig"
+    la.slot = None
+    with pytest.raises(RuntimeError, match="cannot write the board"):
+        la.take_slot()
+
+
+def test_launcher_says_wsl_is_missing_not_no_rig_slot(tmp_path, monkeypatch):
+    """PAD-806: on a PC with no WSL, Play opened the table and the launcher
+    came back with "no rig slot free for foo_fighters_le", which reads like a
+    game already running. The registry says there is no Linux before any
+    wsl.exe is asked, and the launch and Play both say that instead."""
+    pl = pytest.importorskip("padlaunch")
+    vs = pytest.importorskip("vpxsetup")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    calls = []
+    monkeypatch.setattr(pl, "_run", lambda cmd, timeout=60: calls.append(cmd))
+    monkeypatch.setattr(pl, "registered", lambda: [])
+    assert pl.no_linux() == pl.no_linux("PAD-Runtime") == pl.NO_LINUX
+    assert "WSL is not installed" in pl.NO_LINUX and "slot" not in pl.NO_LINUX
+    la = pl.Launch("foo_fighters_le", "/mnt/d/cards/ff.raw", dist=None)
+    with pytest.raises(RuntimeError, match="WSL is not installed"):
+        la.start()
+    assert calls == [] and la.slot is None              # no wsl.exe, no slot taken
+    # Play refuses before Visual Pinball opens the table
+    vp = tmp_path / "vp"
+    (vp / "tables").mkdir(parents=True)
+    (vp / "tables" / "Foo (PAD).vpx").write_bytes(b"x")
+    monkeypatch.setattr(vs, "find_vpx", lambda: str(vp))
+    monkeypatch.setattr(pl, "distro", lambda: None)
+    monkeypatch.setattr(vs, "missing_directx", lambda vpx: "")   # PAD-882's own test
+    opened = []
+    monkeypatch.setattr(vs.subprocess, "Popen", lambda *a, **k: opened.append(a))
+    assert vs.open_table("Foo (PAD).vpx") == pl.NO_LINUX and opened == []
+    # a distro the kit names that is not there is named
+    monkeypatch.setattr(pl, "registered", lambda: ["Ubuntu"])
+    assert "(PAD-Runtime) is not installed" in pl.no_linux("PAD-Runtime")
+    assert pl.no_linux("ubuntu") == pl.no_linux(None) == ""
+    assert vs.open_table("Foo (PAD).vpx") == "ok" and len(opened) == 1
+    # the registry unreadable (or not Windows): nothing refused on a guess
+    monkeypatch.setattr(pl, "registered", lambda: None)
+    assert pl.no_linux("PAD-Runtime") == ""
+
+
+def test_launcher_reads_no_distros_from_a_failing_wsl_list(monkeypatch):
+    """With no WSL, `wsl -l -q` exits non-zero and prints its complaint;
+    those lines are not distro names."""
+    pl = pytest.importorskip("padlaunch")
+
+    class R:
+        returncode = -1
+        stdout = "Windows Subsystem for Linux has no installed distributions.\r\n".encode("utf-16-le")
+
+    monkeypatch.setattr(pl.subprocess, "run", lambda *a, **k: R())
+    assert pl.distros() == []
+    R.returncode, R.stdout = 0, "Ubuntu\r\nPAD-Runtime\r\n".encode("utf-16-le")
+    assert pl.distros() == ["Ubuntu", "PAD-Runtime"]
+    # and a refusal wsl.exe prints itself reads as words, not "W i n d o w s"
+    assert pl._text("There is no distribution.\r\n".encode("utf-16-le")).strip() == "There is no distribution."
+    assert pl._text("slot=3\n".encode()) == "slot=3\n" and pl._text(None) == ""
+
+
+def test_launcher_uses_the_rigs_own_home_off_the_runtime(monkeypatch):
+    pl = pytest.importorskip("padlaunch")
+    assert pl.app_home("Ubuntu") == ""
+
+
+def test_kit_recognises_each_supported_table(monkeypatch):
+    pv = pytest.importorskip("padvpx")
+    titles = pv.maps()
+    assert set(titles) >= {"rush_le", "foo_fighters_le", "foo_fighters_pro", "godzilla_le"}
+    assert all(t["detect"] for t in titles.values()), "every map names the words that identify its table"
+
+    class Fake:
+        def __init__(self, script):
+            self._s = script
+
+        def script(self):
+            return self._s
+
+    monkeypatch.setattr(pv.padlaunch, "card_for", lambda t, platform="spike2": None)
+    for title, words in (("rush_le", ["Rush LE ver 2.0.2 / PUP ver 2.0.0 - By DrHotWing"]),
+                         ("foo_fighters_pro", ["'  JP's Foo Fighters - a tribute", "script by jpsalas - 2025"]),
+                         ("godzilla_le", ["' Godzilla Limited Edition", 'ExecuteGlobal GetTextFile("SEGA.VBS")'])):
+        monkeypatch.setattr(pv.vpxfile, "VpxTable", lambda p, s="\n".join(words): Fake(s))
+        got, info = pv.recognise("x.vpx")
+        assert got == title, (title, got)
+    monkeypatch.setattr(pv.vpxfile, "VpxTable", lambda p: Fake("Option Explicit\n' some other table"))
+    assert pv.recognise("x.vpx") == (None, None)
+
+
+def test_jps_foo_fighters_plays_as_the_pro_unless_only_an_le_card_is_there(monkeypatch):
+    """PAD-808: JP's table has no upper playfield and no Overlord magnet or
+    hit coil - a Pro's playfield. Both maps fit the download; Patch takes the
+    one asked for, else the one the card given is for, else the first with a
+    card known, else the Pro."""
+    pv = pytest.importorskip("padvpx")
+
+    class Fake:
+        def script(self):
+            return "'  JP's Foo Fighters - a tribute\n' script by jpsalas - 2025"
+    monkeypatch.setattr(pv.vpxfile, "VpxTable", lambda p: Fake())
+    fits = [t for t, _ in pv.fitting("x.vpx")]
+    assert fits == ["foo_fighters_pro", "foo_fighters_le"], "the preferred map first"
+    cards = {}
+    monkeypatch.setattr(pv.padlaunch, "card_for", lambda t, platform="spike2": cards.get(t))
+    assert pv.recognise("x.vpx")[0] == "foo_fighters_pro"
+    cards["foo_fighters_le"] = "D:/c/foo_fighters_le-1_04_0.Release.16G.sdcard.raw"
+    assert pv.recognise("x.vpx")[0] == "foo_fighters_le", "only an LE card: the LE"
+    cards["foo_fighters_pro"] = "D:/c/foo_fighters_pro-1_04_0.Release.16G.sdcard.raw"
+    assert pv.recognise("x.vpx")[0] == "foo_fighters_pro", "both: the Pro"
+    assert pv.recognise("x.vpx", title="foo_fighters_le")[0] == "foo_fighters_le"
+    assert pv.recognise("x.vpx", card="E:/foo_fighters_le-1_04_0.Release.16G.sdcard.raw")[0] \
+        == "foo_fighters_le", "setup's card names the title"
+    assert pv.card_title("rush_le-1_19_0.Release.16G.sdcard.raw") == "rush_le"
+    assert pv.patch("x.vpx", title="rush_le") == 2, "a title whose map does not fit"
+
+
+def _ff_maps():
+    return [json.load(open(os.path.join(VPX, "foo_fighters_%s.shadow.json" % m), encoding="utf-8"))
+            for m in ("le", "pro")]
+
+
+def test_the_foo_fighters_pro_map_is_the_le_map_on_the_pros_numbers():
+    """PAD-808: the Pro map was made from the LE one through both programs'
+    own switch tables (swelf, 1.04.0): the same table objects on the same
+    switch names, the Pro's ids (lower past each of the LE's upper
+    playfield switches, which the Pro has none of), the LE-only coils gone,
+    the lights as they are."""
+    le, pro = _ff_maps()
+    assert pro["title"] == "foo_fighters_pro" and pro["model"] == "Pro" and pro["preferred"]
+    assert le["model"] == "LE" and not le.get("preferred")
+    for k in ("detect", "output", "table", "game_on", "keys_skip_orig", "neuter", "extra_vbs",
+              "quiet_subs", "orig_keep", "retrofit_timers",
+              "retrofit_triggers", "item_fields"):
+        assert pro[k] == le[k], k
+    assert {k: v["name"] for k, v in pro["switches"].items() if k != "_"} == \
+        {k: v["name"] for k, v in le["switches"].items() if k != "_"}
+    for k, v in pro["switches"].items():
+        if k != "_":
+            assert 0 <= le["switches"][k]["id"] - v["id"] <= 3, (k, v)
+    assert pro["switches"]["Target004"]["id"] == 48, "LOWER RIGHT TARGET: below every UP PF switch"
+    assert pro["switches"]["Trigger003"]["id"] == 54, "LEFT OUTLANE on the Pro"
+    assert pro["switches"]["LeftSlingShot"]["id"] == 65
+    assert pro["switches"]["PadOverlordOpto"]["id"] == 82, "OVERLORD OPTO on the Pro"
+    assert pro["trough"]["switches"] == [72, 71, 70, 69, 68, 67, 73]
+    assert pro["plunger"]["lane_switch"] == 63
+    assert pro["cabinet"]["left_flipper"] == 1061 and pro["cabinet"]["start"] == 1036
+    gone = {v["name"] for k, v in le["solenoids"].items() if k not in pro["solenoids"]}
+    assert gone == {"OUTLANE UP POST", "OVERLORD MAGNET", "OVERLORD HIT", "UP PF DIVERTER"}
+    assert all(pro["solenoids"][k] == v for k, v in le["solenoids"].items() if k in pro["solenoids"])
+    assert {k: v["leds"] for k, v in pro["lamps"].items() if k != "_"} ==         {k: v["leds"] for k, v in le["lamps"].items() if k != "_"}
+
+
+
+def _bond_maps():
+    return [json.load(open(os.path.join(VPX, "james_bond_%s.shadow.json" % m), encoding="utf-8"))
+            for m in ("le", "pro")]
+
+
+def test_the_bond_table_plays_as_the_pro(monkeypatch):
+    """PAD-900: marty & jpsalas's BOND has no rocket VUK or physical rocket
+    lock (the Pro's locks are virtual) and no jet pack magnet: both maps fit
+    it, the Pro first; the LE only when an LE card is the one there."""
+    pv = pytest.importorskip("padvpx")
+
+    class Fake:
+        def script(self):
+            return "' BOND for VISUAL PINBALL X 10.7\nDim bondjetpack"
+    monkeypatch.setattr(pv.vpxfile, "VpxTable", lambda p: Fake())
+    assert [t for t, _ in pv.fitting("x.vpx")] == ["james_bond_pro", "james_bond_le"]
+    cards = {}
+    monkeypatch.setattr(pv.padlaunch, "card_for", lambda t, platform="spike2": cards.get(t))
+    assert pv.recognise("x.vpx")[0] == "james_bond_pro"
+    cards["james_bond_le"] = "D:/c/james_bond_le-1_06_0.Release.16G.sdcard.raw"
+    assert pv.recognise("x.vpx")[0] == "james_bond_le", "only an LE card: the LE"
+    cards["james_bond_pro"] = "D:/c/james_bond_pro-1_06_0.Release.16G.sdcard.raw"
+    assert pv.recognise("x.vpx")[0] == "james_bond_pro", "both: the Pro"
+
+
+def _john_wick_maps():
+    return [json.load(open(os.path.join(VPX, "john_wick_%s.shadow.json" % m), encoding="utf-8"))
+            for m in ("le", "pro")]
+
+
+def test_the_john_wick_table_plays_as_the_pro(monkeypatch):
+    """PAD-905: JPSalas & marty's John Wick 3.0 has neither the LE's moving car
+    nor a physical lock, so both maps fit it, the Pro first; the LE only when
+    an LE card is the one there. One row in the Visual Pinball tab."""
+    pv = pytest.importorskip("padvpx")
+    vs = pytest.importorskip("vpxsetup")
+
+    class Fake:
+        def script(self):
+            return "'                 JOHN WICK Script JPSalas & marty\n"
+    monkeypatch.setattr(pv.vpxfile, "VpxTable", lambda p: Fake())
+    assert [t for t, _ in pv.fitting("x.vpx")] == ["john_wick_pro", "john_wick_le"]
+    cards = {}
+    monkeypatch.setattr(pv.padlaunch, "card_for", lambda t, platform="spike2": cards.get(t))
+    assert pv.recognise("x.vpx")[0] == "john_wick_pro"
+    cards["john_wick_le"] = "D:/c/john_wick_le-1_02_0.Release.16G.sdcard.raw"
+    assert pv.recognise("x.vpx")[0] == "john_wick_le", "only an LE card: the LE"
+    cards["john_wick_pro"] = "D:/c/john_wick_pro-1_02_0.Release.16G.sdcard.raw"
+    assert pv.recognise("x.vpx")[0] == "john_wick_pro", "both: the Pro"
+    rows = [r for r in vs.known_tables("") if "john_wick_pro" in r["titles"]]
+    assert [(r["output"], sorted(r["titles"])) for r in rows] == \
+        [("John_Wick_Legend (PAD).vpx", ["john_wick_le", "john_wick_pro"])]
+    # PAD-943: each row names its platform (the tab shows its manufacturer's own)
+    assert rows[0]["platform"] == "spike2"
+    assert [r for r in vs.known_tables("") if "got_le" in r["titles"]][0]["platform"] == "spike1"
+
+
+def test_the_john_wick_maps_split_at_the_les_mechs():
+    """PAD-905: both maps on the same table objects, numbered by each program's
+    own switch table (1.02.0, read on the emulator, where the Pro started a
+    game through PAD.Controller on these numbers and its LEFT EJECT and
+    RIGHT VUK kicked). The LE adds the arch's lock (LOCK 1-3 behind the
+    post, the center ramp's diverter), the pops' drop target and the car's
+    optos. PAD-922: the self-kicking hole at the Continental's mouth is the
+    CAPTIVE BALL TGT on both, and the car a trigger added on its nose."""
+    le, pro = _john_wick_maps()
+    assert pro["preferred"] and not le["preferred"] and pro["model"] == "Pro"
+    assert pro["output"] == le["output"] and pro["detect"] == le["detect"]
+    # the LE numbers its switches higher past the car's five and the drop target
+    shared = set(pro["switches"]) & set(le["switches"]) - {"_", "PadCarHit"}
+    for obj in shared:
+        p, e = pro["switches"][obj], le["switches"][obj]
+        assert p["name"] == e["name"] and p["event"] == e["event"], obj
+        assert e["id"] - p["id"] in (0, 2, 3, 5), obj
+    assert pro["switches"]["lock"]["id"] == 79 and le["switches"]["lock"]["id"] == 82
+    assert pro["switches"]["lock"]["name"].startswith("CAPTIVE BALL TGT (the Continental")
+    assert pro["switches"]["PadCarHit"]["name"].startswith("CAR HIT OPTO")
+    assert le["switches"]["PadCarHit"]["name"].startswith("CAR FRONT OPTO")
+    assert pro["switches"]["PadCarHit"]["id"] == le["switches"]["PadCarHit"]["id"] == 77
+    assert "CapTrigger1" not in pro["switches"] and "CapTrigger1" not in le["switches"],         "the captive ball top right is the table's own, not the Continental"
+    assert pro["retrofit_triggers"] == le["retrofit_triggers"]
+    assert set(le["switches"]) - set(pro["switches"]) == {"Target11"}
+    # the same three kickers on the machine's coils; the lock is the LE's
+    assert sorted(k for k in pro["saucers"] if k != "_") == ["Krampcoude", "PyramidKicker"]
+    lock = le["saucers"]["Karche"]
+    assert lock["kick_from"] == "KArche3" and len(lock["stack"]) == 2 and lock["held_ms"]
+    assert pro["saucers"]["Krampcoude"]["kick_from"] == "Krampcoude1"
+    names = {s["name"] for s in le["solenoids"].values()} - {s["name"] for s in pro["solenoids"].values()}
+    assert names == {"DIVERTER", "LOCK POST", "DROP TRIP", "DROP RESET", "CRATE", "MARKER"}
+    for k, v in pro["solenoids"].items():
+        assert v["name"] == "CAR" or le["solenoids"][k] == v, k
+    assert "PadHeldKarche_Sol e" in le["extra_vbs"] and "Targetclub.IsDropped = 1" in pro["extra_vbs"]
+    assert "Tenemy7.Enabled = 1 : Tkatia.Enabled = 1" in pro["extra_vbs"], "the skill shot's triggers are live"
+    assert {k: v["leds"] for k, v in pro["lamps"].items() if k != "_"}.keys() == \
+        {k: v["leds"] for k, v in le["lamps"].items() if k != "_"}.keys()
+
+
+#: John Wick 3.0's own arch lock, as its script has it (cut down): the gun
+#: target, the Takira and Tcharon triggers, checkarche (the diverter, opened
+#: when the three ramp diamonds are lit) and Karche, which swallows the ball
+#: and makes one behind the arch's post.
+JW_ARCH = MINI_TRIBUTE + """Sub Targetgun_hit()
+    Targetgun.IsDropped = 1
+    Takira.Enabled = 1
+End Sub
+Sub Takira_hit()
+    Lakira.State = 1
+    CheckArche
+End Sub
+Sub checkarche()
+    If Lakira.state + Lcharon.state + Lkatia.state = 3 Then
+       guideramp.RotZ = -50
+       guideramp.collidable = 0
+       guideramp1.collidable = 1
+    End If
+End Sub
+Sub Karche_hit()
+    Karche.DestroyBall
+    ArcheDelayTimer_Timer
+End Sub
+Sub ArcheDelayTimer_Timer()
+    ArcheLocked = ArcheLocked + 1
+    Select Case ArcheLocked
+        Case 1
+
+            KArche1.CreateBall
+        Case 2
+            KArche2.CreateBall
+        Case 3
+            KArche3.CreateBall
+    End Select
+End Sub
+"""
+
+
+def test_the_john_wick_tables_own_arch_lock_stays_shut(tmp_path):
+    """PAD-1098: the John Wick tribute's own lock at the arch (top of the
+    center ramp) swung its diverter open whenever the three ramp diamonds
+    were lit, and those are the machine's lights now: the ball went to
+    Karche, which destroyed it and made one behind the arch's post, where it
+    sat for good. Both maps quiet checkarche (the LE's diverter is the
+    machine's coil, the Pro has none) and neuter the lock's CreateBalls; a
+    copy patched before is told to patch again."""
+    vs = pytest.importorskip("vpxshadow")
+    vset = pytest.importorskip("vpxsetup")
+    for m in _john_wick_maps():
+        assert "checkarche" in m["quiet_subs"], m["title"]
+        out, rep = vs.patch(JW_ARCH, m)
+        assert "quieted Sub checkarche (the machine runs that now)" in rep
+        assert "Sub checkarche() : End Sub" in out
+        assert re.search(r"Sub checkarche_orig\(\)", out)
+        for k in ("KArche1", "KArche2", "KArche3"):
+            assert "'PAD neutered: %s.CreateBall" % k in out, (m["title"], k)
+        script = tmp_path / "John_Wick_Legend (PAD).script.vbs"
+        old, _ = vs.patch(JW_ARCH, dict(m, quiet_subs=[s for s in m["quiet_subs"] if s != "checkarche"],
+                                        neuter=[n for n in m["neuter"] if "KArche" not in n]))
+        script.write_text(old, encoding="utf-8")
+        assert vset.missed_fixes(str(tmp_path), m["output"], m["repatch"]) == [
+            "a ball can get stuck behind the post at the top of the center ramp"], m["title"]
+        script.write_text(out, encoding="utf-8")
+        assert vset.missed_fixes(str(tmp_path), m["output"], m["repatch"]) == [], m["title"]
+
+
+def _last_sub(text, name):
+    """The last `Sub <name>` in a script, whole (a bridge's stub follows the
+    table's own, renamed, so the last one is what runs)."""
+    found, lines = None, text.split("\n")
+    for i, ln in enumerate(lines):
+        if re.match(r"\s*Sub\s+%s\b(?!_)" % re.escape(name), ln, re.I):
+            j = i
+            while not re.search(r"\bEnd\s+Sub\b", lines[j], re.I):
+                j += 1
+            found = "\n".join(lines[i:j + 1])
+    assert found, name
+    return found
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the patched VBScript under cscript")
+def test_the_john_wick_arch_lock_run_under_cscript(tmp_path):
+    """PAD-1098: the patched arch subs themselves, with the machine's three
+    diamonds lit: the ball over Takira no longer swings the diverter open."""
+    vs = pytest.importorskip("vpxshadow")
+    for m in _john_wick_maps():
+        out, _ = vs.patch(JW_ARCH, m)
+        body = [_last_sub(out, name) for name in ("Targetgun_hit", "Takira_hit", "checkarche")]
+        vbs = tmp_path / ("arch_%s.vbs" % m["title"])
+        vbs.write_text("""Class Obj
+  Public RotZ, Collidable, State, Enabled, IsDropped, Created, Destroyed
+  Private Sub Class_Initialize : RotZ = 0 : Collidable = 1 : State = 0 : Created = 0 : Destroyed = 0 : End Sub
+  Public Sub CreateBall : Created = Created + 1 : End Sub
+  Public Sub DestroyBall : Destroyed = Destroyed + 1 : End Sub
+End Class
+Dim ArcheLocked, n
+For Each n In Array("Targetgun","Takira","Lakira","Lcharon","Lkatia","guideramp","guideramp1","Karche","KArche1","KArche2","KArche3")
+  ExecuteGlobal "Dim " & n & " : Set " & n & " = New Obj"
+Next
+""" + "\n".join(body) + """
+Lcharon.State = 1 : Lkatia.State = 1     ' the machine's diamonds
+Targetgun_hit
+Takira_hit
+WScript.Echo guideramp.RotZ & " " & guideramp.Collidable
+""", encoding="ascii")
+        r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+        assert r.stdout.split() == ["0", "1"], (m["title"], r.stdout, r.stderr)
+
+
+def test_the_bond_pro_map_is_the_le_map_on_the_pros_numbers():
+    """PAD-900: the Pro map was made from the LE one through both programs'
+    own switch tables (1.06.0): the same table objects on the same switch
+    names, the Pro's ids (lower past the LE's tank hood, jetpack and rocket
+    lock switches, which the Pro has none of), the LE-only coils gone, the
+    lights as they are but the TANK HOOD insert. Every id was in the Pro
+    game's own switch table on the emulator, and its Start, left flipper,
+    trough and right VUK answered on these numbers."""
+    le, pro = _bond_maps()
+    assert pro["title"] == "james_bond_pro" and pro["model"] == "Pro" and pro["preferred"]
+    assert le["model"] == "LE" and not le.get("preferred")
+    for k in ("detect", "output", "table", "game_on", "keys_skip_orig", "neuter", "flippers",
+              "quiet_subs", "orig_keep", "retrofit_timers", "retrofit_lights", "solenoid_max"):
+        assert pro[k] == le[k], k
+    assert {k: v["name"] for k, v in pro["switches"].items() if k != "_"} == \
+        {k: v["name"] for k, v in le["switches"].items() if k != "_"}
+    for k, v in pro["switches"].items():
+        if k != "_":
+            assert 0 <= le["switches"][k]["id"] - v["id"] <= 8, (k, v)
+    assert pro["switches"]["Trigger001"]["id"] == 58, "LEFT OUTLANE on the Pro"
+    assert pro["switches"]["Trigger011"]["id"] == 82, "ROCKET OPTO 2 on the Pro"
+    assert pro["switches"]["Bumper2"]["id"] == 97, "LEFT POP BUMPER on the Pro"
+    assert pro["switches"]["scoop"]["id"] == 93, "RIGHT VUK OPTO on the Pro"
+    assert pro["switches"]["Trigger013"]["id"] == 47, "below the LE's TANK HOOD TARGET: the same"
+    assert pro["trough"]["switches"] == [74, 73, 72, 71, 70, 69, 75]
+    assert pro["plunger"]["lane_switch"] == 65
+    assert pro["cabinet"]["left_flipper"] == 1063 and pro["cabinet"]["right_flipper"] == 1062
+    assert pro["cabinet"]["up_left_flipper"] == 1064 and pro["cabinet"]["start"] == 1036
+    # the scoop's sub clears the RIGHT VUK opto on the Pro's number, and the
+    # magnet sub is gone with the coil that called it
+    assert "Controller.Switch(1093) = False" in pro["extra_vbs"] and "1101" not in pro["extra_vbs"]
+    assert "PadMagnet" not in pro["extra_vbs"] and "PadMagnet" in le["extra_vbs"]
+    gone = {v["name"] for k, v in le["solenoids"].items() if k not in pro["solenoids"]}
+    assert gone == {"JET PACK MAGNET", "ROCKET LOCK", "CENTER LANE DIVERTER", "BACK RAMP UP POST",
+                    "ROCKET VUK"}
+    assert all(pro["solenoids"][k] == v for k, v in le["solenoids"].items() if k in pro["solenoids"])
+    assert "li065" not in pro["lamps"] and "li065" in pro["dark"]
+    assert {k: v["leds"] for k, v in pro["lamps"].items() if k != "_"} == \
+        {k: v["leds"] for k, v in le["lamps"].items() if k not in ("_", "li065")}
+
+
+def test_setup_says_when_a_patched_table_is_for_another_model(tmp_path, monkeypatch):
+    """PAD-900: a Bond table patched for the LE before the Pro map keeps
+    playing as the LE; the tab reads which title its patch named, from the
+    script written beside it, so it can say to patch it again."""
+    vs = pytest.importorskip("vpxsetup")
+    pl = pytest.importorskip("padlaunch")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.delenv("PAD_VPX_CARD", raising=False)
+    monkeypatch.delenv("PAD_VPX_LIBRARY", raising=False)
+    tables = tmp_path / "tables"
+    tables.mkdir()
+    (tables / "bond (PAD).vpx").write_bytes(b"x")
+    (tables / "bond (PAD).script.vbs").write_text(
+        'Const cGameName = "bond"\nSub Table1_Init\n\tController.GameName = "james_bond_le"\nEnd Sub\n',
+        encoding="utf-8")
+    (tables / "Rush LE 2.0.2 (PAD).vpx").write_bytes(b"x")
+    got = {t["output"]: t for t in vs.known_tables(str(tables))}
+    bond = got["bond (PAD).vpx"]
+    assert bond["title"] == "james_bond_pro" and bond["titles"] == ["james_bond_pro", "james_bond_le"]
+    assert bond["patched"] and bond["patched_title"] == "james_bond_le"
+    assert got["Rush LE 2.0.2 (PAD).vpx"]["patched_title"] == "", "no script beside it"
+    assert got["JP's Foo Fighters (PAD).vpx"]["patched_title"] == "", "not patched"
+    # a ROM table's patcher names it on cGameName
+    (tables / "x (PAD).script.vbs").write_text('Const cGameName = "turtles_le"\n', encoding="utf-8")
+    assert vs.patched_title(str(tables), "x (PAD).vpx") == "turtles_le"
+
+
+def test_a_table_patched_before_a_fix_says_so_and_where_it_came_from(tmp_path, monkeypatch):
+    """PAD-939: a Beatles copy patched before PAD-933 still served two balls
+    and the tab offered only Play. The map's `repatch` names the line only an
+    earlier patch wrote; the copy that has it is flagged, a fresh one is not,
+    and padvpx records the download a patch ran on for Patch again."""
+    vs = pytest.importorskip("vpxsetup")
+    pv = pytest.importorskip("padvpx")
+    pl = pytest.importorskip("padlaunch")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.delenv("PAD_VPX_CARD", raising=False)
+    monkeypatch.delenv("PAD_VPX_LIBRARY", raising=False)
+    tables = tmp_path / "tables"
+    tables.mkdir()
+    out = tables / "The Beatles_007 (PAD).vpx"
+    out.write_bytes(b"x")
+    script = tables / "The Beatles_007 (PAD).script.vbs"
+    script.write_text("Sub Table1_Init\n     \t\t  bsTrough.Balls = 6\nEnd Sub\n", encoding="utf-8")
+    (tables / "Rush LE 2.0.2 (PAD).vpx").write_bytes(b"x")
+    got = {t["output"]: t for t in vs.known_tables(str(tables))}
+    assert got[out.name]["repatch"] == ["it serves two balls at Start"]
+    assert got[out.name]["source"] == ""                 # patched before the record
+    assert got["Rush LE 2.0.2 (PAD).vpx"]["repatch"] == []
+    assert got["JP's Foo Fighters (PAD).vpx"]["repatch"] == [], "not patched"
+    # patched again: four balls, and the download recorded
+    script.write_text("Sub Table1_Init\n\tbsTrough.Balls = 4\nEnd Sub\n", encoding="utf-8")
+    src = tmp_path / "The Beatles_007.vpx"
+    src.write_bytes(b"x")
+    pv.remember_patch(str(out), str(src), "beatles")
+    got = {t["output"]: t for t in vs.known_tables(str(tables))}
+    assert got[out.name]["repatch"] == [] and got[out.name]["source"] == str(src)
+    src.unlink()                                         # the download moved: the dialog asks again
+    assert {t["output"]: t for t in vs.known_tables(str(tables))}[out.name]["source"] == ""
+
+
+def test_the_beatles_patcher_no_longer_writes_the_line_its_repatch_names():
+    """PAD-939: a `repatch` mark must be a line the current patcher never
+    writes, or every fresh copy would be told to patch again."""
+    m = json.load(open(os.path.join(VPX, "beatles.vpxmap.json"), encoding="utf-8"))
+    src = open(os.path.join(VPX, "patch_beatles.py"), encoding="utf-8").read()
+    for mark in m["repatch"]:
+        assert mark["old"] not in src and mark["why"]
+    assert m["switch_holds"]["balls"] != 6
+
+
+def test_the_beatles_record_magnet_pulls_without_grabbing(tmp_path):
+    """PAD-950: the game only pulses MAGNET-RECORD (bursts of ~0.4 + 0.15 +
+    0.08 s), and a GrabCenter magnet pinned a ball on the record dead centre
+    and dropped it down the middle. The record's magnet pulls; the top one
+    still grabs (it holds the ball for seconds); a copy patched with the
+    grab is told to patch again."""
+    pb = pytest.importorskip("patch_beatles")
+    vs = pytest.importorskip("vpxsetup")
+    m = json.load(open(os.path.join(VPX, "beatles.vpxmap.json"), encoding="utf-8"))
+    out, _ = pb.patch_script("Option Explicit\nSub UpdateLamps\nEnd Sub\nDim PuPlayer\n", m)
+    rec = out.split("With mRecordMagnet")[1].split("End With")[0]
+    assert ".GrabCenter = False" in rec and ".InitMagnet PadRecordMagnet, 10" in rec
+    assert ".Solenoid = 3" in rec and "MagnetW2.Solenoid = 2" in out
+    old = tmp_path / "The Beatles_007 (PAD).script.vbs"
+    old.write_text("With mRecordMagnet\n\t.InitMagnet PadRecordMagnet, 30\n\t.GrabCenter = True\nEnd With\n",
+                   encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), "The Beatles_007 (PAD).vpx", m["repatch"]) == [
+        "the record's magnet catches the ball and drops it down the middle"]
+    old.write_text(out, encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), "The Beatles_007 (PAD).vpx", m["repatch"]) == []
+
+
+def test_the_beatles_record_spins_up_while_its_magnet_holds_the_ball(tmp_path):
+    """PAD-965: the game runs the record (node cmd 50, which the shim now puts
+    on MOTOR A0 DRIVER) 15 ms before each MAGNET-RECORD burst, for 5.2 s.
+    core.vbs's default SpinUp of 10 is 6 s to full speed, so the record had
+    hardly turned when the magnet let the ball go; the patched table spins it
+    up in 0.6 s, and a copy patched before is told to patch again."""
+    pb = pytest.importorskip("patch_beatles")
+    vs = pytest.importorskip("vpxsetup")
+    m = json.load(open(os.path.join(VPX, "beatles.vpxmap.json"), encoding="utf-8"))
+    out, _ = pb.patch_script("Option Explicit\nSub UpdateLamps\nEnd Sub\nDim PuPlayer\n", m)
+    assert "spinner.SpinUp = 100" in out
+    assert out.index("spinner.SpinUp = 100") > out.index("Set mRecordMagnet = New cvpmMagnet")
+    old = tmp_path / "The Beatles_007 (PAD).script.vbs"
+    old.write_text("' the record turns on its motor's two LED channels (MOTOR A0 / A1 DRIVER)\n"
+                   "Sub PadRecordMotor(n, v)\n", encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), "The Beatles_007 (PAD).vpx", m["repatch"]) == [
+        "the record spins up too slowly to throw the ball its magnet caught"]
+    old.write_text(out, encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), "The Beatles_007 (PAD).vpx", m["repatch"]) == []
+
+
+# ------------------------------------------------ the table generator -----
+
+MINI_TABLES = {
+    "switch_list.txt": "\n".join([
+        "# id   num   node  bit  name",
+        "34     100   1     2    Action Button", "36     103   1     11   Start Button",
+        "39     106   1     16   LEFT COIN", "38     111   1     14   TILT PENDULUM",
+        "63     10    8     24   RIGHT FLIPPER BUTTON", "64     9     8     25   LEFT FLIPPER BUTTON",
+        "66     22    8     28   SHOOTER LANE", "67     8     8     29   RIGHT SLINGSHOT",
+        "68     7     8     30   LEFT SLINGSHOT", "70     15    8     32   TROUGH 2", "71     16    8     33   TROUGH 1",
+        "72     21    8     38   TROUGH JAM", "80     40    9     8    LEFT ORBIT", "81     41    9     9    TANK TARGET",
+        "82     42    9     10   LEFT POP BUMPER", "83     43    9     11   LEFT SPINNER OPTO",
+        "84     44    9     12   RIGHT VUK OPTO", "85     45    9     13   CENTER 3 BANK DROP LEFT OPTO",
+        "86     46    9     14   JETPACK HOME OPTO", ""]),
+    "switch_xy.txt": "\n".join([
+        "# id   node bit  name                                 x     y",
+        "66     8     28    SHOOTER LANE                       416   859", "67     8     29    RIGHT SLINGSHOT   310   710",
+        "68     8     30    LEFT SLINGSHOT                     114   710", "70     8     32    TROUGH 2   364   859",
+        "71     8     33    TROUGH 1                           377   854", "72     8     38    TROUGH JAM   377   840",
+        "80     9     8     LEFT ORBIT                          43   169", "81     9     9     TANK TARGET   235   271",
+        "82     9     10    LEFT POP BUMPER                    305   263", "83     9     11    LEFT SPINNER OPTO   77   383",
+        "84     9     12    RIGHT VUK OPTO                     388   549", "85     9     13    CENTER 3 BANK DROP LEFT OPTO 124 273",
+        "86     9     14    JETPACK HOME OPTO                  234    17", ""]),
+    "device_xy.txt": "\n".join([
+        "# class   name                                   x     y    w    h  grp index  conn   image",
+        "coil      RIGHT FLIPPER                        281   813   20   20    7     0  -      playfield",
+        "coil      TROUGH                               370   858   20   20    7     1  -      playfield",
+        "coil      AUTO PLUNGER                         415   872   20   20    7     4  -      playfield",
+        "coil      LEFT FLIPPER                         141   813   20   20    7     5  -      playfield",
+        "coil      UPPER LEFT FLIPPER                    60   432   20   20    7     6  -      playfield",
+        "coil      RIGHT VUK                            389   550   20   20    8     1  -      playfield",
+        "coil      CENTER 3 BANK DROP TARGET            147   258   20   20    8     4  -      playfield",
+        "led       SHOOT AGAIN                          210   863   20   20    8     8  -      playfield", ""]),
+    "group_node.txt": "\n".join([
+        "# group node devices", "4     0    led=1 switch=12", "5     1    led=9 switch=6",
+        "7     8    coil=9 led=60 switch=30", "8     9    coil=8 led=55 switch=32", ""]),
+    "led_io.txt": "\n".join([
+        "# node index name                                   x     y  conn  image",
+        "0      0     BACKBOX GI                             0     0  -     ",
+        "8      3     LEFT LANE ARROW-R                    117   356  -     playfield",
+        "8      4     LEFT LANE ARROW-G                    117   356  -     playfield",
+        "8      5     LEFT LANE ARROW-B                    117   356  -     playfield",
+        "8      8     SHOOT AGAIN                          210   863  -     playfield",
+        "8      37    BATH-O-SUB                           207   465  -     playfield",
+        "9      45    BACKPANEL FLASH                      620   116  -     playfield",
+        "12     0     TOPPER 1-G                            69    77  -     topper", ""]),
+}
+
+
+@pytest.fixture(scope="module")
+def mini_tables(tmp_path_factory):
+    PIL = pytest.importorskip("PIL.Image")
+    d = tmp_path_factory.mktemp("tables")
+    for name, text in MINI_TABLES.items():
+        (d / name).write_text(text, encoding="utf-8")
+    PIL.new("L", (459, 998), 40).save(str(d / "playfield.png"))
+    return str(d)
+
+
+def test_generator_puts_the_titles_devices_on_a_table(mini_tables):
+    vg = pytest.importorskip("vpxgen")
+    g = vg.Gen("james_bond_le", mini_tables)
+    g.build()
+    kinds = {}
+    names = {}
+    for d in g.items:
+        kind, name, pos = vg.vpxfile.VpxTable.item_info(d)
+        kinds[kind] = kinds.get(kind, 0) + 1
+        names[name] = (kind, pos)
+    assert kinds["Flipper"] == 3 and kinds["Plunger"] == 1
+    assert kinds["Timer"] == 3 and "PulseTimer" in names, "vpmTimer runs on PulseTimer: no PulseSw without it"
+    assert kinds["Bumper"] == 1 and kinds["Spinner"] == 1 and kinds["HitTarget"] == 2
+    assert kinds["Light"] == 3, "an RGB triple is one light, the backpanel and topper none"
+    assert "LBathOSub" in names, "a name ending in B is not a blue channel"
+    assert kinds["Kicker"] == 4                                   # drain, ball release, the VUK, the test shooter
+    # james_bond_le's traced geometry rides along: outline, guides, slings, ramps
+    assert kinds["Ramp"] == 3 and "RightRamp" in names and "Outline" in names
+    assert "LeftSling" in names and "LeftSlingshot" not in names, "the traced sling is the switch's"
+    assert "JetpackHomeOpto" not in names, "a mechanism's sensor is no object"
+    sx = vg.TABLE_W / 459.0
+    assert abs(names["LeftFlipper"][1][0] - 141 * sx) < 0.01 and abs(names["LeftFlipper"][1][1] - 813 * sx) < 0.01
+    assert abs(names["LeftPopBumper"][1][0] - 305 * sx) < 0.01
+    m = g.map
+    assert m["cabinet"]["start"] == 1036 and m["cabinet"]["launch"] == 1034 and m["cabinet"]["launch_key"] == "LockBarKey"
+    assert m["trough"]["switches"] == [71, 70, 72], "TROUGH 1 first, the jam last"
+    assert m["plunger"]["lane_switch"] == 66
+    assert m["switches"]["LeftOrbit"] == {"id": 80, "event": "hit", "name": "LEFT ORBIT"}
+    assert m["switches"]["LeftSpinnerOpto"]["event"] == "spin"
+    assert m["switches"]["LeftSling"]["event"] == "slingshot"      # the traced sling wall
+    assert m["saucers"]["RightVukOpto"]["switch"] == 84
+    sols = {v["callback"]: v["coil"] for v in m["solenoids"].values() if v["callback"]}
+    # the coil table's group is a place in the node directory: 7 -> node 8, 8 -> node 9
+    assert sols["bsTrough.SolOut"] == [8, 1] and sols["PadAutoPlunge"] == [8, 4]
+    assert sols["bsRightVukOpto.SolOut"] == [9, 1] and sols["PadResetDrops"] == [9, 4]
+    assert m["game_on"]["coils"] == [[8, 5], [8, 0]]
+    assert m["lamps"]["LLeftLaneArrow"]["leds"] == [[8, 3], [8, 4], [8, 5]]
+    assert "Center3BankDropLeftOpto.IsDropped = 0" in m["extra_vbs"]
+    script = g.script()
+    assert 'Controller.GameName = "james_bond_le"' in script
+    assert "Sub LeftOrbit_Hit : vpmTimer.PulseSw 1080 : End Sub" in script
+    assert 'SolCallback(sLLFlipper) = "SolLFlipper"' in script and "Sub SolLFlipper(e)" in script
+    assert 'PadLamps.Add "1803", Array(LLeftLaneArrow)' in script
+    assert "bsTrough.InitSw 0,1071,1070,1072" in script
+    assert script.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", script))
+
+
+def test_generator_ramps_slings_and_guides(mini_tables):
+    vg = pytest.importorskip("vpxgen")
+    g = vg.Gen("james_bond_le", mini_tables)
+    g.build()
+    by = {vg.vpxfile.VpxTable.item_info(d)[1]: d for d in g.items}
+
+    def fields(d):
+        out = {}
+        for t, p, _ in vg.vpxfile.item_records(d, 4):
+            out.setdefault(t, p)
+        return out
+
+    ramp = fields(by["RightRamp"])
+    # collidable (the example table's ramp is not), flat, climbing 0 -> 90
+    assert struct.unpack("<i", ramp["CLDR"])[0] == 1 and struct.unpack("<i", ramp["TYPE"])[0] == 0
+    assert struct.unpack("<f", ramp["HTBT"])[0] == 0 and struct.unpack("<f", ramp["HTTP"])[0] == 90
+    drop = fields(by["RightRampDrop"])
+    assert struct.unpack("<f", drop["HTBT"])[0] == 75 and struct.unpack("<f", drop["HTTP"])[0] == 0
+    # a switch on the ramp rides it
+    assert fields(by["RightRampExitOpto"])["SURF"][4:] == b"RightRamp" if "RightRampExitOpto" in by else True
+    # the sling kicks OUT: its corners wound the way Visual Pinball pushes outwards
+    pts = [struct.unpack_from("<ff", p, 0) for t, p, _ in vg.vpxfile.item_records(by["LeftSling"], 4) if t == "VCEN"]
+    n = len(pts)
+    assert sum(pts[i][0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * pts[i][1] for i in range(n)) <= 0
+    flags = [struct.unpack("<i", p)[0] for t, p, _ in vg.vpxfile.item_records(by["LeftSling"], 4) if t == "SLNG"]
+    k = flags.index(1)
+    a, b = pts[k], pts[(k + 1) % n]
+    s = vg.TABLE_W / 459.0
+    assert {(round(a[0] / s), round(a[1] / s)), (round(b[0] / s), round(b[1] / s))} == {(90, 672), (128, 748)}
+    # the upper flipper points down from where the geometry puts it
+    fl = fields(by["UpperLeftFlipper"])
+    assert struct.unpack("<f", fl["ANGS"])[0] == 172 and abs(struct.unpack_from("<f", fl["VCEN"], 0)[0] - 66 * s) < 0.01
+    m = g.map
+    assert m["saucers"]["RightVukOpto"]["dir"] in (0.0, 180.0)
+    script = g.script()
+    assert "Sub PlaySoundAt(sound, obj)" in script, "the bridge's saucer and drain subs call it"
+    assert 'If parts(0) = "shoot" Then' in script and "Sub PadShoot(x, y, a, s)" in script
+
+
+def test_winding_and_thick_walls():
+    vg = pytest.importorskip("vpxgen")
+    cw = [(90, 672), (128, 748), (112, 760), (88, 738)]           # clockwise on screen
+    q, s = vg.sling_winding(cw, 0)
+    assert q == list(reversed(cw)) and (q[s], q[(s + 1) % 4]) == ((128, 748), (90, 672))
+    q2, s2 = vg.sling_winding(q, s)
+    assert q2 == q and s2 == s, "a polygon already wound the right way is kept"
+    poly = vg.thick([(0, 0), (0, 100)], 10)
+    assert len(poly) == 4 and {round(x) for x, _ in poly} == {-5, 5}
+    bend = vg.thick([(0, 0), (0, 100), (100, 100)], 10)
+    assert len(bend) == 6
+    assert vg.load_geo("nosuchtitle") is None and vg.load_geo("james_bond_le")["ramps"]
+
+
+def test_generator_shapes_carry_their_points():
+    vg = pytest.importorskip("vpxgen")
+    data = vg.set_points(vg.proto("trigger"), vg.circle(100, 200, 10, n=6))
+    recs = list(vg.vpxfile.item_records(data, 4))
+    pts = [struct.unpack_from("<ff", p, 0) for t, p, _ in recs if t == "VCEN"][1:]
+    assert len(pts) == 6 and abs(pts[0][0] - 110) < 0.01 and abs(pts[0][1] - 200) < 0.01
+    assert [t for t, _, _ in recs].count("DPNT") == 6 and recs[-1][0] == "ENDB"
+    wall = vg.set_points(vg.proto("wall"), [(0, 0), (10, 0), (10, 10)], slingshot_seg=1)
+    flags = [struct.unpack("<i", p)[0] for t, p, _ in vg.vpxfile.item_records(wall, 4) if t == "SLNG"]
+    assert flags == [0, 1, 0]
+    assert vg.ident("LEFT RAMP ENTER OPTO") == "LeftRampEnterOpto" and vg.ident("3 BANK") == "X3Bank"
+
+
+@pytest.mark.parametrize("title", ["rush_le", "foo_fighters_le", "foo_fighters_pro", "deadpool_pro"])
+def test_shadow_maps_are_consistent(title):
+    vs = pytest.importorskip("vpxshadow")
+    path = os.path.join(VPX, title + ".shadow.json")
+    if not os.path.exists(path):
+        pytest.skip("no map")
+    m = json.load(open(path, encoding="utf-8"))
+    assert m["title"] == title and m["output"].endswith(".vpx")
+    cab = m["cabinet"]
+    ids = [v - 1000 for k, v in cab.items() if isinstance(v, int)]
+    assert all(1 <= i < 1000 for i in ids) and len(set(ids)) == len(ids), "cabinet switches"
+    sw = [s["id"] for k, s in m["switches"].items() if k != "_"]
+    sw += m["trough"]["switches"] + [s["switch"] for k, s in m["saucers"].items() if k != "_"]
+    sw += [n for k, s in m["saucers"].items() if k != "_" for n in s.get("stack", ())]
+    sw += [s["enter"] for k, s in m["saucers"].items() if k != "_" and s.get("enter")]
+    if m.get("plunger"):
+        sw.append(m["plunger"]["lane_switch"])
+    sw += ids
+    fakes = {k: f for k, f in m.get("switch_fakes", {}).items() if k != "_"}
+    sw += [f["switch"] for f in fakes.values() if f.get("kind") == "latch"]
+    assert len(set(sw)) == len(sw), "a switch id named twice: %s" % sorted(i for i in sw if sw.count(i) > 1)
+    assert all(1 <= i < 1000 for i in sw)
+    assert len(m["trough"]["switches"]) == 7, "TROUGH 1..6 + JAM"
+    nums = [int(n) for n in m["solenoids"] if n != "_"]
+    assert len(set(nums)) == len(nums) and max(nums) <= m.get("solenoid_max", 68)
+    coils = [tuple(s["coil"]) for n, s in m["solenoids"].items() if n != "_"]
+    assert len(set(coils)) == len(coils), "a coil named twice"
+    assert all(8 <= n <= 15 and 0 <= i <= 15 for n, i in coils)
+    g = m["game_on"]
+    assert g["number"] not in nums and g["number"] <= m.get("solenoid_max", 68)
+    assert all(tuple(c) in coils for c in g["coils"]), "game_on names the flipper coils"
+    for k, s in m["switches"].items():
+        if k == "_":
+            continue
+        assert s.get("event", "hit") in vs_events(), (k, s.get("event"))
+        if s.get("call"):              # a map sub the switch calls (PAD-1228's drops)
+            sub = s["call"].split()[0]
+            assert re.search(r"(?i)\bSub\s+%s\b" % re.escape(sub), m.get("extra_vbs", "")), "%s has no Sub" % sub
+    # every coil callback is something the generated script defines
+    extra = m.get("extra_vbs", "")
+    saucers = {k for k in m["saucers"] if k != "_"}
+    for n, s in m["solenoids"].items():
+        cb = s.get("callback") if n != "_" else None
+        if not cb:
+            continue
+        if cb == "bsTrough.SolOut" or cb == "PadAutoPlunge":
+            continue
+        if cb.startswith("bs") and cb.endswith(".SolOut"):
+            assert cb[2:-7] in saucers, cb
+        else:
+            assert re.search(r"(?i)\bSub\s+%s\b" % re.escape(cb), extra), "%s has no Sub" % cb
+    for name, f in fakes.items():
+        if f.get("kind") != "latch":
+            continue
+        assert tuple(f["up"]) in coils and tuple(f["down"]) in coils, name
+        assert f["solenoid"] not in nums and f["solenoid"] != g["number"]
+        assert f["solenoid"] <= m.get("solenoid_max", 68)
+        assert re.search(r"(?i)\bSub\s+%s\b" % re.escape(f["callback"]), extra), name
+    # every lamp names LEDs on a board, one table light per entry
+    lamps = m.get("lamps", {})
+    for name, v in lamps.items():
+        if name == "_":
+            continue
+        assert all(0 <= n <= 15 and 0 <= i < 200 for n, i in v["leds"]), name
+        assert len(v["leds"]) in (1, 3), "%s: one LED or an RGB triple" % name
+    had = {k: False for k in ("Table1_Init", "Table1_KeyDown", "Table1_KeyUp", "Table1_Exit")}
+    out = vs.gen(m, had)
+    assert "None" not in out and "Sub Table1_Init\n" in out
+
+
+@pytest.mark.parametrize("title,fork_up", [("foo_fighters_pro", 84), ("foo_fighters_le", 87)])
+def test_overlord_fork_is_a_latch_the_controller_follows(monkeypatch, title, fork_up):
+    """PAD-968: Mike's Foo Fighters table never held a ball at the Overlord.
+    The map had FORK DOWN raise the posts and FORK RELEASE drop them, and no
+    one answered OVERLORD FORK UP. On the emulator (foo_fighters_pro 1.04)
+    the fork rests down (open); with capture lit the game arms BOTH coils on
+    the OVERLORD OPTO (the bridge sees both on while the opto is made), the
+    post pops up and catches the ball; it lets go by clearing FORK RELEASE's
+    rule while it fires FORK DOWN, and pulses FORK DOWN again while FORK UP
+    still reads up. The controller follows the post, answers FORK UP and
+    hands the table the post as solenoid 60."""
+    pc = pytest.importorskip("padcontroller")
+    monkeypatch.setattr(pc, "log", lambda s: None)
+    b = pc.Bridge()
+    b.set_game(title)
+    f = b.map.fakes["fork"]
+    assert f["kind"] == "latch" and f["switch"] == fork_up
+    assert b.map.solenoids[6] == (9, 3) and b.map.solenoids[7] == (9, 4)
+
+    class Pipe:
+        def __init__(self):
+            self.held = {}
+
+        def set(self, sid, level):
+            self.held[sid] = level
+    b.pipe = Pipe()
+    down, up = (9, 3), (9, 4)
+
+    def step(d, u):
+        b._coil_set(down, d)
+        b._coil_set(up, u)
+        b._fakes_tick(0.0)
+        return b.pipe.held.get(fork_up, 0), b.sol_state.get(60, 0)
+
+    assert step(0, 0) == (0, 0)                  # rests down: the ball rolls through
+    assert step(1, 0) == (0, 0)                  # FORK DOWN alone: stays down
+    assert step(0, 0) == (0, 0)
+    assert step(1, 1) == (1, 1)                  # capture: both on the opto -> up, held
+    assert step(1, 1) == (1, 1)                  # the ball sits on the opto
+    assert step(1, 0) == (0, 0)                  # release: rule cleared, FORK DOWN fires
+    assert step(0, 0) == (0, 0)
+    assert step(0, 1) == (1, 1)                  # RELEASE alone (coil test): up
+    assert step(0, 0) == (1, 1)                  # a latch: it stays up
+    assert step(1, 0) == (0, 0)                  # FORK DOWN puts it back
+    assert step(1, 1) == (1, 1)                  # both at once, once more
+    assert step(0, 0) == (1, 1)                  # the opto opened, nothing caught: still up
+    sols = dict(b.changed_solenoids())
+    assert sols[60] == 1                         # the table hears it (<= solenoid_max)
+
+
+def test_a_foo_fighters_copy_patched_before_the_fork_fix_asks_for_a_new_patch(tmp_path):
+    """The copy's script still has the old fork subs; both models' maps carry
+    the mark (the row fits both), and the tab says it once."""
+    vs = pytest.importorskip("vpxsetup")
+    marks = []
+    for t in ("foo_fighters_pro", "foo_fighters_le"):
+        marks += json.load(open(os.path.join(VPX, t + ".shadow.json"), encoding="utf-8"))["repatch"]
+    name = "JP's Foo Fighters (PAD).vpx"
+    (tmp_path / (name[:-4] + ".script.vbs")).write_text(
+        "Sub PadForkDown(e) : If e Then OverPost1.IsDropped = 0 : End If : End Sub\n", encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), name, marks) == [marks[0]["why"]]
+    (tmp_path / (name[:-4] + ".script.vbs")).write_text(
+        "Sub PadForkPost(e) : OverPost1.IsDropped = Not e : End Sub\n", encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), name, marks) == []
+
+
+def test_shadow_wires_the_fork_post_to_the_followed_solenoid():
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, "foo_fighters_pro.shadow.json"), encoding="utf-8"))
+    had = {k: False for k in ("Table1_Init", "Table1_KeyDown", "Table1_KeyUp", "Table1_Exit")}
+    out = vs.gen(m, had)
+    assert 'SolCallback(60) = "PadForkPost"' in out
+    assert "SolCallback(6)" not in out and "SolCallback(7)" not in out
+    assert "Sub PadForkPost(e) : OverPost1.IsDropped = Not e : OverPost2.IsDropped = Not e" in out
+
+
+@pytest.mark.parametrize("title,sid", [("foo_fighters_pro", 91), ("foo_fighters_le", 94)])
+def test_foo_fighters_kick_target_is_the_games_switch_and_kicks_harder(title, sid):
+    """PAD-982: JP's kick target (LightningTarget, a slingshot wall at the
+    lower right) reached no switch, so the game never counted it, and it
+    kicked weaker than the real one. It is KICK TARGET (each program's own
+    switch table, 1.04.0), the game's KICK TARGET coil sounds it, and the
+    patched table's wall kicks at 360 (PAD-1119; 300 by PAD-982) where JP's kicked at 240."""
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, title + ".shadow.json"), encoding="utf-8"))
+    # PAD-1212: the coil's callback sounds it, not the switch's own sub too
+    assert m["switches"]["LightningTarget"] == {"id": sid, "event": "slingshot", "name": "KICK TARGET",
+                                                "own_sound": False}
+    assert m["item_fields"]["LightningTarget"] == {"SLGF": 360.0}
+    out = vs.gen(m, {k: False for k in ("Table1_Init", "Table1_KeyDown", "Table1_KeyUp", "Table1_Exit")})
+    assert "Sub LightningTarget_Slingshot : vpmTimer.PulseSw %d" % (1000 + sid) in out
+    assert 'SolCallback(10) = "PadKickTarget"' in out
+    assert 'Sub PadKickTarget(e) : If e Then PlaySoundAt "fx_slingshot_EM", Target004' in out
+
+
+def test_item_fields_sets_the_tables_own_objects_fields():
+    vs = pytest.importorskip("vpxshadow")
+    vf = pytest.importorskip("vpxfile")
+
+    def item(kind, name, **fields):
+        out = struct.pack("<i", kind) + vf.biff_record("NAME", struct.pack("<I", 2 * len(name)) + name.encode("utf-16-le"))
+        for tag, v in fields.items():
+            out += vf.biff_record(tag, struct.pack("<f" if isinstance(v, float) else "<i", v))
+        return out + vf.biff_record("ENDB", b"")
+
+    class Table:
+        items = [item(0, "LeftSling", SLGF=80.0), item(0, "LightningTarget", SLGF=240.0, SLTH=2.0, CLDW=1)]
+        item_info = staticmethod(vf.VpxTable.item_info)
+
+    streams = vs.item_fields(Table, {"item_fields": {"_": "why", "lightningtarget": {"SLGF": 300.0, "CLDW": 0}}})
+    assert list(streams) == ["GameItem1"]
+    recs = {t: p for t, p, _ in vf.item_records(streams["GameItem1"])}
+    assert struct.unpack("<f", recs["SLGF"])[0] == 300.0 and struct.unpack("<i", recs["CLDW"])[0] == 0
+    assert struct.unpack("<f", recs["SLTH"])[0] == 2.0, "the rest of the object as it was"
+    assert vs.item_fields(Table, {}) == {}
+    with pytest.raises(KeyError):
+        vs.item_fields(Table, {"item_fields": {"NoSuchWall": {"SLGF": 1.0}}})
+
+
+def test_a_foo_fighters_copy_patched_before_the_kick_target_fix_asks_for_a_new_patch(tmp_path):
+    vs = pytest.importorskip("vpxsetup")
+    m = json.load(open(os.path.join(VPX, "foo_fighters_pro.shadow.json"), encoding="utf-8"))
+    name = "JP's Foo Fighters (PAD).vpx"
+    script = (tmp_path / (name[:-4] + ".script.vbs"))
+    script.write_text("Sub LightningTarget_Slingshot\n    If Tilted Then Exit Sub\n", encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), name, m["repatch"]) == [m["repatch"][1]["why"]]
+    script.write_text("Sub LightningTarget_Slingshot_orig\n    If Tilted Then Exit Sub\n", encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), name, m["repatch"]) == []
+    # PAD-982: a copy whose Overlord opto was JP's whole-pocket trigger
+    script.write_text("Sub Trigger015_Hit : Controller.Switch(1082) = True : End Sub\n"
+                      "Sub Trigger015_UnHit : Controller.Switch(1082) = False : End Sub\n", encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), name, m["repatch"]) == [m["repatch"][2]["why"]]
+    # PAD-992: a copy whose kick target sound was played at the wall itself
+    script.write_text('Sub PadKickTarget(e) : If e Then PlaySoundAt "fx_slingshot_EM", LightningTarget : End If : End Sub\n',
+                      encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), name, m["repatch"]) == [m["repatch"][3]["why"]]
+
+
+def test_sounds_at_shapes_names_a_sound_played_at_a_wall():
+    """PAD-992: Foo Fighters' first KICK TARGET coil stopped Visual Pinball
+    with "Object doesn't support this property or method: 'ball.x'": the
+    bridge played its sound at LightningTarget, a wall, and JP's PlaySoundAt
+    pans by the object's .x. A wall, ramp or rubber has no position."""
+    vs = pytest.importorskip("vpxshadow")
+    info = [("Wall", "LightningTarget", None), ("HitTarget", "Target004", (700.0, 1500.0)),
+            ("Ramp", "Ramp1", None), ("Kicker", "scoop", (10.0, 20.0))]
+    vbs = ('Sub A(e) : If e Then PlaySoundAt "fx_slingshot_EM", lightningtarget : End If : End Sub\n'
+           'Sub B(e) : PlaySoundAt "fx_popper", scoop : PlaySoundAt "x", Target004 : End Sub\n'
+           'Sub C(e) : PlaySoundAt  "fx_ramp" ,Ramp1 : End Sub\n')
+    assert vs.sounds_at_shapes(vbs, info) == ["LightningTarget", "Ramp1"]
+    assert vs.sounds_at_shapes('PlaySoundAt "x", Target004', info) == []
+
+
+@pytest.mark.parametrize("path", sorted(glob.glob(os.path.join(VPX, "*.shadow.json"))),
+                         ids=os.path.basename)
+def test_no_map_plays_a_sound_at_one_of_its_slingshot_walls(path):
+    """PAD-992: a slingshot switch is a wall, which PlaySoundAt cannot pan."""
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(path, encoding="utf-8"))
+    walls = [("Wall", k, None) for k, s in m["switches"].items()
+             if k != "_" and s.get("event") == "slingshot"]
+    out = vs.gen(m, {k: False for k in ("Table1_Init", "Table1_KeyDown", "Table1_KeyUp", "Table1_Exit")})
+    assert vs.sounds_at_shapes(out, walls) == []
+
+
+def _inside(pt, poly):
+    x, y = pt
+    n, hit = len(poly), False
+    for i in range(n):
+        (x1, y1), (x2, y2) = poly[i], poly[(i + 1) % n]
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            hit = not hit
+    return hit
+
+
+@pytest.mark.parametrize("title,sid", [("foo_fighters_pro", 82), ("foo_fighters_le", 85)])
+def test_the_overlord_opto_sees_only_where_the_held_ball_rests(title, sid):
+    """PAD-982: hits on the ball the Overlord holds never counted. The game
+    counts one only when OVERLORD OPTO opens (emulator, 1.04.0: fourteen
+    OVERLORD HIT TARGET hits with the opto made counted none; opto open, hit,
+    opto made counts), and JP's opto, Trigger015, is the whole pocket up to
+    the hit target: the knocked ball never left it. PadOverlordOpto is the
+    pocket's mouth: the ball at rest against the fork's posts is on it, the
+    ball on its way back to the hit target (591, 252) is off it."""
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, title + ".shadow.json"), encoding="utf-8"))
+    assert "Trigger015" not in m["switches"]
+    assert m["switches"]["PadOverlordOpto"]["id"] == sid and m["switches"]["PadOverlordOpto"]["event"] == "hold"
+    rt = m["retrofit_triggers"]["PadOverlordOpto"]
+    assert rt["clone"] == "Trigger015" and rt["surface"] == "10m"
+    assert len(rt["shape"]) == 9, "reshape_item keeps the clone's nine drag points"
+    assert _inside((577, 440), rt["shape"]), "the held ball, against OverPost1 (552, 452) and OverPost2 (603, 463)"
+    assert not _inside((585, 370), rt["shape"]) and not _inside((591, 300), rt["shape"])
+    out = vs.gen(m, {k: False for k in ("Table1_Init", "Table1_KeyDown", "Table1_KeyUp", "Table1_Exit")})
+    assert "Sub PadOverlordOpto_Hit : Controller.Switch(%d) = True" % (1000 + sid) in out
+    assert "Sub PadOverlordOpto_UnHit : Controller.Switch(%d) = False" % (1000 + sid) in out
+    assert "Trigger015_Hit" not in out
+
+
+# ------------------------------------------------- the app's setup -----
+
+def test_setup_reads_the_card_folder(tmp_path):
+    vs = pytest.importorskip("vpxsetup")
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    for n in ("rush_le-1_19_0.Release.16G.sdcard.raw", "rush_le-1_18_0.Release.16G.sdcard.raw",
+              "foo_fighters_le-1_04_0.Release.16G.sdcard.raw", "notes.txt", "godzilla_le.raw"):
+        (lib / n).write_bytes(b"x")
+    cards = vs.cards_in(str(lib))
+    assert sorted(cards) == ["foo_fighters_le", "rush_le"] and len(cards["rush_le"]) == 2
+    assert vs.cards_in(str(tmp_path / "missing")) == {}
+    # PAD-943: the Spike 1 .iso cards in the library's spike1 sibling count too
+    pl = pytest.importorskip("padlaunch")
+    s1 = tmp_path / "spike1"
+    s1.mkdir()
+    for n in ("GOT_LE-1_37.iso", "transformers_pin-1.0.18.iso", "kiss_le-1_41_0.iso", "readme.iso.txt"):
+        (s1 / n).write_bytes(b"x")
+    assert sorted(vs.cards_in(str(s1), "spike1")) == ["got_le", "kiss_le", "transformers_pin"]
+    assert vs.cards_in(str(s1)) == {}                                           # not Spike 2 cards
+    both = vs.all_cards(str(lib), {"library": str(lib)})
+    assert sorted(both) == ["foo_fighters_le", "got_le", "kiss_le", "rush_le", "transformers_pin"]
+    assert both["got_le"] == ["GOT_LE-1_37.iso"]
+    assert pl.libraries("spike1", {"library": str(lib)}) == [str(lib), str(s1)]
+
+
+def test_setup_names_each_known_table_and_what_is_patched(tmp_path, monkeypatch):
+    """PAD-802: the app ships no table, so every map says which download it
+    fits (the tab lists them), and a table counts as patched once its (PAD)
+    copy is in Visual Pinball's tables folder."""
+    vs = pytest.importorskip("vpxsetup")
+    pl = pytest.importorskip("padlaunch")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.delenv("PAD_VPX_CARD", raising=False)
+    monkeypatch.delenv("PAD_VPX_LIBRARY", raising=False)
+    tables = tmp_path / "tables"
+    tables.mkdir()
+    (tables / "Rush LE 2.0.2 (PAD).vpx").write_bytes(b"x")
+    (tables / "Rush LE 2.0.2.vpx").write_bytes(b"x")
+    got = {t["title"]: t for t in vs.known_tables(str(tables))}
+    assert set(got) >= {"rush_le", "foo_fighters_pro", "godzilla_le"}
+    for t in got.values():
+        assert t["name"] and t["by"] and t["where"] and t["output"].endswith("(PAD).vpx"), t
+        assert t["card"] == ""
+    assert got["rush_le"]["patched"] and not got["foo_fighters_pro"]["patched"]
+    # PAD-808: one row for JP's Foo Fighters, the Pro first, the LE beside it
+    assert "foo_fighters_le" not in got
+    ff = got["foo_fighters_pro"]
+    assert ff["titles"] == ["foo_fighters_pro", "foo_fighters_le"]
+    assert ff["models"] == {"foo_fighters_pro": "Pro", "foo_fighters_le": "LE"}
+    assert got["rush_le"]["titles"] == ["rush_le"]
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "foo_fighters_le-1_04_0.Release.16G.sdcard.raw").write_bytes(b"x")
+    monkeypatch.setenv("PAD_VPX_LIBRARY", str(lib))
+    ff = {t["output"]: t for t in vs.known_tables(str(tables))}[ff["output"]]
+    assert ff["title"] == "foo_fighters_le" and ff["card"].endswith("foo_fighters_le-1_04_0.Release.16G.sdcard.raw")
+    assert vs.patched_in(str(tables)) == ["Rush LE 2.0.2 (PAD).vpx"]
+    assert vs.patched_in(str(tmp_path / "none")) == []
+
+
+def test_setup_layouts_fit_the_screens_found():
+    vs = pytest.importorskip("vpxsetup")
+    one = vs.layout_presets([(0, 0, 3840, 2160)])
+    keys = [k for k, _, _, _ in one]
+    assert keys == ["side", "centre"]
+    _, _, player, lcd = one[0]
+    assert player == (0, 0, 1440, 2160)              # a 2:3 playfield, full height
+    assert lcd[0] == 1440 and lcd[2] == 2400 and lcd[3] == 1350    # the rest, 16:9
+    two = vs.layout_presets([(0, 0, 1920, 1080), (1920, 0, 3840, 1080)])
+    assert [k for k, _, _, _ in two] == ["side", "two", "centre"]
+    assert two[1][3] == (1920, 0, 1920, 1080)        # the LCD fills the second screen
+    assert vs.layout_presets([])[0][2][3] == 1080    # no screens known: a 1080p guess
+
+
+def test_setup_layout_writes_the_kit_and_the_ini_and_reads_back(tmp_path, monkeypatch):
+    vs = pytest.importorskip("vpxsetup")
+    pl = pytest.importorskip("padlaunch")
+    pv = pytest.importorskip("padvpx")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    ini = tmp_path / "VPinballX.ini"
+    ini.write_text("[Player]\nFullScreen = 1\nWidth = 1920\n[Editor]\nX = 1\n", encoding="utf-8")
+    monkeypatch.setattr(pv, "vpx_ini_path", lambda: str(ini))
+    # PAD-811: a layout also saves the game display; never the real one
+    pd = pytest.importorskip("padisplay")
+    conf = str(tmp_path / "display.conf")
+    monkeypatch.setattr(pd, "CONF", conf)
+    monkeypatch.setattr(pd, "monitors", lambda: [
+        {"n": 1, "x": 0, "y": 0, "w": 3840, "h": 2160, "primary": True}])
+    presets = vs.layout_presets([(0, 0, 3840, 2160)])
+    assert vs.layout_key(pl.kit_load(), presets) == ""
+    assert vs.apply_layout("side", [0, 0, 1440, 2160], [1440, 0, 2400, 1350]).startswith("layout side")
+    kit = pl.kit_load()
+    assert kit["player"] == {"x": 0, "y": 0, "w": 1440, "h": 2160}
+    assert kit["lcd"] == {"x": 1440, "y": 0, "w": 2400, "h": 1350, "topmost": True}
+    assert vs.layout_key(kit, presets) == "side"      # the tab ticks the layout in use
+    text = ini.read_text(encoding="utf-8")
+    assert "FullScreen = 0" in text and "Width = 1440" in text and "Height = 2160" in text and "X = 1" in text
+    # the LCD rectangle is a borderless window there
+    assert pd.load(conf) == {"mode": "window", "monitor": 1, "border": False,
+                             "rx": 1440, "ry": 0, "w": 2400, "h": 1350}
+    vs.apply_layout("centre", None, None)                 # Visual Pinball's own place, the LCD's default
+    kit = pl.kit_load()
+    assert "player" not in kit and kit["lcd"] == {"topmost": True}
+    assert vs.layout_key(kit, presets) == "centre"
+    assert "FullScreen = 0" in ini.read_text(encoding="utf-8")
+    assert pd.load(conf)["mode"] == "free"                # the kit places it, as before
+
+
+def test_setup_always_on_top_is_a_choice_layouts_keep(tmp_path, monkeypatch):
+    """PAD-1231: a desktop player asked for the game's screen NOT always on
+    top. The kit keeps the choice, a layout no longer forces it back on and
+    still reads as the layout in use, and an open game's window follows."""
+    vs = pytest.importorskip("vpxsetup")
+    pl = pytest.importorskip("padlaunch")
+    pv = pytest.importorskip("padvpx")
+    pd = pytest.importorskip("padisplay")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(pv, "vpx_ini_set", lambda kv: None)
+    monkeypatch.setattr(pd, "CONF", str(tmp_path / "display.conf"))
+    monkeypatch.setattr(pd, "monitors", lambda: [
+        {"n": 1, "x": 0, "y": 0, "w": 3840, "h": 2160, "primary": True}])
+    pc = pytest.importorskip("padcontroller")
+    raised = []
+    monkeypatch.setattr(vs.sys, "platform", "win32")
+    monkeypatch.setattr(pc, "find_lcd_window", lambda: 77)
+    monkeypatch.setattr(pc, "raise_window", lambda h, top=True: raised.append((h, top)))
+    assert vs.lcd_on_top(pl.kit_load()) is True           # on, as it always was
+    got = vs.set_on_top(False)
+    assert got == {"result": "ok", "lcd_on_top": False, "live": True} and raised == [(77, False)]
+    assert pl.kit_load()["lcd"] == {"topmost": False}
+    presets = vs.layout_presets([(0, 0, 3840, 2160)])
+    vs.apply_layout("side", [0, 0, 1440, 2160], [1440, 0, 2400, 1350])
+    kit = pl.kit_load()
+    assert kit["lcd"] == {"x": 1440, "y": 0, "w": 2400, "h": 1350, "topmost": False}
+    assert vs.layout_key(kit, presets) == "side" and vs.lcd_on_top(kit) is False
+    vs.set_on_top(True)                                   # the rectangle stays
+    kit = pl.kit_load()
+    assert kit["lcd"] == {"x": 1440, "y": 0, "w": 2400, "h": 1350, "topmost": True}
+    vs.apply_layout("centre", None, None)
+    kit = pl.kit_load()
+    assert kit["lcd"] == {"topmost": True} and vs.layout_key(kit, presets) == "centre"
+    vs.set_on_top(False)                                  # still the centre layout, not on top
+    assert vs.layout_key(pl.kit_load(), presets) == "centre"
+    # a fresh kit's choice alone is no layout taken; an old centre kit still is one
+    pl.kit_save({})
+    vs.set_on_top(True)
+    assert vs.layout_key(pl.kit_load(), presets) == ""
+    pl.kit_save({"lcd": {"topmost": True}})
+    assert vs.layout_key(pl.kit_load(), presets) == "centre"
+    vs.set_on_top(False)
+    assert vs.layout_key(pl.kit_load(), presets) == "centre"
+    monkeypatch.setattr(pc, "find_lcd_window", lambda: 0)  # no game open: saved only
+    assert vs.set_on_top(False)["live"] is False and len(raised) == 5
+
+
+def test_setup_layout_display_fills_a_monitor_or_sits_on_one():
+    """PAD-811: the LCD rectangle becomes the game display setting: full
+    screen on a monitor it fills, else a borderless window on the monitor
+    holding its middle, at its offset there."""
+    vs = pytest.importorskip("vpxsetup")
+    mons = [{"n": 1, "x": 0, "y": 0, "w": 1920, "h": 1080, "primary": True},
+            {"n": 2, "x": 1920, "y": 0, "w": 1920, "h": 1080, "primary": False}]
+    assert vs.display_for([1920, 0, 1920, 1080], mons) == {
+        "mode": "fullscreen", "monitor": 2, "border": False}
+    assert vs.display_for([2000, 100, 1360, 768], mons) == {
+        "mode": "window", "monitor": 2, "border": False, "rx": 80, "ry": 100, "w": 1360, "h": 768}
+    # off every monitor: on the main one
+    assert vs.display_for([9000, 0, 100, 100], mons)["monitor"] == 1
+    assert vs.display_for(None, mons)["mode"] == "free"
+
+
+def test_an_old_layouts_lcd_becomes_the_borderless_display_setting(tmp_path):
+    """PAD-1131: a layout saved before PAD-811 left only the kit's LCD
+    rectangle, so the run moved the FRAMED window over the second screen
+    and its title bar showed. Carried once into the display setting the
+    layout writes today: full screen, borderless, on the monitor it fills."""
+    pc = pytest.importorskip("padcontroller")
+    pd = pytest.importorskip("padisplay")
+    mons = [{"n": 1, "x": 0, "y": 0, "w": 3840, "h": 2160, "primary": True},
+            {"n": 2, "x": 3840, "y": 0, "w": 1920, "h": 1080, "primary": False}]
+    conf = str(tmp_path / "display.conf")
+    kit = {"lcd": {"x": 3840, "y": 0, "w": 1920, "h": 1080, "topmost": True}}
+    got = pc.carry_lcd_layout(kit, conf=conf, mons=mons)
+    assert got == {"mode": "fullscreen", "monitor": 2, "border": False}
+    assert kit["display_carried"] is True
+    line = open(conf, encoding="utf-8").read()
+    assert "game monitor=2 mode=fullscreen border=0" in line
+    assert "x=3840 y=0 w=1920 h=1080 fs=1" in line
+    # the kit's rectangle stays, so the Visual Pinball tab still names the layout
+    assert kit["lcd"] == {"x": 3840, "y": 0, "w": 1920, "h": 1080, "topmost": True}
+
+    # once only: a later "free" on the Emulate tab holds
+    pd.save({"mode": "free"}, conf, mons)
+    assert pc.carry_lcd_layout(kit, conf=conf, mons=mons) is None
+    assert pd.load(conf)["mode"] == "free"
+
+
+def test_lcd_carry_leaves_a_chosen_setting_and_a_kit_with_no_rectangle(tmp_path):
+    pc = pytest.importorskip("padcontroller")
+    pd = pytest.importorskip("padisplay")
+    mons = [{"n": 1, "x": 0, "y": 0, "w": 1920, "h": 1080, "primary": True}]
+    conf = str(tmp_path / "display.conf")
+    # the user's own setting is never replaced
+    pd.save({"mode": "window", "monitor": 1, "border": True, "rx": 10, "ry": 20,
+             "w": 800, "h": 450}, conf, mons)
+    kit = {"lcd": {"x": 0, "y": 0, "w": 1920, "h": 1080, "topmost": True}}
+    assert pc.carry_lcd_layout(kit, conf=conf, mons=mons) is None
+    assert pd.load(conf)["mode"] == "window" and pd.load(conf)["border"] is True
+    # the centred layout (no rectangle): nothing to carry, nothing marked
+    kit = {"lcd": {"topmost": True}}
+    assert pc.carry_lcd_layout(kit, conf=str(tmp_path / "other.conf"), mons=mons) is None
+    assert "display_carried" not in kit and not os.path.exists(str(tmp_path / "other.conf"))
+    # a rectangle on no monitor's full size: a borderless window where it was
+    kit = {"lcd": {"x": 100, "y": 50, "w": 960, "h": 540, "topmost": True}}
+    got = pc.carry_lcd_layout(kit, conf=str(tmp_path / "third.conf"), mons=mons)
+    assert got == {"mode": "window", "monitor": 1, "border": False,
+                   "rx": 100, "ry": 50, "w": 960, "h": 540}
+
+
+def test_setup_state_reports_the_game_display(tmp_path, monkeypatch):
+    vs = pytest.importorskip("vpxsetup")
+    pl = pytest.importorskip("padlaunch")
+    pd = pytest.importorskip("padisplay")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(pd, "CONF", str(tmp_path / "display.conf"))
+    monkeypatch.setattr(pd, "monitors", lambda: [
+        {"n": 1, "x": 0, "y": 0, "w": 1920, "h": 1080, "primary": True}])
+    monkeypatch.setattr(vs, "controller_registered", lambda: False)
+    monkeypatch.setattr(vs, "vpx_tables_dir", lambda: "")
+    pd.save({"mode": "fullscreen", "monitor": 1, "border": False}, pd.CONF)
+    got = vs.state()["display"]
+    assert got["setting"]["mode"] == "fullscreen"
+    assert got["text"] == "full screen on monitor 1, borderless"
+
+
+def test_setup_finds_visual_pinball_from_the_kit_first(tmp_path, monkeypatch):
+    vs = pytest.importorskip("vpxsetup")
+    pl = pytest.importorskip("padlaunch")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(vs, "VPX_DEFAULT_DIR", str(tmp_path / "nowhere"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "pf"))
+    monkeypatch.setattr(os.path, "expanduser", lambda p: str(tmp_path / "home"))
+    assert vs.find_vpx() == "" and vs.vpx_tables_dir() == ""
+    mine = tmp_path / "vp"
+    mine.mkdir()
+    assert vs.set_vpx(str(mine)).startswith("There is no VPinballX64.exe")
+    (mine / "VPinballX64.exe").write_bytes(b"x")
+    assert vs.set_vpx(str(mine)) == "ok" and vs.find_vpx() == str(mine)
+    assert vs.vpx_tables_dir() == os.path.join(str(mine), "tables")
+
+
+def test_setup_state_names_the_minimum_visual_pinball(tmp_path, monkeypatch):
+    # PAD-887: the Setup line shows the oldest Visual Pinball the tables open
+    # in, and a copy older than that is not "Ready"
+    vs = pytest.importorskip("vpxsetup")
+    pl = pytest.importorskip("padlaunch")
+    pd = pytest.importorskip("padisplay")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(pd, "CONF", str(tmp_path / "display.conf"))
+    monkeypatch.setattr(vs, "controller_registered", lambda: False)
+    monkeypatch.setattr(vs, "vpx_tables_dir", lambda: "")
+    monkeypatch.setattr(vs, "find_vpx", lambda: str(tmp_path))
+    for have, shown, old in (((10, 7, 3), "10.7.3", True), ((10, 8, 0), "10.8.0", False),
+                             ((10, 8, 1), "10.8.1", False), (None, "", False)):
+        monkeypatch.setattr(vs, "vpx_version", lambda d, v=have: v)
+        got = vs.state()
+        assert (got["vpx_min"], got["vpx_version"], got["vpx_old"]) == ("10.8.0", shown, old)
+    # the reader itself: nothing there is None, not an error
+    assert vs.vpx_version("") is None and vs.vpx_version(str(tmp_path / "none")) is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="reads a Windows exe's version resource")
+def test_visual_pinball_version_is_read_from_the_exe(tmp_path):
+    vs = pytest.importorskip("vpxsetup")
+    # any exe with a version resource stands in for VPinballX64.exe
+    shutil.copyfile(sys.executable, str(tmp_path / "VPinballX64.exe"))
+    got = vs.vpx_version(str(tmp_path))
+    assert got and got[:2] == tuple(sys.version_info[:2])
+
+
+def test_setup_answers_the_app_in_one_json_line(tmp_path, monkeypatch, capsys):
+    """The app's tab reads the LAST line of the kit's output as JSON."""
+    vs = pytest.importorskip("vpxsetup")
+    pl = pytest.importorskip("padlaunch")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "rush_le-1_19_0.Release.16G.sdcard.raw").write_bytes(b"x")
+    assert vs.main(["library", str(lib)]) == 0
+    got = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert got == {"result": "ok", "cards": {"rush_le": ["rush_le-1_19_0.Release.16G.sdcard.raw"]}}
+    assert vs.main(["nonsense"]) == 2
+
+
+def test_no_table_ships_with_the_app():
+    """PAD-802: the tables are their authors' to hand out. The installer
+    carries none and offers no separate setup window."""
+    iss = open(os.path.join(ROOT, "installer", "pinball_decryptor.iss"), encoding="utf-8").read()
+    lines = [ln for ln in iss.splitlines() if not ln.lstrip().startswith(";")]
+    assert not [ln for ln in lines if "vpx_tables" in ln or "*.vpx" in ln]
+    assert not [ln for ln in lines if "wizard" in ln]
+    assert not os.path.exists(os.path.join(VPX, "padwizard.py"))
+
+
+def test_a_slots_first_run_takes_the_titles_switch_table_from_another_slot(tmp_path):
+    # PAD-811: TMNT on a slot that had never run it sat on its logo, the
+    # table unable to report a trough without the run's switch_list.txt
+    pc = pytest.importorskip("padcontroller")
+    slots = tmp_path / "padslots"
+    old = slots / "3" / "root" / "dump" / "tables" / "turtles_le"
+    old.mkdir(parents=True)
+    (old / "switch_list.txt").write_text("# turtles_le\n36 73 1 11 Start Button\n", encoding="utf-8")
+    dump = slots / "2" / "root" / "dump"
+    dump.mkdir(parents=True)
+    rig = pc.Rig.__new__(pc.Rig)
+    rig.dump = str(dump)
+    assert rig.switch_ids("turtles_le") == {(1, 11): 36}
+    assert (dump / "tables" / "turtles_le" / "switch_list.txt").exists()
+    assert rig.switch_ids("venom_le") == {}          # nobody has one: nothing made up
+
+
+def test_losing_the_focus_lets_go_of_held_buttons():
+    # PAD-811: VPX sends no key-up once its window loses the focus; TMNT's
+    # launch button stayed down and launched every ball it was given
+    pc = pytest.importorskip("padcontroller")
+
+    class Pipe:
+        def __init__(self):
+            self.held = {34: 1, 36: 0, 65: 1, 39: 1}
+
+        def set(self, sid, level):
+            self.held[sid] = 1 if level else 0
+
+    class Map:
+        cabinet = {"start": 1036, "launch": 1034, "right_flipper": 1065, "coin": 1039}
+
+        def switch_id(self, n):
+            return n - 1000
+
+    b = pc.Bridge.__new__(pc.Bridge)
+    b.pipe, b.map = Pipe(), Map()
+    b._release_buttons()
+    assert b.pipe.held == {34: 0, 36: 0, 65: 0, 39: 1}   # coins are not buttons
+
+
+def test_switches_the_table_sets_before_the_game_is_up_reach_it_at_attach(tmp_path, monkeypatch):
+    # PAD-878 "star wars vpx - looking for ball error on boot": the table sets
+    # its trough once, at Init, right after Controller.Run starts the game -
+    # half a minute before the bridge attaches - and those edges were dropped.
+    # On Star Wars Pro's first run the renderer had no switch list to fill the
+    # trough from either, so the game booted on an empty one.
+    pc = pytest.importorskip("padcontroller")
+    sent = []
+
+    class Pipe:
+        def __init__(self, rig):
+            self.held = {}
+
+        def set(self, sid, level):
+            self.held[sid] = 1 if level else 0
+            sent.append((sid, self.held[sid]))
+
+    class Rig:
+        how = "test"
+
+        def ballfeed_off_path(self):
+            return str(tmp_path / "ballfeed.off")
+
+    monkeypatch.setattr(pc, "SwitchPipe", Pipe)
+    monkeypatch.setattr(pc, "log", lambda s: None)
+    b = pc.Bridge()
+    b.set_game("star_wars_pro")
+    b.start_t = 0.0
+    b._read_tables = lambda data: None
+    # bsTrough.Balls = 0 opens the trough, then PadTroughSync closes its six
+    for n in (1067, 1066, 1065, 1064, 1063, 1062, 1068):
+        b.set_switch(n, 0)
+    for n in (1067, 1066, 1065, 1064, 1063, 1062):
+        b.set_switch(n, 1)
+    b.set_switch(1055, 1)                      # a flipper pressed and let go while it booted
+    b.set_switch(1055, 0)
+    assert b.get_switch(1067) and not b.get_switch(1068) and not b.get_switch(1055)
+    assert sent == []                          # nothing to send them to yet
+    b.rig = Rig()
+    b._attach(b"")
+    assert dict(sent) == {62: 1, 63: 1, 64: 1, 65: 1, 66: 1, 67: 1, 68: 0, 55: 0}
+    assert len(sent) == 8                      # each once, its last level
+    sent.clear()
+    b.set_switch(1067, 0)                      # from here on straight through
+    assert sent == [(67, 0)] and b._early == {}
+
+
+def test_a_titles_card_is_the_stock_release_over_a_custom_one_of_its_version(tmp_path, monkeypatch):
+    pl = pytest.importorskip("padlaunch")
+    for n in ("turtles_pro-1_59_0.1987-upscaled.8G.sdcard.raw", "turtles_pro-1_59_0.Release.8G.sdcard.raw",
+              "turtles_pro-1_58_0.Release.8G.sdcard.raw"):
+        (tmp_path / n).write_bytes(b"")
+    monkeypatch.setattr(pl, "kit_load", lambda: {"library": str(tmp_path)})
+    monkeypatch.delenv("PAD_VPX_CARD", raising=False)
+    monkeypatch.delenv("PAD_VPX_LIBRARY", raising=False)
+    assert os.path.basename(pl.card_for("turtles_pro")) == "turtles_pro-1_59_0.Release.8G.sdcard.raw"
+
+
+def test_a_named_table_never_takes_the_lone_run_of_another_title(tmp_path, monkeypatch):
+    # PAD-811: JAWS attached to another ticket's hidden Godzilla run, the
+    # only one up, drove its switches and never started its own
+    pc = pytest.importorskip("padcontroller")
+    monkeypatch.setattr(pc, "BOARD", str(tmp_path))
+    (tmp_path / "slot-2.run").write_text(json.dumps(
+        {"emu": "spike2", "slot": 2, "game": "godzilla_le", "label": "PAD-827", "hidden": True}), encoding="utf-8")
+    assert pc.Rig.board_run("jaws_le") is None
+    assert pc.Rig.board_run("godzilla_le")["slot"] == 2
+    assert pc.Rig.board_run(None)["slot"] == 2                         # a nameless table still finds it
+
+
+def test_patched_table_gets_its_backglass_under_the_matching_name(tmp_path):
+    # B2S looks for <table name>.directb2s, and the patched table is
+    # "<name> (PAD).vpx": the original's backglass is copied to match
+    pv = pytest.importorskip("padvpx")
+    src, out = tmp_path / "src", tmp_path / "out"
+    src.mkdir(), out.mkdir()
+    (src / "JAWS.vpx").write_bytes(b"t")
+    (src / "JAWS.directb2S").write_bytes(b"bg")
+    got = pv.copy_backglass(str(src / "JAWS.vpx"), str(out / "JAWS (PAD).vpx"))
+    assert got == str(out / "JAWS (PAD).directb2s")
+    assert (out / "JAWS (PAD).directb2s").read_bytes() == b"bg"
+    # one the user already put there is theirs
+    (out / "JAWS (PAD).directb2s").write_bytes(b"mine")
+    pv.copy_backglass(str(src / "JAWS.vpx"), str(out / "JAWS (PAD).vpx"))
+    assert (out / "JAWS (PAD).directb2s").read_bytes() == b"mine"
+    # no backglass anywhere: nothing
+    (src / "Bond.vpx").write_bytes(b"t")
+    assert pv.copy_backglass(str(src / "Bond.vpx"), str(out / "Bond (PAD).vpx")) is None
+
+
+def test_the_tables_folder_can_be_chosen(tmp_path, monkeypatch):
+    # PAD-848: David keeps his patched tables in a folder on the desktop; the
+    # tab's folder is where "Patched" looks, what Play lists and opens
+    vs = pytest.importorskip("vpxsetup")
+    pl = pytest.importorskip("padlaunch")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    vpx = tmp_path / "Visual Pinball"
+    (vpx / "tables").mkdir(parents=True)
+    (vpx / "VPinballX64.exe").write_bytes(b"x")
+    monkeypatch.setattr(vs, "find_vpx", lambda: str(vpx))
+    assert vs.vpx_tables_dir() == str(vpx / "tables")                     # nothing chosen: Visual Pinball's
+    mine = tmp_path / "desktop tables"
+    mine.mkdir()
+    (mine / "Rush LE 2.0.2 (PAD).vpx").write_bytes(b"x")
+    assert vs.set_tables(str(mine)) == "ok"
+    assert vs.vpx_tables_dir() == str(mine)
+    rush = next(t for t in vs.known_tables() if t["title"] == "rush_le")
+    assert rush["patched"]
+    assert vs.patched_in(vs.vpx_tables_dir()) == ["Rush LE 2.0.2 (PAD).vpx"]
+    assert "no folder" in vs.set_tables(str(tmp_path / "gone")).lower()    # refused, the setting kept
+    assert vs.vpx_tables_dir() == str(mine)
+    import shutil
+    shutil.rmtree(mine)                                                     # a folder that went away
+    assert vs.vpx_tables_dir() == str(vpx / "tables")
+    assert vs.set_tables("") == "ok" and "tables" not in pl.kit_load()
+
+
+def test_tmnt_lists_only_the_pro():
+    # PAD-848: the TMNT LE card starts no game in the emulator (PAD-829); the
+    # tab lists the Pro alone, and Patch still takes the Pro for the download
+    vs = pytest.importorskip("vpxsetup")
+    pv = pytest.importorskip("padvpx")
+    titles = [t for row in vs.known_tables("") for t in row["titles"]]
+    assert "turtles_pro" in titles and "turtles_le" not in titles
+    assert pv.maps()["turtles_le"]["listed"] is False and pv.maps()["turtles_pro"]["listed"]
+
+
+def test_every_table_row_links_its_download():
+    # PAD-961: David, "I need to find Godzilla Limited Edition v2.6 and I don't
+    # have the link": a row carries the page its author put the download on,
+    # the map's own or (a Spike 1 or Spooky title) the catalogue's
+    vs = pytest.importorskip("vpxsetup")
+    rows = {r["title"]: r for r in vs.known_tables("")}
+    assert rows["godzilla_le"]["url"] == "https://vpuniverse.com/files/file/8449-godzilla-limited-edition/"
+    assert rows["got_le"]["url"] == "https://vpuniverse.com/files/file/12510-game-of-thrones-le-stern-2015-vpw/"
+    assert "showfile=15967" in rows["deadpool_pro"]["url"]
+    for r in rows.values():
+        assert r["url"] == "" or re.match(r"https://(vpuniverse\.com/files/file/\d+-|www\.vpforums\.org/index\.php\?app=downloads&showfile=\d+$)", r["url"]), r
+    # the ones no page could be found for say so by having none (PAD-1171:
+    # the original-layout Ghostbusters LE was withdrawn from VPForums)
+    assert sorted(t for t, r in rows.items() if not r["url"]) == ["aerosmith", "beatles", "ghostbusters_le_replica", "star_wars_pro"]
+
+
+def test_jurassic_park_table_is_dropped(tmp_path, monkeypatch):
+    # PAD-860: marty's "Jurassic Park Limited Edition" is not the real JP's
+    # playfield; the kit recognises nothing in it, and a copy an earlier
+    # release patched is neither listed nor opened. PAD-887: JPSalas &
+    # marty's "Jurassic Park Pro Le" 4.02 is the Jurassic Park table now
+    vs = pytest.importorskip("vpxsetup")
+    pv = pytest.importorskip("padvpx")
+    rows = [r for r in vs.known_tables("") if any("jurassic" in t for t in r["titles"])]
+    assert [r["output"] for r in rows] == ["Jurassic Park Pro Le (PAD).vpx"]
+    assert sorted(rows[0]["titles"]) == ["jurassic_park_le", "jurassic_park_pro"]
+
+    class Fake:
+        text = "' Jurassic Parc Limited Edition\nSub TRexlockhaut_Hit\n"
+
+        def script(self):
+            return self.text
+
+    monkeypatch.setattr(pv.vpxfile, "VpxTable", lambda p: Fake())
+    assert pv.recognise("x.vpx") == (None, None)
+    Fake.text = "'                 Jurassic Park Le Script JPSalas & marty\n"
+    assert pv.recognise("x.vpx")[0] == "jurassic_park_pro"
+    assert pv.recognise("x.vpx", title="jurassic_park_le")[0] == "jurassic_park_le"
+    (tmp_path / "Jurassic Park Limited Edition (PAD).vpx").write_bytes(b"")
+    (tmp_path / "Rush LE 2.0.2 (PAD).vpx").write_bytes(b"")
+    assert vs.patched_in(str(tmp_path)) == ["Rush LE 2.0.2 (PAD).vpx"]
+    monkeypatch.setattr(vs, "find_vpx", lambda: str(tmp_path))
+    assert "no longer supported" in vs.open_table("Jurassic Park Limited Edition (PAD).vpx")
+
+
+def test_player_resize_keeps_the_side_the_user_dragged():
+    # PAD-845: the snap kept the width, so a bottom-edge drag (height only)
+    # was put straight back. A 4:3 picture, 1440x1080 before each drag
+    pc = pytest.importorskip("padcontroller")
+    a, before = 0.75, (1440, 1080)
+    assert pc.keep_proportions(before, (1140, 1080), a) == (1140, 855)    # side edge: width wins
+    assert pc.keep_proportions(before, (1440, 810), a) == (1080, 810)     # bottom edge: height wins
+    assert pc.keep_proportions(before, (1200, 700), a) == (933, 700)      # corner: the bigger change
+    assert pc.keep_proportions(None, (1000, 999), a) == (1000, 750)       # nothing before: width
+
+
+def test_player_fills_its_monitor_at_the_tables_proportions():
+    # the maximize box / title double-click: the largest picture that keeps
+    # its shape, centred; the frame as on David's PC (11 px sides, 45 top)
+    pc = pytest.importorskip("padcontroller")
+    win, client = (1653, 516, 1462, 1136), (1664, 561, 1440, 1080)
+    x, y, w, h = pc.fill_monitor(win, client, (0, 0, 3840, 2160))
+    assert h <= 2160 and abs((w - 22) * 0.75 - (h - 56)) <= 1
+    assert x == (3840 - w) // 2 and y == (2160 - h) // 2
+    x, y, w, h = pc.fill_monitor(win, client, (3840, 0, 5760, 1080))    # a second, smaller monitor
+    assert 3840 <= x and x + w <= 5760 and h <= 1080
+
+
+def test_player_grips_take_16_px_inside_the_playfield_edge():
+    # PAD-845: "loosely grab 16 pixels from the edge", like the display.
+    # The picture 1440x1080 at 1664,561 on the screen
+    pc = pytest.importorskip("padcontroller")
+    c = (1664, 561, 1440, 1080)
+    assert pc.grip_edge((1664 + 1440 - 10, 900), c) == "r"
+    assert pc.grip_edge((1664 + 5, 900), c) == "l"
+    assert pc.grip_edge((2300, 561 + 1080 - 15), c) == "b"
+    assert pc.grip_edge((2300, 561 + 3), c) == "t"
+    assert pc.grip_edge((1664 + 1440 - 2, 561 + 1080 - 2), c) == "br"
+    assert pc.grip_edge((1664 + 4, 561 + 4), c) == "tl"
+    assert pc.grip_edge((1664 + 1440 - 17, 900), c) is None                 # 17 px in: the game's
+    assert pc.grip_edge((2300, 900), c) is None
+    assert pc.grip_edge((1600, 900), c) is None                             # off the picture
+
+
+def test_player_grip_drag_resizes_in_the_tables_proportions():
+    pc = pytest.importorskip("padcontroller")
+    win, client = (1653, 516, 1462, 1136), (1664, 561, 1440, 1080)
+    x, y, w, h = pc.resized("r", win, client, (3100, 900), (2800, 900))
+    assert (x, y) == (1653, 516) and (w - 22, h - 56) == (1140, 855)
+    x, y, w, h = pc.resized("l", win, client, (1670, 900), (1970, 900))
+    assert x + w == 1653 + 1462 and w - 22 == 1140                          # the right side stays
+    x, y, w, h = pc.resized("b", win, client, (2300, 1630), (2300, 1360))
+    assert (w - 22, h - 56) == (1080, 810)
+    x, y, w, h = pc.resized("t", win, client, (2300, 565), (2300, 835))
+    assert y + h == 516 + 1136 and h - 56 == 810                            # the bottom stays
+    assert pc.resized("r", win, client, (3100, 900), (0, 900))[2] - 22 == pc.PLAYER_MIN_W
+
+
+def test_a_saved_playfield_place_fits_its_monitor():
+    # PAD-851: Iron Maiden filled the 4K screen 2881 wide; JAWS (1.5 tall)
+    # then opened 2881 x 4322, half of it below the screen
+    pc = pytest.importorskip("padcontroller")
+    mons = [(0, 0, 3840, 2160)]
+    x, y, w, h = pc.fit_on_monitor((479, 0, 2881, 4322), 1.5, mons)
+    assert h == 2160 and w == 1440 and 0 <= x and x + w <= 3840 and y == 0
+    assert pc.fit_on_monitor((100, 100, 1000, 1500), 1.5, mons) == (100, 100, 1000, 1500)  # fits: kept
+    x, y, w, h = pc.fit_on_monitor((3500, 1900, 1000, 1500), 1.5, mons)                    # hangs off: moved in
+    assert (w, h) == (1000, 1500) and x + w <= 3840 and y + h <= 2160
+    two = [(0, 0, 3840, 2160), (3840, 0, 5760, 1080)]
+    x, y, w, h = pc.fit_on_monitor((4000, 0, 1500, 2250), 1.5, two)                        # on the small one
+    assert h == 1080 and x >= 3840 and x + w <= 5760
+    assert pc.fit_on_monitor((1, 2, 3, 4), 1.0, []) == (1, 2, 3, 4)
+
+
+def test_a_registration_whose_folder_is_gone_is_not_registered(tmp_path):
+    # PAD-850: the tab said "Registered" while PAD.Controller pointed at a
+    # deleted folder, and every table failed to load it
+    vs = pytest.importorskip("vpxsetup")
+    kit = tmp_path / "vpx"
+    kit.mkdir()
+    (kit / "padcontroller.py").write_text("")
+    py = tmp_path / "pythonw.exe"
+    py.write_bytes(b"")
+    server = '%s "C:/x/localserver.py" {7D5B2A1E}' % py
+    assert vs.registration_ok(str(kit), server)
+    assert vs.registration_ok(str(kit), '"%s" localserver.py' % py)            # a quoted exe
+    assert not vs.registration_ok(str(tmp_path / "gone"), server)               # the folder deleted
+    assert not vs.registration_ok(str(kit), str(tmp_path / "nopython.exe") + " x")
+    assert not vs.registration_ok("", server)
+    assert vs.controller_registered() in (True, False)                          # never raises
+
+
+def test_the_registration_is_known_to_be_this_kits_or_anothers(tmp_path, monkeypatch):
+    """PAD-943: David's Spike 1 tables stopped on "no Spike 2 run is up": the
+    registered PAD.Controller was an older checkout's. The state says whose
+    the registration is, and the page offers Register when it is another's."""
+    vs = pytest.importorskip("vpxsetup")
+    pl = pytest.importorskip("padlaunch")
+    pd = pytest.importorskip("padisplay")
+    assert vs.registered_here(vs.HERE) and vs.registered_here(os.path.join(vs.HERE, "."))
+    assert not vs.registered_here(str(tmp_path)) and not vs.registered_here("")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(pd, "CONF", str(tmp_path / "display.conf"))
+    monkeypatch.setattr(pd, "monitors", lambda: [{"n": 1, "x": 0, "y": 0, "w": 1920, "h": 1080, "primary": True}])
+    monkeypatch.setattr(vs, "vpx_tables_dir", lambda: "")
+    monkeypatch.setattr(vs, "controller_registration", lambda: (True, str(tmp_path)))
+    st = vs.state()
+    assert st["registered"] and st["registered_to"] == str(tmp_path) and st["registered_here"] is False
+    monkeypatch.setattr(vs, "controller_registration", lambda: (True, vs.HERE))
+    assert vs.state()["registered_here"] is True
+    monkeypatch.setattr(vs, "controller_registration", lambda: (False, ""))
+    st = vs.state()
+    assert not st["registered"] and not st["registered_here"] and st["registered_to"] == ""
+
+
+def test_the_places_a_card_is_looked_for_name_the_platforms_libraries(tmp_path, monkeypatch):
+    # PAD-943: the Spike 1 refusal named the Spike 2 library only
+    pl = pytest.importorskip("padlaunch")
+    lib = tmp_path / "Stern" / "spike2"
+    lib.mkdir(parents=True)
+    (tmp_path / "Stern" / "spike1").mkdir()
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.delenv("PAD_VPX_LIBRARY", raising=False)
+    monkeypatch.delenv("PAD_VPX_CARD", raising=False)
+    json.dump({"library": str(lib)}, open(pl.KIT, "w", encoding="utf-8"))
+    two = pl.card_places("got_le", "spike1")
+    assert str(lib) in two and str(tmp_path / "Stern" / "spike1") in two and "libraries" in two
+    one = pl.card_places("rush_le")
+    assert str(lib) in one and "spike1" not in one and "library " in one
+
+
+# ------------------------------------------------- the backglass (PAD-852) --
+
+_B2S_HARNESS = r'''
+Class FakeB2S
+	Public Sub Run : WScript.Echo "run" : End Sub
+	Public Sub [Stop] : WScript.Echo "stop" : End Sub
+	Public Property Let B2SName(v) : WScript.Echo "name " & v : End Property
+	Public Sub B2SSetData(n, v) : WScript.Echo "b2s" & n & "=" & v : End Sub
+End Class
+Class FakePad
+	Public Function PadDOFInit(rom, f) : WScript.Echo "dofinit " & rom & " " & (f <> "") : PadDOFInit = DofUp : End Function
+	Public Sub PadDOF(k, n, v) : WScript.Echo k & n & "=" & v : End Sub
+	Public Sub PadDOFFinish : WScript.Echo "doffinish" : End Sub
+End Class
+Dim Controller, DofUp, DOFSet
+Function PadNewB2S
+	If NoB2S Then Err.Raise 429, "x", "ActiveX component can't create object" : Exit Function
+	Set PadNewB2S = New FakeB2S
+End Function
+Function Setting(s, k)
+	If k = "ForceDisableB2S" Then Setting = ForceOff Else Setting = DOFSet
+End Function
+'''
+
+
+def _run_padspike2(tmp_path, lines):
+    """PADSPIKE2.vbs as Visual Pinball loads it (ExecuteGlobal), with a
+    stand-in B2S.Server, then `lines`; what it echoed, and padspike2.log."""
+    import subprocess
+    sysvbs = open(os.path.join(VPX, "PADSPIKE2.vbs"), encoding="utf-8").read()
+    assert sysvbs.count('CreateObject("B2S.Server")') == 1
+    sysvbs = sysvbs.replace('CreateObject("B2S.Server")', "PadNewB2S")
+    (tmp_path / "sys.vbs").write_text(sysvbs, encoding="latin-1")
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Dim NoB2S, ForceOff, VPBuildVersion, cGameName",
+        "VPBuildVersion = 10800 : ForceOff = 0 : cGameName = \"metallica_spike\"",
+        _B2S_HARNESS,
+        'ExecuteGlobal CreateObject("Scripting.FileSystemObject").OpenTextFile("%s").ReadAll'
+        % str(tmp_path / "sys.vbs")] + lines), encoding="latin-1")
+    env = dict(os.environ, TEMP=str(tmp_path), TMP=str(tmp_path))
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True,
+                       timeout=60, env=env)
+    assert not r.stderr.strip(), r.stdout + r.stderr
+    log = tmp_path / "padspike2.log"
+    return r.stdout.split(), log.read_text(encoding="latin-1") if log.exists() else ""
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs PADSPIKE2.vbs under cscript")
+def test_padspike2_starts_the_backglass_beside_the_controller(tmp_path):
+    # controller.vbs's LoadVPM made `Controller` a B2S.Server, and that is
+    # what shows a ROM table's backglass; PADSPIKE2.vbs makes it
+    # PAD.Controller, so B2S.Server has to run beside it (Metallica: none)
+    out, log = _run_padspike2(tmp_path, [
+        'PadB2SName = "mtl_180h"', "PadStartB2S",
+        'WScript.Echo "alt=" & B2SOnALT & " on=" & B2SOn',
+        "PadStopB2S", 'WScript.Echo "alt=" & B2SOnALT'])
+    assert out == ["name", "mtl_180h", "run", "alt=True", "on=False", "stop", "alt=False"]
+    assert "B2S.Server: started as mtl_180h err=0" in log
+    # no ROM name kept: the table's cGameName
+    out, _ = _run_padspike2(tmp_path, ["PadStartB2S"])
+    assert out[:2] == ["name", "metallica_spike"]
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs PADSPIKE2.vbs under cscript")
+def test_padspike2_backglass_off_or_missing_changes_nothing(tmp_path):
+    for pre in ("ForceOff = 1", "B2SOff = True"):        # Visual Pinball's setting, the table's
+        out, log = _run_padspike2(tmp_path, [pre, "PadStartB2S", 'WScript.Echo "alt=" & B2SOnALT'])
+        assert out == ["alt=False"], pre
+        assert "B2S.Server: off" in log
+    # B2S not installed: no backglass, no message box, the load goes on
+    out, log = _run_padspike2(tmp_path, ["NoB2S = True", "PadStartB2S", "PadStopB2S",
+                                         'WScript.Echo "alt=" & B2SOnALT'])
+    assert out == ["alt=False"]
+    assert "B2S.Server: none" in log
+    # LoadVPM starts it, after the controller
+    sysvbs = open(os.path.join(VPX, "PADSPIKE2.vbs"), encoding="utf-8").read()
+    body = sysvbs[sysvbs.index("Sub LoadVPM("):]
+    body = body[:body.index("End Sub")]
+    assert body.index('CreateObject("PAD.Controller")') < body.index("PadStartB2S")
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs PADSPIKE2.vbs under cscript")
+def test_padspike2_hosts_dof_before_the_backglass(tmp_path):
+    # PAD-879: under VPinMAME a ROM table's DOF is B2S.Server's plugin hearing
+    # the ROM; beside PAD.Controller it heard nothing, and `Sub DOF` was empty.
+    # PAD.Controller hosts DOF now, started for the ROM's name BEFORE B2S (so
+    # it opens the cabinet's devices first), and the script's DOF goes there;
+    # Visual Pinball's "toy only" settings mute the sound the toy replaces
+    pre = ["Set Controller = New FakePad", 'PadB2SName = "mtl_180h"', "DOFSet = 1"]
+    calls = ["PadStartDOF", "PadStartB2S",
+             'WScript.Echo "dof=" & PadDOFOn',
+             'WScript.Echo "[" & SoundFX("knock", DOFKnocker) & "]"',
+             'WScript.Echo "[" & SoundFXDOF("bump", 141, DOFPulse, DOFContactors) & "]"',
+             "DOF 101, DOFOn", "DOFALT 102, DOFOff", "PadStopB2S"]
+    out, log = _run_padspike2(tmp_path, pre + ["DofUp = True"] + calls)
+    assert out == ["dofinit", "mtl_180h", "True", "name", "mtl_180h", "run", "dof=True",
+                   "[]", "E141=1", "E141=0", "[]", "E101=1", "E102=0", "stop", "doffinish"]
+    assert "DOF: True for mtl_180h err=0" in log
+    # sound and toy (2): both
+    out, _ = _run_padspike2(tmp_path, pre[:2] + ["DOFSet = 2", "DofUp = True"] + calls[:1] + [
+        'WScript.Echo "[" & SoundFX("knock", DOFKnocker) & "]"',
+        'WScript.Echo "[" & SoundFXDOF("bump", 141, DOFPulse, DOFContactors) & "]"'])
+    assert out[-4:] == ["[knock]", "E141=1", "E141=0", "[bump]"]
+    # no DOF installed: every sound plays (a toy that cannot fire mutes
+    # nothing), and the script's DOF reaches B2S.Server as controller.vbs's
+    # DOFALT would
+    out, _ = _run_padspike2(tmp_path, pre + ["DofUp = False"] + calls)
+    assert out == ["dofinit", "mtl_180h", "True", "name", "mtl_180h", "run", "dof=False",
+                   "[knock]", "b2s141=1", "b2s141=0", "[bump]", "b2s101=1", "b2s102=0", "stop"]
+    # B2S turned off: no DOF either (controller.vbs's rule)
+    out, log = _run_padspike2(tmp_path, pre + ["DofUp = True", "ForceOff = 1"] + calls[:3])
+    assert out == ["dof=False"] and "DOF: off" in log
+    # LoadVPM starts DOF after the controller and before the backglass
+    sysvbs = open(os.path.join(VPX, "PADSPIKE2.vbs"), encoding="utf-8").read()
+    body = sysvbs[sysvbs.index("Sub LoadVPM("):]
+    body = body[:body.index("End Sub")]
+    assert (body.index('CreateObject("PAD.Controller")') < body.index("PadStartDOF")
+            < body.index("PadStartB2S"))
+    assert "Sub DOF(DOFevent, State) : End Sub" not in sysvbs
+
+
+def test_metallica_dof_hears_the_roms_numbers():
+    # PAD-879: mtl_180h's DOF config is keyed by the SAM ROM's solenoids,
+    # lamps and switches; the map read backwards gives them
+    pc = pytest.importorskip("padcontroller")
+    m = pc.VpxMap("metallica_spike")
+    assert m.dof_sols[15] == (8, 5) and m.dof_sols[16] == (8, 0)     # flippers, not 46/48
+    assert 46 not in m.dof_sols and 48 not in m.dof_sols
+    assert m.dof_sols[13] == (8, 3) and m.dof_sols[9] == (9, 2)      # sling, pop
+    assert m.dof_flashers[27] == [(9, 24), (9, 25), (9, 26), (9, 27)]  # f27 SPARKY FLASH 1-4
+    assert m.dof_lamps[17] == [(9, 35), (9, 36), (9, 37)]            # l17, an RGB insert
+    assert m.dof_switches[37] == [15] and m.dof_switches[63] == [1]  # Spike 2 id -> SAM switch
+    assert 22 not in sum(m.dof_switches.values(), [])                # no Spike 2 switch: none
+    # a title on core.vbs's own numbering keeps them (Whitestar's flippers are 46/48)
+    g = pc.VpxMap("godzilla_le")
+    assert 46 in g.dof_sols and 48 in g.dof_sols and g.dof_lamps
+
+
+def test_bridge_feeds_dof_the_machines_coils_lights_and_switches():
+    pc = pytest.importorskip("padcontroller")
+
+    class FakeDOF:
+        def __init__(self):
+            self.got = []
+
+        def Init(self, host, table, rom):
+            self.got.append(("init", host, rom))
+
+        def UpdateTableElement(self, kind, n, v):
+            self.got.append((kind, n, v))
+
+        def Finish(self):
+            self.got.append(("finish",))
+
+    dof = FakeDOF()
+    b = pc.Bridge()
+    b.set_game("metallica_spike")
+    assert b.dof_init("mtl_180h", "x.vpx", factory=lambda: dof)
+    assert b.dof_init("mtl_180h", "x.vpx", factory=lambda: dof)      # Reset: the same one
+    data = bytearray(pc.READ_N)
+    data[20 + 9 * 96 + 36] = 200                                     # l17's green channel
+    data[20 + 9 * 96 + 25] = 128                                     # one of f27's LEDs
+    b.sol_state[pc.sol_number(8, 5)] = 1                             # left flipper held
+    b._poll_dof(bytes(data))
+    b._poll_dof(bytes(data))                                         # unchanged: nothing again
+    b.sol_state[pc.sol_number(8, 5)] = 0
+    b._poll_dof(bytes(data))
+    b.set_switch(1037, 1)                                            # a Spike 2 id the table wrote
+    b.set_switch(1037, 1)
+    b.dof_send("E", 101, 1)                                          # the script's own DOF
+    b.dof_finish()
+    got = dof.got
+    assert got[0] == ("init", "B2SServer", "mtl_180h") and got[-1] == ("finish",)
+    assert got.count(("S", 15, 1)) == 1 and ("S", 15, 0) in got
+    assert got.index(("S", 15, 1)) < got.index(("S", 15, 0))
+    assert ("L", 17, 1) in got and ("L", 18, 0) in got
+    assert ("S", 27, 128) in got and ("S", 19, 0) in got
+    assert got.count(("W", 15, 1)) == 1 and ("E", 101, 1) in got
+    assert len([g for g in got if g[0] == "S" and g[1] == 16]) == 1  # sent once, off
+    assert b.dof is None
+
+    # no DOF installed: off, and nothing is sent or raised
+    def missing():
+        raise OSError("Invalid class string")
+    assert not b.dof_init("mtl_180h", "x.vpx", factory=missing)
+    assert "no DirectOutput.ComObject" in b.dof.why
+    b.dof_send("E", 101, 1)
+    b.set_switch(1037, 0)
+    b.dof_finish()
+
+
+_KEYS_HARNESS = '''
+Class FakeCtl
+	Public Property Let Switch(n, v) : WScript.Echo "sw" & n & "=" & v : End Property
+End Class
+Class FakeFlips
+	Public FlipperSolNumber(3)
+	Sub FlipL(e) : WScript.Echo "L=" & e : End Sub
+	Sub FlipR(e) : WScript.Echo "R=" & e : End Sub
+	Sub FlipUL(e) : WScript.Echo "UL=" & e : End Sub
+	Sub FlipUR(e) : WScript.Echo "UR=" & e : End Sub
+End Class
+Set Controller = New FakeCtl
+Set vpmFlips = New FakeFlips
+vpmFlips.FlipperSolNumber(0) = 48 : vpmFlips.FlipperSolNumber(1) = 46
+vpmFlips.FlipperSolNumber(2) = 36 : vpmFlips.FlipperSolNumber(3) = 0
+LeftFlipperKey = 42 : RightFlipperKey = 54
+StagedLeftFlipperKey = 219 : StagedRightFlipperKey = 184
+keyStagedFlipperL = LeftFlipperKey : keyStagedFlipperR = RightFlipperKey
+'''
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs PADSPIKE2.vbs under cscript")
+def test_padspike2_left_key_flips_the_upper_left_flipper(tmp_path):
+    # PAD-878 "GODZILLA VPX - no third flipper": Visual Pinball's own staged
+    # keys default to Left Windows / Right Alt, and the handlers read those,
+    # so the left key never closed UP LEFT FLIP (1061) and Godzilla's upper
+    # flipper sat still. VPMKeys.vbs's keyStagedFlipperL is the left key
+    # itself, as on the machine, whose button closes both switches.
+    out, _ = _run_padspike2(tmp_path, [_KEYS_HARNESS, "vpmKeyDown 42", "vpmKeyUp 42"])
+    assert out == ["sw1060=True", "L=True", "UL=True", "sw1061=True",
+                   "sw1060=False", "L=False", "UL=False", "sw1061=False"]
+    # no upper right flipper on Godzilla: the right key is the right flipper only
+    out, _ = _run_padspike2(tmp_path, [_KEYS_HARNESS, "vpmKeyDown 54", "vpmKeyUp 54"])
+    assert out == ["sw1059=True", "R=True", "UR=True", "sw1059=False", "R=False", "UR=False"]
+    # a table that names its own staged key keeps the upper flipper on that key
+    out, _ = _run_padspike2(tmp_path, [_KEYS_HARNESS, "keyStagedFlipperL = 219",
+                                       "vpmKeyDown 42", "vpmKeyDown 219", "vpmKeyUp 219"])
+    assert out == ["sw1060=True", "L=True", "UL=True", "sw1061=True", "UL=False", "sw1061=False"]
+
+
+def test_rom_patchers_keep_the_rom_name_for_the_backglass():
+    tm = pytest.importorskip("patch_turtles_le")
+    m = json.load(open(os.path.join(VPX, "turtles_le.vpxmap.json"), encoding="utf-8"))
+    out, _ = tm.patch_script('Const cGameName = "tmnt_104"\nLoadVPM "01560000", "DE.VBS", 3.26', m)
+    assert 'Const cGameName = "%s"\nPadB2SName = "tmnt_104"' % m["title"] in out
+    mt = pytest.importorskip("patch_metallica_spike")
+    src = open(mt.__file__, encoding="utf-8").read()
+    assert "PadB2SName = \"mtl_180h\"" in src
+    # PAD-852: the output is the map's name whatever the download is called,
+    # so the backglass padvpx copies to that name sits beside the table
+    assert 'out_name = m.get("output") or' in src
+
+
+def _metallica_drop_script():
+    # Only the patcher's required landmarks and the two computed drop-bank
+    # writes. No table download or artwork is needed for this regression.
+    return '''ExecuteGlobal GetTextFile("controller.vbs")
+Const cGameName = "mtl_180h"
+Const UseSolenoids = 1
+Const UseLamps = 1
+Const UseVPMModSol = 1
+LoadVPM "x", "sam.VBS", 3.10
+SolCallback(15) = "SolLFlipper"
+SolCallback(16) = "SolRFlipper"
+Sub Table_Init
+InitVPMFFlipsSAM
+vpmMapLights allLamps
+vpmNudge.TiltSwitch = 16
+End Sub
+Sub Table_KeyDown(keycode)
+If keycode = StartGameKey Then Controller.Switch(16) = 1
+If vpmKeyDown(keycode) Then Exit Sub
+End Sub
+Sub Table_KeyUp(keycode)
+If keycode = StartGameKey Then Controller.Switch(16) = 0
+If vpmKeyUp(keycode) Then Exit Sub
+End Sub
+' This table has raised DT switches = 1 and dropped = 0
+controller.switch(60) = 1
+controller.switch(61) = 1
+controller.switch(62) = 1
+Set DT60 = (new DropTarget)(sw60, sw60a, BM_sw60, 60, 0, false)
+Set DT61 = (new DropTarget)(sw61, sw61a, BM_sw61, 61, 0, false)
+Set DT62 = (new DropTarget)(sw62, sw62a, BM_sw62, 62, 0, false)
+Sub DropTarget(Switchid)
+controller.Switch(Switchid mod 100) = 0  ' dropped DT
+End Sub
+Sub RaiseTarget(Switchid)
+controller.Switch(Switchid mod 100) = 1  ' raised DT
+End Sub'''
+
+
+def test_metallica_drop_bank_and_resync_agree_on_logical_polarity():
+    mt = pytest.importorskip("patch_metallica_spike")
+    m = json.load(open(mt.MAP, encoding="utf-8"))
+    out, _ = mt.patch_script(_metallica_drop_script(), m)
+    assert "controller.Switch(Switchid mod 100) = 1" in out
+    assert "controller.Switch(Switchid mod 100) = 0" in out
+    assert "Controller.Switch(DTArray(i).sw) = DTArray(i).isDropped" in out
+    assert "Not DTArray(i).isDropped" not in out
+    # the table's own load-time writes of the three raised targets flip too (PR #21 review)
+    for sid in (1048, 1049, 1050):
+        assert re.search(r"(?m)^controller\.switch\(%d\) = 0\t" % sid, out)
+    assert "raised DT switches = 1 and dropped = 0" not in out
+    # Computed SAM aliases stay on their small numbers; the controller's
+    # existing map resolves each of the three physical drop targets.
+    assert [m["switch_rewrite"][str(n)] for n in (60, 61, 62)] == [48, 49, 50]
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the patched drop-bank writes under cscript")
+def test_metallica_drop_and_raise_publish_closed_and_open(tmp_path):
+    mt = pytest.importorskip("patch_metallica_spike")
+    m = json.load(open(mt.MAP, encoding="utf-8"))
+    out, _ = mt.patch_script(_metallica_drop_script(), m)
+    actions = re.search(r"(?ms)^Sub DropTarget.*?^End Sub\nSub RaiseTarget.*?^End Sub", out).group(0)
+    init = "\n".join(re.findall(r"(?m)^controller\.switch\(10[45]\d\) = .*$", out))
+    vbs = tmp_path / "drops.vbs"
+    vbs.write_text('''Class TestController
+Public Property Let Switch(n, value)
+WScript.Echo n & "=" & CInt(value)
+End Property
+End Class
+Dim Controller : Set Controller = New TestController
+''' + init + '\n' + actions + '\nDropTarget 160 : RaiseTarget 160\nDropTarget 161 : RaiseTarget 161\nDropTarget 162 : RaiseTarget 162\n', encoding="utf-8")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["1048=0", "1049=0", "1050=0", "60=1", "60=0", "61=1", "61=0", "62=1", "62=0"]
+
+
+def test_tmnt_shooter_lane_top_switch_ends_the_turtle_select():
+    # PAD-897: the game keeps the turtle select open, turtles cycling, until
+    # the launched ball crosses the shooter lane's upper switch; the table had
+    # no object for it, so the pick waited for the first playfield switch
+    tm = pytest.importorskip("patch_turtles_le")
+    for name, sid in (("turtles_pro", 66), ("turtles_le", 67)):   # UPPER SHOOTER LANE / SKILL SHOT
+        m = json.load(open(os.path.join(VPX, name + ".vpxmap.json"), encoding="utf-8"))
+        trig = m["retrofit_triggers"]["PadUpperShooter"]
+        assert trig["switch"] == sid and trig["clone"] == "sw14"
+        assert str(sid) not in m["unmapped"]["stern_switches_without_object"]
+        out, _ = tm.patch_script("", m)
+        assert "Sub PadUpperShooter_Hit : Controller.Switch(%d) = 1 : End Sub" % (1000 + sid) in out
+        assert "Sub PadUpperShooter_unHit : Controller.Switch(%d) = 0 : End Sub" % (1000 + sid) in out
+
+
+def test_tmnt_plunger_key_is_the_tables_plunger_not_the_action_button(tmp_path):
+    # PAD-1281: the plunger key pulled the table's plunger AND pressed the
+    # Action button, so the game fired its AUTO PLUNGER as the key went down
+    # and a pulled plunger never launched the ball. The lockbar key is the
+    # Action button; the plunger key is left to the table's own plunger.
+    tm = pytest.importorskip("patch_turtles_le")
+    vs = pytest.importorskip("vpxsetup")
+    src = ("Sub Table1_KeyDown(ByVal keycode)\n\tIf keycode = PlungerKey Then\n\t\tPlunger.PullBack\n\tEnd If\nEnd Sub\n"
+           "Sub Table1_KeyUp(ByVal keycode)\n\tIf keycode = PlungerKey Then\n\t\tPlunger.Fire\n\tEnd If\nEnd Sub\n")
+    for name in ("turtles_pro", "turtles_le"):
+        out, m = _tmnt_patch(name, src)
+        launch = [ln for ln in out.split("\n") if "Controller.Switch(swLaunch)" in ln]
+        assert len(launch) == 2, launch
+        heads = [ln.strip() for ln in out.split("\n") if "keycode = LockBarKey" in ln or "Or keycode" in ln]
+        assert heads == ["If keycode = LockBarKey Then"] * 2, heads
+        assert "Plunger.PullBack" in out and "Plunger.Fire" in out
+        assert tm.PLUNGER_MARK in out
+        # a table patched before is asked to patch again; one patched now is not
+        tables = tmp_path / name
+        tables.mkdir()
+        script = tables / "x (PAD).script.vbs"
+        script.write_text(out.replace(tm.PLUNGER_MARK, ""), encoding="utf-8")
+        why = vs.missed_fixes(str(tables), "x (PAD).vpx", m["repatch"])
+        assert "pulling its plunger fires the auto plunger at once instead of launching the ball" in why
+        script.write_text(out, encoding="utf-8")
+        assert not any("plunger" in w for w in vs.missed_fixes(str(tables), "x (PAD).vpx", m["repatch"]))
+
+
+def test_tmnt_dof_hears_data_easts_numbers():
+    # PAD-896: tmnt_104's DOF config is keyed by Data East's solenoids, not
+    # the small numbers the patched script calls the Stern coils by (S11 was
+    # Data East's GI relay, S14 a flasher)
+    pc = pytest.importorskip("padcontroller")
+    for title in ("turtles_pro", "turtles_le"):
+        m = pc.VpxMap(title)
+        assert m.dof_sols[2] == (8, 1) and m.dof_sols[4] == (8, 4)        # trough, auto plunger
+        assert m.dof_sols[7] == (8, 7)                                     # the lock's kick out
+        assert {m.dof_sols[n] for n in (17, 18, 19)} == {(9, 2), (9, 3), (9, 4)}   # pops
+        assert m.dof_sols[20] == (8, 3) and m.dof_sols[21] == (8, 2)      # slings
+        assert m.dof_sols[46] == (8, 0) and m.dof_sols[48] == (8, 5)      # flippers
+        assert not {1, 3, 11, 12, 13, 14, 15, 36} & set(m.dof_sols)
+
+
+
+def test_tmnt_dof_hears_the_slings_as_data_easts_switches():
+    # PAD-1116: slings DOF did not fire while pops did. The pops reach DOF
+    # twice (S17-19 and Data East's switches 46-48, which the table sends);
+    # the slings only as S20/S21, because this table's slings sent Data East
+    # no switch at all. Data East's tables send them as 21 (left) and 22
+    # (right), and DOF configs fire sling toys on those: so does the bridge.
+    pc = pytest.importorskip("padcontroller")
+    for title, left, right in (("turtles_pro", 70, 69), ("turtles_le", 71, 70)):
+        m = pc.VpxMap(title)
+        assert m.dof_switches[left] == [21] and m.dof_switches[right] == [22]
+        assert m.switch_rewrite[21] == left and m.switch_rewrite[22] == right
+
+
+def test_a_coil_pulse_between_two_reads_still_reaches_the_table():
+    # PAD-1116: the game kicks LOWER LOCK for ~20 ms; Visual Pinball reads
+    # ChangedSolenoids once a frame, so a pulse that came and went between two
+    # reads reached the table as OFF only, and the lock never let the ball go
+    # (a slow 4K frame in multiball). It is reported ON, then OFF next read.
+    pc = pytest.importorskip("padcontroller")
+    b = pc.Bridge()
+    b.set_game("turtles_pro")
+    b._sol_set(3, 1)
+    b._sol_set(3, 0)
+    assert b.changed_solenoids() == [[3, 1]]
+    assert b.changed_solenoids() == [[3, 0]]
+    assert b.changed_solenoids() is None
+    b._sol_set(3, 1)                              # a long one: on, then off, as ever
+    assert b.changed_solenoids() == [[3, 1]]
+    b._sol_set(3, 0)
+    assert b.changed_solenoids() == [[3, 0]]
+    assert b.changed_solenoids() is None
+
+def _tmnt_patch(title, src):
+    tm = pytest.importorskip("patch_turtles_le")
+    m = json.load(open(os.path.join(VPX, "%s.vpxmap.json" % title), encoding="utf-8"))
+    return tm.patch_script(src, m)[0], m
+
+
+_TMNT_VBS_FAKES = [
+    # Controller: keeps each switch's state and how often it was made
+    "Class FakeCtl", "Public St, Made",
+    "Private Sub Class_Initialize : Set St = CreateObject(\"Scripting.Dictionary\") : "
+    "Set Made = CreateObject(\"Scripting.Dictionary\") : End Sub",
+    "Public Property Let Switch(n, v)",
+    "If v And Not St.Item(n) Then Made.Item(n) = Made.Item(n) + 1",
+    "St.Item(n) = CBool(v)",
+    "End Property",
+    "Public Property Let PadNote(t) : WScript.Echo \"note: \" & t : End Property",
+    "End Class",
+    # vpmTimer: AddTimer queues; Flush runs the queue in time order (40 ms ticks),
+    # GameTime following it; Lose = a word: the next timer naming it is dropped,
+    # as core.vbs drops every timer past its 50th (PAD-1334)
+    "Class FakeTimer", "Public Q, Now, Lose",
+    "Private Sub Class_Initialize : Set Q = CreateObject(\"Scripting.Dictionary\") : Now = 0 : Lose = \"\" : End Sub",
+    "Public Sub AddTimer(d, c)",
+    "If Lose <> \"\" And InStr(c, Lose) > 0 Then Lose = \"\" : Exit Sub",
+    "Q.Add Q.Count & \"_\" & Rnd, Array(Now + d \\ 40, c)",
+    "End Sub",
+    "Public Sub Flush",
+    "Dim k, best, t",
+    "Do While Q.Count > 0",
+    "best = \"\" : t = 1E9",
+    "For Each k In Q.Keys : If Q.Item(k)(0) < t Then t = Q.Item(k)(0) : best = k",
+    "Next",
+    "Now = t : GameTime = t * 40 : c = Q.Item(best)(1) : Q.Remove best : ExecuteGlobal c",
+    "Loop", "End Sub", "End Class",
+    "Dim c, GameTime : GameTime = 0",
+    "Sub Wait(ms) : GameTime = GameTime + ms : vpmTimer.Now = GameTime \\ 40 : End Sub",
+    "Class FakeStack", "Public Balls",
+    "Public Sub Update : End Sub",
+    "Public Sub ExitSol_On : If Balls > 0 Then Balls = Balls - 1 : WScript.Echo \"out\"",
+    "End Sub", "End Class",
+    "Class FakeKicker", "Public Sub DestroyBall : End Sub",
+    "Public Sub Kick(a, p) : WScript.Echo \"kicked back\" : End Sub", "End Class",
+    "Class FakeVan", "Public blenddisablelighting", "End Class",
+    "Dim Controller, vpmTimer, bsVan, padVanUp, padVanComing, padVanFalling, padVanPost, sw41, pizzavan, "
+    "padVanComeT, padVanFallT",
+    "Set Controller = New FakeCtl : Set vpmTimer = New FakeTimer : Set bsVan = New FakeStack",
+    "bsVan.Balls = 0 : padVanUp = 0 : padVanComing = 0 : padVanFalling = 0 : padVanPost = False",
+    "Set sw41 = New FakeKicker : Set pizzavan = New FakeVan",
+    "Sub pizzavanshake : End Sub",
+    "Sub Show(tag)",
+    "WScript.Echo tag & \": upper \" & padVanUp & \" lower \" & bsVan.Balls & \" sw \" & "
+    "-CInt(Controller.St.Item(1051)) & -CInt(Controller.St.Item(1052)) & -CInt(Controller.St.Item(1053)) & "
+    "\" made \" & Controller.Made.Item(1051) & Controller.Made.Item(1052) & Controller.Made.Item(1053)",
+    "End Sub",
+]
+
+
+def _tmnt_run_vbs(tmp_path, out, steps):
+    lines = out.split("\n")
+    a = lines.index("Sub PadVanIn(aKicker)")
+    b = lines.index("Sub PadKrang(Enabled)")
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join(_TMNT_VBS_FAKES + lines[a:b] + steps), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    return [x.strip() for x in r.stdout.strip().splitlines()], r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the TMNT table script under cscript")
+def test_tmnt_lock_ball_goes_to_the_upper_section_and_drops_on_its_coil(tmp_path):
+    # PAD-896: the Pro let a ball put straight onto LOWER LOCK 1 out again
+    # (emulator: LOWER LOCK fired 7 s later, nothing locked); a ball resting
+    # on UPPER LOCK 1 is what the game drops (UPPER LOCK) and holds.
+    # PAD-1116: a ball shot in crosses the free switches above its place
+    # (the game calls a lock switch no ball crosses broken); a short UPPER
+    # LOCK pulse drops one ball, onto an empty LOWER LOCK only.
+    out, m = _tmnt_patch("turtles_pro", "Sub sw41_Hit()\n\tController.Switch(41) = 1\nEnd Sub\n")
+    assert "\tPadVanIn Me" in out
+    tm = pytest.importorskip("patch_turtles_le")
+    assert any(x.startswith('SolCallback(4) = "PadVanDrop"') for x in tm.gen_sol_callbacks(m))
+    got, why = _tmnt_run_vbs(tmp_path, out, [
+        "PadVanIn sw41 : vpmTimer.Flush : Show \"one in\"",
+        "PadVanIn sw41 : vpmTimer.Flush : Show \"two in\"",
+        "PadVanDrop True : PadVanDrop False : vpmTimer.Flush : Show \"pulse\"",
+        "PadVanDrop True : PadVanDrop False : vpmTimer.Flush : Show \"pulse, lower full\"",
+        "PadVanOut True : PadVanOut False : vpmTimer.Flush : Show \"lower out\"",
+        "PadVanIn sw41 : PadVanIn sw41 : PadVanIn sw41 : vpmTimer.Flush : Show \"three more shot in\""])
+    assert got == [
+        "one in: upper 1 lower 0 sw 100 made 111",          # crossed 3 and 2, rests on 1
+        "two in: upper 2 lower 0 sw 110 made 122",          # crossed 3, rests on 2
+        "pulse: upper 1 lower 1 sw 100 made 122",           # UPPER LOCK dropped one
+        "pulse, lower full: upper 1 lower 1 sw 100 made 122",
+        "out", "lower out: upper 1 lower 0 sw 100 made 122",   # post up: the other stays
+        "kicked back",                                      # the upper section is full
+        "three more shot in: upper 3 lower 0 sw 111 made 134"], why
+    # the LE's lock has two lower places and the same three upper ones
+    out, _ = _tmnt_patch("turtles_le", "Sub Table1_Init()\n\tCreatBalls\nEnd Sub\n")
+    assert "\tbsVan.InitSw 0, 1050, 1051, 0, 0, 0, 0, 0" in out
+    assert "Controller.Switch(1054) = 1" in out
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the TMNT table script under cscript")
+def test_tmnt_lock_post_held_down_lets_every_locked_ball_out(tmp_path):
+    # PAD-1116: Ninja Pizza Multiball holds UPPER LOCK (the post) down ~5 s and
+    # wants every locked ball out, LOWER LOCK letting each go as it lands
+    # (emulator, turtles_pro 1.59). One ball per pulse used up the game's
+    # retries: DEVICE MALFUNCTION on UPPER LOCK and LOWER LOCK. While the post
+    # is down each ball rolls on as the lower place has room, and a ball shot
+    # in meanwhile goes straight through.
+    out, _ = _tmnt_patch("turtles_pro", "")
+    got, why = _tmnt_run_vbs(tmp_path, out, [
+        "PadVanIn sw41 : PadVanIn sw41 : PadVanIn sw41 : vpmTimer.Flush : Show \"locked\"",
+        "PadVanDrop True : vpmTimer.Flush : Show \"post down\"",
+        "PadVanOut True : PadVanOut False : vpmTimer.Flush : Show \"out 1\"",
+        "PadVanOut True : PadVanOut False : vpmTimer.Flush : Show \"out 2\"",
+        "PadVanOut True : PadVanOut False : vpmTimer.Flush : Show \"out 3\"",
+        "PadVanIn sw41 : vpmTimer.Flush : Show \"shot in, post down\"",
+        "PadVanOut True : PadVanOut False : vpmTimer.Flush",
+        "PadVanDrop False : PadVanIn sw41 : vpmTimer.Flush : Show \"post up\""])
+    assert got == [
+        "locked: upper 3 lower 0 sw 111 made 122",
+        "post down: upper 2 lower 1 sw 110 made 122",      # the first rolled to LOWER LOCK
+        "out", "out 1: upper 1 lower 1 sw 100 made 122",    # and the next one after it
+        "out", "out 2: upper 0 lower 1 sw 000 made 122",
+        "out", "out 3: upper 0 lower 0 sw 000 made 122",    # all three out, no new pulse
+        "shot in, post down: upper 0 lower 1 sw 000 made 233",
+        "out",
+        "post up: upper 1 lower 0 sw 100 made 344"], why    # post up: it locks again
+    # the roll down takes a moment: LOWER LOCK closes after UPPER LOCK opens
+    assert "vpmTimer.AddTimer 240, \"PadVanLand '\"" in out
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the TMNT table script under cscript")
+def test_tmnt_lock_step_lost_from_the_timer_queue_is_taken_by_the_next_coil(tmp_path):
+    # PAD-1334: core.vbs drops every vpmTimer past its 50th. A lost PadVanLand
+    # left padVanFalling at 1, so no ball ever dropped again: the game fired
+    # UPPER LOCK over and over, called a malfunction and kept the next game
+    # back until Visual Pinball restarted (emulator, turtles_pro 1.59). The
+    # next lock coil a second later takes the lost step; a late timer after
+    # that changes nothing.
+    out, _ = _tmnt_patch("turtles_pro", "")
+    got, why = _tmnt_run_vbs(tmp_path, out, [
+        "PadVanIn sw41 : PadVanIn sw41 : vpmTimer.Flush : Show \"two in\"",
+        "vpmTimer.Lose = \"PadVanLand\"",
+        "PadVanDrop True : PadVanDrop False : vpmTimer.Flush : Show \"land lost\"",
+        "PadVanDrop True : PadVanDrop False : PadVanOut True : PadVanOut False : vpmTimer.Flush : Show \"at once\"",
+        "Wait 1500 : PadVanDrop True : PadVanDrop False : vpmTimer.Flush : Show \"a second on\"",
+        "PadVanOut True : PadVanOut False : vpmTimer.Flush : Show \"out\"",
+        "PadVanLand : PadVanRest : Show \"late timers\"",
+        "PadVanDrop True : PadVanDrop False : vpmTimer.Flush : PadVanOut True : PadVanOut False : Show \"last\""])
+    assert got == [
+        "two in: upper 2 lower 0 sw 110 made 121",
+        "land lost: upper 1 lower 0 sw 100 made 121",       # rolling down, for good
+        "at once: upper 1 lower 0 sw 100 made 121",         # not overdue yet
+        "note: lock: a ball rolling down never reached LOWER LOCK; put there now",
+        "a second on: upper 1 lower 1 sw 100 made 121",
+        "out", "out: upper 1 lower 0 sw 100 made 121",
+        "late timers: upper 1 lower 0 sw 100 made 121",     # nothing moved twice
+        "out", "last: upper 0 lower 0 sw 000 made 121"], why
+    assert "Sub PadVanHeal" in out and "\tPadVanHeal" in out
+    # the table declares the step times with the lock's counts: undeclared,
+    # VBScript makes each a local of the sub that sets it and the heal fires
+    # on every coil
+    head, _ = _tmnt_patch("turtles_pro", "Const cGameName = \"tmnt_104\"\n")
+    assert re.search(r"^Dim bsTrough, .*padVanComeT, padVanFallT\s*$", head, re.M), head[:600]
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the TMNT table script under cscript")
+def test_tmnt_pro_lair_shot_rolls_down_onto_the_lower_lock_post(tmp_path):
+    # PAD-1268: the LAIR shot goes in UNDER the upper flipper and rolls DOWN
+    # the lane (Mike's video of the machine; the table's wires agree: the
+    # lane's mouth is under the flipper, the left orbit's rail hooks above it).
+    # On the machine it rests on LOWER LOCK 1 against the LOWER LOCK post: the
+    # game held it 1.7 s (7-10 s starting Training) and dropped the post
+    # (emulator, turtles_pro 1.59). PAD-896 took a ball going UP instead, so
+    # the real shot never reached the game. Now a ball going down arms a
+    # hidden kicker below the trigger; it holds the ball with LOWER LOCK 1
+    # made until the LOWER LOCK coil, then sends it on down the lane.
+    out, m = _tmnt_patch("turtles_pro", "Sub t25_Hit:vpmTimer.PulseSw(25):End Sub\n")
+    assert "Sub t25_Hit:PadLairIn Me:End Sub" in out
+    assert "PulseSw(25)" not in out and "PulseSw(1066)" not in out
+    assert m["lair_lane"]["post"]["name"] == "PadLairPost"
+    got, why = _tmnt_run_vbs(tmp_path, out, [
+        "Class FakePost", "Public Enabled",
+        "Public Sub Kick(a, p) : WScript.Echo \"post kick \" & a : End Sub", "End Class",
+        "Class FakeBall", "Public VelY", "End Class",
+        "Dim PadLairPost, padLairHeld, ActiveBall, t25",
+        "Set PadLairPost = New FakePost : PadLairPost.Enabled = False : padLairHeld = False",
+        "Set ActiveBall = New FakeBall : Set t25 = Nothing",
+        "Sub Lair(tag) : WScript.Echo tag & \": armed \" & PadLairPost.Enabled & \" held \" & padLairHeld & "
+        "\" lower \" & bsVan.Balls : End Sub",
+        "ActiveBall.VelY = -6 : PadLairIn t25 : Lair \"up the lane\"",
+        "ActiveBall.VelY = 5 : PadLairIn t25 : Lair \"down the lane\"",
+        "PadLairPost_Hit : Lair \"on the post\"",
+        "PadVanOut True : PadVanOut False : Lair \"LOWER LOCK\"",
+        "ActiveBall.VelY = 5 : PadLairIn t25 : vpmTimer.Flush : Lair \"down, never arrived\"",
+        "bsVan.Balls = 1 : PadLairIn t25 : Lair \"down, lower place taken\"",
+        "PadLairPost.Enabled = True : PadLairPost_Hit : Lair \"filled meanwhile\"",
+        "bsVan.Balls = 1 : PadVanOut True : PadVanOut False : Lair \"a van ball\""])
+    assert got == [
+        "up the lane: armed False held False lower 0",      # in from the inlane: not the shot
+        "down the lane: armed True held False lower 0",
+        "on the post: armed True held True lower 1",        # LOWER LOCK 1 made
+        "post kick 180",                                    # on down the lane, not out of the van
+        "LOWER LOCK: armed False held False lower 0",
+        "down, never arrived: armed False held False lower 0",
+        "down, lower place taken: armed False held False lower 1",
+        "post kick 180",
+        "filled meanwhile: armed False held False lower 1",
+        "out", "a van ball: armed False held False lower 0"], why
+    # the item the patcher adds: a hidden kicker cloned from the map's source,
+    # placed mid-lane below the trigger and off until a ball comes down
+    tm = pytest.importorskip("patch_turtles_le")
+    vf = pytest.importorskip("vpxfile")
+    import struct
+
+    def item(kind, name, *extra):
+        return struct.pack("<i", kind) + vf.biff_record("VCEN", struct.pack("<ff", 1, 2)) \
+            + vf.biff_record("NAME", vf.wide(name)) + b"".join(extra) + vf.biff_record("ENDB", b"")
+    on = vf.biff_record("EBLD", struct.pack("<i", 1)) + vf.biff_record("TMON", struct.pack("<i", 1))
+
+    class Table:
+        items = [item(7, m["retrofit_lights"]["clone"]), item(6, "sw14"), item(2, "DiscsTimer", on + vf.biff_record("TMIN", struct.pack("<i", 100))),
+                 item(8, m["lair_lane"]["post"]["clone"], on)]
+        item_info = staticmethod(vf.VpxTable.item_info)
+    posts = [d for d in tm.retrofit_items(Table, m) if vf.VpxTable.item_info(d)[1] == "PadLairPost"]
+    assert len(posts) == 1
+    kind, _, pos = vf.VpxTable.item_info(posts[0])
+    assert (kind, tuple(round(v) for v in pos)) == ("Kicker", (65, 1215))
+    fields = {t: pl for t, pl, _ in vf.item_records(posts[0], 4)}
+    assert struct.unpack("<i", fields["EBLD"])[0] == 0 and struct.unpack("<i", fields["TMON"])[0] == 0
+    # the LE's LAIR shot lands on LOWER LOCK 1 too (emulator: held 1.7 s, 7 s
+    # starting Training): the same lane, the same post, two lower places
+    out, m_le = _tmnt_patch("turtles_le", "Sub t25_Hit:vpmTimer.PulseSw(25):End Sub\n")
+    assert "Sub t25_Hit:PadLairIn Me:End Sub" in out
+    assert "\tIf ActiveBall.VelY > 0 And Not padLairHeld And bsVan.Balls + padVanFalling < 2 Then" in out
+    assert m_le["lair_lane"]["post"] == m["lair_lane"]["post"]
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the TMNT table script under cscript")
+def test_tmnt_pro_disc_spins_on_its_pizza_motor_coil(tmp_path):
+    # PAD-896: the Pro has no SPIN DISC CW/CCW LEDs (the LE's); its disc is
+    # the PIZZA MOTOR coil, which DOF hears as Data East's 22. The game
+    # commands it again every ~2.25 s while it turns: one spin, stopped only
+    # once 3 s pass without a command.
+    tm = pytest.importorskip("patch_turtles_le")
+    pc = pytest.importorskip("padcontroller")
+    _, m = _tmnt_patch("turtles_pro", "")
+    assert 'SolCallback(16) = "PadPizzaMotor"          \' PIZZA MOTOR' in tm.gen_sol_callbacks(m)
+    assert "\tPadDiscTick" not in tm.gen_lamp_lines(m)
+    assert not any("Sub PadDiscTick" in x for x in tm.pad_subs(m))
+    assert pc.VpxMap("turtles_pro").dof_sols[22] == (9, 5)
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join([
+        "Class FakeTimer", "Public Due", "Public Sub AddTimer(t, cb) : Due = Due & cb & vbLf : End Sub",
+        "Public Sub Fire(k)", "Dim c : c = Split(Due, vbLf)(k)",
+        "Execute Left(c, InStr(c, \"'\") - 1)", "End Sub", "End Class",
+        "Dim vpmTimer, padDiscOn : Set vpmTimer = New FakeTimer : padDiscOn = 0",
+        "Sub SolPizzaSpin(v) : WScript.Echo \"spin \" & v : End Sub",
+        "\n".join(tm.disc_subs(m)),
+        "PadPizzaMotor True : PadPizzaMotor False : PadPizzaMotor True",
+        "vpmTimer.Fire 0 : WScript.Echo \"first timer ran out\"",
+        "vpmTimer.Fire 1 : WScript.Echo \"done\""]), encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert [x.strip() for x in r.stdout.strip().splitlines()] == [
+        "spin True", "first timer ran out", "spin False", "done"], r.stdout + r.stderr
+    _, le = _tmnt_patch("turtles_le", "")
+    assert "\tPadDiscTick" in tm.gen_lamp_lines(le)
+    assert "Sub PadDiscTick" in tm.pad_subs(le)
+
+
+def test_play_brings_the_tables_padspike2_up_to_date(tmp_path):
+    vs = pytest.importorskip("vpxsetup")
+    ours = open(os.path.join(VPX, "PADSPIKE2.vbs"), "rb").read()
+    assert not vs.refresh_system_script(str(tmp_path))                 # none there: none written
+    assert not (tmp_path / "PADSPIKE2.vbs").exists()
+    (tmp_path / "PADSPIKE2.vbs").write_bytes(b"' an older release's")
+    assert vs.refresh_system_script(str(tmp_path))
+    assert (tmp_path / "PADSPIKE2.vbs").read_bytes() == ours
+    assert not vs.refresh_system_script(str(tmp_path))                 # already this kit's
+
+
+# ------------------------------------------------- PAD-859: lamps that show ---
+
+def test_shadow_lamps_colour_dark_calls_and_the_tables_own_reads():
+    # Bond: RGB inserts give their light the insert's colour (PadLampSet),
+    # lights the machine has no LED for are held off (PadDark). Batman:
+    # inserts its tribute shows without a Light go to a sub (lamp_calls), and
+    # its own LampTimer's `Controller.ChangedLamps` must no longer take the
+    # changes the bridge waits for
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["lamps"] = {"_": "x", "L2": {"leds": [[8, 32], [8, 33], [8, 34]], "rgb": True, "name": "ARROW"}}
+    m["dark"] = ["L9", "F1"]
+    m["lamp_calls"] = {"_": "x",
+                       "PadBill": {"leds": [[9, 37], [9, 38], [9, 39]], "rgb": True, "call": "PadCatBulbs", "arg": 1},
+                       "PadSig": {"leds": [[8, 59]], "call": "PadBatSignal", "arg": "flsh"}}
+    script = MINI_TRIBUTE + ("Sub LampTimer()\n\tIf b2son then chglamp = Controller.ChangedLamps "
+                             "' Controller.ChangedLamps\nEnd Sub\n")
+    out, rep = vs.patch(script, m)
+    assert "If b2son then chglamp = Empty ' Controller.ChangedLamps" in out    # the comment kept
+    assert any("ChangedLamps answer Empty" in r for r in rep)
+    assert out.count("Controller.ChangedLamps") == 2                    # the bridge's, and the comment
+    assert 'PadCalls.Add "1937", Array(Array(GetRef("PadCatBulbs"), 1))' in out
+    assert 'PadCalls.Add "1859", Array(Array(GetRef("PadBatSignal"), "flsh"))' in out
+    assert "Set f = c(0) : f c(1), chg(ii, 1)" in out
+    assert "\tPadDark = Array(L9, F1)" in out
+    assert "If CLng(o.ColorFull) <> v Then o.ColorFull = v : o.Color = PadDim(v)" in out
+    assert r"PadDim = RGB((v And 255) \ 14, ((v \ 256) And 255) \ 14, ((v \ 65536) And 255) \ 14)" in out
+    assert "\t\tIf PadLamps.Exists(k) Then\n\t\t\tFor Each o In PadLamps(k) : PadLampSet o, PadLampState(k) : Next" in out
+    assert out.count("End Sub") == len(re.findall(r"(?im)^\s*(?:public |private )?sub\s", out))
+    only_calls = json.loads(json.dumps(MINI_SHADOW))
+    only_calls["lamp_calls"] = m["lamp_calls"]
+    assert "Sub PadUpdateLamps" in vs.patch(MINI_TRIBUTE, only_calls)[0]   # calls alone still get the loop
+
+
+# JP's Foo Fighters' SetLightColor (PAD-1101): Color and ColorFull the same
+FULL_COLOUR_SLC = """Sub SetLightColor(n, col, stat) 'stat 0 = off, 1 = on, 2 = blink
+    Select Case col
+        Case red
+            n.color = RGB(255, 0, 0)
+            n.colorfull = RGB(255, 0, 0)
+        Case orange
+            n.color = RGB(255, 64, 0)
+            n.colorfull = RGB(255, 64, 0)
+        Case green
+            n.color = RGB(0, 128, 0)
+            n.colorfull = RGB(0,128,0)
+    End Select
+    If stat <> -1 Then n.State = stat
+End Sub
+"""
+# the rest (JP's Jurassic Park, Deadpool, Rush...): a dim Color under a full ColorFull
+DIM_COLOUR_SLC = FULL_COLOUR_SLC.replace("n.color = RGB(255, 0, 0)", "n.color = RGB(18, 0, 0)").replace(
+    "n.color = RGB(255, 64, 0)", "n.color = RGB(18, 3, 0)").replace("n.color = RGB(0, 128, 0)", "n.color = RGB(0, 9, 0)")
+
+
+def test_shadow_rgb_insert_colour_follows_the_tables_own_set_light_color():
+    # PAD-1101: v1.388.7 gave Foo Fighters' arrows their colour, and with it a
+    # Color a 14th of ColorFull - the convention of most tributes. JP's Foo
+    # Fighters sets Color = ColorFull, so its lit arrows showed all but black
+    vs = pytest.importorskip("vpxshadow")
+    assert vs.full_colour_lights(FULL_COLOUR_SLC)
+    assert not vs.full_colour_lights(DIM_COLOUR_SLC)
+    assert not vs.full_colour_lights(MINI_TRIBUTE)                      # no SetLightColor: as before
+    assert not vs.full_colour_lights(FULL_COLOUR_SLC.split("Case green")[0] + "End Select\nEnd Sub\n")  # 2 pairs: too few
+    # Batman 66 / GotG: SetLightColor hands on to SetLightColorTimed, which sets them
+    timed = ("Sub SetLightColor(n, col, stat)\n\tSetLightColorTimed n, col, stat, 500\nEnd Sub\n"
+             + FULL_COLOUR_SLC.replace("Sub SetLightColor(n, col, stat)", "Sub SetLightColorTimed(n, col, stat, msec)"))
+    assert vs.full_colour_lights(timed)
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["lamps"] = {"_": "x", "L2": {"leds": [[8, 32], [8, 33], [8, 34]], "rgb": True, "name": "ARROW"}}
+    dim = r"PadDim = RGB((v And 255) \ 14, ((v \ 256) And 255) \ 14, ((v \ 65536) And 255) \ 14)"
+    out, rep = vs.patch(MINI_TRIBUTE + FULL_COLOUR_SLC, m)
+    assert "\tPadDim = v\n" in out and dim not in out
+    assert any("take their colour whole" in r for r in rep)
+    assert "If CLng(o.ColorFull) <> v Then o.ColorFull = v : o.Color = PadDim(v)" in out
+    out, rep = vs.patch(MINI_TRIBUTE + DIM_COLOUR_SLC, m)
+    assert dim in out and "\tPadDim = v\n" not in out
+    assert not any("take their colour whole" in r for r in rep)
+
+
+def _vbs_with_vpx_lights(code, calls):
+    """Run `code` in the Windows VBScript engine beside lights L1, L2 that
+    answer Color/ColorFull as VPX does: OLE_COLOR, an unsigned VT_UI4, and
+    State as a float. `calls` is VBScript run under On Error Resume Next, as
+    core.vbs calls LampCallback; Log lines come back with each light's props."""
+    pythoncom = pytest.importorskip("pythoncom")
+    axsite = pytest.importorskip("win32com.axscript.server.axsite")
+    from win32com.client import VARIANT
+    from win32com.server import policy, util
+
+    class Light:
+        _public_methods_ = []
+
+        def __init__(self, colour=True):
+            self.colour = colour
+            self.p = {"colorfull": 0xFFFFFF, "color": 0xFFFFFF, "state": 0.0}
+
+        def _dynamic_(self, name, lcid, wFlags, args):
+            k = name.lower()
+            if k in ("color", "colorfull") and not self.colour:
+                raise policy.COMException(scode=-2147352573)          # DISP_E_MEMBERNOTFOUND
+            if wFlags & 4:                                            # property put
+                self.p[k] = args[0]
+                return None
+            if k in ("color", "colorfull"):
+                return VARIANT(pythoncom.VT_UI4, int(self.p[k]) & 0xFFFFFFFF)
+            return VARIANT(pythoncom.VT_R4, float(self.p[k]))
+
+    class Out:
+        _public_methods_ = ["Log"]
+
+        def __init__(self):
+            self.lines = []
+
+        def Log(self, s):
+            self.lines.append(str(s))
+
+    lights = {"L1": Light(), "L2": Light(), "LX": Light(colour=False)}
+    out = Out()
+    items = {k: util.wrap(v, usePolicy=policy.DynamicPolicy) for k, v in lights.items()}
+    items["O"] = util.wrap(out)
+    site = axsite.AXSite(items)
+    eng = site.AddEngine("VBScript")
+    eng.AddCode(code + "\nSub PadTest\n\tOn Error Resume Next\n" + calls + "\nEnd Sub\n")
+    eng.Start()
+    sd = eng.GetScriptDispatch()
+    sd.Invoke(sd.GetIDsOfNames("PadTest"), 0, pythoncom.DISPATCH_METHOD, False)
+    eng.Close()
+    return out.lines, {k: v.p for k, v in lights.items()}
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the Windows VBScript engine")
+def test_shadow_rgb_insert_lights_with_colours_as_vpx_hands_them_over():
+    # PAD-1113 (Rush, and Foo Fighters' PAD-1111): VPX answers a light's Color
+    # and ColorFull as OLE_COLOR, a VT_UI4 VBScript cannot compare (error 458).
+    # PadLampSet's `If o.ColorFull <> v` failed on every lit colour insert;
+    # core.vbs calls LampCallback under On Error Resume Next, so it failed
+    # silently and the rest of the batch with it: no shot arrow ever lit
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["lamps"] = {"_": "x", "L2": {"leds": [[8, 32], [8, 33], [8, 34]], "rgb": True, "name": "ARROW"}}
+    out, _ = vs.patch(MINI_TRIBUTE + DIM_COLOUR_SLC, m)
+    code = "\n".join(re.search(r"(?ms)^%s .*?^End %s\s*$" % (kw, kw.split()[0]), out[out.index(start):]).group(0)
+                     for start, kw in (("Sub PadLampSet(", "Sub"), ("Function PadDim(", "Function")))
+    # the stand-in is VPX's: the old line fails on it as it did in Visual Pinball
+    old = code.replace("If CLng(o.ColorFull) <> v Then", "If o.ColorFull <> v Then").replace("\tOn Error Resume Next\n", "")
+    log, _ = _vbs_with_vpx_lights(old, 'O.Log VarType(L1.ColorFull)\nPadLampSet L1, 65535\nO.Log Err.Number')
+    assert log == ["19", "458"]
+    # a lit yellow arrow takes the game's colour and lights; a light that
+    # fails (LX has no colour) keeps it to itself; off and on still work
+    log, p = _vbs_with_vpx_lights(code, "PadLampSet L1, 65535 : O.Log Err.Number\n"
+                                        "PadLampSet LX, 255 : PadLampSet L2, 16711680 : O.Log Err.Number\n"
+                                        "PadLampSet L1, 65535\nPadLampSet L2, 0 : O.Log Err.Number")
+    assert log == ["0", "0", "0"]
+    assert p["L1"] == {"colorfull": 65535, "color": 18 * 256 + 18, "state": 1}
+    assert p["L2"]["colorfull"] == 16711680 and p["L2"]["color"] == 18 * 65536 and p["L2"]["state"] == 0
+    assert p["LX"]["state"] == 1                                       # lit, in its own colour
+
+
+def test_colour_maps_ask_a_table_patched_before_the_colour_fix_to_patch_again(tmp_path):
+    """PAD-1113: every tribute with colour inserts carries the mark; a script
+    with the old compare is told to patch again, a fresh patch never is."""
+    vs = pytest.importorskip("vpxshadow")
+    vset = pytest.importorskip("vpxsetup")
+    old = "If o.ColorFull <> v Then o.ColorFull = v"
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["lamps"] = {"_": "x", "L2": {"leds": [[8, 32], [8, 33], [8, 34]], "rgb": True, "name": "ARROW"}}
+    fresh, _ = vs.patch(MINI_TRIBUTE + DIM_COLOUR_SLC, m)
+    assert old.lower() not in re.sub(r"\s+", " ", fresh).lower()
+    stale = fresh.replace("If CLng(o.ColorFull) <> v Then", "If o.ColorFull <> v Then")
+    assert stale != fresh
+    n = 0
+    for f in sorted(glob.glob(os.path.join(VPX, "*.shadow.json"))):
+        mp = json.load(open(f, encoding="utf-8"))
+        rl = (mp.get("retrofit_lights") or {}).get("lights") or {}
+        if not any(isinstance(v, dict) and v.get("rgb")
+                   for sec in (mp.get("lamps") or {}, mp.get("lamp_calls") or {}, rl) for v in sec.values()):
+            continue
+        n += 1
+        marks = [k for k in mp.get("repatch") or [] if k.get("old") == old]
+        assert len(marks) == 1, os.path.basename(f)
+        script = tmp_path / (mp["output"][:-4] + ".script.vbs")
+        script.write_text(stale, encoding="utf-8")
+        assert marks[0]["why"] in vset.missed_fixes(str(tmp_path), mp["output"], mp["repatch"]), f
+        script.write_text(fresh, encoding="utf-8")
+        assert marks[0]["why"] not in vset.missed_fixes(str(tmp_path), mp["output"], mp["repatch"]), f
+    assert n >= 23                                     # Rush, Foo Fighters, GotG, Guardians...
+
+
+def test_controller_reports_an_rgb_insert_in_its_colour():
+    pc = pytest.importorskip("padcontroller")
+    assert pc.rgb_value(255, 0, 0) == 0x0000FF                          # VBScript RGB(): red in the low byte
+    assert pc.rgb_value(148, 0, 211) == 178 | 0 << 8 | 255 << 16        # brightest channel to 255
+    assert pc.rgb_value(1, 0, 0) == 255 and pc.rgb_value(0, 0, 0) == 2   # never 0 or 1 (off / on)
+    vm = pc.VpxMap(None)
+    vm.lamp_groups = {1832: [(8, 32), (8, 33), (8, 34)], 1859: [(8, 59)]}
+    vm.rgb_groups = {1832}
+    b = pc.Bridge.__new__(pc.Bridge)
+    b.map, b.lamp_state, b.lamp_pending = vm, {}, set()
+    data = bytearray(20 + 16 * 96)
+    data[20 + 8 * 96 + 32], data[20 + 8 * 96 + 34], data[20 + 8 * 96 + 59] = 200, 100, 255
+    b._poll_lamps(bytes(data))
+    assert b.lamp_state[1832] == 255 | 0 << 8 | 127 << 16 and b.lamp_state[1859] == 1
+    assert b.lamp_state[1833] == 0                                      # an RGB insert's other LEDs stay unreported
+
+
+def test_raw_lamp_rewrite_on_spike2_reports_the_level_through_lamp_and_changes(tmp_path):
+    """A table reading Lamp(n) as a mechanism position (PR #25): the LED's
+    own 0..255 level, through both Controller.Lamp and ChangedLamps, on a
+    Spike 2 bridge too; every other lamp is still VPinMAME's Boolean."""
+    pc = pytest.importorskip("padcontroller")
+    mapping = tmp_path / "raw.vpxmap.json"
+    mapping.write_text(json.dumps({"raw_lamp_rewrite": {"_": "why", "281": [8, 59]},
+                                   "lamps": {"L1": {"leds": [[8, 32]]}}}), encoding="utf-8")
+    vm = pc.VpxMap(None)
+    vm.load(str(mapping))
+    assert vm.raw_lamp_rewrite == {281: (8, 59)}
+    b = pc.Bridge.__new__(pc.Bridge)
+    b.map, b.lamp_state, b.lamp_pending = vm, {}, set()
+    b.lock = __import__("threading").Lock()
+    data = bytearray(20 + 16 * 96)
+    for level in (71, 130, 0):
+        data[20 + 8 * 96 + 59], data[20 + 8 * 96 + 32] = level, 200
+        b._poll_lamps(bytes(data))
+        assert dict(b.changed_lamps() or [])[281] == level
+        assert b.lamp(281) == level and type(b.lamp(281)) is int
+        assert b.lamp(1832) is True                      # a mapped group stays on/off
+    b._poll_lamps(bytes(data))
+    assert not b.changed_lamps()                         # nothing new, nothing reported
+
+
+@pytest.mark.parametrize("entry", [{"1859": [8, 59]}, {"0": [8, 59]}, {"281": [8]}, {"281": 59}])
+def test_raw_lamp_rewrite_refuses_an_entry_it_cannot_read(tmp_path, entry):
+    """1000+ is already every LED's own number (it would be set twice a
+    poll and report a change every frame); a value must be [node, index]."""
+    pc = pytest.importorskip("padcontroller")
+    mapping = tmp_path / "bad.vpxmap.json"
+    mapping.write_text(json.dumps({"raw_lamp_rewrite": entry}), encoding="utf-8")
+    with pytest.raises(ValueError, match="raw_lamp_rewrite"):
+        pc.VpxMap(None).load(str(mapping))
+
+
+def test_every_shadow_maps_lamps_are_consistent():
+    # the controller keys a lamp by its FIRST LED: two entries starting on one
+    # LED must be the same insert, or one would light the other's light
+    for path in sorted(os.listdir(VPX)):
+        if not path.endswith((".shadow.json", ".vpxmap.json")):
+            continue
+        m = json.load(open(os.path.join(VPX, path), encoding="utf-8"))
+        first = {}
+        wired = set()
+        for sect in ("lamps", "lamp_calls", "retrofit_lights"):
+            table = m.get(sect, {})
+            if sect == "retrofit_lights":
+                table = table.get("lights", {})
+            for name, v in table.items():
+                if name == "_":
+                    continue
+                leds = [tuple(x) for x in v["leds"]]
+                assert first.setdefault(leds[0], (leds, bool(v.get("rgb")))) == (leds, bool(v.get("rgb"))), \
+                    "%s: %s starts on another insert's LED" % (path, name)
+                # a Spooky LED is red, green and blue in one (PAD-952)
+                assert not v.get("rgb") or len(leds) == 3 or (len(leds) == 1 and m.get("platform") == "spooky"), \
+                    "%s: %s rgb needs R, G, B" % (path, name)
+                assert not (v.get("rgb") and path.endswith(".vpxmap.json")), "a ROM table's lamps are 0/1"
+                if sect == "retrofit_lights" and path.endswith(".shadow.json"):
+                    assert v.get("clone") or m["retrofit_lights"].get("clone"), (path, name)
+                    assert len(v["at"]) == 2, (path, name)
+                if sect == "lamp_calls" and path.endswith(".shadow.json"):
+                    assert v["call"] in m.get("extra_vbs", ""), "%s: %s calls a sub extra_vbs lacks" % (path, name)
+                elif sect == "lamp_calls":
+                    # a ROM table's patcher writes the sub (PAD-926: The Beatles' domes)
+                    src = open(os.path.join(VPX, m["patcher"]), encoding="utf-8").read()
+                    assert '"Sub %s(' % v["call"] in src, "%s: %s calls a sub its patcher lacks" % (path, name)
+                wired.add(name)
+        assert not wired & set(m.get("dark", [])), "%s: dark and wired" % path
+
+
+def test_vpxlamps_fit_suggest_and_write(tmp_path):
+    vl = pytest.importorskip("vpxlamps")
+    # the fit: table units -> drawing px, recovered from wired lights
+    lights = {"a": (100.0, 100.0), "b": (900.0, 100.0), "c": (100.0, 2000.0), "d": (900.0, 2000.0),
+              "e": (500.0, 1000.0), "f": (300.0, 1500.0)}
+    leds = {(8, i): ("I%d" % i, round(x * 0.48 + 3), round(y * 0.45 - 2))
+            for i, (x, y) in enumerate(lights.values())}
+    wires = {n: [(8, i)] for i, n in enumerate(lights)}
+    fit, rms = vl.fit_table(lights, wires, leds)
+    assert rms < 1 and abs(vl.apply(fit, (500, 1000))[0] - 243) < 1
+    back = vl.apply(vl.invert(fit), vl.apply(fit, (321, 654)))
+    assert abs(back[0] - 321) < 0.01 and abs(back[1] - 654) < 0.01
+    assert vl._base("RIGHT ORBIT ARROW-G") == "RIGHT ORBIT ARROW"
+    assert vl.is_rgb({(8, 1): ("X-R",), (8, 2): ("X-G",), (8, 3): ("X-B",)}, [[8, 1], [8, 2], [8, 3]])
+    assert vl.retrofit_name("LEFT ORBIT-T-BALL 3") == "PadLeftOrbitTBall3"
+    # writing keeps a hand-laid map's one-entry-per-line layout
+    p = tmp_path / "t.shadow.json"
+    p.write_text('{\n  "title": "t",\n  "lamps": {\n    "_": "x",\n'
+                 '    "L1": {"leds": [[8, 1], [8, 2], [8, 3]], "name": "ARROW"}\n  },\n  "dark": []\n}\n',
+                 encoding="utf-8")
+    vl.write_lamps(str(p), {"L2": {"leds": [[8, 9]], "name": "NEW"}},
+                   {"PadX": {"leds": [[8, 10]], "name": "X", "clone": "L1", "at": [1, 2]}}, ["L1"])
+    text = p.read_text(encoding="utf-8")
+    assert '    "L1": {"leds": [[8, 1], [8, 2], [8, 3]], "rgb": true, "name": "ARROW"},\n    "L2": {' in text
+    m = json.loads(text)
+    assert list(m) == ["title", "lamps", "retrofit_lights", "dark"]
+    assert m["retrofit_lights"]["lights"]["PadX"]["at"] == [1, 2]
+    # and a json.dump file is dumped again, the same way
+    q = tmp_path / "d.shadow.json"
+    q.write_text(json.dumps({"title": "d", "lamps": {"L1": {"leds": [[8, 1]]}}, "quiet_subs": []}, indent=2) + "\n")
+    vl.write_lamps(str(q), {}, {"PadY": {"leds": [[8, 5]], "clone": "L1", "at": [3, 4]}})
+    mq = json.loads(q.read_text())
+    assert list(mq) == ["title", "lamps", "retrofit_lights", "quiet_subs"]
+    assert q.read_text() == json.dumps(mq, indent=2) + "\n"
+
+
+def test_vpxlamps_rgb_reads_every_channel_spelling_and_order(tmp_path):
+    # PAD-1097: Foo Fighters' arrows never took the mode colours. Its LED
+    # rows end in a connector ("8b") with no image, which read_unplaced
+    # skipped; Aerosmith names -BLU/-GRN/-RED, Rush " R"; and the controller
+    # reads a lit rgb light's levels in map order as R, G, B.
+    vl = pytest.importorskip("vpxlamps")
+    io = tmp_path / "led_io.txt"
+    io.write_text("# node index name                                   x     y  conn  image\n"
+                  "8      20    LEFT RAMP-R                            0     0  8b    \n"
+                  "8      21    LEFT RAMP-G                            0     0  8b    \n"
+                  "8      22    LEFT RAMP-B                            0     0  8b    \n"
+                  "8      30    TOY BOX ARROW-BLU                      0     0  -     \n"
+                  "8      31    TOY BOX ARROW-GRN                      0     0  -     \n"
+                  "8      32    TOY BOX ARROW-RED                      0     0  -     \n"
+                  "8      40    SHOOT ME VUK R                         0     0  -     \n"
+                  "8      41    SHOOT ME VUK G                         0     0  -     \n"
+                  "8      42    SHOOT ME VUK B                         0     0  -     \n"
+                  "8      50    GUARDIANS-LEFT                         0     0  -     \n"
+                  "8      51    GUARDIANS-CENTER                       0     0  -     \n"
+                  "8      52    GUARDIANS-RIGHT                        0     0  -     \n"
+                  "8      60    MOD A                                  0     0  -     \n"
+                  "8      61    OTHER-G                                0     0  -     \n"
+                  "8      62    MOD B                                  0     0  -     \n"
+                  "9      19    UFO-R                                120   300  9a    playfield\n",
+                  encoding="utf-8")
+    unplaced = vl.read_unplaced(str(io))
+    assert unplaced[(8, 20)] == "LEFT RAMP-R" and (9, 19) not in unplaced
+    leds = {k: (n,) for k, n in vl.read_names(str(io)).items()}
+    assert vl.rgb_flag(leds, [[8, 20], [8, 21], [8, 22]]) is True
+    assert vl.rgb_flag(leds, [[8, 30], [8, 31], [8, 32]]) == "BGR"
+    assert vl.rgb_flag(leds, [[8, 41], [8, 40], [8, 42]]) == "GRB"
+    assert vl.rgb_flag(leds, [[8, 50], [8, 51], [8, 52]]) is None       # three lamps, not three colours
+    assert vl.rgb_flag(leds, [[8, 60], [8, 61], [8, 62]]) is None       # not one insert
+    assert vl._base("TOY BOX ARROW-GRN") == "TOY BOX ARROW"
+    p = tmp_path / "t.shadow.json"
+    p.write_text('{\n  "title": "t",\n  "lamps": {\n    "_": "x",\n'
+                 '    "L1": {"leds": [[8, 20], [8, 21], [8, 22]], "name": "LEFT RAMP"},\n'
+                 '    "L2": {"leds": [[8, 30], [8, 31], [8, 32]], "name": "TOY BOX"},\n'
+                 '    "L3": {"leds": [[8, 50], [8, 51], [8, 52]], "name": "GUARDIANS"}\n  },\n'
+                 '  "lamp_calls": {\n    "C2": {"leds": [[8, 30], [8, 31], [8, 32]], "call": "X"}\n  }\n}\n',
+                 encoding="utf-8")
+    fixes = vl.rgb_fixes(json.loads(p.read_text(encoding="utf-8")), leds)
+    assert [(s, n) for s, n, _ in fixes] == [("lamps", "L1"), ("lamps", "L2"), ("lamp_calls", "C2")]
+    vl.mark_rgb(str(p), fixes)
+    text = p.read_text(encoding="utf-8")
+    # the LEDs keep their order (and the light its number): a table patched before stays wired
+    assert '    "L1": {"leds": [[8, 20], [8, 21], [8, 22]], "rgb": true, "name": "LEFT RAMP"},\n' in text
+    assert '    "L2": {"leds": [[8, 30], [8, 31], [8, 32]], "rgb": "BGR", "name": "TOY BOX"},\n' in text
+    assert '"C2": {"leds": [[8, 30], [8, 31], [8, 32]], "rgb": "BGR", "call": "X"}' in text
+    assert '"L3": {"leds": [[8, 50], [8, 51], [8, 52]], "name": "GUARDIANS"}' in text
+    assert vl.rgb_fixes(json.loads(text), leds) == []
+    # the drawing reads a BGR light the controller's way: blue LED full = blue
+    lv = {(8, 30): 255, (8, 31): 0, (8, 32): 0}
+    assert vl.lamp_value(lv, [(8, 30), (8, 31), (8, 32)], "BGR") == 255 << 16
+    # a json.dump file is dumped again
+    q = tmp_path / "d.shadow.json"
+    q.write_text(json.dumps({"title": "d", "lamps": {"L2": {"leds": [[8, 30], [8, 31], [8, 32]]}}}, indent=2) + "\n")
+    vl.mark_rgb(str(q), vl.rgb_fixes(json.loads(q.read_text()), leds))
+    mq = json.loads(q.read_text())
+    assert mq["lamps"]["L2"] == {"leds": [[8, 30], [8, 31], [8, 32]], "rgb": "BGR"}
+    assert q.read_text() == json.dumps(mq, indent=2) + "\n"
+
+
+def test_controller_reads_an_rgb_light_in_its_channel_order(tmp_path):
+    # PAD-1097: Aerosmith lists its arrows' LEDs BLU, GRN, RED. The map says
+    # "rgb": "BGR" and the controller turns the levels back into R, G, B.
+    pc = pytest.importorskip("padcontroller")
+    assert pc.rgb_channels(["X-BLU", "X-GRN", "X-RED"]) == "BGR"
+    assert pc.rgb_channels(["SHOOT ME VUK R", "SHOOT ME VUK G", "SHOOT ME VUK B"]) == "RGB"
+    assert pc.rgb_channels(["GUARDIANS-LEFT", "GUARDIANS-CENTER", "GUARDIANS-RIGHT"]) is None
+    assert pc.rgb_levels([10, 20, 30], "BGR") == [30, 20, 10]
+    assert pc.rgb_levels([10, 20, 30], True) == [10, 20, 30]
+    p = tmp_path / "t.shadow.json"
+    p.write_text(json.dumps({"title": "t", "lamps": {
+        "A": {"leds": [[8, 21], [8, 22], [8, 23]], "rgb": "BGR"},
+        "B": {"leds": [[8, 40], [8, 41], [8, 42]], "rgb": True}}}), encoding="utf-8")
+    vm = pc.VpxMap()
+    vm.load(str(p))
+    assert vm.rgb_order == {pc.lamp_number(8, 21): "BGR"}
+    assert vm.rgb_groups == {pc.lamp_number(8, 21), pc.lamp_number(8, 40)}
+
+
+def test_tribute_maps_light_the_mode_coloured_arrows_in_colour():
+    # PAD-1097: the RGB shot arrows of these tributes change colour with the
+    # modes on the real machine; their maps now say so, with the channel order.
+    want = {"foo_fighters_le": ("Light025", True), "foo_fighters_pro": ("Light060", True),
+            "aerosmith": ("I107", True), "guardians": ("lGamoraArrow", True), "rush_le": ("I103", True),
+            "star_wars_pro": ("LightFireButton", "GRB")}
+    for title, (light, flag) in want.items():
+        m = json.load(open(os.path.join(VPX, title + ".shadow.json"), encoding="utf-8"))
+        assert m["lamps"][light].get("rgb") == flag, (title, light)
+    ae = json.load(open(os.path.join(VPX, "aerosmith.shadow.json"), encoding="utf-8"))["lamps"]
+    assert ae["I23"] == {"leds": [[8, 21], [8, 22], [8, 23]], "rgb": "BGR", "name": "LOVE IN AN ELEVATOR"}
+
+
+def test_vpxlamps_names_a_lamp_on_another_inserts_led(tmp_path):
+    # Guardians LE's map carried the Pro's LED numbers; TMNT Pro's eight
+    # episode lights all sat on EPISODE 2. The build's own LED names say so.
+    vl = pytest.importorskip("vpxlamps")
+    io = tmp_path / "led_io.txt"
+    io.write_text("# node index name\n"
+                  "8      8     EPISODE 2                              0     0  -     \n"
+                  "8      18    EPISODE 1                              0     0  -     \n"
+                  "9      19    LEFT RAMP ARROW-R                    120   300  9a    playfield\n",
+                  encoding="utf-8")
+    names = vl.read_names(str(io))
+    assert names[(9, 19)] == "LEFT RAMP ARROW-R" and names[(8, 18)] == "EPISODE 1"
+    m = {"lamps": {"_": "x",
+                   "L7": {"leds": [[8, 8]], "name": "EPISODE 1 (GUESS order)"},
+                   "L7a": {"leds": [[8, 8]], "name": "EPISODE 2"},
+                   "LA": {"leds": [[9, 19], [9, 20], [9, 21]], "name": "LEFT RAMP ARROW"},
+                   "gi1": {"leds": [[8, 0]], "name": "BOTTOM GI"}}}            # an LED the build does not name
+    assert vl.misnamed(m, names) == [("L7", "EPISODE 1 (GUESS order)", "EPISODE 2")]
+
+
+# ---------------------------------------------------- PAD-858: the soundtrack
+
+def _snd(name, path, data, out, lower=True, fmt=b""):
+    def s(b):
+        return struct.pack("<i", len(b)) + b
+    rec = s(name.encode()) + s(path.encode())
+    if lower:
+        rec += s(name.lower().encode())
+    return rec + fmt + s(data) + bytes([out]) + struct.pack("<4i", -37, 0, 0, -37)
+
+
+WAVFMT = struct.pack("<HHIIHHH", 1, 2, 44100, 176400, 4, 16, 0)
+
+
+@pytest.mark.parametrize("lower", [True, False])
+def test_sound_record_reads_and_mutes_in_its_own_layout(lower):
+    vs = pytest.importorskip("vpxsounds")
+    for path, fmt in (("C:/x/mu_main1.ogg", b""), ("C:/x/fx_bumper.wav", WAVFMT)):
+        rec = _snd("mu_main1", path, b"OggS" + bytes(5000), 1, lower, fmt)
+        snd = vs.read_sound(rec)
+        assert snd["name"] == "mu_main1" and snd["size"] == 5004 and snd["wav"] == bool(fmt)
+        assert (snd["lower"] is not None) == lower
+        quiet = vs.read_sound(vs.silent(snd))
+        assert quiet["name"] == "mu_main1" and quiet["wav"] and quiet["size"] == 882
+        assert quiet["trailer"] == snd["trailer"] and quiet["lower"] == snd["lower"]
+        assert quiet["path"].endswith(".pad-muted.wav")
+    assert vs.read_sound(b"\x05\x00\x00\x00abc") is None                 # fits no layout
+
+
+def test_iron_maiden_motor_timer_is_fitted_and_tribute_commands_are_quiet():
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, "iron_maiden_le.shadow.json"), encoding="utf-8"))
+    assert m["retrofit_timers"]["PadMaidenMotorTimer"] == {"clone": "PulseTimer", "interval_ms": 100}
+    out, _ = vs.patch('''Sub Table1_Init
+End Sub
+Sub RotateRamp(p)
+WScript.Echo "tribute ramp"
+End Sub
+Sub OpenRamp(p)
+WScript.Echo "tribute guardian"
+End Sub''', m)
+    assert "Sub RotateRamp_orig" in out and "Sub OpenRamp_orig" in out
+    assert "Sub RotateRamp(p) : End Sub" in out
+    assert "Sub OpenRamp(p) : End Sub" in out
+    assert "Sub PadMaidenMotorTimer_Timer" in out
+    old = next(r["old"] for r in m["repatch"] if "RotateRamp" in r["old"])
+    source = old + "\nEnd Sub"
+    updated, _ = vs.patch(source, m)
+    assert old not in updated  # the tab can distinguish old and rebuilt tables
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the map's motor animation under cscript")
+def test_iron_maiden_animations_follow_real_end_stops_without_writing_them(tmp_path):
+    m = json.load(open(os.path.join(VPX, "iron_maiden_le.shadow.json"), encoding="utf-8"))
+    extra = m["extra_vbs"].split("'---- PAD: motor end stops", 1)[1]
+    extra = extra[extra.index("\n"):]
+    harness = '''Class TestController
+Public state
+Private Sub Class_Initialize
+Set state = CreateObject("Scripting.Dictionary")
+End Sub
+Public Property Get Switch(n)
+Switch = False
+If state.Exists(n) Then Switch = state(n)
+End Property
+Public Property Let Switch(n, value)
+WScript.Echo "ERROR: fabricated end stop" : WScript.Quit 2
+End Property
+End Class
+Dim Controller : Set Controller = New TestController
+Dim gRampPos, LockStopPos, LockCurPos, LockCurInc, rampCalls, guardianCalls
+rampCalls = 0 : guardianCalls = 0 : LockCurPos = 8
+Sub RotateRamp2(p, mute)
+rampCalls = rampCalls + 1 : gRampPos = p
+If p = 3 Then gRampPos = 1 : LockStopPos = 0 : LockCurInc = -0.2
+WScript.Echo "ramp=" & p
+End Sub
+Sub OpenRamp2(p, force)
+guardianCalls = guardianCalls + 1
+WScript.Echo "guardian=" & p
+End Sub
+Sub AtStop(n)
+Controller.state.RemoveAll
+Controller.state.Add n, True
+PadMaidenMotorTimer_Timer
+End Sub
+'''
+    calls = '''PadMaidenMotorTimer_Timer
+WScript.Echo "idle=" & rampCalls & "," & guardianCalls
+AtStop 1094
+AtStop 1095
+WScript.Echo "load=" & gRampPos & "," & LockStopPos & "," & Sgn(LockCurInc)
+AtStop 1096
+AtStop 1097
+AtStop 1076
+AtStop 1077
+PadMaidenMotorTimer_Timer
+WScript.Echo "calls=" & rampCalls & "," & guardianCalls
+'''
+    vbs = tmp_path / "motors.vbs"
+    vbs.write_text(harness + extra + calls, encoding="utf-8")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["idle=0,0", "ramp=0", "ramp=3", "load=3,18,1", "ramp=2", "ramp=1",
+                                     "guardian=True", "guardian=False", "calls=4,2"]
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the map's motor timer under cscript")
+def test_iron_maiden_sarcophagus_swings_in_the_machines_time(tmp_path):
+    """PAD-1253: at game over the machine holds the Sarcophagus at UNLOAD for 0.6-3.4 s for the
+    locked ball; the tribute's own 0.2-degree ticks took 3.3 s from load to open the Underworld
+    exit, so the ball never came out and Start never began a game."""
+    m = json.load(open(os.path.join(VPX, "iron_maiden_le.shadow.json"), encoding="utf-8"))
+    extra = m["extra_vbs"].split("'---- PAD: motor end stops", 1)[1]
+    extra = extra[extra.index("\n"):]
+    harness = '''Class TestController
+Public state
+Private Sub Class_Initialize
+Set state = CreateObject("Scripting.Dictionary")
+End Sub
+Public Property Get Switch(n)
+Switch = False
+If state.Exists(n) Then Switch = state(n)
+End Property
+End Class
+Dim Controller : Set Controller = New TestController
+Dim gRampPos, LockStopPos, LockCurPos, LockCurInc
+Sub RotateRamp2(p, mute)       ' the tribute's: a stop angle, 0.2 a tick towards it
+gRampPos = p
+LockStopPos = Array(-14, 0, 8, 0)(p)
+If p = 3 Then gRampPos = 1
+If LockStopPos < LockCurPos Then LockCurInc = -0.2 Else LockCurInc = 0.2
+End Sub
+Sub OpenRamp2(p, force)
+End Sub
+Function Swing(n, from)         ' tmrBallLock's 20 ms ticks from the stop to the swing's end
+Dim k
+LockCurPos = from
+Controller.state.RemoveAll
+Controller.state.Add n, True
+PadMaidenMotorTimer_Timer
+k = 0
+Do
+k = k + 1
+LockCurPos = LockCurPos + LockCurInc
+Loop Until (LockCurPos >= LockStopPos And LockCurInc > 0) Or (LockCurPos <= LockStopPos And LockCurInc < 0) Or k > 1000
+Swing = k
+End Function
+'''
+    calls = '''WScript.Echo "load->unload " & Swing(1094, 18)
+WScript.Echo "flat->unload " & Swing(1097, 18) & " " & Swing(1094, 0)
+WScript.Echo "unload->load " & Swing(1095, -14) & " " & LockStopPos
+WScript.Echo "eject->flat " & Swing(1097, 8)
+'''
+    vbs = tmp_path / "swing.vbs"
+    vbs.write_text(harness + extra + calls, encoding="utf-8")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    # every swing the machine asks for ends 15 ticks (0.3 s; 16 when the float sum falls short of
+    # the stop) after its stop, where the tribute took 160 (load -> unload) and 70 (flat -> unload);
+    # load keeps its destination
+    lines = r.stdout.splitlines()
+    assert [ln.split()[0] for ln in lines] == ["load->unload", "flat->unload", "unload->load", "eject->flat"]
+    ticks = [int(w) for ln in lines for w in ln.split()[1:]]
+    assert lines[2].split()[2] == "18"
+    del ticks[4]
+    assert all(15 <= k <= 16 for k in ticks), lines
+    vs = pytest.importorskip("vpxshadow")
+    out, _ = vs.patch("Sub Table1_Init\nEnd Sub\n", m)
+    mark = next(r for r in m["repatch"] if r.get("absent") == "Sub PadMaidenSwingNow")
+    assert mark["absent"] in out          # an older build lacks it: the Tables card says Patch again
+
+
+def test_iron_maiden_sarcophagus_lock_switch_latches():
+    """PAD-1206: a pulse on Ball Lock told the game the Sarcophagus was empty again at once."""
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, "iron_maiden_le.shadow.json"), encoding="utf-8"))
+    assert m["switches"]["trgBallLock3"]["event"] == "latch"
+    assert m["retrofit_timers"]["PadMaidenLockTimer"] == {"clone": "PulseTimer", "interval_ms": 100}
+    out, _ = vs.patch('''Sub Table1_Init
+End Sub
+Sub trgBallLock3_Hit()
+BallsInRealLock=BallsInRealLock+1
+HandleMummyLock True
+End Sub''', m)
+    assert "Sub trgBallLock3_Hit : Controller.Switch(1080) = True : PadMaidenLockIn : End Sub" in out
+    assert "PulseSw 1080" not in out
+    assert "Sub PadMaidenLockTimer_Timer" in out
+    old = next(r["old"] for r in m["repatch"] if "trgBallLock3" in r["old"])
+    assert old not in out                 # the Tables card tells an old build from a rebuilt one
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the map's lock subs under cscript")
+def test_iron_maiden_sarcophagus_lock_follows_the_held_ball(tmp_path):
+    m = json.load(open(os.path.join(VPX, "iron_maiden_le.shadow.json"), encoding="utf-8"))
+    v = m["extra_vbs"]
+    lock = v[v.index("'---- PAD-1206"):v.index("'---- PAD: motor end stops")]
+    harness = '''Class TestController
+Public Property Let Switch(n, value)
+WScript.Echo "switch " & n & "=" & value
+End Property
+End Class
+Class TestBall
+End Class
+Dim Controller : Set Controller = New TestController
+Dim BallsInRealLock, LockBall1, LockBall2, ballA, ballB, cur
+BallsInRealLock = 0
+Set ballA = New TestBall : Set ballB = New TestBall
+Function ActiveBall : Set ActiveBall = cur : End Function
+'''
+    calls = '''PadMaidenLockTimer_Timer
+Set cur = ballA : Controller.Switch(1080) = True : PadMaidenLockIn
+WScript.Echo "in=" & BallsInRealLock & "," & (LockBall1 Is ballA)
+PadMaidenLockTimer_Timer
+Set cur = ballA : PadMaidenLockIn
+WScript.Echo "again=" & BallsInRealLock
+BallsInRealLock = BallsInRealLock - 1
+PadMaidenLockTimer_Timer
+PadMaidenLockTimer_Timer
+Set cur = ballB : PadMaidenLockIn
+WScript.Echo "next=" & BallsInRealLock & "," & (LockBall1 Is ballB)
+PadMaidenLockTimer_Timer
+'''
+    vbs = tmp_path / "lock.vbs"
+    vbs.write_text(harness + lock + calls, encoding="utf-8")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    # held from the hit to the tribute counting the ball out (trgBallLock0/2), once each way;
+    # the held ball back over the trigger at load is not a second ball
+    assert r.stdout.splitlines() == ["switch 1080=True", "in=1,True", "again=1", "switch 1080=False",
+                                     "next=1,True"]
+
+
+def test_playfield_sounds_stay_and_the_soundtrack_goes():
+    vs = pytest.importorskip("vpxsounds")
+    keep = ["fx_ballrolling3", "Flipper_L01", "Rubber_Strong_4", "fx_bumper", "Drain_7",
+            "BallRoll_0_amp5", "WireLoop2", "fx_kicker_enter", "fx_solenoidon", "Sling_R3",
+            "Coin_In_2", "IdolMotor", "DTReset", "magnet", "Bridge_Move", "ShakeBass2"]
+    mute = ["mu_main1", "vo_mother12", "sfx_thunder3", "Song1-WorkingMan", "b66-start3",
+            "say-ShootTheTargets", "explosion", "Sound-0x0111", "fx_guitar2", "pistolet",
+            "shootgoldenball", "redbarchettahorns", "KickDrum1", "bumperDino1", "combo"]
+    for n in keep:
+        assert vs.mechanical(n, 0), n
+    for n in mute:
+        assert not vs.mechanical(n, 0), n
+    assert not vs.mechanical("fx_bumper", vs.OUT_BACKGLASS)              # a table's own bumper sfx
+
+
+@pytest.mark.parametrize("name", ["bottomjet", "leftjet", "rightjet", "fx_lrturn", "fx_lrbump"])
+def test_ghostbusters_jets_and_ramp_contacts_are_mechanical(name):
+    vs = pytest.importorskip("vpxsounds")
+    assert vs.mechanical(name, 0) and vs.mechanical(name.upper(), 0)
+    assert not vs.mechanical(name, vs.OUT_BACKGLASS)
+    assert not vs.mechanical("sfx_" + name, 0)
+    assert not vs.mechanical(name + "voice", 0)  # exact names, no broad jet/bump substring
+
+
+def test_playmusic_goes_to_empty_subs_by_argument_count():
+    vs = pytest.importorskip("vpxsounds")
+    lines = ['Sub Table1_MusicDone : PlayMusic "Aerosmith\\" & Song : End Sub',
+             '    If x Then Call PlayMusic("a.mp3", 0.5) Else EndMusic',
+             "' PlayMusic \"comment.mp3\"",
+             '    D "PlayMusic is a word here" : Call PlayMusic(Song)  \' PlayMusic again']
+    rep = []
+    subs = vs.quiet_music(lines, rep)
+    assert lines[0] == 'Sub Table1_MusicDone : PadNoMusic1 "Aerosmith\\" & Song : End Sub'
+    assert lines[1] == '    If x Then Call PadNoMusic2("a.mp3", 0.5) Else EndMusic'
+    assert lines[2] == "' PlayMusic \"comment.mp3\""
+    assert lines[3] == '    D "PlayMusic is a word here" : Call PadNoMusic1(Song)  \' PlayMusic again'
+    assert "Sub PadNoMusic1(a0) : End Sub" in subs and "Sub PadNoMusic2(a0, a1) : End Sub" in subs
+    own = ["sub playMusic(fileName)", "  playmedia fileName", "end sub", 'playMusic "x.mp3"']
+    assert vs.quiet_music(own, rep) == "" and own[3] == 'playMusic "x.mp3"'   # PinUP's, left
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the quieted VBScript under cscript")
+def test_quieted_playmusic_runs_under_vbscript(tmp_path):
+    vs = pytest.importorskip("vpxsounds")
+    lines = ['Dim Song : Song = "a.mp3"', 'PlayMusic "x\\" & Song', "Call PlayMusic(Song, 0.5)",
+             'WScript.Echo "quiet"']
+    subs = vs.quiet_music(lines, [])
+    vbs = tmp_path / "t.vbs"
+    vbs.write_text("\n".join(lines) + subs, encoding="latin-1")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.strip() == "quiet", r.stdout + r.stderr
+
+
+def _mini_vpx(path, vpxfile, sounds, script):
+    """A compound file with just what VpxTable reads, signed."""
+    pythoncom = pytest.importorskip("pythoncom")
+    from win32com import storagecon as sc
+    pytest.importorskip("Crypto.Hash.MD2")
+    gd = _code(script) + _rec("SEDT", struct.pack("<i", 0)) + _rec("ENDB", b"")
+    mode = sc.STGM_CREATE | sc.STGM_READWRITE | sc.STGM_SHARE_EXCLUSIVE
+    root = pythoncom.StgCreateDocfile(str(path), mode, 0)
+    stg = root.CreateStorage("GameStg", mode, 0, 0)
+    for name, data in [("Version", struct.pack("<i", 1072)), ("GameData", gd)] + \
+            [("Sound%d" % i, s) for i, s in enumerate(sounds)]:
+        stm = stg.CreateStream(name, mode, 0, 0)
+        stm.Write(data)
+        stm.Commit(0)
+    stm = stg.CreateStream("MAC", mode, 0, 0)
+    stm.Write(bytes(16))
+    stm.Commit(0)
+    stg.Commit(0)
+    root.Commit(0)
+    del stm, stg, root
+    t = vpxfile.VpxTable(str(path))
+    mac = t.digest()
+    t.ole.close()
+    vpxfile.write_patched(str(path), str(path) + ".s", streams={"MAC": mac})
+    os.replace(str(path) + ".s", str(path))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="writes through Windows structured storage")
+def test_a_table_patched_before_is_quieted_in_place_once(tmp_path, vpxfile):
+    vs = pytest.importorskip("vpxsounds")
+    p = tmp_path / "old (PAD).vpx"
+    keep = _snd("fx_flipperup", "C:/fx_flipperup.wav", bytes(400), 0, fmt=WAVFMT)
+    song = _snd("mu_main1", "C:/main1.ogg", b"OggS" + bytes(9000), 1)
+    _mini_vpx(p, vpxfile, [keep, song], 'Sub Table1_MusicDone : PlayMusic "a.mp3" : End Sub')
+    t = vpxfile.VpxTable(str(p))
+    assert t.verify()
+    t.ole.close()
+    rep = vs.quiet_in_place(str(p))
+    assert rep and "muted 1 more" in rep[0] and "PlayMusic goes nowhere" in rep[0]
+    t = vpxfile.VpxTable(str(p))
+    assert t.verify() and "PadNoMusic1" in t.script()
+    assert t.ole.openstream("GameStg/Sound0").read() == keep
+    assert vs.read_sound(t.ole.openstream("GameStg/Sound1").read())["size"] == 882
+    t.ole.close()
+    assert vs.quiet_in_place(str(p)) == []                              # once
+
+
+# ------------------------------------------- PAD-882: paths and DirectX -----
+
+def test_a_launch_converts_its_paths_in_its_own_distro(monkeypatch, tmp_path):
+    r"""PAD-882: Jim-Beam's installed app handed bash `C:\Program Files\...
+    \riglock.sh`: the launch into PAD-Runtime asked the machine's DEFAULT
+    distro to convert its Windows paths, that distro could not answer, and
+    the path came back unchanged. Every path is now converted by the distro
+    the run is in, and a drive-letter path becomes /mnt/<drive>/... even
+    when no WSL answers."""
+    import padpath
+    pl = pytest.importorskip("padlaunch")
+    asked = []
+
+    def fake_wsl(args, distro=None):
+        asked.append(distro)
+        if distro != "PAD-Runtime":
+            return None                         # the default distro: no answer
+        p = args[-1]
+        return "/mnt/%s%s" % (p[0].lower(), p[2:].replace("\\", "/"))
+
+    monkeypatch.setattr(padpath, "_wsl", fake_wsl)
+    monkeypatch.setattr(padpath, "_WIN_CACHE", {})
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    rig = r"C:\Program Files\Pinball Asset Decryptor\tools\spike2_emu"
+    monkeypatch.setattr(pl, "rig_dir", lambda: rig)
+    la = pl.Launch("jaws_le", r"C:\_Ricker\Pinball\Jaws\jaws_le-1_02_0.Release.16G.sdcard.raw",
+                   dist="PAD-Runtime")
+    assert la.rig_wsl == "/mnt/c/Program Files/Pinball Asset Decryptor/tools/spike2_emu"
+    assert "PAD-Runtime" in asked and None not in asked
+    monkeypatch.setattr(pl, "app_home", lambda d: "")
+    la.slot = 1
+    env = la.env()
+    assert "PAD_CARD=/mnt/c/_Ricker/Pinball/Jaws/jaws_le-1_02_0.Release.16G.sdcard.raw" in env
+    assert all(":" not in e.split("=", 1)[1][:3] for e in env if e.startswith(("PAD_BOARD=", "PAD_CARD=")))
+    # no WSL answering at all: still a Linux path, never the Windows one
+    monkeypatch.setattr(padpath, "_wsl", lambda args, distro=None: None)
+    monkeypatch.setattr(padpath, "_WIN_CACHE", {})
+    assert padpath.to_wsl(rig + r"\riglock.sh", "PAD-Runtime") == \
+        "/mnt/c/Program Files/Pinball Asset Decryptor/tools/spike2_emu/riglock.sh"
+    assert padpath.to_wsl("/already/linux", "PAD-Runtime") == "/already/linux"
+    assert padpath.to_wsl(r"\server\share\x", "PAD-Runtime") == r"\server\share\x"
+
+
+def test_play_says_when_directx_is_missing(monkeypatch, tmp_path):
+    """PAD-882: VPinballX64.exe imports XINPUT1_3.dll, which only Microsoft's
+    DirectX End-User Runtime installs; without it Windows stopped Play with a
+    system-error box. Play now says so before starting Visual Pinball."""
+    pl = pytest.importorskip("padlaunch")
+    vs = pytest.importorskip("vpxsetup")
+    win = tmp_path / "Windows"
+    (win / "System32").mkdir(parents=True)
+    vp = tmp_path / "vp"
+    (vp / "tables").mkdir(parents=True)
+    (vp / "tables" / "Foo (PAD).vpx").write_bytes(b"x")
+    monkeypatch.setattr(vs.sys, "platform", "win32")
+    monkeypatch.setenv("SystemRoot", str(win))
+    assert vs.missing_directx(str(vp)) == vs.NO_DIRECTX
+    assert "XINPUT1_3.dll" in vs.NO_DIRECTX and "DirectX End-User Runtime" in vs.NO_DIRECTX
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(vs, "find_vpx", lambda: str(vp))
+    monkeypatch.setattr(pl, "distro", lambda: "PAD-Runtime")
+    monkeypatch.setattr(pl, "no_linux", lambda d=None: "")
+    monkeypatch.setattr(vs, "refresh_system_script", lambda t: False)
+    opened = []
+    monkeypatch.setattr(vs.subprocess, "Popen", lambda *a, **k: opened.append(a))
+    assert vs.open_table("Foo (PAD).vpx") == vs.NO_DIRECTX and opened == []
+    (win / "System32" / "xinput1_3.dll").write_bytes(b"")
+    assert vs.missing_directx(str(vp)) == ""
+    assert vs.open_table("Foo (PAD).vpx") == "ok" and len(opened) == 1
+    # Visual Pinball's own folder carrying the DLL counts too
+    (win / "System32" / "xinput1_3.dll").unlink()
+    (vp / "xinput1_3.dll").write_bytes(b"")
+    assert vs.missing_directx(str(vp)) == ""
+
+
+# ------------------------------------- PAD-882: the coin door's buttons -----
+
+def test_the_service_buttons_reach_each_titles_own_switch(monkeypatch):
+    """PAD-882: a first boot's Guided Setup (Free Play, pricing...) needs the
+    coin door's buttons, and a table had none (tributes) or Godzilla's ids
+    (PADSPIKE2.vbs: 1028 is Back there, Select on Batman). A table sends the
+    SERVICE numbers; the bridge finds each button by its wire in the run's
+    switch table."""
+    pc = pytest.importorskip("padcontroller")
+    sent = []
+
+    class Pipe:
+        def __init__(self, rig=None):
+            self.held = {}
+
+        def set(self, sid, level):
+            self.held[sid] = 1 if level else 0
+            sent.append((sid, self.held[sid]))
+
+    monkeypatch.setattr(pc, "log", lambda s: None)
+    b = pc.Bridge()
+    b.set_game("jaws_le")
+    b.pipe = Pipe()
+    assert b.switch_id(9011) == 0                       # no switch table yet: nothing
+    b.sw_ids = {(0, 8): 25, (0, 9): 26, (0, 10): 27, (0, 11): 28}
+    for n, sid in ((9011, 28), (9010, 27), (9009, 26), (9008, 25)):
+        b.set_switch(n, 1)
+        b.set_switch(n, 0)
+        assert sent[-2:] == [(sid, 1), (sid, 0)], n
+    b.sw_ids = {(0, 8): 28, (0, 11): 31}                # another title's numbering
+    sent.clear()
+    b.set_switch(9008, 1)
+    assert sent == [(28, 1)] and b.get_switch(9008)
+    b.set_switch(9011, 1)                               # held when the table loses focus
+    b._release_buttons()
+    assert (28, 0) in sent and (31, 0) in sent          # let go, as a cabinet button is
+    assert pc.SERVICE == {9008: (0, 8), 9009: (0, 9), 9010: (0, 10), 9011: (0, 11)}
+
+
+def test_padspike2_puts_all_four_service_buttons_on_7_8_9_0():
+    s = open(os.path.join(VPX, "PADSPIKE2.vbs"), encoding="utf-8").read()
+    for key, var, num in (("keyBlack", "swSvcBack", 9011), ("keyGreen", "swSvcMinus", 9010),
+                          ("keyRed", "swSvcPlus", 9009), ("keyEnter", "swSvcSelect", 9008)):
+        assert "Dim %s" % var in s and "= %d" % num in s
+        assert re.search(r"Case %s\s+\.Switch\(%s\)\s+= True" % (key, var), s), key
+        assert re.search(r"Case %s\s+\.Switch\(%s\)\s+= False" % (key, var), s), key
+    # a table patched before still sets these: they stay declared
+    assert "Dim swBlack, swGreen, swRed" in s
+    assert "swBlack = 1028" not in open(os.path.join(VPX, "patch_turtles_le.py"), encoding="utf-8").read()
+
+
+def test_a_tribute_gets_the_service_keys_and_an_old_patch_the_same_in_place():
+    vs = pytest.importorskip("vpxshadow")
+    m = json.load(open(os.path.join(VPX, "jaws_le.shadow.json"), encoding="utf-8"))
+    had = {k: True for k in ("Table1_Init", "Table1_KeyDown", "Table1_KeyUp", "Table1_Exit")}
+    new = vs.gen(m, had)
+    down = new[new.index("Sub Table1_KeyDown(ByVal KeyCode)"):]
+    down = down[:down.index("End Sub")]
+    up = new[new.index("Sub Table1_KeyUp(ByVal KeyCode)"):]
+    up = up[:up.index("End Sub")]
+    for k, sw in ((8, 9011), (9, 9010), (10, 9009), (11, 9008)):
+        assert "If KeyCode = %d Then Controller.Switch(%d) = True" % (k, sw) in down
+        assert "If KeyCode = %d Then Controller.Switch(%d) = False" % (k, sw) in up
+    # the shadow game never sees those four keys
+    assert "If KeyCode < 8 Or KeyCode > 11 Then Table1_KeyDown_orig KeyCode" in down
+    assert "If KeyCode < 8 Or KeyCode > 11 Then Table1_KeyUp_orig KeyCode" in up
+    # a script patched before PAD-882 (no service lines, a bare orig call)
+    old = [ln for ln in new.split("\n") if "Service " not in ln]
+    old = [ln.replace("If KeyCode < 8 Or KeyCode > 11 Then ", "") for ln in old]
+    up_again, changed = vs.with_service_keys(old)
+    assert changed and "\n".join(up_again) == new
+    assert vs.with_service_keys(up_again) == (up_again, False)      # once
+    # CRLF scripts keep their line ends
+    crlf = [ln + "\r" for ln in old]
+    got, _ = vs.with_service_keys(crlf)
+    assert all(ln.endswith("\r") for ln in got if ln)
+
+
+def test_a_launch_with_no_emulator_set_up_says_so(tmp_path, monkeypatch):
+    """PAD-882: Jim-Beam's first table run died a second in with "no rig to
+    layer slot 1 over: /home/pad/spike2root does not exist" in its log only,
+    and the table sat there. The launch says it, and the table shows it."""
+    pl = pytest.importorskip("padlaunch")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(pl, "no_linux", lambda d=None: "")
+    monkeypatch.setattr(pl, "account", lambda d=None: ("pad", "/home/pad"))
+    monkeypatch.setattr(pl, "app_home", lambda d: "")
+    monkeypatch.setattr(pl.padpath, "to_wsl", lambda p, distro=None: "/mnt/c/x")
+    calls = []
+
+    class R:
+        returncode, stdout, stderr = 1, b"", b""
+
+    monkeypatch.setattr(pl, "_run", lambda cmd, timeout=60: calls.append(cmd) or R())
+    la = pl.Launch("sword_of_rage_le", "/mnt/c/cards/bk.raw", dist="PAD-Runtime")
+    with pytest.raises(RuntimeError) as e:
+        la.start()
+    assert str(e.value) == pl.NO_RIG and "Emulate tab" in pl.NO_RIG
+    assert calls == [["wsl.exe", "-d", "PAD-Runtime", "-u", "root", "-e", "test", "-d",
+                      "/home/pad/spike2root"]]
+    assert la.slot is None                              # no slot taken for nothing
+    # the app's data disk holds the rig: that is where it is looked for
+    monkeypatch.setattr(pl, "app_home", lambda d: "/mnt/wsl/paddata/spike2")
+    la2 = pl.Launch("sword_of_rage_le", "/mnt/c/cards/bk.raw", dist="PAD-Runtime")
+    assert la2.base_rig() == "/mnt/wsl/paddata/spike2/spike2root"
+    # WSL not answering (any other code) refuses nothing on a guess
+    R.returncode = 2
+    calls.clear()
+    monkeypatch.setattr(pl.subprocess, "Popen", lambda *a, **k: None)
+    R.stdout = b"slot=2\n"
+    la3 = pl.Launch("sword_of_rage_le", "/mnt/c/cards/bk.raw", dist="PAD-Runtime")
+    monkeypatch.setattr(la3, "take_slot", lambda: setattr(la3, "slot", 2))
+    monkeypatch.setattr(pl, "LOG", str(tmp_path / "padcontroller.log"))
+    la3.logfile = str(tmp_path / "padvpx.log")
+    la3.start()
+    assert la3.slot == 2
+
+
+def test_the_grips_stand_aside_while_visual_pinball_is_paused(monkeypatch):
+    """PAD-882: the grips window lies over the whole picture and takes every
+    click, and Visual Pinball's Esc menu (Resume, Quit to editor...) is drawn
+    inside that picture: its buttons took no click, so the only way out of a
+    table was closing its windows. While VPX is paused the grips are hidden;
+    when it plays on they cover the picture again. _tick as it runs every
+    50 ms, against a recording user32."""
+    pc = pytest.importorskip("padcontroller")
+    pytest.importorskip("win32gui")
+    logged, calls = [], []
+    monkeypatch.setattr(pc, "log", logged.append)
+    monkeypatch.setattr(pc.Bridge, "_client_on_screen", staticmethod(lambda h: (10, 20, 400, 600)))
+
+    class U:
+        def __getattr__(self, name):
+            def f(*a):
+                calls.append((name, tuple(getattr(x, "value", x) for x in a)))
+                return 0 if name in ("IsIconic", "IsZoomed") else 1
+            return f
+
+    g = pc.PlayerGrips.__new__(pc.PlayerGrips)
+    g.u, g.hwnd, g.player, g.placed, g.drag, g.press, g.aside = U(), 77, 55, None, None, None, False
+    # the real chain: VPX's Esc opens its menu and fires the table's Paused,
+    # whose `Controller.Pause = 1` is Bridge.set_pause (PadController._dynamic_)
+    g.bridge = pc.Bridge()
+    g.bridge.running, g.bridge.player_hwnd = True, 55
+
+    def tick():
+        calls.clear()
+        g._tick()
+        return [c for c in calls if c[0] in ("ShowWindow", "SetWindowPos")]
+
+    assert tick() == [("SetWindowPos", (77, None, 10, 20, 400, 600, 0x50))]     # over the picture
+    assert tick() == []                                                         # placed: nothing to do
+    g.bridge.set_pause(1)                                                       # Esc: VPX pauses for its menu
+    assert tick() == [("ShowWindow", (77, 0))] and g.aside
+    assert tick() == []                                                         # hidden once, not every tick
+    assert any("grips aside" in s for s in logged)
+    g.bridge.set_pause(0)                                                       # Resume
+    assert tick() == [("SetWindowPos", (77, None, 10, 20, 400, 600, 0x50))]     # back, shown again
+    assert not g.aside and any("grips back" in s for s in logged)
+
+
+def test_minimized_player_is_not_placed_until_it_is_restored(monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+    pc = pytest.importorskip("padcontroller")
+    minimized = [True]
+    u = SimpleNamespace(IsIconic=lambda h: minimized[0])
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=u), raising=False)
+    monkeypatch.setattr(pc.sys, "platform", "win32")
+    monkeypatch.setattr(pc.padlaunch, "kit_load", lambda: {})
+    monkeypatch.setattr(pc, "dpi_aware", lambda: None)
+    monkeypatch.setattr(pc, "log", lambda s: None)
+    reads = []
+    def rect(h):
+        reads.append(h)
+        return (-32000, -32000, 160, 28) if minimized[0] else (100, 200, 600, 1200)
+    monkeypatch.setattr(pc, "window_rect", rect)
+    b = pc.Bridge.__new__(pc.Bridge)
+    b.player_hwnd, b.player_placed = 55, False
+    b._frame_player = lambda h: False
+    b._place_player()
+    assert not reads and not b.player_placed
+    assert not hasattr(b, "player_aspect")
+    minimized[0] = False
+    b._place_player()
+    assert reads == [55] and b.player_placed and b.player_aspect == 2.0
+
+
+def test_minimized_player_does_not_replace_the_saved_geometry(monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+    pc = pytest.importorskip("padcontroller")
+    minimized = [True]
+    u = SimpleNamespace(IsIconic=lambda h: minimized[0], IsWindow=lambda h: True,
+                        IsZoomed=lambda h: False)
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=u), raising=False)
+    monkeypatch.setattr(pc.sys, "platform", "win32")
+    reads, saves = [], []
+    def rect(h):
+        reads.append(h)
+        return (-32000, -32000, 160, 28) if minimized[0] else (100, 200, 600, 1200)
+    monkeypatch.setattr(pc, "window_rect", rect)
+    monkeypatch.setattr(pc.padlaunch, "kit_save", lambda k: saves.append(k))
+    b = pc.Bridge.__new__(pc.Bridge)
+    b.player_hwnd, b.player_placed, b.player_aspect = 55, True, 2.0
+    b._player_seen = b._player_settled = (100, 200, 600, 1200)
+    b._player_seen_t = 0
+    b._watch_player()
+    assert not reads and not saves
+    assert b._player_seen == b._player_settled == (100, 200, 600, 1200)
+    minimized[0] = False
+    b._watch_player()
+    assert reads == [55] and not saves   # restored, still at the saved place
+
+
+def test_a_table_that_runs_without_its_window_still_gets_the_grips(monkeypatch):
+    """PAD-933: The Beatles (and TMNT) call a bare `Controller.Run`, as their
+    ROM scripts had it, so the bridge never got the player window: no grips,
+    no placing, and the playfield could not be moved or resized. The window
+    is found by its title then, once, and a handed one is never replaced."""
+    pc = pytest.importorskip("padcontroller")
+    logged = []
+    monkeypatch.setattr(pc, "log", logged.append)
+    monkeypatch.setattr(pc.sys, "platform", "win32")
+    found = [0]
+    monkeypatch.setattr(pc, "find_player_window", lambda: found[0])
+    b = pc.Bridge()
+    b.player_hwnd = 0                     # what PadController's "run" key keeps for a bare Run
+    b._find_player()
+    assert b.player_hwnd == 0 and not logged             # not up yet: looked for again next second
+    found[0] = 4242
+    b._find_player()
+    assert b.player_hwnd == 4242 and any("found by its title" in s for s in logged)
+    found[0] = 99
+    b._find_player()
+    assert b.player_hwnd == 4242                         # kept
+    b.player_hwnd = 55                                   # Controller.Run GetPlayerHWnd
+    b._find_player()
+    assert b.player_hwnd == 55
+
+
+# --------------------------------- PAD-893: the backglass keeps the focus -----
+
+def test_the_backglass_hands_the_foreground_back_once_per_window(monkeypatch):
+    """PAD-893: B2S.Server, started from PADSPIKE2.vbs's LoadVPM, takes the
+    foreground as its window opens and gives it back only to a playfield that
+    is already showing, so Metallica sat paused behind its backglass. Each
+    backglass window's first grab is undone, for any run (the bridge's own
+    or not); a later click on it is the user's. The LCD rule stays: once,
+    only for a run the bridge started, and nothing else is ever taken."""
+    pc = pytest.importorskip("padcontroller")
+    monkeypatch.setattr(pc, "log", lambda s: None)
+    b = pc.Bridge()
+    b.b2s_handed = set()
+    assert pc.b2s_window("B2S Backglass Server") and pc.b2s_window("B2S DMD")
+    assert pc.b2s_window("B2S Backglass")
+    assert not pc.b2s_window("Visual Pinball Player") and not pc.b2s_window("Notepad")
+    assert b.launch is None
+
+    def handed(fg, title):
+        if not b._hand_back_from(fg, title):
+            return False
+        b._handed_back(fg, title, True)
+        return True
+    assert handed(101, "B2S Backglass Server")                      # no started run: still
+    assert not handed(101, "B2S Backglass Server")                  # once
+    assert handed(102, "B2S DMD")                                   # its DMD: its own once
+    assert not handed(103, "Untitled - Notepad")                    # never the user's windows
+    lcd = "[rig 1: %s] Metallica - Stern Spike 2 emulator" % pc.padlaunch.LABEL
+    assert not handed(104, lcd)                                     # not a run it started
+    b.launch = object()
+    b.attached, b.attached_t, b.ready_t = True, -1e9, -1e9          # long up: the start rule is over
+    assert handed(104, lcd) and b.front_done
+    assert not handed(104, lcd)                                     # once
+    assert handed(105, "B2S Backglass Server")                      # a new backglass window
+
+
+def test_the_started_runs_windows_are_handed_back_until_the_player_has_it(monkeypatch):
+    """PAD-949: Mike's Beatles table played on with the keyboard in the game's
+    LCD window until Alt+Tab. The one hand-back the controller made was
+    refused by Windows now and then and never tried again, and the LCD window
+    or the loading window can take the foreground again while the run comes
+    up. A refused hand-back is tried again (up to FRONT_TRIES), and the run's
+    own windows - the LCD window, the loading window by its process - are
+    handed back from every time until FRONT_SETTLE_S after the game is up;
+    after that the old rules: the LCD window once, never the user's windows."""
+    pc = pytest.importorskip("padcontroller")
+    monkeypatch.setattr(pc, "log", lambda s: None)
+    b = pc.Bridge()
+    lcd = "[rig 1: %s] beatles - Stern Spike 2 emulator (PAD-Runtime)" % pc.padlaunch.LABEL
+    b.launch = object()
+    b._loading = type("P", (), {"pid": 777})()
+    for _ in range(3):                                              # not up yet: every grab
+        assert b._hand_back_from(104, lcd)
+        b._handed_back(104, lcd, True)
+    assert b._hand_back_from(106, "C:\\Python314\\pythonw.exe", 777)    # the loading window
+    assert not b._hand_back_from(107, "C:\\Python314\\pythonw.exe", 778)  # someone else's Tk
+    assert not b._hand_back_from(103, "Untitled - Notepad")
+    b.attached, b.attached_t = True, pc.time.monotonic()            # attached, still booting (PAD-963)
+    assert b._hand_back_from(104, lcd)
+    b.attached_t -= pc.FRONT_SETTLE_S + 1                           # however long the boot takes
+    assert b._hand_back_from(104, lcd)
+    b.ready_t = pc.time.monotonic()                                 # in attract, just: still
+    assert b._hand_back_from(104, lcd)
+    for _ in range(pc.FRONT_TRIES):                                 # refused: tried again, a while
+        assert b._hand_back_from(108, lcd)
+        b._handed_back(108, lcd, False)
+    assert not b._hand_back_from(108, lcd)
+    b.ready_t -= pc.FRONT_SETTLE_S + 1                              # settled: a click on it is the user's
+    b._loading = None
+    assert not b._hand_back_from(104, lcd)
+    b.front_tries.clear()
+    b.front_done = False                                            # its first grab after the start: once
+    assert b._hand_back_from(104, lcd)
+    b._handed_back(104, lcd, False)                                 # refused: not done
+    assert not b.front_done and b._hand_back_from(104, lcd)
+    b._handed_back(104, lcd, True)
+    assert b.front_done and not b._hand_back_from(104, lcd)
+    b.launch = None                                                 # a run it did not start: never
+    b.front_done = False
+    assert not b._hand_back_from(104, lcd)
+
+
+def _fake_win32com(monkeypatch, objects):
+    """win32com.client whose Dispatch knows only `objects` (name -> factory);
+    anything else fails the way an unregistered ProgID does."""
+    import types
+    client = types.ModuleType("win32com.client")
+
+    def dispatch(name):
+        if name in objects:
+            return objects[name]()
+        raise OSError(-2147221005, "Invalid class string", None, None)
+    client.Dispatch = dispatch
+    pkg = types.ModuleType("win32com")
+    pkg.client = client
+    monkeypatch.setitem(sys.modules, "win32com", pkg)
+    monkeypatch.setitem(sys.modules, "win32com.client", client)
+
+
+class _RecDOF:
+    def __init__(self, *a):
+        self.got = []
+
+    def Init(self, host, table, rom):
+        self.got.append(("init", host, rom))
+
+    def UpdateTableElement(self, kind, n, v):
+        self.got.append((kind, n, v))
+
+    def Finish(self):
+        self.got.append(("finish",))
+
+
+def test_dof_comes_up_without_its_com_registration(monkeypatch):
+    """PAD-909: DOF's per-user COM registration went missing on a cabinet
+    (every run: 'no DirectOutput.ComObject (Invalid class string)') while DOF
+    itself still worked through B2S. The class id is tried next, then DOF's
+    own DLL in a helper; with none of them DOF is off and says why."""
+    pc = pytest.importorskip("padcontroller")
+    rec = _RecDOF()
+    _fake_win32com(monkeypatch, {pc.DofHost.CLSID: lambda: rec})
+    h = pc.DofHost("mtl_180h", "", dlls=[])
+    assert h.up and "class id" in h.how and rec.got == [("init", "B2SServer", "mtl_180h")]
+    h.finish()
+
+    _fake_win32com(monkeypatch, {})
+    made = []
+
+    class Proc(_RecDOF):
+        def __init__(self, dll, shell):
+            super().__init__()
+            self.where = (dll, shell)
+            made.append(self)
+    monkeypatch.setattr(pc, "_DofProcess", Proc)
+    h = pc.DofHost("mtl_180h", "t.vpx", dlls=[(r"D:\DOF\x64\DirectOutputComObject.dll", ["ps64"])])
+    assert h.up and "COM registration is missing" in h.how
+    h.send("S", 16, 1)
+    h.finish()
+    assert made[0].where == (r"D:\DOF\x64\DirectOutputComObject.dll", "ps64")
+    assert made[0].got == [("init", "B2SServer", "mtl_180h"), ("S", 16, 1), ("finish",)]
+
+    h = pc.DofHost("mtl_180h", "", dlls=[])
+    assert not h.up
+    assert "no DirectOutput.ComObject" in h.why and "Invalid class string" in h.why
+    assert "no DirectOutputComObject.dll" in h.why
+
+
+def test_dof_takes_the_parent_roms_name_when_its_config_has_only_that(tmp_path, monkeypatch):
+    """PAD-948: The Beatles names the free-play Seawitch ROM (seawitfp); the
+    DOF config tool keys Seawitch as seawitch, and DOF's own match (exact,
+    name_, prefix) cannot get from one to the other, so a cabinet had no toys
+    until the user edited the script. DOF is started under the parent's name
+    when only the parent has a row; its own row, or no configs, keep it."""
+    pc = pytest.importorskip("padcontroller")
+    dof = tmp_path / "DirectOutput"
+    (dof / "x64").mkdir(parents=True)
+    (dof / "Config").mkdir()
+    ini = dof / "Config" / "directoutputconfig30.ini"
+    ini.write_text("[Config DOF]\nafm,S1 Blue,0\nseawitch,S9,0\n[Colors DOF]\nseawitfp=1,2,3\n")
+    dirs = [str(dof / "x64")]
+    assert pc.dof_config_names(pc.dof_config_dirs("", dirs)) == {"afm", "seawitch"}
+    assert pc.dof_rom_for("seawitfp", "", dirs) == "seawitch"
+    assert pc.dof_rom_for("afm_113b", "", dirs) == "afm_113b"          # not a listed clone
+    assert pc.dof_knows("afm_113b", {"afm"}) and not pc.dof_knows("seawitfp", {"seawitch"})
+    # a row of its own wins, wherever DOF reads it from: the table's folder too
+    tables = tmp_path / "Tables"
+    tables.mkdir()
+    (tables / "directoutputconfig51.ini").write_text("[Config DOF]\nseawitfp,S9,0\n")
+    assert pc.dof_rom_for("seawitfp", str(tables / "seawitfp.vpx"), dirs) == "seawitfp"
+    # the global config's IniFilesPath is read as well
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (other / "directoutputconfig.ini").write_text("[Config DOF]\nseawitfp,S9,0\n")
+    (dof / "Config" / "GlobalConfig_B2SServer.xml").write_text(
+        "<GlobalConfig><IniFilesPath>%s</IniFilesPath></GlobalConfig>" % other)
+    assert pc.dof_rom_for("seawitfp", "", dirs) == "seawitfp"
+    # no configs to read: the table's own name, as before
+    assert pc.dof_rom_for("seawitfp", "", [str(tmp_path / "none")]) == "seawitfp"
+
+    # the bridge starts DOF under the name it picked
+    (dof / "Config" / "GlobalConfig_B2SServer.xml").unlink()
+    got = []
+
+    class Rec:
+        def Init(self, host, table, rom):                  # noqa: N802
+            got.append(rom)
+
+        def UpdateTableElement(self, *a):                  # noqa: N802
+            pass
+
+        def Finish(self):                                  # noqa: N802
+            pass
+    monkeypatch.setattr(pc, "_dof_dirs", lambda: dirs)
+    b = pc.Bridge()
+    assert b.dof_init("seawitfp", "", factory=Rec)
+    b.dof_finish()
+    assert got == ["seawitch"]
+
+
+def test_dof_dll_is_found_in_every_install_layout(tmp_path):
+    pc = pytest.importorskip("padcontroller")
+    ps64, ps32 = pc._dof_shells()
+    shared = tmp_path / "Direct Output"
+    for sub in ("x64", "x86"):
+        (shared / sub).mkdir(parents=True)
+        (shared / sub / pc.DOF_DLL).write_bytes(b"")
+    flat = tmp_path / "old"
+    flat.mkdir()
+    (flat / pc.DOF_DLL).write_bytes(b"")
+    got = pc.dof_dll_candidates([str(shared), str(shared / "x64"), "", str(flat),
+                                 str(tmp_path / "none")])
+    assert got == [(str(shared / "x64" / pc.DOF_DLL), [ps64]),
+                   (str(shared / "x86" / pc.DOF_DLL), [ps32]),
+                   (str(flat / pc.DOF_DLL), [ps64, ps32])]
+
+
+STANDIN_DOF = r"""
+namespace DirectOutputCom {
+  public class ComObject {
+    void Say(string s) { System.IO.File.AppendAllText(System.Environment.GetEnvironmentVariable("PAD_TEST_DOF_OUT"), s + "\n"); }
+    public void Init(string host, string table, string rom) { Say("init " + host + " " + rom + " " + System.IO.Directory.GetCurrentDirectory()); }
+    public void UpdateTableElement(string kind, int n, int v) { Say(kind + n + "=" + v); }
+    public void Finish() { Say("finish"); }
+  }
+}
+"""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell")
+def test_dof_helper_loads_dofs_own_dll(tmp_path, monkeypatch):
+    """The helper for real: a stand-in DirectOutputComObject.dll in a shared
+    install's x64 folder, loaded by path with nothing registered."""
+    import subprocess
+    pc = pytest.importorskip("padcontroller")
+    dof = tmp_path / "Direct Output"
+    (dof / "x64").mkdir(parents=True)
+    src = tmp_path / "standin.cs"
+    src.write_text(STANDIN_DOF)
+    dll = dof / "x64" / pc.DOF_DLL
+    subprocess.run([pc._dof_shells()[0], "-NoProfile", "-NonInteractive", "-Command",
+                    "Add-Type -Path '%s' -OutputAssembly '%s' -OutputType Library" % (src, dll)],
+                   check=True, timeout=120)
+    out = tmp_path / "said.txt"
+    monkeypatch.setenv("PAD_TEST_DOF_OUT", str(out))
+    _fake_win32com(monkeypatch, {})
+    h = pc.DofHost("mtl_180h", "", dlls=pc.dof_dll_candidates([str(dof)]))
+    assert h.up, h.why
+    for ev in (("S", 16, 1), ("S", 16, 0), ("L", 17, 1)):
+        h.send(*ev)
+    h.finish()
+    said = out.read_text().splitlines()
+    assert said[0] == "init B2SServer mtl_180h %s" % dof        # DOF's log lands in its main folder
+    assert said[1:] == ["S16=1", "S16=0", "L17=1", "finish"]
+
+
+# ---- PAD-926: The Beatles (Original 2018) on Stern's Seawitch ROM -> beatles
+
+#: beatles 1.29.0's switch table (the rig's switch_list.txt): the playfield
+#: ids the map may send, by name
+BEATLES_SWITCHES = {
+    43: "LOWER LEFT TARGET", 44: "SUPER JACKPOT TARGET", 48: "LEFT OUTLANE", 49: "LEFT RETURN LANE",
+    50: "RIGHT RETURN LANE", 51: "RIGHT OUTLANE", 52: "LT 3 BANK DROP LT", 53: "LT 3 BANK DROP CNTR",
+    54: "LT 3 BANK DROP RT", 59: "SHOOTER LANE", 60: "RIGHT SLINGSHOT", 61: "LEFT SLINGSHOT",
+    63: "TROUGH 6", 64: "TROUGH 5", 65: "TROUGH 4", 66: "TROUGH 3", 67: "TROUGH 2", 68: "TROUGH 1",
+    69: "TROUGH JAM", 70: "LEFT ORBIT OPTO", 71: "TOP MAGNET OPTO", 72: "RIGHT ORBIT OPTO",
+    73: "TARGET 1", 74: "TARGET 2", 75: "TARGET 3", 76: "TARGET 4", 77: "LEFT ORBIT TARGET",
+    78: "RT 4 BANK DROP LEFT", 79: "RT 4 BANK DROP LT CTR", 80: "RT 4BANK DROP R-CNTR",
+    81: "RT 4 BANK DROP RIGHT", 82: "SPINNER RIGHT ORBIT", 83: "SKILL SHOT ROLLOVER",
+    84: "RIGHT ORBIT TARGET", 85: "CNTR 4 BANK DROP LT", 86: "CNTR 4 BANK DROP LT CNTR",
+    87: "CNTR 4BANK DROP R-CNTR", 88: "CNTR 4 BANK DROP RT", 89: "LEFT POP BUMPER",
+    90: "RIGHT POP BUMPER", 91: "TOP POP BUMPER", 92: "SPINNER LEFT",
+}
+
+
+@pytest.fixture
+def btmap():
+    return json.load(open(os.path.join(VPX, "beatles.vpxmap.json"), encoding="utf-8"))
+
+
+def test_beatles_map_sends_only_beatles_switches(btmap):
+    sent = [v for k, v in btmap["switch_rewrite"].items() if k != "_"]
+    sent += [v for k, v in btmap["switch_by_object"].items() if k != "_"]
+    sent += [v.get("pulse", v.get("hold")) for k, v in btmap["switch_subs"].items() if k != "_"]
+    sent += btmap["switch_holds"]["trough"]
+    # every playfield switch the machine has is reached (the star's release goes
+    # through the rewrite of Seawitch's 25, its press through switch_subs)
+    assert set(sent) == set(BEATLES_SWITCHES)
+    assert len(sent) == len(BEATLES_SWITCHES) + 1
+    assert btmap["switch_subs"]["sw25_Hit"]["hold"] == 83                  # the star rollover
+    assert btmap["switch_subs"]["pupballstart_hit"]["hold"] == 59         # where the ball rests
+    # the controller finds the map and maps the coils the patcher calls by number
+    pc = pytest.importorskip("padcontroller")
+    m = pc.VpxMap("beatles")
+    assert m.coil(10) == (8, 1) and m.coil(7) == (9, 5) and m.coil(8) == (8, 8) and m.coil(9) == (9, 1)
+    assert m.coil(36) == (8, 6) and m.coil(34) == (8, 7)                   # the upper flippers
+    assert m.game_on == (40, [(8, 5), (8, 0)])
+    assert m.switch_id(4) == 71 and m.switch_id(1083) == 83
+    # DOF hears Seawitch's own coil numbers, and nothing for the coils Seawitch never had
+    assert m.dof_sols[10] == (8, 1) and m.dof_sols[7] == (9, 5)
+    assert not {1, 2, 3, 4, 5, 11, 12, 13, 34, 36} & set(m.dof_sols)
+    # the record's motor LEDs reach the table (lamp_calls are lamps the controller reports)
+    assert m.lamp_groups[1804] == [(8, 4)] and m.lamp_groups[1805] == [(8, 5)]
+
+
+def test_beatles_patcher_rewrites_a_miniature(btmap):
+    pb = pytest.importorskip("patch_beatles")
+    mini = "\n".join([
+        'Option Explicit',
+        'ExecuteGlobal GetTextFile("controller.vbs")',
+        'If Err Then MsgBox "You need the controller.vbs in order to run this table, available in the vp10 package"',
+        'Const cGameName="seawitfp",UseSolenoids=1,UseLamps=0,UseGI=0,SSolenoidOn="SolOn",SSolenoidOff="SolOff",SCoin="coin"',
+        'LoadVPM "01560000", "stern.vbs", 3.26',
+        'SolCallback(6) =  "vpmSolSound SoundFX(""Knocker"",DOFKnocker),"',
+        'SolCallback(10) = "SolBallRelease"',
+        'Sub SolBallRelease(enabled)',
+        '\tbsTrough.ExitSol_On',
+        'End Sub',
+        'SolCallback(sLLFlipper) = "SolLFlipper"',
+        'Sub SolLFlipper(Enabled)',
+        '     If Enabled Then',
+        '         PlaySound SoundFX("fx_Flipperup",DOFContactors):LeftFlipper.RotateToEnd:LeftFlipper1.RotateToEnd',
+        '     End If',
+        'End Sub',
+        'Sub Table1_KeyDown(ByVal KeyCode)',
+        '\tIf KeyDownHandler(keycode) Then Exit Sub',
+        'End Sub',
+        '          vpmNudge.TiltSwitch = 7',
+        '     \t  bsTrough.InitNoTrough ballrelease, 33, 90, 4 ',
+        '              dtLBank.InitDrop Array(sw40, sw39, sw38), Array(40, 39, 38)',
+        'Sub sw5_Spin()',
+        '\tvpmTimer.PulseSw 5',
+        'End Sub',
+        'Sub leftspin_Spin()',
+        '\tvpmTimer.PulseSw 5',
+        'End Sub',
+        'Sub sw34_Hit::Controller.Switch(34) = 1:PlaySound "rollover":flashdrum:CheckBeatlemania:End Sub',
+        'Sub AddPoints(PointsPar)',
+        '\tvpmTimer.PulseSw 25',
+        'End Sub',
+        'Sub superjball_hit',
+        '\tballrelease.createball:BallRelease.Kick 90, 4',
+        'End Sub',
+        'Sub MysteryTarget_Hit',
+        '\tif MysteryActive then AddPoints 5000',
+        'End Sub',
+        'sub flash2_hit',
+        '\tstrip3.visible = 1',
+        'End Sub',
+        'Sub sw25_Hit()',
+        '\tController.Switch(25) = 1',
+        '\tAddpoints 10000',
+        'End Sub',
+        'Dim LampState(200), FadingLevel(200)',
+        'Sub UpdateLamps',
+        '        NFadeL 1, l1 ',
+        '\tif haspup then PuPlayer.LabelSet pBackglass,"GameOverbg","Game Over",1,""',
+        'End Sub',
+        'Dim HasPup:HasPuP = True',
+        'Dim PuPlayer',
+        'if HasPuP Then',
+        '\tSet PuPlayer = CreateObject("PinUpPlayer.PinDisplay") ',
+        'end If',
+    ])
+    out, rep = pb.patch_script(mini, btmap)
+    assert 'GetTextFile("PADSPIKE2.vbs")' in out and "stern.vbs" not in out
+    assert 'Const cGameName="beatles",UseSolenoids=2' in out and 'PadB2SName = "seawitfp"' in out
+    assert "swULFlip = 1058 : swURFlip = 1057" in out
+    assert out.count("PAD: Spike 2 coils") == 1 and "Knocker" not in out
+    assert 'SolCallback(10) = "bsTrough.SolOut"' in out
+    assert 'SolCallback(sULFlipper) = "SolULFlipper"' in out and 'SolCallback(sURFlipper) = "SolURFlipper"' in out
+    # the upper flippers are their own coils now; their buttons close with the lower ones
+    assert "LeftFlipper.RotateToEnd\n" in out and "LeftFlipper1.RotateToEnd:" not in out
+    assert "If KeyCode = LeftFlipperKey Then Controller.Switch(1058) = True : vpmFlips.FlipUL True" in out
+    assert "vpmNudge.TiltSwitch = 1035" in out
+    assert "bsTrough.InitSw 0,1068,1067,1066,1065,1064,1063,1069" in out and "bsTrough.Balls = 4" in out   # PAD-933: the game counts 4
+    assert "Array(sw40, sw39, sw38), Array(1052, 1053, 1054)" in out
+    # both spinners pulsed Seawitch's 5: each its own now
+    assert out.index("PulseSw 1082") < out.index("PulseSw 1092")
+    assert "Controller.Switch(1048) = 1" in out
+    # the tribute's rules are emptied: no extra scoring through the star, no balls of its own
+    assert "PulseSw 1083" not in out and "createball" not in out.lower()
+    assert "Sub MysteryTarget_Hit\n\tvpmTimer.PulseSw 1043" in out and "MysteryActive" not in out
+    assert "Sub flash2_hit\n\tvpmTimer.PulseSw 1070" in out and "strip3.visible = 1" in out   # its own flash kept
+    assert "Controller.Switch(1083) = 1" in out and "Sub sw25_UnHit : Controller.Switch(1083) = 0" in out
+    assert "Sub pupballstart_UnHit : Controller.Switch(1059) = 0 : End Sub" in out
+    lamps = out.split("Sub UpdateLamps")[1].split("End Sub")[0]
+    assert "Dim LampState(3000)" in out and "NFadeL 1942, l1" in lamps and "GameOverbg" not in lamps
+    assert "PadDome 3, 1" in lamps and "PadRecordMotor 1, 1" in lamps
+    assert "HasPuP = False" in out and "Set PuPlayer = New PadNoPuP" in out and "Class PadNoPuP" in out
+    assert "MagnetW2.Solenoid = 2" in out and ".Solenoid = 3" in out
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="compiles the generated script under cscript")
+def test_beatles_generated_subs_compile(tmp_path, btmap):
+    pb = pytest.importorskip("patch_beatles")
+    out, _ = pb.patch_script("Option Explicit\nSub UpdateLamps\nEnd Sub\nDim PuPlayer\n", btmap)
+    lines = out.split("\n")
+    f = tmp_path / "t.vbs"
+    # WScript.Quit first: the whole file compiles, nothing runs (no message box on the desktop)
+    f.write_text(lines[0] + "\nWScript.Quit 0\n" + "\n".join(lines[1:]), encoding="utf-8")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(f)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the generated subs under cscript")
+def test_beatles_record_motor_and_domes_run(tmp_path, btmap):
+    # the generated subs for real, with stand-ins for the table's objects
+    pb = pytest.importorskip("patch_beatles")
+    out, _ = pb.patch_script("Option Explicit\nDim PuPlayer\n", btmap)
+    tail = out.split("'==== PAD: the Spike 2 emulator")[1].split("Class PadNoPuP")[0]
+    tail = "\n".join(ln for ln in tail.split("\n")[1:]
+                     if not ln.startswith(("MagnetW2.", "Set mRecordMagnet", "With mRecordMagnet", "\t.", "End With")))
+    harness = "\n".join([
+        "Class FakeTT : Public MotorOn, SpinCW, SpinUp : End Class",
+        "Dim spinner : Set spinner = New FakeTT",
+        "Dim padMotor(1), FlashLevel1, FlashLevel2, FlashLevel3, FlashLevel5, flashed",
+        "Sub Flasherflash1_Timer : flashed = flashed & \"1\" : End Sub",
+        "Sub Flasherflash2_Timer : flashed = flashed & \"2\" : End Sub",
+        "Sub Flasherflash3_Timer : flashed = flashed & \"3\" : End Sub",
+        "Sub Flasherflash5_Timer : flashed = flashed & \"5\" : End Sub",
+        tail,
+        "PadRecordMotor 0, 1 : WScript.Echo CBool(spinner.MotorOn) & \" \" & CBool(spinner.SpinCW)",
+        "PadRecordMotor 1, 1 : WScript.Echo CBool(spinner.MotorOn)",
+        "PadRecordMotor 0, 0 : WScript.Echo CBool(spinner.MotorOn) & \" \" & CBool(spinner.SpinCW)",
+        "PadRecordMotor 1, 0 : WScript.Echo CBool(spinner.MotorOn)",
+        "PadDome 3, 1 : PadDome 1, 0 : PadDome 5, 1 : WScript.Echo flashed & \" \" & FlashLevel3 & FlashLevel5",
+        "WScript.Echo spinner.SpinUp",
+    ])
+    f = tmp_path / "t.vbs"
+    f.write_text(harness, encoding="utf-8")
+    import subprocess
+    r = subprocess.run(["cscript", "//nologo", str(f)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # A0 alone turns it one way, A1 alone the other, both (a brake) or neither stops it
+    # (cscript prints a Boolean False as "False" or, on some Windows setups, "0")
+    got = ["False" if w == "0" else w for w in r.stdout.split()]
+    assert got == ["True", "True", "False", "True", "False", "False", "35", "11", "100"], r.stdout
+
+
+def test_patched_table_finds_a_backglass_named_its_own_way(tmp_path):
+    # PAD-926: The Beatles ships b2s\The-Beatles-Original-2018.directb2s
+    pv = pytest.importorskip("padvpx")
+    src, out = tmp_path / "src", tmp_path / "out"
+    (src / "b2s").mkdir(parents=True)
+    out.mkdir()
+    (src / "The Beatles_007.vpx").write_bytes(b"t")
+    (src / "b2s" / "The-Beatles-Original-2018.directb2s").write_bytes(b"bg")
+    got = pv.copy_backglass(str(src / "The Beatles_007.vpx"), str(out / "The Beatles_007 (PAD).vpx"))
+    assert got == str(out / "The Beatles_007 (PAD).directb2s")
+    assert (out / "The Beatles_007 (PAD).directb2s").read_bytes() == b"bg"
+    # one beside the only table in its folder
+    solo = tmp_path / "solo"
+    solo.mkdir()
+    (solo / "T.vpx").write_bytes(b"t")
+    (solo / "Some Backglass.directb2s").write_bytes(b"s")
+    assert pv.copy_backglass(str(solo / "T.vpx"), str(out / "T (PAD).vpx")) == str(out / "T (PAD).directb2s")
+    # two to choose from: none is a guess worth making
+    (out / "The Beatles_007 (PAD).directb2s").unlink()
+    (src / "b2s" / "other.directb2s").write_bytes(b"x")
+    assert pv.copy_backglass(str(src / "The Beatles_007.vpx"), str(out / "The Beatles_007 (PAD).vpx")) is None
+
+
+# ------------------------------------------------- PAD-940: loading window --
+
+#: the lines of a real start (David's Jurassic Park Pro, 2026-11-02: 79 s to
+#: the game, a minute of it before the game's window opened), in order
+JP_START = [
+    "[event] [sw] id=94  num=37   node=8  bit=39 raw=? logical=0 flags=0x0024 Left Return Lane",
+    "[card] evicting cached Godzilla Premium 1.16 (least recently booted) to make room",
+    "[card] caching jurassic_park_pro-1_16_0.Release.8G.sdcard.raw to the WSL disk in the background",
+    "[card]   ([card] mounting jurassic_park_pro-1_16_0.raw p3 at offset 364904448 (read only)",
+    "[card] title: jurassic_park_pro",
+    "[watch] cfg GAME=jurassic_park_pro",
+    "[watch] starting renderer (it opens the game window; the picture arrives",
+    "[watch] game window opened 1452x845 on DISPLAY=:0",
+    "[watch] starting jurassic_park_pro (boot to the first picture takes ~15 s)",
+    "[watch] waiting for the game to start...",
+    "[watch] running. CLOSE THE WINDOW to stop (or press Ctrl-C here).",
+]
+
+
+def test_the_loading_window_names_each_step_of_a_real_start():
+    """PAD-940: Play showed nothing for a minute; the loading window says
+    which step the run is on, read from its log, and its bar only moves on."""
+    ld = pytest.importorskip("padloading")
+    seen, floors = [], []
+    for n in range(len(JP_START) + 1):
+        floor, words = ld.step_of("\n".join(JP_START[:n]))
+        floors.append(floor)
+        if not seen or seen[-1] != words:
+            seen.append(words)
+    # PAD-964: the copy is named for what it is, and says it is the first start's cost only
+    assert seen == ["Starting the emulator's Linux", "Making room for the card image",
+                    "Copying the card image into the emulator's cache (this first start only)",
+                    "Getting the game ready", "Opening the game's screen", "Starting the game"]
+    assert floors == sorted(floors) and floors[-1] < 1.0
+    # the pace of the last start, never past 95% before the game is up
+    assert ld.progress(0.1, 10, 80) == 0.125 and ld.progress(0.6, 10, 80) == 0.6
+    assert ld.progress(0.0, 500, 80) == 0.95
+    assert ld.name_of("jurassic_park_pro") == "Jurassic Park Pro Le 4.02"     # the table's own name
+    assert ld.name_of("some_new_le") == "Some New LE"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' own hit test")
+def test_a_press_on_the_loading_window_reaches_the_game_window_under_it(tmp_path):
+    """PAD-962: the loading window stood over the game's window and took
+    every press, so that window could not be dragged until the game was up.
+    It is click-through now: Windows' hit test at its middle passes it by.
+    Off the desktop (--rect), so nothing shows."""
+    import ctypes
+    import time
+    u = ctypes.windll.user32
+    u.WindowFromPoint.argtypes = [ctypes.c_int64]
+    u.WindowFromPoint.restype = ctypes.c_void_p
+    u.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    u.GetAncestor.restype = ctypes.c_void_p
+    log, status = tmp_path / "run.log", tmp_path / "status.txt"
+    log.write_text("")
+    x, y, w, h = -7000, 100, 640, 360
+    p = subprocess.Popen([sys.executable, os.path.join(VPX, "padloading.py"), "pad962_test", str(log), str(status),
+                          "--parent", str(os.getpid()), "--rect", str(x), str(y), str(w), str(h)],
+                         creationflags=0x08000000)
+    try:
+        found = []
+        proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def cb(hw, _):
+            buf = ctypes.create_unicode_buffer(256)
+            u.GetWindowTextW(ctypes.c_void_p(hw), buf, 256)
+            if u.IsWindowVisible(ctypes.c_void_p(hw)) and buf.value == "PAD - starting pad962_test":
+                found.append(hw)
+            return True
+        styled = 0
+        for _ in range(100):
+            found.clear()
+            u.EnumWindows(proc(cb), 0)
+            styled = found and u.GetWindowLongW(ctypes.c_void_p(found[0]), -20) & 0x080800a0
+            if styled == 0x080800a0:        # NOACTIVATE, LAYERED, TRANSPARENT, TOOLWINDOW
+                break
+            time.sleep(0.1)
+        assert found, "the loading window never showed"
+        assert styled == 0x080800a0, hex(u.GetWindowLongW(ctypes.c_void_p(found[0]), -20) & 0xffffffff)
+        cx, cy = x + w // 2, y + h // 2
+        hit = u.WindowFromPoint(ctypes.c_int64((cy << 32) | (cx & 0xffffffff)))
+        assert (u.GetAncestor(hit, 2) if hit else 0) != found[0]
+    finally:
+        status.write_text("up")
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+
+def test_a_started_run_shows_the_loading_window_until_the_game_is_up(monkeypatch, tmp_path):
+    """The bridge starts padloading.py with a run it starts (pythonw, its own
+    process), says `up` when the game is, keeps how long it took for the next
+    bar, and says why when the run dies first."""
+    pc = pytest.importorskip("padcontroller")
+    pl = pc.padlaunch
+    monkeypatch.setattr(pc, "log", lambda s: None)
+    monkeypatch.setattr(pc, "LOG", str(tmp_path / "padcontroller.log"))
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(pc.sys, "platform", "win32")
+    started, killed = [], []
+
+    class Proc:
+        def __init__(self, cmd, **kw):
+            started.append(cmd)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            killed.append(self)
+    monkeypatch.setattr(pc.subprocess, "Popen", Proc)
+
+    class Launch:
+        logfile = str(tmp_path / "padvpx-jurassic_park_pro.log")
+        slot = 1
+
+        def alive(self):
+            return False
+
+        def stop(self):
+            pass
+
+    b = pc.Bridge()
+    b.title = "jurassic_park_pro"
+    b.launch = Launch()
+    b._loading_start()
+    cmd = started[-1]
+    assert cmd[1].endswith("padloading.py") and cmd[2:4] == ["jurassic_park_pro", Launch.logfile]
+    assert "--parent" in cmd and "--expect" not in cmd                  # no start timed yet
+    status = cmd[4]
+    b._loading_end("up", 79.4)
+    assert open(status).read() == "up"
+    for _ in range(50):                                                 # and its process ended, for sure
+        if killed:
+            break
+        pc.time.sleep(0.02)
+    assert len(killed) == 1
+    assert pl.kit_load()["start_s"] == {"jurassic_park_pro": 79}
+    b._loading_end("up")                                                # once: nothing up any more
+
+    b._loading_start()
+    assert started[-1][-2:] == ["--expect", "79"]                       # paced by the last start
+    monkeypatch.setattr(pc.Rig, "board_slot", staticmethod(lambda slot: None))
+    b.start_t = pc.time.monotonic()
+    b._poll_starting()                                                  # the run died before it was up
+    said = open(status).read()
+    assert said.startswith("failed The emulator stopped") and Launch.logfile in said
+    assert b.launch is None
+
+
+def test_a_launch_attaches_the_card_store_before_the_run(tmp_path, monkeypatch):
+    """PAD-963: a WSL restart detaches the shared card store; the app's
+    Emulate tab attaches it again before a run, the table's launch did not -
+    so Batman booted off D: through 9p, 148 s to attract (36 s from the
+    store). The launch attaches it before watch.sh, never refuses on it, and
+    leaves a PC without a store alone."""
+    pl = pytest.importorskip("padlaunch")
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(pl, "log", lambda s: None)
+    monkeypatch.setattr(pl.sys, "platform", "win32")
+    monkeypatch.setattr(pl, "no_linux", lambda d=None: "")
+    monkeypatch.setattr(pl, "win_python", lambda: None)
+    monkeypatch.setattr(pl, "account", lambda d=None: ("pad", "/home/pad"))
+    monkeypatch.setattr(pl, "app_home", lambda d: "")
+    monkeypatch.setattr(pl.padpath, "to_wsl", lambda p, distro=None: "/mnt/x")
+    monkeypatch.setattr(pl.Launch, "cache_check", lambda self, cards=None: None)   # PAD-964's own test
+    events = []
+
+    class Rigdata:
+        store = True
+        fail = False
+
+        def cards_exists(self):
+            return self.store
+
+        def ensure_cards(self, dist, log=None):
+            events.append(("store", dist))
+            if self.fail:
+                raise RuntimeError("wsl --mount refused")
+            return "/mnt/wsl/cards"
+    rd = Rigdata()
+    monkeypatch.setattr(pl, "_rigdata", lambda why: rd)
+
+    class Proc:
+        def __init__(self, cmd, **kw):
+            events.append(("watch", cmd[-2].endswith("watch.sh")))
+
+        def poll(self):
+            return None
+    monkeypatch.setattr(pl.subprocess, "Popen", Proc)
+
+    def start():
+        la = pl.Launch("batman", "/mnt/d/cards/batman.raw", dist="PAD-Runtime")
+        la.logfile = str(tmp_path / "padvpx-batman.log")
+        la.slot = 2
+        la.base_rig = lambda: ""
+        la.start()
+    start()
+    assert events == [("store", "PAD-Runtime"), ("watch", True)]
+    del events[:]
+    rd.fail = True                                          # a refusal is a line in the log, not a dead table
+    start()
+    assert events == [("store", "PAD-Runtime"), ("watch", True)]
+    del events[:]
+    rd.store = False                                        # no store made on this PC: nothing asked
+    start()
+    assert events == [("watch", True)]
+    monkeypatch.setattr(pl.sys, "platform", "linux")
+    rd.store = True
+    pl.card_store("PAD-Runtime")
+    assert events == [("watch", True)]
+
+
+def _failed_start_bridge(pc, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    b = pc.Bridge.__new__(pc.Bridge)
+    b.title, b.map = "batman", SimpleNamespace(platform="spike2")
+    b.rig = SimpleNamespace(led_path=lambda: "fixture")
+    b._rig_up = lambda data: False
+    b.launch = Mock(card="card.raw", logfile="boot.log")
+    b.launch.alive.return_value = False
+    b.running, b._start_retried = True, False
+    b.start_t = pc.time.monotonic()
+    b._loading_end = Mock()
+    monkeypatch.setattr(pc, "read_block", lambda *a: None)
+    monkeypatch.setattr(pc, "log", lambda s: None)
+    monkeypatch.setattr(pc.padlaunch, "kit_load", lambda: {"startup_retry_titles": ["batman"]})
+    return b
+
+
+def test_failed_start_with_a_board_record_is_cleaned_and_retried_once(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    pc = pytest.importorskip("padcontroller")
+    b = _failed_start_bridge(pc, monkeypatch)
+    old, replacement = b.launch, Mock()
+    replacement.start.return_value = 2
+    factory = Mock(return_value=replacement)
+    monkeypatch.setattr(pc.padlaunch, "launch_for", factory)
+    b._poll_starting()
+    old.stop.assert_called_once()
+    replacement.start.assert_called_once()
+    factory.assert_called_once_with("spike2", "batman", "card.raw")
+    assert b._start_retried and b.launch is replacement
+    b.rig = SimpleNamespace(led_path=lambda: "fixture")
+    replacement.alive.return_value = False
+    b._poll_starting()
+    assert factory.call_count == 1
+    replacement.stop.assert_called_once()
+    assert b.launch is None and b.rig is None
+    b._loading_end.assert_called_once()
+
+
+@pytest.mark.parametrize("close_during", ["cleanup", "retry"])
+def test_closing_the_table_during_start_recovery_leaves_no_new_run(monkeypatch, close_during):
+    from unittest.mock import Mock
+    pc = pytest.importorskip("padcontroller")
+    b = _failed_start_bridge(pc, monkeypatch)
+    replacement = Mock()
+    replacement.start.return_value = 2
+    def close():
+        b.running = False
+        b.launch = None
+        return 2
+    if close_during == "cleanup":
+        b.launch.stop.side_effect = close
+    else:
+        replacement.start.side_effect = close
+    factory = Mock(return_value=replacement)
+    monkeypatch.setattr(pc.padlaunch, "launch_for", factory)
+    b._poll_starting()
+    assert b.launch is None
+    if close_during == "cleanup":
+        factory.assert_not_called()
+    else:
+        replacement.stop.assert_called_once()
+
+
+@pytest.mark.parametrize("configured", [[], None, "batman", ["deadpool_pro"]])
+def test_failed_start_cleanup_does_not_retry_without_an_explicit_title_list(monkeypatch, configured):
+    from unittest.mock import Mock
+    pc = pytest.importorskip("padcontroller")
+    b = _failed_start_bridge(pc, monkeypatch)
+    old = b.launch
+    monkeypatch.setattr(pc.padlaunch, "kit_load", lambda: {"startup_retry_titles": configured})
+    factory = Mock()
+    monkeypatch.setattr(pc.padlaunch, "launch_for", factory)
+    b._poll_starting()
+    old.stop.assert_called_once()
+    factory.assert_not_called()
+    assert b.launch is None and b.rig is None
+
+
+def test_failed_start_retry_exception_cleans_the_replacement(monkeypatch):
+    from unittest.mock import Mock
+    pc = pytest.importorskip("padcontroller")
+    b = _failed_start_bridge(pc, monkeypatch)
+    replacement = Mock()
+    replacement.start.side_effect = RuntimeError("cannot start")
+    monkeypatch.setattr(pc.padlaunch, "launch_for", lambda *a: replacement)
+    b._poll_starting()
+    replacement.stop.assert_called_once()
+    assert b.launch is None
+    assert "cannot start" in b._loading_end.call_args.args[0]
+
+
+def _boot_bridge(pc, monkeypatch, tmp_path, slot=1):
+    """A bridge with a run it started, attached, its loading window up."""
+    pl = pc.padlaunch
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(pc, "log", lambda s: None)
+    monkeypatch.setattr(pc, "LOG", str(tmp_path / "padcontroller.log"))
+    monkeypatch.setattr(pl, "KIT", str(tmp_path / "kit.json"))
+    monkeypatch.setattr(pc.sys, "platform", "win32")
+
+    class Proc:
+        def __init__(self, cmd, **kw):
+            self.status = cmd[4]
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+    monkeypatch.setattr(pc.subprocess, "Popen", Proc)
+
+    class Launch:
+        logfile = str(tmp_path / "padvpx-batman.log")
+
+        def stop(self):
+            pass
+
+    class Rig:
+        pass
+    rig = Rig()
+    rig.slot = slot
+    rig.dump = str(tmp_path / "padslots" / str(slot) / "root" / "dump")
+    b = pc.Bridge()
+    b.title = "batman"
+    b.launch = Launch()
+    b.rig = rig
+    b.start_t = pc.time.monotonic()
+    b._loading_start()
+    status = b._loading.status
+    b.attached, b.attached_t = True, pc.time.monotonic()
+    return b, status, tmp_path / "padslots" / str(slot)
+
+
+def test_a_started_run_is_up_at_attract_not_at_attach(monkeypatch, tmp_path):
+    """PAD-963: the padled block comes up early in a boot - Batman's 30 s
+    in, then two more minutes on "Startup In Progress" with the loading
+    window gone and the hand-backs over, so the game's LCD window kept the
+    foreground and Visual Pinball sat paused until David clicked it. A run
+    the bridge started is up at attract (the slot's own boot log, as
+    bootprog.py reads it); until then the loading window names the boot's
+    step and the run's windows are still handed back from."""
+    pc = pytest.importorskip("padcontroller")
+    b, status, logdir = _boot_bridge(pc, monkeypatch, tmp_path)
+    logdir.mkdir(parents=True)
+    log = logdir / "gzwatch.log"
+    log.write_text("[gst] factory_make\n" * 3 + "[nbsched] playfield nodes: 4 1 8 (x)\n", encoding="utf-8")
+    (logdir / "padauto.log").write_text("[auto] bus quiet; pressing Service Back once\n", encoding="utf-8")
+    b._boot_watch()
+    assert open(status, encoding="utf-8").read() == "boot 95 Passing Tech Alerts…"
+    assert not b.ready_t and b._starting()
+    assert pc.padlaunch.kit_load().get("start_s") is None          # not up yet: no time kept
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("[led] light show running\n")
+    b._poll_boot()
+    assert open(status, encoding="utf-8").read() == "up" and b.ready_t and b.boot is None
+    assert "batman" in pc.padlaunch.kit_load()["start_s"]           # the next bar paced to attract
+    assert b._starting()                                            # hand-backs settle after it
+    b.ready_t -= pc.FRONT_SETTLE_S + 1
+    assert not b._starting()
+
+
+def test_a_started_run_without_a_boot_log_is_up_at_attach(monkeypatch, tmp_path):
+    """A rig that keeps no such log (no slot to find it by, or a log that
+    never shows) is up as before, never held; a game stuck at Tech Alerts is
+    the player's to clear, so the loading window stops covering it."""
+    pc = pytest.importorskip("padcontroller")
+    b, status, _ = _boot_bridge(pc, monkeypatch, tmp_path, slot=0)
+    b._boot_watch()
+    assert open(status, encoding="utf-8").read() == "up" and b.ready_t
+
+    b, status, logdir = _boot_bridge(pc, monkeypatch, tmp_path / "nolog")
+    b._boot_watch()
+    assert b.boot is not None and not b.ready_t                     # a log may take a moment
+    b._boot_seen -= b.BOOT_LOG_S + 1
+    b._poll_boot()
+    assert open(status, encoding="utf-8").read() == "up" and b.ready_t
+
+    b, status, logdir = _boot_bridge(pc, monkeypatch, tmp_path / "stuck")
+    logdir.mkdir(parents=True)
+    (logdir / "gzwatch.log").write_text("[gst] factory_make\n" * 3, encoding="utf-8")
+    (logdir / "padauto.log").write_text("[auto] 3 presses did not clear it\n", encoding="utf-8")
+    b._boot_watch()
+    assert open(status, encoding="utf-8").read() == "up" and b.ready_t
+
+
+def test_the_loading_window_shows_the_games_boot_step():
+    """PAD-963: `boot <pct> <words>` from the bridge moves the bar and names
+    the step; anything else is not a boot line."""
+    ld = pytest.importorskip("padloading")
+    assert ld.boot_step("boot 84 Node boards: 9 found") == (0.84, "Node boards: 9 found")
+    assert ld.boot_step("boot 100 Ready") == (0.95, "Ready")          # never done before `up`
+    assert ld.boot_step("up") is None and ld.boot_step("boot x Ready") is None
+    assert ld.boot_step("failed boot 3 x") is None
+
+
+def test_a_trough_of_fewer_switches_pads_init_sw(tmp_path, monkeypatch):
+    """PAD-943: Can Crusher's one-ball trough stopped the table on "Wrong
+    number of arguments: bsTrough.InitSw" - core.vbs's InitSw takes seven
+    switches (InitSw8 eight), so the call is padded with 0 like a lock lane's."""
+    sh = pytest.importorskip("vpxshadow")
+    assert sh.trough_init([643]) == "InitSw 0,1643,0,0,0,0,0,0"
+    assert sh.trough_init([71, 70, 69, 68, 67, 66, 72]) == "InitSw 0,1071,1070,1069,1068,1067,1066,1072"
+    assert sh.trough_init(list(range(10, 18))) == "InitSw8 0,1010,1011,1012,1013,1014,1015,1016,1017"
+    with pytest.raises(ValueError):
+        sh.trough_init(list(range(9)))
+
+
+def test_flexdmd_stands_in_as_a_null_object(tmp_path):
+    """PAD-943: VPW's Game of Thrones stops on "No FlexDMD found. This table
+    will not run without it." (a DMD library this PC lacks) and twenty of its
+    subs dereference FlexDMD unguarded. With `flexdmd_stub` the CreateObject
+    becomes a PadNoFlex: every member the script uses on FlexDMD or on what
+    it makes, assignments taken, methods giving back another PadNoFlex;
+    shorter calls padded to the stub's arity; a name both assigned and called
+    with arguments renamed at its assignments."""
+    sh = pytest.importorskip("vpxshadow")
+    lines = [
+        'Dim FlexDMD, scene, font, a',
+        'Set FlexDMD = CreateObject("FlexDMD.FlexDMD")',
+        'FlexDMD.RenderMode = 2 : FlexDMD.Run = True',
+        'Set font = FlexDMD.NewFont("f.fnt", vbWhite, vbWhite, 0)',
+        'Set scene = FlexDMD.NewGroup("s")',
+        'scene.AddActor FlexDMD.NewLabel("a", font, "t")',
+        'scene.AddActor FlexDMD.NewLabel("b", FlexDMD.NewFont("g.fnt", 1, 2, 3), "u")',
+        'Set a = FlexDMD.NewLabel("c", font)          \' two arguments: padded',
+        'FlexDMD.LockRenderThread',
+        'FlexDMD.Stage.AddActor scene',
+        'a.Text = "hi" : a.Visible = False',
+        'a.SetAlignedPosition 64, 16, 4',
+        'FlexDMD.Show = True',
+        'scene.GetLabel("a").Show 1',
+        'With FlexDMD',
+        '    .GameName = "got" : .Width = 128',
+        '    If x = 0 Then .Show = True Else .Show = False',
+        '    .Stage.AddActor scene',
+        '    .SetAlignedPosition ((1-1)*25)+14, 32, 7',
+        'End With',
+        'Do While FlexDMD.IsRendering : Loop',
+        'x = a.Text',
+    ]
+    rep = []
+    cls = sh.flexdmd_stub(lines, rep)
+    assert "New PadNoFlex   \' PAD: FlexDMD stands in" in lines[1]
+    assert lines[7].startswith('Set a = FlexDMD.NewLabel("c", font, 0)'), lines[7]       # padded to three
+    assert lines[12].startswith("FlexDMD.Show_set = True"), lines[12]                  # assigned AND called
+    assert "Public Function NewLabel(a0, a1, a2)" in cls and "Public Function NewFont(a0, a1, a2, a3)" in cls
+    assert "Public Property Let Text(v)" in cls and "Public Property Let Show_set(v)" in cls
+    assert "Public Function Show(a0)" in cls and "Public Function Stage()" in cls
+    assert "Public Property Let GameName(v)" in cls and "Public Property Let Width(v)" in cls   # the With block's
+    assert lines[16].strip() == "If x = 0 Then .Show_set = True Else .Show_set = False", lines[16]
+    assert lines[18].strip() == ".SetAlignedPosition ((1-1)*25)+14, 32, 7", lines[18]     # a bare call, untouched
+    assert "Public Function SetAlignedPosition(a0, a1, a2)" in cls
+    assert "Public Function IsRendering() : IsRendering = False" in cls          # a value read: False
+    assert "Public Function Stage() : Set Stage = New PadNoFlex" in cls          # chained: an object
+    assert any("1 padded call" in r for r in rep), rep
+    # the class and the script's uses run under VBScript itself
+    if sys.platform != "win32" or not shutil.which("cscript"):
+        pytest.skip("no cscript")
+    vbs = tmp_path / "flex.vbs"
+    vbs.write_text(cls + "\n" + "\n".join(lines[:-1]) + '\nx = a.Text\nWScript.Echo "ok"\n', encoding="utf-8")
+    out = subprocess.run(["cscript", "//Nologo", str(vbs)], capture_output=True, text=True, timeout=30)
+    assert out.stdout.strip() == "ok", out.stdout + out.stderr
+
+
+def test_ultradmd_stands_in_too():
+    """PAD-943: KISS stops on "ActiveX component can't create object:
+    'UltraDMD.DMDObject'": the same null object, its own class."""
+    sh = pytest.importorskip("vpxshadow")
+    lines = ['Set UltraDMD = CreateObject("UltraDMD.DMDObject")', 'UltraDMD.Init', 'UltraDMD.SetProjectFolder ".\\x"',
+             'Do While UltraDMD.IsRendering : Loop', 'UltraDMD.DisplayScene "a", "b", 0, 1, 2, 3, 4, 5, 6, 7',
+             'If Not UltraDMD.GetMajorVersion = 1 Then MsgBox "Incompatible" : End If',
+             'If UltraDMD.GetMinorVersion < 3 Then MsgBox "Incompatible" : End If']
+    rep = []
+    cls = sh.flexdmd_stub(lines, rep, "UltraDMD.DMDObject", "PadNoUltra", "UltraDMD")
+    assert "New PadNoUltra   \' PAD: UltraDMD stands in" in lines[0]
+    assert "Class PadNoUltra" in cls and "Public Function IsRendering() : IsRendering = False" in cls
+    assert "Public Function DisplayScene(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9)" in cls
+    assert "GetMajorVersion() : GetMajorVersion = 1" in cls and "GetMinorVersion() : GetMinorVersion = 9" in cls
+    assert sh.flexdmd_stub(["x = 1"], [], "UltraDMD.DMDObject", "PadNoUltra", "UltraDMD") == ""
+
+
+# PAD-1187: John Wick's own FlexDMD set-up (JPSalas: on in cabinet mode)
+_JW_FLEX = """
+Dim UseFlexDMD
+UseFlexDMD = True
+Dim FlexDMD, DMDScene
+Sub DMD_Init()
+    If UseFlexDMD Then
+        Set FlexDMD = CreateObject("FlexDMD.FlexDMD")
+        If Not FlexDMD is Nothing Then
+            FlexDMD.RenderMode = 2
+            FlexDMD.Run = True
+            Set DMDScene = FlexDMD.NewGroup("Scene")
+            DMDScene.AddActor FlexDMD.NewImage("Back", "VPX.d_border")
+            DMDScene.GetImage("Back").SetSize FlexDMD.Width, FlexDMD.Height
+            FlexDMD.LockRenderThread
+            FlexDMD.Stage.AddActor DMDScene
+            FlexDMD.UnlockRenderThread
+        End If
+    End If
+End Sub
+Sub DMDDisplayChar(c, d)
+    If UseFlexDMD Then DMDScene.GetImage("Dig" & d).Bitmap = FlexDMD.NewImage("", "VPX." & c & "&dmd=2&add").Bitmap
+End Sub
+"""
+
+
+def test_flexdmd_stands_in_on_every_table():
+    """PAD-1187: John Wick's FlexDMD window sat over the machine's LCD. Its
+    map never asked for `flexdmd_stub`, so the patch only made FlexDMD
+    optional, and on a PC that has FlexDMD installed the table made it and
+    its DMD window opened anyway. The null object is now the default for
+    every table (UltraDMD too); a map opts out with false."""
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    assert "flexdmd_stub" not in m
+    out, rep = vs.patch(MINI_TRIBUTE + _JW_FLEX, m)
+    assert 'CreateObject("FlexDMD.FlexDMD")' not in out
+    assert "Set FlexDMD = New PadNoFlex" in out and "Class PadNoFlex" in out
+    assert any("FlexDMD replaced by PadNoFlex" in r for r in rep), rep
+    assert not any("FlexDMD made optional" in r for r in rep), rep
+    # a map that keeps the table's own FlexDMD: optional, as before
+    keep = dict(json.loads(json.dumps(MINI_SHADOW)), flexdmd_stub=False)
+    out, rep = vs.patch(MINI_TRIBUTE + _JW_FLEX, keep)
+    assert 'CreateObject("FlexDMD.FlexDMD")' in out and "PadNoFlex" not in out
+    assert any("FlexDMD made optional" in r for r in rep), rep
+    # a copy patched the old way (FlexDMD only optional) is told to patch again
+    vset = pytest.importorskip("vpxsetup")
+    why = "the table's own FlexDMD window opened, and could sit over the machine's screen"
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "T (PAD).script.vbs"), "w", encoding="utf-8") as f:
+            f.write(out)
+        assert vset.missed_fixes(d, "T (PAD).vpx", vset.GENERIC_REPATCH) == [why]
+        with open(os.path.join(d, "T (PAD).script.vbs"), "w", encoding="utf-8") as f:
+            f.write(vs.patch(MINI_TRIBUTE + _JW_FLEX, json.loads(json.dumps(MINI_SHADOW)))[0])
+        assert vset.missed_fixes(d, "T (PAD).vpx", vset.GENERIC_REPATCH) == []
+    # the script's FlexDMD code runs on the stand-in under VBScript itself
+    if sys.platform != "win32" or not shutil.which("cscript"):
+        pytest.skip("no cscript")
+    lines = _JW_FLEX.strip().split("\n")
+    cls = vs.flexdmd_stub(lines, [])
+    with tempfile.TemporaryDirectory() as d:
+        vbs = os.path.join(d, "jw.vbs")
+        with open(vbs, "w", encoding="utf-8") as f:
+            f.write(cls + "\n" + "\n".join(lines) + '\nDMD_Init\nDMDDisplayChar "A", 0\n'
+                    'WScript.Echo TypeName(FlexDMD)\n')
+        r = subprocess.run(["cscript", "//Nologo", vbs], capture_output=True, text=True, timeout=30)
+    assert r.stdout.strip() == "PadNoFlex", r.stdout + r.stderr
+
+
+# PAD-976: GotG's own scoring, run with the table's own game never started
+_GOTG_SCORING = [
+    "Dim PlayersPlayingGame, CurrentPlayer, DefScoreSize, Tilted",
+    "Dim ScoreTable(3, 18), Score(3)",
+    "DefScoreSize = 8.5",
+    "Sub AddScore(points)",
+    "\tdim multiplierVal",
+    "\tIf (Tilted = False) Then",
+    "\t\tScore(CurrentPlayer) = Score(CurrentPlayer) + points",
+    "\t\tUpdateNumberPlayers2 False",
+    "\tEnd If",
+    "End Sub",
+    "Sub UpdateNumberPlayers2(bForce)",
+    "\tDim i",
+    "\tfor i = 0 to 3",
+    "\t\tif DefScoreSize > ScoreTable(PlayersPlayingGame-1, 17) then DefScoreSize = 1",
+    "\tNext",
+    "End Sub",
+    "Sub tgAntiqueShop_Dropped",
+    "\tAddScore 1110",
+    "End Sub",
+]
+
+
+def _gotg_run(tmp_path, lines):
+    vbs = tmp_path / "gotg.vbs"
+    vbs.write_text("\n".join(lines + ["tgAntiqueShop_Dropped", 'WScript.Echo "played on"']),
+                   encoding="latin-1")
+    return subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the table's VBScript under cscript")
+def test_gotg_scoring_with_no_player_of_its_own_stays_quiet(tmp_path):
+    """The table's own game never starts behind the machine, so its
+    PlayersPlayingGame is 0, and the first sub the bridge leaves it that scored
+    ended Visual Pinball on 'Subscript out of range: [number: -1]' (the ball's
+    first trip up the playfield). The GotG maps quiet AddScore."""
+    vs = pytest.importorskip("vpxshadow")
+    r = _gotg_run(tmp_path, list(_GOTG_SCORING))
+    assert "Subscript out of range" in r.stdout + r.stderr          # as David hit it
+    for f in ("guardians_le.shadow.json", "guardians.shadow.json"):
+        m = json.load(open(os.path.join(VPX, f), encoding="utf-8"))
+        assert {"AddScore", "tgAntiqueShop_Dropped", "GrootMouth_Hit"} <= set(m["quiet_subs"]), f
+    lines = list(_GOTG_SCORING)
+    stubs = []
+    for name in ("AddScore", "tgAntiqueShop_Dropped"):
+        args = vs.quiet_sub(lines, name, [])
+        stubs.append("Sub %s%s : End Sub" % (name, args))
+    r = _gotg_run(tmp_path, lines + stubs)
+    assert r.stdout.strip() == "played on", r.stdout + r.stderr
+
+
+def test_gotg_patched_before_the_fix_is_asked_to_patch_again(tmp_path):
+    vs = pytest.importorskip("vpxsetup")
+    m = json.load(open(os.path.join(VPX, "guardians_le.shadow.json"), encoding="utf-8"))
+    name = m["output"]
+    script = tmp_path / (name[:-4] + ".script.vbs")
+    script.write_text("Sub AddScore(points)\n\tdim multiplierVal\n\tResetBallSearch\n", encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), name, m["repatch"]) == [m["repatch"][0]["why"]]
+    script.write_text("Sub AddScore_orig(points)\n\tdim multiplierVal\n"
+                      "Sub AddScore(points) : End Sub   ' PAD: quiet\n", encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), name, m["repatch"]) == []
+    # the row gathers both GotG maps' marks; the reason shows once
+    script.write_text("Sub AddScore(points)\n\tdim multiplierVal\n", encoding="utf-8")
+    pro = json.load(open(os.path.join(VPX, "guardians.shadow.json"), encoding="utf-8"))
+    assert vs.missed_fixes(str(tmp_path), name, m["repatch"] + pro["repatch"]) == [m["repatch"][0]["why"]]
+
+
+# ---- PAD-1093: GotG's playfield dark, its domes flashing for good ------------
+
+def test_shadow_after_init_runs_once_the_tables_own_init_is_done():
+    # a tribute's boot can leave a look for a game of its own that never starts
+    # (GotG: EndOfGame's GiOff and dome show); `after_init` undoes it, last
+    vs = pytest.importorskip("vpxshadow")
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["lamps"] = {"_": "x", "gi1": {"leds": [[8, 1]], "name": "BOTTOM GI"}}
+    m["after_init"] = ["PadLookOff", "PadOther 1"]
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    assert ("\tSet LampCallback = GetRef(\"PadUpdateLamps\")\n\tPadLookOff\n\tPadOther 1\nEnd Sub"
+            in out)
+    assert out.index("\tTable1_Init_orig") < out.index("\tPadLookOff")
+    m["after_init"] = "PadLookOff"                     # one statement may be a plain string
+    out, _ = vs.patch(MINI_TRIBUTE, m)
+    assert "\tSet LampCallback = GetRef(\"PadUpdateLamps\")\n\tPadLookOff\nEnd Sub" in out
+
+
+#: the LE's own LED table (led_io.txt of guardians_le 1.15) and the Pro's
+#: (guardians-1.15.port): the GI is three LEDs a string on the LE, two on the Pro
+GOTG_GI = {"guardians_le.shadow.json": ([[8, 0], [8, 1], [8, 2]], [[9, 0], [9, 1], [9, 2]]),
+           "guardians.shadow.json": ([[8, 1], [8, 2]], [[9, 1], [9, 2]])}
+
+
+@pytest.mark.parametrize("f", sorted(GOTG_GI))
+def test_gotg_gi_is_the_whole_string_and_its_look_follows_it(f):
+    m = json.load(open(os.path.join(VPX, f), encoding="utf-8"))
+    bottom, top = GOTG_GI[f]
+    gi = {k: v["leds"] for k, v in m["lamps"].items() if k.startswith("gi")}
+    assert len(gi) == 26 and all(v in (bottom, top) for v in gi.values()), gi
+    calls = {v["arg"]: v for k, v in m["lamp_calls"].items() if k != "_"}
+    assert calls[0]["leds"] == bottom and calls[1]["leds"] == top
+    assert all(v["call"] == "PadGotgGi" for v in calls.values())
+    assert m["after_init"] == ["PadGotgLookOff"]
+    for sub in ("Sub PadGotgLookOff", "Sub PadGotgGi(n, v)", "Sub PadGotgGiLook(lit)"):
+        assert sub in m["extra_vbs"]
+    vs = pytest.importorskip("vpxshadow")
+    out, _ = vs.patch(MINI_TRIBUTE, json.loads(json.dumps(dict(MINI_SHADOW, lamps=m["lamps"],
+                                                                lamp_calls=m["lamp_calls"],
+                                                                after_init=m["after_init"]))))
+    first = 1000 + bottom[0][0] * 100 + bottom[0][1]
+    assert 'PadCalls.Add "%d", Array(Array(GetRef("PadGotgGi"), 0))' % first in out
+    assert "\tSet LampCallback = GetRef(\"PadUpdateLamps\")\n\tPadGotgLookOff\nEnd Sub" in out
+
+
+def test_gotg_patched_before_the_dark_playfield_fix_is_asked_to_patch_again(tmp_path):
+    vs = pytest.importorskip("vpxsetup")
+    m = json.load(open(os.path.join(VPX, "guardians_le.shadow.json"), encoding="utf-8"))
+    mark = [k for k in m["repatch"] if "PAD-1093" in k["since"]]
+    assert len(mark) == 1
+    name = m["output"]
+    script = tmp_path / (name[:-4] + ".script.vbs")
+    script.write_text("Sub AddScore(points) : End Sub\n\tPadLampsInit\n"
+                      "\tSet LampCallback = GetRef(\"PadUpdateLamps\")\nEnd Sub\n", encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), name, m["repatch"]) == [mark[0]["why"]]
+    script.write_text("Sub AddScore(points) : End Sub\n\tPadLampsInit\n"
+                      "\tSet LampCallback = GetRef(\"PadUpdateLamps\")\n\tPadGotgLookOff\nEnd Sub\n",
+                      encoding="utf-8")
+    assert vs.missed_fixes(str(tmp_path), name, m["repatch"]) == []
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the map's VBScript under cscript")
+@pytest.mark.parametrize("f", sorted(GOTG_GI))
+def test_gotg_look_undoes_the_boot_and_follows_the_machines_gi(tmp_path, f):
+    """The map's own GotG subs, run as VBScript: the table's boot (GiOff, the
+    red domes armed, the hadron dome blinking) is undone by after_init; the
+    machine's GI reading off before the game first lights it leaves the look
+    on; after that the look follows the GI (a tilt puts it out)."""
+    m = json.load(open(os.path.join(VPX, f), encoding="utf-8"))
+    ours = m["extra_vbs"][m["extra_vbs"].index("' The table's own init ends in its EndOfGame"):]
+    lines = [
+        "Class T : Public Enabled : End Class",
+        "Dim tmrHadronLightFlash : Set tmrHadronLightFlash = New T",
+        "Dim bFlash1Enabled, bFlash2Enabled, bFlash3Enabled, bFlash4Enabled, bFlash4FastEnabled",
+        "Dim Look, PadLampState",
+        "Sub GiOn : Look = \"on\" : End Sub",
+        "Sub GiOff : Look = \"off\" : End Sub",
+        "Sub PadReassertLamps : End Sub",
+        ours,
+        "Sub Say(tag)",
+        "\tWScript.Echo tag & \" \" & Look & \" \" & (bFlash1Enabled Or bFlash4Enabled) & \" \" & tmrHadronLightFlash.Enabled",
+        "End Sub",
+        "GiOff : bFlash1Enabled = True : bFlash4Enabled = True : tmrHadronLightFlash.Enabled = True",
+        "Say \"boot\"",
+        "PadGotgLookOff : Say \"after_init\"",
+        "PadGotgGi 0, 0 : PadGotgGi 1, 0 : Say \"before\"",
+        "PadGotgGi 0, 1 : Say \"lit\"",
+        "PadGotgGi 1, 1 : PadGotgGi 0, 0 : Say \"half\"",
+        "PadGotgGi 1, 0 : Say \"tilt\"",
+        "PadGotgGi 0, 1 : Say \"back\""]
+    vbs = tmp_path / "gotg_look.vbs"
+    vbs.write_text("\n".join(lines) + "\n", encoding="latin-1")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.splitlines()[:7] == [
+        "boot off True True", "after_init on False False", "before on False False",
+        "lit on False False", "half on False False", "tilt off False False",
+        "back on False False"], r.stdout
+
+
+# ---- PAD-1099: the plunger lane's own subs obey orig_hits ------------------
+#
+# Behind the machine a tribute's plunger-lane subs are its rules (skill shots,
+# ball savers, songs, light effects, even gates). The lane wrapper called them
+# whatever orig_hits said, so they ran on every launch over the machine's
+# lights. They are called now only where every other switch's would be.
+
+PLUNGER_TRIBUTE = MINI_TRIBUTE.replace(
+    "Sub Trigger1_Hit : bBallInPlungerLane = True : End Sub",
+    "Sub Trigger1_Hit : bBallInPlungerLane = True : DOF 117, DOFPulse : End Sub\n"
+    "Sub Trigger1_UnHit : bBallInPlungerLane = False : LightEffect 6 : End Sub")
+
+
+def _plunger_lines(out):
+    return [ln for ln in out.split("\n") if ln.startswith(("Sub Trigger1_Hit ", "Sub Trigger1_UnHit "))]
+
+
+def test_plunger_lane_calls_the_tributes_own_subs_only_with_orig_hits():
+    vs = pytest.importorskip("vpxshadow")
+    out, _ = vs.patch(PLUNGER_TRIBUTE, json.loads(json.dumps(MINI_SHADOW)))
+    assert _plunger_lines(out) == [
+        "Sub Trigger1_Hit : Controller.Switch(1067) = True : Trigger1_Hit_orig : End Sub",
+        "Sub Trigger1_UnHit : Controller.Switch(1067) = False : Trigger1_UnHit_orig : End Sub"]
+    m = json.loads(json.dumps(MINI_SHADOW))
+    m["orig_hits"] = False
+    out, rep = vs.patch(PLUNGER_TRIBUTE, m)
+    # the rules stay out; the lane's unconditional DOF is fired by the bridge
+    assert _plunger_lines(out) == [
+        "Sub Trigger1_Hit : Controller.Switch(1067) = True : PadDOF 117, DOFPulse, Empty : End Sub",
+        "Sub Trigger1_UnHit : Controller.Switch(1067) = False : End Sub"]
+    assert "Sub Trigger1_UnHit_orig" in out                 # renamed, never called
+    assert "Trigger1_Hit (117)" in " ".join(rep)
+    m["orig_keep"] = ["Trigger1"]                           # a map that needs them says so
+    out, rep = vs.patch(PLUNGER_TRIBUTE, m)
+    assert _plunger_lines(out)[1] == "Sub Trigger1_UnHit : Controller.Switch(1067) = False : Trigger1_UnHit_orig : End Sub"
+    assert "Trigger1_Hit (117)" not in " ".join(rep)
+
+
+def test_every_map_without_orig_hits_asks_a_table_with_the_old_lane_wrapper_to_patch_again(tmp_path):
+    vs = pytest.importorskip("vpxsetup")
+    seen = 0
+    for path in sorted(glob.glob(os.path.join(VPX, "*.shadow.json"))):
+        m = json.load(open(path, encoding="utf-8"))
+        if m.get("orig_hits", True) is not False or not m.get("plunger"):
+            continue
+        seen += 1
+        p = m["plunger"]
+        name = "t.vpx"
+        script = tmp_path / "t.script.vbs"
+        old = "Sub %s_UnHit : Controller.Switch(1%03d) = False : %s_UnHit_orig : End Sub" % (
+            p["lane_trigger"], p["lane_switch"], p["lane_trigger"])
+        script.write_text(old + "\n", encoding="utf-8")
+        assert any("every launch" in w for w in vs.missed_fixes(str(tmp_path), name, m["repatch"])), path
+        # what the patcher writes now asks nothing
+        script.write_text(old.replace(" : %s_UnHit_orig" % p["lane_trigger"], "") + "\n", encoding="utf-8")
+        assert not any("every launch" in w for w in vs.missed_fixes(str(tmp_path), name, m["repatch"])), path
+    assert seen >= 20
+
+
+# ---- PAD-1099: GotG's own rules bulbs rest; the LE's slings are the machine's
+
+@pytest.mark.parametrize("f", ["guardians_le.shadow.json", "guardians.shadow.json"])
+def test_gotg_rules_bulbs_rest_once_the_tables_init_is_done(f):
+    m = json.load(open(os.path.join(VPX, f), encoding="utf-8"))
+    ex = m["extra_vbs"]
+    look = ex[ex.index("Sub PadGotgLookOff"):]
+    look = look[:look.index("End Sub")]
+    assert "\tPadGotgBulbsOff" in look
+    bulbs = ex[ex.index("Sub PadGotgBulbsOff"):]
+    bulbs = bulbs[:bulbs.index("End Sub")]
+    assert "On Error Resume Next" in bulbs
+    for t in ("flshUpgrade", "flshModeSelect", "flshMystery", "flshExtraBall"):
+        assert "%s.TimerEnabled = False" % t in bulbs
+    assert "Lampz.SetLamp n, False" in bulbs
+    assert [k for k in m["repatch"] if "PAD-1099: the table's rules bulbs" in k["since"]]
+
+
+def test_gotg_le_sling_inserts_follow_the_machines_sling_leds():
+    m = json.load(open(os.path.join(VPX, "guardians_le.shadow.json"), encoding="utf-8"))
+    assert m["lamps"]["Light001"]["leds"] == [[10, 30]]      # LEFT SLING (led_io, LE 1.15)
+    assert m["lamps"]["Light004"]["leds"] == [[10, 29]]      # RIGHT SLING
+    pro = json.load(open(os.path.join(VPX, "guardians.shadow.json"), encoding="utf-8"))
+    assert "Light001" not in pro["lamps"]                    # the Pro build has no sling LEDs
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the map's VBScript under cscript")
+def test_gotg_bulbs_off_runs_without_the_tables_objects(tmp_path):
+    """PadGotgLookOff runs from Table1_Init; a table without the bulbs (or a
+    Lampz that is not up yet) must not stop it."""
+    m = json.load(open(os.path.join(VPX, "guardians_le.shadow.json"), encoding="utf-8"))
+    ex = m["extra_vbs"]
+    bulbs = ex[ex.index("Sub PadGotgBulbsOff"):]
+    bulbs = bulbs[:bulbs.index("End Sub") + len("End Sub")]
+    vbs = tmp_path / "bulbs.vbs"
+    vbs.write_text(bulbs + "\nPadGotgBulbsOff\nWScript.Echo \"done\"\n", encoding="latin-1")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "done", r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("title", ["foo_fighters_pro", "foo_fighters_le"])
+@pytest.mark.skipif(not (sys.platform == "win32" and shutil.which("cscript")),
+                    reason="runs the map's VBScript under cscript")
+def test_foo_fighters_kick_target_fires_dof_and_kicks_harder(tmp_path, title):
+    """PAD-1119: JP's kick target sub fires no DOF, so the KICK TARGET coil's
+    callback fires the right slingshot's (104 contactor, 107 MX; the target
+    stands beside it), on the coil's fire only; and it kicks harder than
+    PAD-982's 300. Copies patched with the DOF-less callback show Patch again."""
+    m = json.load(open(os.path.join(VPX, title + ".shadow.json"), encoding="utf-8"))
+    sol = [s for k, s in m["solenoids"].items() if k != "_" and s.get("name") == "KICK TARGET"]
+    assert [s["callback"] for s in sol] == ["PadKickTarget"]
+    assert m["item_fields"]["LightningTarget"]["SLGF"] > 300.0
+    ex = m["extra_vbs"]
+    sub = ex[ex.index("Sub PadKickTarget"):]
+    sub = sub[:sub.index("End Sub", sub.index("End If")) + len("End Sub")]
+    old = 'Sub PadKickTarget(e) : If e Then PlaySoundAt "fx_slingshot_EM", Target004 : End If : End Sub'
+    assert old not in ex and [k for k in m["repatch"] if k.get("old") == old]
+    vbs = tmp_path / "kick.vbs"
+    vbs.write_text("\n".join([
+        "Const DOFPulse = 2",
+        "Dim Target004, Got : Got = \"\"",
+        "Sub PlaySoundAt(s, o) : Got = Got & \"snd \" : End Sub",
+        "Sub DOF(n, v) : Got = Got & n & \":\" & v & \" \" : End Sub",
+        sub,
+        "PadKickTarget False : PadKickTarget True : PadKickTarget 0",
+        "WScript.Echo Got"]), encoding="latin-1")
+    r = subprocess.run(["cscript", "//nologo", str(vbs)], capture_output=True, text=True, timeout=60)
+    assert r.stdout.split() == ["snd", "104:2", "107:2"], r.stdout + r.stderr
+
+
+PULL_TRIBUTE = MINI_TRIBUTE.replace(
+    "Sub Table1_KeyDown(ByVal keycode)\n",
+    "Sub Table1_KeyDown(ByVal keycode)\n    If keycode = PlungerKey Then Plunger.Pullback\n").replace(
+    "Sub Table1_KeyUp(ByVal keycode) : End Sub",
+    "Sub Table1_KeyUp(ByVal keycode)\n    If keycode = PlungerKey Then Plunger.Fire\nEnd Sub")
+
+
+def test_no_map_takes_the_plunger_key_from_the_tables_plunger():
+    """PAD-1128: the Jaws, John Wick and Jurassic Park maps sent the plunger
+    key to the machine's Action button and kept it from the table, so a
+    manual-plunger machine's plunger never pulled (Jaws' game waits with the
+    ball in the lane until the plunger or the button launches it). A map may
+    take the plunger key only when the table's plunger IS the auto launcher
+    (`auto_plunger`, AC/DC)."""
+    for path in sorted(glob.glob(os.path.join(VPX, "*.shadow.json"))):
+        m = json.load(open(path, encoding="utf-8"))
+        if (m.get("plunger") or {}).get("auto_plunger"):
+            continue
+        assert "PlungerKey" not in m.get("keys_skip_orig", []), os.path.basename(path)
+
+
+def test_jaws_plunger_key_pulls_the_plunger_and_lockbar_is_action(tmp_path):
+    """PAD-1128: on the Jaws, John Wick and Jurassic Park maps Enter reaches
+    the table's own Plunger.Pullback / Fire and the lockbar key presses the
+    Action button; a copy patched before is told to patch again."""
+    vs = pytest.importorskip("vpxshadow")
+    vset = pytest.importorskip("vpxsetup")
+    for t in ("jaws_le", "john_wick_le", "john_wick_pro", "jurassic_park_le", "jurassic_park_pro"):
+        m = json.load(open(os.path.join(VPX, t + ".shadow.json"), encoding="utf-8"))
+        assert m["cabinet"]["launch_key"] == "LockBarKey", t
+        out, _ = vs.patch(PULL_TRIBUTE, m)
+        down = _last_sub(out, "Table1_KeyDown")
+        assert "If KeyCode = LockBarKey Then Controller.Switch(1034) = True" in down, t
+        assert "PlungerKey" not in down, t           # falls through to the table's own
+        assert re.search(r"Case Else\s+(?:If [^\n]*Then )?Table1_KeyDown_orig KeyCode", down), t
+        assert "If keycode = PlungerKey Then Plunger.Pullback" in out
+        script = tmp_path / (m["output"][:-4] + ".script.vbs")
+        old, _ = vs.patch(PULL_TRIBUTE, dict(m, cabinet=dict(m["cabinet"], launch_key="PlungerKey"),
+                                                keys_skip_orig=m["keys_skip_orig"] + ["PlungerKey"]))
+        script.write_text(old, encoding="utf-8")
+        why = [r["why"] for r in m["repatch"] if r["since"].startswith("PAD-1128")][0]
+        assert why in vset.missed_fixes(str(tmp_path), m["output"], m["repatch"]), t
+        script.write_text(out, encoding="utf-8")
+        assert why not in vset.missed_fixes(str(tmp_path), m["output"], m["repatch"]), t
+
+
+def test_a_run_whose_block_never_comes_says_what_its_log_says(tmp_path, monkeypatch):
+    """PAD-1208: every table on one PC got its board record and then sat:
+    the game's output block never came, the controller said nothing for a
+    minute, and a run that died said only "see <path>" - a path the report
+    leaves out. Both now carry the run log's last telling lines."""
+    pc = pytest.importorskip("padcontroller")
+    said = []
+    monkeypatch.setattr(pc, "log", said.append)
+    logfile = tmp_path / "padvpx-batman.log"
+    logfile.write_text("[watch] slot 1\n[event] [sw] id=1  num=1 x\n"
+                       "[padglhost] 30.0 fps (290 frames total)\n"
+                       "[cardmount] fuse2fs refused the cached card\n", encoding="utf-8")
+    led = tmp_path / "padled"
+    led.write_bytes(b"\0" * 64)                               # there, never with its magic
+
+    class Rig:
+        how = "rig board slot 1 (batman)"
+        dump = str(tmp_path)
+
+        def led_path(self):
+            return str(led)
+
+    class Launch:
+        slot = 1
+        up = True
+
+        def __init__(self):
+            self.logfile = str(logfile)
+
+        def alive(self):
+            return self.up
+
+        def stop(self):
+            pass
+
+    b = pc.Bridge()
+    b.title = "batman"
+    b.running = False
+    b.launch, b.rig = Launch(), Rig()
+    b.start_t = pc.time.monotonic()
+    monkeypatch.setattr(b, "_loading_end", lambda *a: None)
+    b._poll_starting()
+    assert not said                                           # its first sight of the block
+    b._board_t -= b.BLOCK_LATE_S + 1
+    b._poll_starting()
+    b._poll_starting()                                        # once
+    assert len(said) == 1
+    assert "not up %d s after its board record" % b.BLOCK_LATE_S in said[0]
+    assert "    | [cardmount] fuse2fs refused the cached card" in said[0]
+    assert "fps" not in said[0] and "id=1" not in said[0]
+    b.launch.up = False
+    b._poll_starting()
+    assert "ended before it came up" in said[-1] and "fuse2fs refused" in said[-1]
+    assert pc.run_log_tail(str(tmp_path / "gone.log")) == []
+    assert pc.run_log_said(str(tmp_path / "gone.log")) == ""
+
+
+def test_block_in_wsl_reads_the_mark_as_wsl_does():
+    """PAD-1247: padled's mark read inside the run's distro, as the default
+    user (\\\\wsl.localhost's), never root."""
+    pc = pytest.importorskip("padcontroller")
+    calls = []
+
+    def runner(answer, rc=0):
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return pc.subprocess.CompletedProcess(cmd, rc, answer, b"")
+        return run
+
+    class Rig:
+        distro, root = "PAD-Runtime", "/mnt/wsl/paddata/spike2/padslots/1/root"
+
+        def wsl_head(self):
+            return ["wsl.exe", "-d", self.distro]
+
+    assert pc.block_in_wsl(Rig(), runner(b" 50 4c 45 44\n")) is True           # PADLED_MAGIC
+    assert calls[-1] == ["wsl.exe", "-d", "PAD-Runtime", "-e", "od", "-An", "-tx1", "-N4",
+                         "/mnt/wsl/paddata/spike2/padslots/1/root/dump/padled"]
+    assert "-u" not in calls[-1]
+    assert pc.block_in_wsl(Rig(), runner(b" 00 00 00 00\n")) is False          # zeroed, no mark
+    assert pc.block_in_wsl(Rig(), runner(b"", rc=1)) is False                  # not there
+    assert pc.block_in_wsl(Rig(), runner(b" zz\n")) is None
+
+    def hung(cmd, **kw):
+        raise pc.subprocess.TimeoutExpired(cmd, 20)
+    assert pc.block_in_wsl(Rig(), hung) is None                                 # WSL did not answer
+    Rig.distro = None
+    assert pc.block_in_wsl(Rig(), runner(b" 50 4c 45 44\n")) is None           # nowhere to ask
+
+
+@pytest.mark.parametrize("in_wsl", [True, False, None])
+def test_a_block_wsl_has_and_windows_cannot_read_stops_the_run(tmp_path, monkeypatch, in_wsl):
+    """PAD-1247: Mike St P's Rush LE (then Batman) booted to attract on
+    v1.427.1, but the block never came up for Windows and its sound never
+    reached the Windows player, five starts in a row; the next WSL restart
+    put it right. Inside WSL the block has its mark while Windows reads none:
+    the run is stopped and the loading window says Restart WSL, instead of
+    the table sitting on "Starting the game" for seven minutes. A block WSL
+    has no mark in either (or WSL not answering) waits on as before."""
+    pc = pytest.importorskip("padcontroller")
+    said, ended, stopped = [], [], []
+    monkeypatch.setattr(pc, "log", said.append)
+    monkeypatch.setattr(pc, "block_in_wsl", lambda rig: in_wsl)
+    logfile = tmp_path / "padvpx-rush_le.log"
+    logfile.write_text("[event] [padplay] no data for 25 s - transport presumed dead\n", encoding="utf-8")
+    led = tmp_path / "padled"
+    led.write_bytes(b"\0" * 64)
+
+    class Rig:
+        how = "rig board slot 1 (rush_le)"
+        dump = str(tmp_path)
+
+        def led_path(self):
+            return str(led)
+
+    class Launch:
+        slot = 1
+        logfile = str(tmp_path / "padvpx-rush_le.log")
+
+        def alive(self):
+            return True
+
+        def stop(self):
+            stopped.append(1)
+
+    b = pc.Bridge()
+    b.title = "rush_le"
+    b.running = True
+    b.launch, b.rig = Launch(), Rig()
+    b.start_t = pc.time.monotonic()
+    monkeypatch.setattr(b, "_loading_end", lambda word, took=None: ended.append(word))
+    b._poll_starting()
+    b._board_t -= b.BLOCK_LATE_S + 1
+    b._poll_starting()
+    assert "(Windows reads 64 bytes with no mark; inside WSL" in said[0]
+    if in_wsl:
+        assert "inside WSL it has its mark" in said[0]
+        assert "WSL's link to Windows is stuck" in said[1]
+        assert ended == ["failed " + pc.WSL_STUCK] and stopped == [1]
+        assert b.launch is None and b.rig is None
+        assert "Restart WSL" in pc.WSL_STUCK
+    else:
+        assert ("it has none either" if in_wsl is False else "WSL did not say") in said[0]
+        assert ended == [] and stopped == [] and b.launch is not None
+
+
+def test_loading_status_that_is_not_utf8_still_reads(tmp_path):
+    # PAD-1247: a status file in the ANSI code page ("…" as 0x85) raised
+    # UnicodeDecodeError in Tk's timer and froze the window on its last step
+    pl = pytest.importorskip("padloading")
+    st = tmp_path / "status.txt"
+    st.write_bytes(b"failed Press Restart WSL\x85 now")
+    assert pl.read_status(str(st)).startswith("failed Press Restart WSL")
+    assert pl.read_status(str(tmp_path / "none.txt")) == ""
+
+
+def test_an_unquoted_server_path_with_spaces_is_still_registered(tmp_path):
+    # PAD-1229: pywin32 writes LocalServer32 as GetShortPathName(pythonw.exe)
+    # unquoted; with 8.3 names off that is the long path, spaces and all,
+    # and the check cut it at "C:\Program" - "still not registered"
+    vs = pytest.importorskip("vpxsetup")
+    kit = tmp_path / "vpx"
+    kit.mkdir()
+    (kit / "padcontroller.py").write_text("")
+    pydir = tmp_path / "Pinball Asset Decryptor" / "python"
+    pydir.mkdir(parents=True)
+    py = pydir / "pythonw.exe"
+    py.write_bytes(b"")
+    server = '%s "%s" {7D5B2A1E}' % (py, tmp_path / "Pinball Asset Decryptor" / "localserver.py")
+    assert vs.server_exe(server) == str(py)
+    assert vs.registration_ok(str(kit), server)
+    fixed = vs.quoted_server_cmd(server)
+    assert fixed == '"%s"%s' % (py, server[len(str(py)):])
+    assert vs.server_exe(fixed) == str(py) and vs.registration_ok(str(kit), fixed)
+    assert vs.quoted_server_cmd(fixed) is None                                  # already quoted
+    assert vs.quoted_server_cmd(r'C:\PROGRA~1\PAD\python\pythonw.exe "x.py" {c}') is None
+    assert vs.quoted_server_cmd("") is None
+    assert vs.server_exe(r"C:\a b\x.exec\pythonw.exe /Automate") == r"C:\a b\x.exec\pythonw.exe"
+
+
+def test_controller_register_hands_pywin32_its_own_argv(monkeypatch):
+    # PAD-1229: UseCommandLine reads sys.argv itself, and `padvpx.py
+    # unregister` (the uninstaller's) carries "unregister" with no dashes:
+    # it registered again instead of removing the controller
+    pc = pytest.importorskip("padcontroller")
+    seen = []
+
+    class FakeReg:
+        @staticmethod
+        def UseCommandLine(*classes, **flags):
+            seen.append(list(sys.argv[1:]))
+
+    quoted = []
+    monkeypatch.setattr(pc, "_reg", FakeReg, raising=False)
+    monkeypatch.setattr(pc, "quote_local_server", lambda: quoted.append(1))
+    monkeypatch.setattr(sys, "argv", ["padvpx.py", "unregister", "--log", "x.log"])
+    assert pc.main(["--unregister"]) == 0
+    assert pc.main(["--register"]) == 0
+    assert seen == [["--unregister", "--unattended"], ["--register", "--unattended"]]
+    assert quoted == [1]                                         # only after a register
+    assert sys.argv == ["padvpx.py", "unregister", "--log", "x.log"]
+
+
+def test_register_with_a_log_keeps_what_happened(tmp_path, monkeypatch):
+    # PAD-1229: the tab runs the register elevated, where its output went
+    # nowhere; --log keeps it (the traceback and the exit) for the tab
+    pv = pytest.importorskip("padvpx")
+    log = tmp_path / "reg.log"
+
+    def boom(cmd):
+        raise PermissionError("[WinError 5] Access is denied")
+    monkeypatch.setattr(pv, "_register", boom)
+    assert pv.main(["register", "--log", str(log)]) == 1
+    text = log.read_text(encoding="utf-8")
+    assert "PermissionError: [WinError 5] Access is denied" in text and text.strip().endswith("exit 1")
+
+    monkeypatch.setattr(pv, "_register", lambda cmd: print("registered %s" % cmd) or 0)
+    assert pv.main(["register", "--log", str(log)]) == 0
+    assert log.read_text(encoding="utf-8").split() == ["registered", "register", "exit", "0"]
+
+
+# ------------------------------------------------- flipper latency ---------
+
+def _flip_bridge(pc, monkeypatch):
+    """A bridge with a pipe and the left flipper's coil (8, 5) as solenoid
+    48, its button switch id 60; no rule cached until a test sets one."""
+    monkeypatch.setattr(pc, "log", lambda s: None)
+    b = pc.Bridge()
+
+    class Pipe:
+        def __init__(self):
+            self.held = {}
+
+        def set(self, sid, level):
+            self.held[sid] = 1 if level else 0
+    b.pipe = Pipe()
+    b.map.solenoids = {48: (8, 5)}
+    b.switch_id = lambda n: n
+    return b
+
+
+def test_set_switch_without_a_cached_rule_sets_no_coil(monkeypatch):
+    pc = pytest.importorskip("padcontroller")
+    b = _flip_bridge(pc, monkeypatch)
+    b.set_switch(60, 1)
+    assert b.pipe.held[60] == 1
+    assert b.sol_state == {} and b.changed_solenoids() is None
+
+
+def test_a_board_fired_coil_follows_its_switch_at_once(monkeypatch):
+    """A flipper's coil reaches the table on the press itself, not a poll
+    (~25-30 ms over \\\\wsl.localhost) later, and drops on the release."""
+    pc = pytest.importorskip("padcontroller")
+    b = _flip_bridge(pc, monkeypatch)
+    b._rule_coils = {60: [((8, 5), True)]}
+    b.set_switch(60, 1)
+    assert b.sol_state[48] == 1
+    assert [48, 1] in [list(c) for c in b.changed_solenoids()]
+    b.set_switch(60, 0)
+    assert b.sol_state[48] == 0
+
+
+def test_a_release_does_not_cut_a_live_fire_short(monkeypatch):
+    pc = pytest.importorskip("padcontroller")
+    b = _flip_bridge(pc, monkeypatch)
+    b._rule_coils = {60: [((8, 5), True)]}
+    b.set_switch(60, 1)
+    b._coil_off_at[(8, 5)] = pc.time.monotonic() + 60.0    # the game fired it too
+    b.set_switch(60, 0)
+    assert b.sol_state[48] == 1                             # the poll ends it
+
+
+def test_a_spike1_button_coil_turns_on_at_once_and_off_with_the_poll(monkeypatch):
+    pc = pytest.importorskip("padcontroller")
+    b = _flip_bridge(pc, monkeypatch)
+    b._rule_coils = {60: [((8, 5), False)]}
+    b.set_switch(60, 1)
+    assert b.sol_state[48] == 1
+    b.set_switch(60, 0)
+    assert b.sol_state[48] == 1                             # the board says when
+
+
+def test_log_does_not_write_in_the_callers_thread_and_loses_nothing(monkeypatch, tmp_path):
+    pc = pytest.importorskip("padcontroller")
+    path = tmp_path / "padcontroller.log"
+    monkeypatch.setattr(pc, "LOG", str(path))
+    for i in range(200):
+        pc.log("burst %d" % i)
+    import time as _t
+    deadline = _t.monotonic() + 5.0
+    lines = []
+    while _t.monotonic() < deadline:
+        lines = [ln for ln in path.read_text(encoding="utf-8").splitlines()
+                 if " burst " in ln] if path.exists() else []
+        if len(lines) == 200:
+            break
+        _t.sleep(0.01)
+    assert [ln.split(" ", 1)[1] for ln in lines] == ["burst %d" % i for i in range(200)]
+
+
+def test_the_poll_caches_a_rules_switch_and_agrees_with_set_switch(monkeypatch):
+    """_poll_coils keeps {switch id: coils} from the v7 rule plane; a press
+    turns the coil on at once and the next poll, reading the same held
+    switch, leaves it on; a release turns it off and the poll agrees."""
+    pc = pytest.importorskip("padcontroller")
+    import coilmap
+    b = _flip_bridge(pc, monkeypatch)
+    data = bytearray(coilmap.RULE_READ)
+    struct.pack_into("<I", data, 0, coilmap.PADLED_MAGIC)
+    struct.pack_into("<I", data, 4, 7)
+    o = 8 * coilmap.COIL_N + 5                                   # node 8 coil 5
+    data[coilmap.RULE_PWR_OFF + o] = 0xff
+    data[coilmap.RULE_IN_OFF + o] = 0x40 | 25                    # fired by input 25
+    data = bytes(data)
+    b.sw_ids = {(8, 25): 60}
+    b._poll_coils(data, 0.0)
+    b._poll_coils(data, 0.0)
+    assert b._rule_coils == {60: [((8, 5), True)]}
+    b.set_switch(60, 1)
+    assert b.sol_state[48] == 1
+    b._poll_coils(data, 0.0)
+    assert b.sol_state[48] == 1
+    b.set_switch(60, 0)
+    assert b.sol_state[48] == 0
+    b._poll_coils(data, 0.0)
+    assert b.sol_state[48] == 0
+def test_the_log_says_what_the_table_read_of_the_machine_switches(monkeypatch):
+    """PAD-1225: Batman 66's turntable and crane follow the machine by reading
+    its position switches (PadMechTimer, every 50 ms). A player's turntable
+    never moved and nothing in his log could say whether the table read them
+    at all. Each change in what the table reads is logged, once."""
+    pc = pytest.importorskip("padcontroller")
+    logged = []
+    monkeypatch.setattr(pc, "log", logged.append)
+    b = pc.Bridge()
+    b.set_game("batman")
+    b.attached = True
+    plane = bytearray(len(b.mrg))
+    plane[77] = 1                                   # turntable home
+    b.mrg = bytes(plane)
+    for _ in range(20):                             # a second of PadMechTimer
+        assert b.get_switch(1077) and not b.get_switch(1078)
+    plane[77], plane[78] = 0, 1                     # the game turned it to the Bat Phone
+    b.mrg = bytes(plane)
+    for _ in range(20):
+        assert not b.get_switch(1077) and b.get_switch(1078)
+    reads = [ln for ln in logged if ln.startswith("table reads")]
+    assert reads == ["table reads switch 77 = 1", "table reads switch 78 = 0",
+                     "table reads switch 77 = 0", "table reads switch 78 = 1"]
+
+
+def test_tmnt_copy_patched_before_a_fix_is_asked_to_patch_again(tmp_path):
+    # PAD-1276: Mike played a TMNT table patched by v1.429.8, before PAD-1268's
+    # LAIR post (v1.430.5); the tab still called it Patched, so the shot kept
+    # rolling past. Each TMNT fix is marked by a line only its patcher writes:
+    # a script lacking one is asked to patch again, today's script is not.
+    vsu = pytest.importorskip("vpxsetup")
+    src = "Sub t25_Hit:vpmTimer.PulseSw(25):End Sub\nSub Table1_KeyDown(ByVal keycode)\nEnd Sub\n"
+    for title in ("turtles_pro", "turtles_le"):
+        out, m = _tmnt_patch(title, src)
+        marks = m["repatch"]
+        assert {k["since"].split(":")[0] for k in marks} == {"PAD-1281", "PAD-1268", "PAD-1116", "PAD-897"}
+        name = "T (PAD).vpx"
+        (tmp_path / "T (PAD).script.vbs").write_text(out, encoding="utf-8")
+        missing = [k["absent"] for k in marks if k["absent"] not in out]
+        assert missing == [], (title, missing)
+        assert vsu.missed_fixes(str(tmp_path), name, marks) == []
+        for k in marks:
+            lines = [ln for ln in out.split("\n") if k["absent"] not in ln]
+            (tmp_path / "T (PAD).script.vbs").write_text("\n".join(lines), encoding="utf-8")
+            assert vsu.missed_fixes(str(tmp_path), name, marks) == [k["why"]], (title, k["since"])

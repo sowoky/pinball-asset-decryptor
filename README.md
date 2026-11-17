@@ -19,9 +19,14 @@ macOS and Linux.
 - **Share** your changes as a small mod pack, or apply someone else's.
 - **Emulate** the game on your PC to see and hear your changes before they
   go near the machine.
+- **Play in Visual Pinball** (Windows): the Stern Spike 1 and Spike 2 and Spooky
+  emulators can drive a Visual Pinball X table. The
+  **Visual Pinball** tab lists the tables you downloaded from their authors
+  and the ones out there for the other machines, patches and opens them, and
+  gives table authors a checklist of every switch, coil and insert a game has.
 - **Multi-boot**: put several complete games on one Stern Spike 2 SD card
-  (or Jersey Jack install stick, or Barrels of Fun update) and pick one from a
-  menu at power-up.
+  (or Jersey Jack install stick, or Barrels of Fun or Spooky update) and pick
+  one from a menu at power-up.
 
 <p>
   <a href="docs/screenshots/stern-extract.png"><img src="docs/screenshots/stern-extract.png" width="49%" alt="The Extract tab with a Stern Godzilla LE SD-card image detected and per-type extract checkboxes"></a>
@@ -36,15 +41,19 @@ macOS and Linux.
 |---|---|---|
 | American Pinball | 6 | Extract, Write, Replace Audio/Video, Emulate |
 | Barrels of Fun | 4 | Extract, Write, Mod Pack, Replace Audio/Video, Emulate, Multi-boot (Labyrinth) (Bon Jovi: extract only) |
+| Capcom | 6 | Extract every sound as WAVs; capture DMD animations + sound with PinMAME |
 | Chicago Gaming Company | 5 | Extract, Write, Mod Pack, Replace Audio |
 | Data East (classic DMD) | 16 | Capture DMD animations + sound with PinMAME |
-| Dutch Pinball | 2 | Extract, Write, Apply Delta, Mod Pack, Replace Audio/Video, Emulate |
+| Dutch Pinball | 2 | Extract, Write, Apply Delta, Mod Pack, Replace Audio/Video, Emulate, Multi-boot (The Big Lebowski) |
 | Jersey Jack Pinball | 12 | Extract, Write, Mod Pack, Replace Audio/Video, Emulate, Direct-SSD, Multi-boot |
 | Pinball Brothers | 4 | Extract, Write, Apply Delta, Mod Pack, Replace Audio/Video, Emulate |
 | Sega (Whitestar DMD) | 18 | Capture DMD animations + sound with PinMAME |
-| Spooky Pinball | 14 | Extract, Write, Mod Pack, Replace Audio/Video, Emulate |
-| Stern Spike 2 | 26 | Extract, Write, Direct-SD, Replace Audio/Video/Images/Text, Scenes, Partition Explorer, Emulate, Multi-boot |
-| Stern Spike 1 | 6 | Extract, Write, Replace Audio, Emulate |
+| Spooky Pinball | 14 | Extract, Write, Mod Pack, Replace Audio/Video, Emulate, Multi-boot |
+| Stern Spike 3 | 6 | Extract, Replace, Write, Emulate (decrypts the card's encrypted games partition from a LUKS/ext4 SD image or `.spk` and plays it on this PC; Write puts your edits back through the card's own encryption; needs your own OTP key, pasted or as a keyfile) |
+| Stern Spike 2 | 28 | Extract, Write, Direct-SD, Replace Audio/Video/Images/Text, Scenes, Partition Explorer, Emulate, Multi-boot |
+| Stern Spike 1 | 6 | Extract, Write, Replace Audio, Replace Images, Replace Text, Emulate |
+| Stern SAM | 26 | Extract, Write, Replace Audio, Replace Images (stills, fonts and DMD animation frames), Mod Pack; capture DMD animations with PinMAME |
+| Stern Whitestar | 17 | Capture DMD animations + sound with PinMAME |
 | Williams (WPC) | 41 | DMD scenes, animations, fonts and sound from the ROM; PinMAME capture |
 
 Game lists, file formats and what each manufacturer's tabs do in detail:
@@ -55,9 +64,10 @@ Game lists, file formats and what each manufacturer's tabs do in detail:
 Download the latest release for your computer from the
 **[Releases page](https://github.com/davidvanderburgh/pinball-asset-decryptor/releases)**:
 
-- **Windows** - `…_Windows.exe`. Run it, then run **Install Prerequisites**
-  from the Start Menu and pick the manufacturers you use. Most tools run in
-  WSL2, which the installer sets up (it may ask for a restart).
+- **Windows** - `…_Windows.exe`. Run it and keep **Set up WSL2** ticked
+  (it may ask for a restart). Then, if the app's prerequisites row is red,
+  press **Install Missing**: it installs the app's own Linux with every tool
+  in it, so no Ubuntu or command line is needed.
 - **macOS** - `…_macOS_AppleSilicon.dmg` (M1 or newer) or
   `…_macOS_Intel.dmg`. Drag it to Applications; the first launch needs
   **Open Anyway** in System Settings → Privacy & Security, because the app
@@ -71,6 +81,14 @@ needs: **[Installing](docs/guide/install.md)**.
 
 ## Quick start
 
+New here? The app opens on a **Getting started** page the first time: a
+short video and the steps for each common job, from installing to a
+multi-boot card (the top bar's **Getting started** button brings it back).
+**[Getting started: your first mod](docs/guide/getting-started.md)** walks
+through swapping one song, step by step, and
+**[Common problems](docs/guide/common-problems.md)** has what new users
+most often run into.
+
 1. Launch the app and **pick a manufacturer**. The prerequisites row turns
    green once the tools it needs are installed.
 2. On **Select card**, browse to the card image, update file or SD card.
@@ -81,17 +99,28 @@ needs: **[Installing](docs/guide/install.md)**.
    put it in the machine. Keep a backup of the original first.
 
 The **?** button in the app opens tips for whichever tab you are on.
+Something wrong? **Report a problem** in the top bar sends the developer
+what happened, with the app's log and the card's details, after showing
+you exactly what goes. No email needed: the app tells you when a release
+addresses your report.
+
+Questions, or something to show off? The **Discord** button in the top bar
+(also ⚙ > **Join our Discord**) opens the PAD Discord server.
 
 ## Documentation
 
 | Page | What is in it |
 |---|---|
+| [Getting started](docs/guide/getting-started.md) | Your first mod, step by step: swap one song and put it on the machine |
+| [Common problems](docs/guide/common-problems.md) | What new users most often run into, and what to do |
 | [Using the app](docs/guide/using-the-app.md) | Every tab from Extract to Mod Pack, projects, history and the log |
-| [Emulate](docs/guide/emulate.md) | Playing a game on this PC: Stern Spike 2, Jersey Jack, Dutch Pinball |
+| [Emulate](docs/guide/emulate.md) | Playing a game on this PC: Stern Spike 2, Stern Spike 3, Jersey Jack, Dutch Pinball |
 | [Multi-boot cards](docs/guide/multi-boot.md) | Several games on one card with a menu at power-up |
+| [AI agents](docs/guide/ai-agents.md) | Letting an AI agent (Claude, Cursor...) use the app for you through MCP |
 | [Color profile maths](docs/guide/color-profile-maths.md) | Every step of the Color profile tab, in order, with its limits |
 | [Supported manufacturers](docs/guide/manufacturers.md) | Per-manufacturer detail, formats and quirks |
 | [Installing](docs/guide/install.md) | Install, prerequisites, troubleshooting, auto-update |
+| [Docker](docs/guide/docker.md) | Run it on a server (Unraid, a NAS) and use it from any PC in a browser, sound included |
 | [Disclaimer](docs/guide/legal.md) | The full legal notes: DMCA, manufacturer EULAs, no warranty |
 | [Development](docs/development.md) | Running from source, architecture, adding a manufacturer, tests, building installers |
 | [Architecture notes](docs/architecture/README.md) | How each manufacturer's formats and pipelines work |

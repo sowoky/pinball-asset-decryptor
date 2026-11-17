@@ -216,6 +216,18 @@ site video_surface    0x0004f1cc 0xe92d4070 0xe3055978
 site surface_set_video 0x0048bd94 0xe5d03238 0xe92d4ff0
 site surface_play     0x00489534 0xe5d03238 0xe92d43f0
 site surface_stop     0x00489038 0xe5d03238 0xe92d40f0
+# PAD-725: the surface's own seek, length and position (PAD-530's, from Bond 1.06): a mode's clip the game's own
+# clip took the surface from comes back where it would be by then. Placed by the James Bond LE 1.06 recipe at
+# its distances from surface_play (+0x1bc / -0x1274 / -0x360: the older player), each proven by its call: the
+# player's virtual seek (+0x20), duration (+0x28) and position (+0x24), whose entries call gst_element_seek /
+# query_duration / query_position.
+site surface_seek     0x004896f0 0xe92d43f0 0xe1a07003
+site surface_duration 0x004882c0 0xe5d03238 0xe92d40f0
+site surface_position 0x004891d4 0xe5d03238 0xe92d40f0
+# PAD-725: the backdrop on the bank's surface, as Bond's (PAD-521): a mode's loop plays there again whenever it
+# is idle, and a clip the game loops there gets one pass before the loop takes it back. Emulator-proven on the
+# newest build of every title with a clip v2 bank, 2026-10-25.
+value backdrop_surface 1
 value surface_playing       2
 value scene_player_scene    0x10
 
@@ -626,3 +638,52 @@ site block_rule_21         0x00124db8 0xe3021440 0xe3401067  # RuleTimeBank::v[2
 text block_rule_name_21    Time Bank
 site block_rule_22         0x0012e8b0 0xe92d40f8 0xe2035001  # RuleTower::v[28]
 text block_rule_name_22    Tower
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+data  game_flags          0x0067c538
+value game_flags_at       4
+data  game_flag_count     0x004fce34
+value challenge_on_flag   16
+site  challenge_balls     0x002443b4 0xe92d4030 0xe1a05000
+site  challenge_balls_2   0x00264e74 0xe92d4038 0xe1a04000
+site  challenge_extra_ball 0x00223758 0xe30e3f74 0xe340306d
+site  challenge_menu      0x00026a58 0xe1a04000 0xe3140080
+site  challenge_menu_pick 0x00026ad0 0xe2433001 0xe3530005
+value challenge_menu_list_at   236
+value challenge_menu_count_at  32
+value challenge_menu_cap       7
+value challenge_menu_entry     12
+value challenge_menu_kind      2
+value challenge_menu_slot      -1
+value challenge_menu_caption   1901
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x00191958 0xe3012cfe 0xe340206e
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x0018d944 0xe92d4010 0xe30c4758
+value ball_launch_flag       11
+value ball_launch_wait_flag  12
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x001d18a4 0xe92d4ff0 0xe24dd0c4
+
+# PAD-710: the game's own mode framework (mode_framework.py, from this build's program): what one of its
+# modes writes as it starts and stops, so a mode of ours in one's place counts as it
+data  mode_player_at         0x00603388
+value mode_slot_stop         14
+value mode_stopped_at        0x13
+value mode_starts_at         0x3c
+site  mode_started           0x000a8e10 0xe3510018 0xe92d4008
+data  mode_manager           0x006723ec
+value mode_id_at             4
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x004bf09c 0xe5d13000 0xe3530008
+data sw_listen             0x006be374
+data sw_boards             0x006bd254
+site coil_used             0x001ad4c8 0xe92d43f8 0xe30d8638

@@ -38,9 +38,10 @@ import tempfile
 import threading
 import time
 
-from ...core import config, rigdata, runtime, staging_work
+from ...core import config, rigdata, runtime, staging_work, timesync
 from .. import compat
 from .. import emulate_rig as rig
+from ..emulate_log import EmulateLogMixin
 from .base import TabService, rpc
 
 log = logging.getLogger(__name__)
@@ -55,6 +56,78 @@ def no_rig():
     return bool(os.environ.get(NO_RIG_ENV))
 
 
+# ----------------------------------------------------------- game display
+# PAD-811: where the game window goes (full screen or a window on a chosen
+# monitor, borderless or framed) is tools/spike2_emu/padisplay.py's setting;
+# the renderer of a running game reads it twice a second, so a change here
+# moves the window at once.  padisplay is a script beside the rig, not a
+# package, so it is loaded by path, once per rig folder.
+_PADISPLAY = {}
+
+#: Window mode's first rectangle: the Spike 2 screen's own size
+DISPLAY_WINDOW = {"rx": 0, "ry": 0, "w": 1360, "h": 768}
+
+
+def padisplay_mod():
+    """The rig's padisplay module, or None when the rig has none."""
+    path = os.path.join(rig.rig_dir(), "padisplay.py")
+    if path in _PADISPLAY:
+        return _PADISPLAY[path]
+    mod = None
+    if os.path.isfile(path):
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("pad_padisplay", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception:                                # noqa: BLE001
+            log.exception("padisplay")
+            mod = None
+    _PADISPLAY[path] = mod
+    return mod
+
+
+def physical(fn, *args):
+    """``fn(*args)`` with monitors in physical pixels, for padisplay's
+    monitors() and save() (which resolves against them).  The app's process
+    is only system DPI aware (pywebview), which scales a monitor whose DPI
+    differs from the main one's; the per-monitor context set here is this
+    thread's alone and is put back after."""
+    if sys.platform != "win32":
+        return fn(*args)
+    import ctypes
+    old = None
+    try:
+        ctx = ctypes.windll.user32.SetThreadDpiAwarenessContext
+        ctx.restype = ctypes.c_void_p
+        ctx.argtypes = [ctypes.c_void_p]
+        old = ctx(ctypes.c_void_p(-4))        # PER_MONITOR_AWARE_V2
+    except Exception:                                    # noqa: BLE001
+        ctx = None
+    try:
+        return fn(*args)
+    finally:
+        if ctx is not None and old:
+            ctx(ctypes.c_void_p(old))
+
+
+#: Where the Save states panel works: Windows through WSL, macOS through the
+#: emulator's container, which carries criu since PAD-835, and a Linux desktop
+#: whose root needs no password - the app run as root, or a sudo that asks
+#: none, which the Docker image gives its user (PAD-871). Any other Linux
+#: desktop has no root to run the slot scripts with: a GUI has nowhere to
+#: type a password into.
+def _slots_here():
+    return rig.savestates_possible()
+
+
+#: What the panel says on a Linux desktop without that root.
+_SLOTS_NEED_ROOT = ("Save states need the emulator to run as root, and on "
+                    "Linux the app can only do that without a password: "
+                    "start the app as root, or let your account use sudo "
+                    "without one.")
+
+
 # ----------------------------------------------------------------- volume
 # Item 56: the master volume / Mute control file.  emulate_core computes
 # its path once, at import, from settings.json's folder; here it is computed
@@ -64,6 +137,31 @@ def no_rig():
 def audio_ctl_file():
     return os.path.join(os.path.dirname(config.SETTINGS_FILE),
                         "audio_ctl.json")
+
+
+#: PAD-735: the playfield window's Restart game asks through this file, one
+#: per rig, beside the volume file (playfield.py's RESTART_REQ names it the
+#: same way). The status poll acts on it and removes it.
+RESTART_REQ_S = 30
+
+
+def restart_req_file(n=None):
+    """``n``: the rig the window is on, when not this app's (a Spike 3 run
+    on rig 1 from an app on rig 0 - PAD-1198)."""
+    from ...core import rigslot
+    return os.path.join(os.path.dirname(config.SETTINGS_FILE),
+                        "restart_game_%d.req"
+                        % (rigslot.slot() if n is None else n))
+
+
+def stop_req_file(n=None):
+    """PAD-1198: the playfield window's Stop emulator (and its X) asks
+    through this file, one per rig, beside the restart one (playfield.py's
+    stop_req_path names it the same way); the status poll acts on it."""
+    from ...core import rigslot
+    return os.path.join(os.path.dirname(config.SETTINGS_FILE),
+                        "stop_emulator_%d.req"
+                        % (rigslot.slot() if n is None else n))
 
 
 def load_audio_ctl():
@@ -89,10 +187,40 @@ def write_audio_ctl(gain, muted):
         pass
 
 
+#: s3store.py's byte meter, through s3launch.sh (PAD-1238):
+#: ``[s3store] progress <pct> <done MB> <total MB> <seconds left|->``
+S3_STORE_PROGRESS = re.compile(
+    r"s3launch:\s+\[s3store\] progress (\d+) (\d+) (\d+) (\d+|-)\s*$")
+
+
+def _eta_text(secs):
+    """'about 14 min left' / 'under a minute left'."""
+    if secs < 60:
+        return "under a minute left"
+    mins = (secs + 30) // 60
+    if mins < 90:
+        return "about %d min left" % mins
+    return "about %.1f h left" % (mins / 60.0)
+
+
+def s3_progress_logged(line, decade):
+    """Whether a Spike 3 launcher line goes to the log. The byte meter says
+    where it is every 2 s, which is for the bar; the log gets one line per
+    tenth of the card (*decade* is ``[last tenth logged]``, updated here)."""
+    m = S3_STORE_PROGRESS.match(line)
+    if not m:
+        return True
+    tenth = int(m.group(1)) // 10
+    if tenth == decade[0]:
+        return False
+    decade[0] = tenth
+    return True
+
+
 #: The State word and the button from Cancel until the preparation has
 #: really stopped (PAD-489: a Cancel that went on "Applying your
 #: replacements..." read as a hang).
-CANCELLING = "Cancelling…"
+CANCELLING = "Canceling…"
 
 #: The State line's ⓘ while the staging converts videos and pictures before
 #: a run (PAD-489).
@@ -118,7 +246,7 @@ def _state_kind(text):
     return "acc"
 
 
-class EmulateTab(TabService):
+class EmulateTab(EmulateLogMixin, TabService):
     ns = "emulate"
     key = "Emulate"
     label = "Emulate"
@@ -145,6 +273,9 @@ class EmulateTab(TabService):
         self.emulate_overrides_var = self.var("overrides", "bool", False)
         # PAD-251 (DragonRR): the Scenes tab's edits have their own on/off under the opt-in
         self.emulate_scene_edits_var = self.var("scene_edits", "bool", True)
+        # PAD-1197 (DragonRR): kinds of edit left out of the next runs, a comma
+        # list of run_leave_out keys.  Not remembered: each session has them all.
+        self.emulate_leave_out_var = self.var("leave_out", "str", "")
         # PAD-305: run with the stock colours, skipping the Color profile tab's
         # correction (the profile is made for the machine's screen, and the
         # emulator is watched on the PC's).  Not remembered: off each session.
@@ -157,6 +288,10 @@ class EmulateTab(TabService):
                                             rig.COUNTRY_GAME)
         self.emulate_power_var = self.var("power", "str",
                                           rig.POWER_CHOICES[0][0])
+        # PAD-519: which model the board says the machine is (Premium, LE,
+        # SLE ...); "" is the card's own.  Not remembered: the choices are the
+        # card's, so each session starts on the card's own model.
+        self.emulate_edition_var = self.var("edition", "str", "")
         # -- the panel's own ---------------------------------------------
         vol0, mute0 = load_audio_ctl()
         self._volume_var = self.var("volume", "float", round(vol0 * 100))
@@ -179,12 +314,17 @@ class EmulateTab(TabService):
         # the Color profile tab's "Try it in the emulator": Start again once
         # the running game has stopped (a count of polls left to wait)
         self._restart_wait = 0
+        # PAD-738: Restart game asked of the running session (restartgame.sh)
+        self._rebooting = False
         self._launch_accepted = False
         self._launch_serial = 0
         self._loading = False
         self._proc = None
         self._copying = None
         self._copying_pct = None
+        # what the ⓘ says while _copying shows: the card copy's words, or
+        # the Mac container build's (PAD-769)
+        self._copying_tip = rig._COPY_EXPLAIN
         self._preparing = None
         self._preparing_pct = None
         self._preparing_kind = None
@@ -198,8 +338,11 @@ class EmulateTab(TabService):
         self._precached = None
         self._cache_open = False
         self._cache_entries = {}
+        self._cache_meta = None
         self._cache_sel = []
         self._pf_proc = None
+        self._clip_merger = None          # PAD-827: the run's clip sightings, folded in
+        self._elog_init()                 # PAD-1071: the Sound and video log
         self._last_up = False
         self._last_info = None
         self._starting = False
@@ -220,6 +363,7 @@ class EmulateTab(TabService):
         self._docker_engine = None
         self._docker_report_next = False
         self._setup = None
+        self._rt_last = None         # the last runtime.status() the poll read
         self._setup_busy = False
         self._setup_fixing = False
         self._setup_restart_check = False
@@ -237,8 +381,28 @@ class EmulateTab(TabService):
         self._which_token = 0
         self._which = None
         self._browsed = None
+        #: PAD-367: is the picked card a Stern Spike 3 (LUKS-encrypted) card,
+        #: which cannot be emulated? None until the pick-time probe answers;
+        #: ``start()`` refuses when it is True, so a Spike 3 card never reaches
+        #: the 60 GB cache copy or the fuse2fs refusal the rig would hit.
+        self._spike3 = None
+        self._spike3_why = ""
+        self._spike3_probed = None
+        self._s3_slot = None            # PAD-1090: the rig a Spike 3 run is on
+        self._s3_restore = None         # PAD-1147: a save state to start from
+        self._s3_label = None           # ...and what its state says
+        self._s3_foot = None            # ...and its footer step (s3prog.py)
+        #: PAD-659: the picked file is a disk tool's backup of a card (a
+        #: Macrium .mrimgx), not a card image: what to say about it, "" when
+        #: it is not one.  Read off the loop at pick time; ``start()``
+        #: refuses with it instead of the rig's "no MBR signature".
+        self._backup = ""
+        self._backup_probed = None
         self._mains_note = ""       # PAD-173: what this game does about 50 Hz
         self._mains_key = None
+        # PAD-519: the editions the picked card's game takes, read off its binary
+        self._editions = None       # {"built", "choices"} once the probe answers
+        self._editions_key = None
         self._slots_rows = None
         self._slots_total = None
         self._slots_free = None
@@ -253,6 +417,8 @@ class EmulateTab(TabService):
         self.emulate_overrides_var.trace_add(
             "write", lambda *_a: self._overrides_paint())
         self.emulate_scene_edits_var.trace_add(
+            "write", lambda *_a: self._overrides_paint())
+        self.emulate_leave_out_var.trace_add(
             "write", lambda *_a: self._overrides_paint())
         self.emulate_colour_stock_var.trace_add(
             "write", lambda *_a: self._on_colour_stock())
@@ -275,9 +441,12 @@ class EmulateTab(TabService):
             countries=[rig.COUNTRY_GAME] + list(rig.COUNTRIES),
             powers=[label for label, _env in rig.POWER_CHOICES],
             country_tip=rig.COUNTRY_TIP, power_tip=rig.POWER_TIP,
+            edition_tip=rig.EDITION_TIP, editions=[], editions_on=False,
+            edition_note="",
             topper_tip=rig.TOPPER_TIP, states_tip=rig.STATES_TIP,
             launch_tip=rig.LAUNCH_TIP, select_tip=rig.SELECT_TIP_IDLE,
-            vals=dict(self._vals), state_kind="", state_tip="", hint="",
+            vals=dict(self._vals), state_kind="", state_tip="", host_tip="",
+            hint="",
             docker_msg="", docker_btn=None, docker_enabled=True,
             setup_msg="", setup_btn=False,
             setup_label="Set up emulator…", setup_enabled=True,
@@ -285,13 +454,12 @@ class EmulateTab(TabService):
             rt_enabled=True, check_label="Check setup…", check_enabled=True,
             fixaud_enabled=rig_ok, winreset_enabled=rig_ok,
             slots=[], slots_read=False, slot_sel=None,
-            slots_enabled=sys.platform == "win32",
+            slots_enabled=_slots_here(),
             slots_sum=("The slots appear with the next status poll."
-                       if sys.platform == "win32" else
-                       "Slot management is available on Windows (WSL)."),
-            game=None, which=None, mains_note="",
+                       if _slots_here() else _SLOTS_NEED_ROOT),
+            game=None, which=None, mains_note="", not_card="",
             assets="", ovr_hint=rig.OVR_OFF, ovr_refused=False,
-            cache=None, rename=None)
+            cache=None, rename=None, gdisp=None)
         self._run_label(False, False)
         # The panel wrote the control file at build so it exists before a
         # first Start (padplay.py reads it): the same here, bar captures.
@@ -337,7 +505,9 @@ class EmulateTab(TabService):
         return rig.rig_cmd(script, *args, env=env)
 
     def _cmd_root(self, script, *args):
-        if no_rig():
+        # macOS: padbox.sh runs the save-state scripts as root inside the
+        # box itself (PAD-835), so the ordinary command is the root one.
+        if no_rig() or sys.platform == "darwin":
             return self._cmd(script, *args)
         return rig.rig_cmd_root(script, *args)
 
@@ -403,6 +573,9 @@ class EmulateTab(TabService):
         self.emulate_savestates_var.set(True)
         self._bind_assets()
         self._select_probe_kick()
+        self._spike3_kick()
+        self._backup_kick()
+        self._display_paint()
         if no_rig() or self._stopped:
             return
         if sys.platform == "darwin":
@@ -432,6 +605,10 @@ class EmulateTab(TabService):
         self._bind_assets()
         self._overrides_paint()
 
+    def rail_needs(self):
+        # PAD-1090: a Spike 3 card is unusable without the user's OTP key
+        return "spike3key" if self._spike3_era() else None
+
     def on_show(self):
         self._bind_assets()
         # the Stern ladder, then what the last poll said (Tk showed idle
@@ -441,6 +618,8 @@ class EmulateTab(TabService):
         except Exception:                                # noqa: BLE001
             pass
         self._paint_footer()
+        # a monitor plugged in or out since: the picker lists them as now
+        self._display_paint()
 
     def on_close(self):
         self._stopped = True
@@ -467,10 +646,13 @@ class EmulateTab(TabService):
     def _on_card_changed(self, *_a):
         self.set(game=self._card_game())
         self._slots_paint()
+        self._backup_kick()
+        self._spike3_kick()
         self._precache_kick()
         self._select_probe_kick()
         self._which_kick()
         self._mains_kick()
+        self._editions_kick()
 
     # -- which card this is, next to the project (PAD-199) ----------------
     def _which_kick(self):
@@ -522,6 +704,101 @@ class EmulateTab(TabService):
                     rel = dict(rel, **{key: ""})
         self.set(which=rel)
 
+    # -- is the picked card a Spike 3 (encrypted) card? (PAD-367) ---------
+    def _spike3_kick(self):
+        """Ask the rig, off the loop, whether the picked card is a Stern Spike 3
+        card - which cannot be emulated, its partitions being LUKS-encrypted
+        with a key kept in the machine.  Answered the moment a card is picked,
+        so the user is told up front and ``start()`` can refuse without the
+        rig's 60 GB cache copy and fuse2fs refusal.
+        """
+        path = self._card()
+        if path == self._spike3_probed:
+            return
+        self._spike3_probed = path
+        self._spike3 = None
+        self._spike3_why = ""
+        if not (path and not no_rig() and rig.rig_available()
+                and os.path.isfile(os.path.join(rig.rig_dir(), "parts.py"))):
+            return
+
+        def run():
+            try:
+                cmd = rig.spike3_cmd(path)
+            except Exception:                            # noqa: BLE001
+                cmd = None
+            if cmd is None:
+                return
+            try:
+                r = self._run(cmd, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL,
+                              timeout=rig._MULTIBOOT_PROBE_S)
+                out = (r.stdout or b"").decode("utf-8", "replace")
+            except Exception:                            # noqa: BLE001
+                return
+            is3, why = rig.parse_spike3(out)
+            self._post(self._spike3_apply, path, is3, why)
+
+        self._thread(run)
+
+    # -- is the picked file a backup of a card, not one? (PAD-659) -------
+    def _backup_kick(self):
+        """Read, off the loop, whether the picked file is a disk tool's
+        backup of a card (Macrium, Acronis, a zip...) rather than the card's
+        bytes.  Said on the card panel the moment it is picked: the rig only
+        found out at Start, as "no MBR signature" deep in its log."""
+        path = self._card()
+        if path == self._backup_probed:
+            return
+        self._backup_probed = path
+        self._backup = ""
+        self.set(not_card="")
+        if not path:
+            return
+
+        def run():
+            # not_a_card: a backup, or a file off the card's boot partition
+            # (D:\stern-spike2.dtb, PAD-659) - no card image at all
+            from ...core.backup_image import not_a_card
+            try:
+                why = not_a_card(path)
+            except Exception:                            # noqa: BLE001
+                why = ""
+            if why:
+                self._post(self._backup_apply, path, why)
+
+        self._thread(run)
+
+    def _backup_apply(self, path, why):
+        if path != self._backup_probed:
+            return
+        self._backup = why
+        # the chip read a "title" off the backup's file name: there is none
+        self.set(not_card=why, game=None)
+        self._log("[emulate] " + why)
+
+    def _spike3_apply(self, path, is3, why):
+        if path != self._spike3_probed:
+            return
+        was = self._spike3
+        self._spike3 = is3
+        self._spike3_why = why or ""
+        if bool(was) != bool(is3):
+            # the save states listed are the Spike 3 rig's or Spike 2's
+            self.slots_refresh()
+        if is3 and rig.spike3_rig_present():
+            self._log("[emulate] %s is a Stern Spike 3 card: Start runs it on "
+                      "the Spike 3 emulator. The first run of a card decrypts "
+                      "it with YOUR card's OTP key (Extract tab, Spike 3 "
+                      "unlock) and takes a few minutes."
+                      % os.path.basename(path))
+        elif is3:
+            self._log("[emulate] %s is a Stern Spike 3 card and cannot be "
+                      "emulated: its partitions are encrypted with a key kept "
+                      "in the machine, not on the card%s."
+                      % (os.path.basename(path),
+                         " (%s)" % why if why else ""))
+
     @rpc
     def use_card(self, key):
         """Switch the card to run to the project's extracted card
@@ -571,6 +848,14 @@ class EmulateTab(TabService):
             if not os.path.isfile(path) or path == self._precached:
                 return
             self._precached = path
+            # a Spike 3 card runs on its own rig, from its own store: copying
+            # its 60 GB into the Spike 2 card cache helps nothing (PAD-1090)
+            try:
+                from ...plugins.stern import spike3 as _s3
+                if _s3.is_spike3_card(path):
+                    return
+            except Exception:                            # noqa: BLE001
+                pass
             try:
                 cmd = self._cmd("cardmount.sh", rig.wsl_path(path),
                                 "--precache")
@@ -716,6 +1001,60 @@ class EmulateTab(TabService):
         self._mains_note = note
         self.set(mains_note=note)
 
+    # -- the edition (PAD-519) ---------------------------------------------
+    #
+    # A Premium/LE card runs every Premium, LE and SLE of its title; the board
+    # says which one the machine is (plugins/stern/cabinet_model.py).  The
+    # choices are the card's own game program's answer, read when the card is
+    # picked, so a Pro card (which is Pro whatever the board says) gets none.
+    def _editions_kick(self):
+        card = self._card()
+        from ...plugins.stern import mains_check
+        key = (card, mains_check.cache_stamp(card)) if card else None
+        if key == self._editions_key:
+            return
+        self._editions_key = key
+        self._editions = None
+        self._editions_paint()
+        if not card or key[1] is None:
+            return
+
+        def run():
+            from ...plugins.stern import cabinet_model
+            _title, ed = cabinet_model.editions_card(card)
+            self._post(self._editions_apply, key, ed)
+
+        self._thread(run)
+
+    def _editions_apply(self, key, ed):
+        if key != self._editions_key:   # the card moved on
+            return
+        self._editions = ed
+        self._editions_paint()
+
+    def _editions_paint(self):
+        ed = self._editions or {}
+        built, choices = ed.get("built") or "", ed.get("choices") or []
+        own = rig.edition_own_label(built)
+        options = [{"value": "", "label": own}] + [
+            {"value": name, "label": name} for name, _code in choices
+            if name != built]
+        if self.emulate_edition_var.get() not in [o["value"] for o in options]:
+            self.emulate_edition_var.set("")
+        self.set(editions=options, editions_on=bool(choices),
+                 edition_note=rig.edition_note(self._editions, built))
+
+    def _edition_env(self):
+        """PAD_MODEL for the run: the picked edition's code, or the engine's
+        "999" (the card's own) - always sent for a card that has choices, so a
+        board an earlier run made an SLE goes back to the card's own."""
+        choices = dict((self._editions or {}).get("choices") or [])
+        if not choices:
+            return []
+        from ...plugins.stern import cabinet_model
+        code = choices.get(self.emulate_edition_var.get(), cabinet_model.WILDCARD)
+        return ["PAD_MODEL=%s" % code]
+
     # -- the machine row (PAD-149) -----------------------------------------
     def _machine_env(self):
         env = []
@@ -755,7 +1094,8 @@ class EmulateTab(TabService):
         # into the project folder at Start, and neither may hide behind a
         # hover (must survive #4).
         self.set(assets=assets, ovr_hint=text, ovr_refused=False,
-                 scene_edits_offer=bool(assets) and self._project_has_scene_edits(assets))
+                 scene_edits_offer=bool(assets) and self._project_has_scene_edits(assets),
+                 leave_out_offer=self._leave_out_offer(assets))
         self._refresh_colour_note()
 
     def _refresh_colour_note(self):
@@ -768,6 +1108,38 @@ class EmulateTab(TabService):
         except Exception:                                # noqa: BLE001
             on = False
         self.set(colour_offer=on)
+
+    def _leave_out(self):
+        """PAD-1197: the kinds this run leaves out (run_leave_out keys)."""
+        from ...plugins.stern import run_leave_out
+        try:
+            return run_leave_out.clean(self.emulate_leave_out_var.get())
+        except Exception:                                # noqa: BLE001
+            return ()
+
+    def _leave_out_offer(self, assets):
+        """PAD-1197: ``[{key, label, tip, on}]``, a tick for each kind the
+        project can leave out of a run.  A kind left out stays offered while
+        it is, so it can always be put back."""
+        from ...plugins.stern import run_leave_out
+        try:
+            keys = set(run_leave_out.offered(assets)) | set(self._leave_out())
+        except Exception:                                # noqa: BLE001
+            return []
+        left = set(self._leave_out())
+        return [{"key": k, "label": label, "tip": tip, "on": k in left}
+                for k, label, tip in run_leave_out.KINDS if k in keys]
+
+    @rpc
+    def set_leave_out(self, key, on):
+        """PAD-1197: a "Leave out of this run" tick was flipped."""
+        from ...plugins.stern import run_leave_out
+        left = set(self._leave_out())
+        if on:
+            left.add(str(key))
+        else:
+            left.discard(str(key))
+        self.emulate_leave_out_var.set(",".join(run_leave_out.clean(left)))
 
     def _project_has_scene_edits(self, assets):
         try:
@@ -881,6 +1253,10 @@ class EmulateTab(TabService):
         self._docker_report_if_asked(state)
         if state == "ok":
             self.set(docker_btn=None, setup_btn=False, docker_msg="")
+            # the first read of the slots: with no run up the status poll
+            # has no saves stamp to report, so it never asks (PAD-835)
+            if self._slots_rows is None:
+                self.slots_refresh()
             return
         plan = (rig.engine_setup_plan(self._docker_cli)
                 if state in ("engineless", "absent") else None)
@@ -934,8 +1310,10 @@ class EmulateTab(TabService):
         if eng and eng[1] == "cli":
             self.log("[emulate] starting %s; the first start takes a couple "
                      "of minutes" % eng[0])
+            start_cmd = ([eng[2], "machine", "start"] if eng[0] == "Podman"
+                         else [eng[2], "start"])
             self._run_engine_setup([("starting %s" % eng[0],
-                                     [eng[2], "start"], False)])
+                                     start_cmd, False)])
             return
         target = eng[2] if eng else "Docker"
         label = eng[0] if eng else "Docker Desktop"
@@ -1021,7 +1399,7 @@ class EmulateTab(TabService):
         if proc.returncode == 0:
             return True
         if "-128" in err or "cancel" in err.lower():
-            self._log("[emulate] setup cancelled; nothing was changed.")
+            self._log("[emulate] setup canceled; nothing was changed.")
         else:
             self._log("[emulate] %s did not finish. %s"
                       % (label, err.strip() or "See the lines above."))
@@ -1142,6 +1520,9 @@ class EmulateTab(TabService):
                          "registered again — press “Set up emulator…” above, "
                          "which does that and makes it survive the next "
                          "restart.")
+        # the root offer (PAD-659) waits on these facts; the runtime state
+        # usually came first, with the status poll
+        self._runtime_apply(self._rt_last)
         if rig.setup_settled(facts):
             self.set(setup_btn=False, setup_msg="")
             return
@@ -1213,6 +1594,10 @@ class EmulateTab(TabService):
                           "installation: the package it needs is not offered "
                           "by any of that Linux's package sources, so trying "
                           "again will say the same thing.")
+            elif result == "readonly":
+                self._log("[emulate] setup did not run: WSL's disk has gone "
+                          "read-only (see above). Free space on the Windows "
+                          "drive, restart WSL, then press this button again.")
             else:
                 self._log("[emulate] setup did not finish — the emulator will "
                           "probably still fail to start.")
@@ -1252,8 +1637,13 @@ class EmulateTab(TabService):
 
     @staticmethod
     def _colima_argv():
+        # /Volumes too, from the first start: the Multi-boot tab's ISOs live
+        # on other disks as often as not (PAD-903).
+        # and sized to this Mac (PAD-1109): Colima's own 2 CPUs starved the
+        # game's renderer and lumped its sound
         colima = rig.which_tool("colima")
-        return [colima, "start"] if colima else None
+        return (rig.colima_start_argv(colima, resources=rig.colima_resource_args())
+                if colima else None)
 
     def _setup_recheck(self):
         self.set(setup_enabled=True, setup_label="Set up emulator…",
@@ -1269,14 +1659,26 @@ class EmulateTab(TabService):
     def _runtime_apply(self, rt):
         if rt is None:
             return
+        self._rt_last = rt
         state, detail = rt
-        if state not in rig._runtime_ui.UNPROMPTED and state != "foreign":
+        ui = rig._runtime_ui
+        if (state == "absent" and ui.can_install()
+                and (self._setup or {}).get("user") == "root"):
+            # PAD-659: this PC's own WSL logs in as root (the app's own
+            # installer leaves Ubuntu that way), so its game window is
+            # black; the app's Linux has an ordinary user and is one button.
+            text = ui.root_notice()
+            self.set(rt_msg=text, rt_btn=True, rt_label=ui.INSTALL_LABEL)
+            if not self._rt_noted:
+                self._rt_noted = True
+                self.log("[emulate] " + " ".join(text.split()))
+            return
+        if state not in ui.UNPROMPTED and state != "foreign":
             self.set(rt_btn=False, rt_msg="")
             return
-        text = rig._runtime_ui.notice(state, detail)
-        self.set(rt_msg=text,
-                 rt_btn=bool(state in rig._runtime_ui.UNPROMPTED
-                             and rig._runtime_ui.can_install()))
+        text = ui.notice(state, detail)
+        self.set(rt_msg=text, rt_label="Update emulator Linux…",
+                 rt_btn=bool(state in ui.UNPROMPTED and ui.can_install()))
         if not self._rt_noted:
             self._rt_noted = True
             self.log("[emulate] " + " ".join(text.split()))
@@ -1290,7 +1692,9 @@ class EmulateTab(TabService):
         if no_rig():
             self.log("[emulate] " + NO_RIG_TEXT)
             return False
-        self.set(rt_enabled=False, rt_label="Updating…")
+        self.set(rt_enabled=False, rt_label=(
+            "Installing…" if self.get("rt_label") == rig._runtime_ui.INSTALL_LABEL
+            else "Updating…"))
         self._rt_pct = -10
         say = lambda m: self._log("[emulate] %s" % m)       # noqa: E731
 
@@ -1307,13 +1711,15 @@ class EmulateTab(TabService):
                         self._offer_from_file, exc))
                 if state == "ready":
                     self._ensure_data_disk()
+                    # the setup facts were the old distro's (a root login,
+                    # PAD-659): ask the one the emulator runs in now
+                    self._post(self._setup_recheck)
             except Exception as exc:                     # noqa: BLE001
                 self._log("[emulate] %s" % exc)
             finally:
                 self._rt_noted = False
                 runtime.invalidate()
-                self._post(lambda: self.set(rt_enabled=True,
-                                            rt_label="Update emulator Linux…"))
+                self._post(lambda: self.set(rt_enabled=True))
 
         self._thread(work)
         return True
@@ -1361,9 +1767,12 @@ class EmulateTab(TabService):
                       % (pct, total // (1024 * 1024)))
 
     def _reattach_data_disk(self):
-        if not runtime.wsl_distro() or not rigdata.exists():
+        if not runtime.wsl_distro():
             return
         d = runtime.wsl_distro()
+        self._reattach_card_store(d)
+        if not rigdata.exists():
+            return
         try:
             if rigdata.attached(d):
                 return
@@ -1374,10 +1783,24 @@ class EmulateTab(TabService):
             self._log("[emulate] could not re-attach the work disk (%s). The "
                       "run will stop rather than write into memory." % exc)
 
+    def _reattach_card_store(self, d):
+        # the shared card cache (PAD-651): without it a run copies its card
+        # off D: again, which is slow but not wrong - so a failure is a line
+        # in the log, never a refusal
+        try:
+            if rigdata.cards_exists() and not rigdata.cards_attached(d):
+                self._log("[emulate] the Spike 2 card store came unattached "
+                          "(a WSL restart does that); attaching it again.")
+                rigdata.attach_cards(d)
+        except Exception as exc:                         # noqa: BLE001
+            self._log("[emulate] could not attach the card store (%s); cards "
+                      "are copied into the runtime's own cache instead." % exc)
+
     def _ensure_data_disk(self):
         d = runtime.wsl_distro()
         if not d:
             return
+        self._reattach_card_store(d)
         try:
             if rigdata.ensure(d, log=lambda m: self._log("[emulate] %s" % m)):
                 free = rigdata.free_bytes(d)
@@ -1394,13 +1817,13 @@ class EmulateTab(TabService):
     # ------------------------------------------------------------------
     @rpc
     def slots_refresh(self):
-        if sys.platform != "win32":
+        if not _slots_here():
             return False
 
         def run():
             rows, total, free = [], None, None
             try:
-                r = self._run(self._cmd_root("slots.sh", "list"), capture_output=True, timeout=30)
+                r = self._run(self._slots_cmd("list"), capture_output=True, timeout=30)
                 for ln in (r.stdout or b"").decode("utf8",
                                                    "replace").splitlines():
                     p = ln.split("|")
@@ -1422,6 +1845,15 @@ class EmulateTab(TabService):
 
         self._thread(run)
         return True
+
+    def _slots_cmd(self, *args):
+        """slots.sh ARGS on the save states of the card's kind: a Spike 3
+        card's are the Spike 3 rig's (PAD-1147), kept the same way."""
+        if self._spike3 is True:
+            cmd = rig.spike3_slots_cmd(*args)
+            if cmd:
+                return cmd
+        return self._cmd_root("slots.sh", *args)
 
     def _slots_paint(self):
         rows = self._slots_rows
@@ -1449,8 +1881,12 @@ class EmulateTab(TabService):
         self._slot_by_iid = by_iid
         if self._slot_sel not in by_iid:
             self._slot_sel = None
+        mac = sys.platform == "darwin"
+        wsl = sys.platform == "win32"       # a Linux desktop has no WSL (PAD-871)
         if self._slots_total is None:
-            summary = "Could not read the slots - is WSL up?"
+            summary = ("Could not read the slots - is Docker running?" if mac
+                       else "Could not read the slots - is WSL up?" if wsl
+                       else "Could not read the slots.")
         else:
             bits = []
             if game_now:
@@ -1462,7 +1898,8 @@ class EmulateTab(TabService):
             else:
                 bits.append("%d slot%s" % (shown, "" if shown == 1 else "s"))
             bits.append("all slots %s" % rig.human(self._slots_total))
-            bits.append("free on the WSL disk: %s"
+            bits.append(("free on the WSL disk: %s" if wsl else
+                         "free on the emulator's disk: %s")
                         % rig.human(self._slots_free))
             summary = " · ".join(bits)
         # "No save states" only after a read that answered (a failed read
@@ -1493,6 +1930,8 @@ class EmulateTab(TabService):
             return False
         if self._loading or self._starting or self._stopping:
             return False
+        if self._spike3 is True:
+            return self._s3_slot_launch(slot)
         if self._last_up:
             self._slot_load(slot)
             return True
@@ -1502,6 +1941,42 @@ class EmulateTab(TabService):
         self.start()
         if self._launch_serial == serial:   # start refused (bad path, busy)
             self._launch_slot = None
+        return True
+
+    def _s3_slot_launch(self, slot):
+        """Launch on a Spike 3 card (PAD-1147): into the run that is up, or
+        a new run that starts from the save instead of booting."""
+        if self._proc is not None and self._s3_slot:
+            cmd = rig.spike3_load_cmd(self._s3_slot, slot.rsplit("/", 1)[-1])
+            if not cmd:
+                return False
+            self._loading = True
+            self._set("state", "Loading save…")
+            self.log("[emulate] loading slot '%s'" % slot)
+
+            def run():
+                try:
+                    r = self._run(cmd, capture_output=True, timeout=240)
+                    lines = [ln.strip() for ln in (r.stdout or b"").decode(
+                        "utf8", "replace").splitlines() if ln.strip()]
+                except Exception:                        # noqa: BLE001
+                    lines = ["the load did not run"]
+                for ln in lines[-6:]:
+                    self._log("[emulate] " + ln)
+
+                def done():
+                    self._loading = False
+                    if self._s3_label:
+                        self._set("state", self._s3_label)
+                self._post(done)
+
+            self._thread(run)
+            return True
+        self._s3_restore = slot
+        self.log("[emulate] starting from slot '%s'" % slot)
+        self.start()
+        if not self._starting and self._proc is None:   # start refused
+            self._s3_restore = None
         return True
 
     def _slot_load(self, slot):
@@ -1583,7 +2058,7 @@ class EmulateTab(TabService):
         def run():
             out = ""
             try:
-                r = self._run(self._cmd_root("slots.sh", *args),
+                r = self._run(self._slots_cmd(*args),
                               capture_output=True, timeout=60)
                 out = (r.stdout or b"").decode("utf8", "replace").strip()
             except Exception:                            # noqa: BLE001
@@ -1601,6 +2076,16 @@ class EmulateTab(TabService):
     # ------------------------------------------------------------------
     # the card cache manager (item 77)
     # ------------------------------------------------------------------
+    #: What deleting means, under the table (PAD-739: the window must say
+    #: what goes, what it costs and what never goes).
+    _CACHE_HINT = ("Only the copy goes: a deleted card is copied again from "
+                   "its image the next time it boots (a minute or two a "
+                   "card, longer off a slow drive). Your images, projects, "
+                   "edits, overrides, settings and high scores are never in "
+                   "the cache.")
+    #: The limit choices, GB (0 = none).
+    _CACHE_LIMITS = (32, 64, 128, 256, 0)
+
     @rpc
     def open_cache(self):
         if not rig.rig_available():
@@ -1612,9 +2097,9 @@ class EmulateTab(TabService):
         self._cache_open = True
         self._cache_sel = []
         self.set(cache={"head": "Reading the cache…", "rows": [],
-                        "sel": [], "busy": True,
-                        "hint": "Deleting frees the space now; the card "
-                                "re-copies on its next boot."})
+                        "sel": [], "busy": True, "hint": self._CACHE_HINT,
+                        "note": "", "limit": None, "limits": [],
+                        "sel_text": "", "unused": 0})
         self.cache_refresh()
         return True
 
@@ -1633,89 +2118,259 @@ class EmulateTab(TabService):
         return True
 
     @rpc
-    def cache_refresh(self):
+    def cache_refresh(self, hint=None):
         if not self._cache_open:
             return False
-        self._cache_patch(head="Reading the cache…", busy=True, sel=[])
+        self._cache_patch(head="Reading the cache…", busy=True, sel=[],
+                          sel_text="")
         self._cache_sel = []
 
         def run():
             try:
                 out = self._run(self._cmd("cardmount.sh", "--cache-list"),
                                 stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, timeout=30)
+                                stderr=subprocess.DEVNULL, timeout=60)
                 text = out.stdout.decode("utf-8", "replace")
             except Exception:                            # noqa: BLE001
                 text = ""
-            result = rig.parse_cache_list(text)
-            self._post(self._cache_show, result)
+            result = (rig.parse_cache_list(text), rig.parse_cache_meta(text))
+            self._post(self._cache_show, result, hint)
 
         self._thread(run)
         return True
 
-    def _cache_show(self, result):
+    #: The Source column, by cardmount.sh's source state.
+    _CACHE_SOURCE = {
+        "ok": "Image found",
+        "changed": "Image rebuilt since: copy never used again",
+        "gone": "Image deleted or renamed",
+        "unreachable": "Image's drive not attached",
+        "": "",
+    }
+
+    def _cache_row(self, e, now):
+        why = rig.cache_unused(e, now)
+        if e.get("leftover"):
+            source, booted = "Unfinished copy", "—"
+        else:
+            source = self._CACHE_SOURCE.get(e.get("source") or "", "")
+            if e.get("pinned"):
+                source = "Library: always kept"
+            if e.get("boot"):
+                booted = rig.cache_boot_text(e["boot"])
+            elif e.get("copied"):
+                # no boot recorded: the copy's own date, which is when it was
+                # copied, not when it was used - said so, not passed off
+                booted = "copied " + rig.cache_boot_text(e["copied"])
+            else:
+                booted = "never"
+        use = {"mounted": "In use", "copying": "Copying"}.get(
+            e.get("use") or "", "")
+        return {"label": e["label"], "size": rig.human_size(e["real_kb"]),
+                "booted": booted, "source": source, "use": use,
+                "src": e.get("src") or "", "why": why,
+                "locked": bool(use)}
+
+    def _cache_show(self, result, hint=None):
         if not self._cache_open:
             return
-        entries, disk = result
+        (entries, disk), meta = result
+        now = time.time()
         self._cache_entries = {e["label"]: e for e in entries}
-        rows = [{"label": e["label"], "size": rig.human_size(e["real_kb"]),
-                 "booted": rig.cache_boot_text(e["boot"]), "src": e["src"]}
-                for e in entries]
+        self._cache_meta = meta
+        rows = [self._cache_row(e, now) for e in entries]
         total = sum(e["real_kb"] for e in entries)
-        if disk:
-            head = ("%d cached cards — %s on disk · %s free of %s (WSL disk)"
-                    % (len(entries), rig.human_size(total),
-                       rig.human_size(disk[0]), rig.human_size(disk[1])))
-        elif entries:
-            head = "%d cached cards — %s on disk" % (
-                len(entries), rig.human_size(total))
+        unused = [e for e in entries if rig.cache_unused(e, now)]
+        bits = []
+        if entries:
+            bits.append("%d cached card%s — %s on disk" % (
+                len(entries), "" if len(entries) == 1 else "s",
+                rig.human_size(total)))
         else:
-            head = ("The card cache is empty — cards land here on their "
-                    "first boot.")
-        self._cache_patch(head=head, rows=rows, busy=False, sel=[])
+            bits.append("The card cache is empty — cards land here on their "
+                        "first boot.")
+        if meta and meta.get("limit_gb"):
+            if meta["used_kb"] > meta["limit_gb"] * 1048576:
+                bits.append("over its %d GB limit: the next card copied "
+                            "trims it" % meta["limit_gb"])
+            else:
+                bits.append("kept under %d GB" % meta["limit_gb"])
+        elif meta:
+            bits.append("no size limit")
+        if disk:
+            bits.append("%s free of %s (WSL disk)" % (
+                rig.human_size(disk[0]), rig.human_size(disk[1])))
+        if unused:
+            bits.append("%d unused (%s)" % (
+                len(unused), rig.human_size(sum(e["real_kb"]
+                                                for e in unused))))
+        note = ("Deleting frees the space inside WSL at once. The disk file "
+                "that holds it on Windows does not shrink by itself: "
+                "Settings ▸ Manage disk space ▸ Reclaim space to Windows… "
+                "hands it back (it shuts WSL down and needs Administrator), "
+                "and the next cards copied reuse the space either way.")
+        limit = None
+        limits = []
+        if meta:
+            limit = meta["limit_gb"]
+            opts = list(self._CACHE_LIMITS)
+            if limit not in opts:
+                opts.insert(0, limit)
+            limits = [{"gb": g, "text": ("No limit" if not g else
+                                         "%d GB" % g)} for g in opts]
+        self._cache_patch(head=" · ".join(bits), rows=rows, busy=False,
+                          sel=[], sel_text="", note=note, limit=limit,
+                          limits=limits, store=bool(meta and meta["store"]),
+                          unused=len(unused),
+                          hint=hint or self._CACHE_HINT)
+
+    def _cache_sel_text(self):
+        es = [self._cache_entries[l] for l in self._cache_sel
+              if l in self._cache_entries]
+        if not es:
+            return ""
+        return "%d selected — frees about %s" % (
+            len(es), rig.human_size(sum(e["real_kb"] for e in es)))
 
     @rpc
     def cache_select(self, labels):
         self._cache_sel = [l for l in (labels or [])
                            if l in self._cache_entries]
-        self._cache_patch(sel=list(self._cache_sel))
+        self._cache_patch(sel=list(self._cache_sel),
+                          sel_text=self._cache_sel_text())
         return len(self._cache_sel)
+
+    @rpc
+    def cache_select_unused(self):
+        """Select every entry that is safe to delete without being missed:
+        an unfinished copy, an image rebuilt, deleted or renamed since, or
+        not used for 30 days - never one in use or the library's."""
+        now = time.time()
+        return self.cache_select([l for l, e in self._cache_entries.items()
+                                  if rig.cache_unused(e, now)])
+
+    @rpc
+    def cache_set_limit(self, gb):
+        """Keep the cache under *gb* GB (0 = no limit).  The rig saves it
+        beside the cache - every run, sweep and copier reads it there - and
+        evicts down to it now by its own rule: dead entries first, then the
+        least recently booted; never one in use, being copied or the
+        library's."""
+        try:
+            gb = max(0, int(gb))
+        except (TypeError, ValueError):
+            return False
+        if not self._cache_open:
+            return False
+        cur = self.get("cache") or {}
+        if gb and cur.get("limit") is not None and (
+                not cur.get("limit") or gb < cur["limit"]):
+            used = sum(e["real_kb"] for e in self._cache_entries.values())
+            if used > gb * 1048576 and not compat.messagebox.askyesno(
+                    "Card cache limit",
+                    "The cache holds %s. Keeping it under %d GB deletes the "
+                    "least recently booted cards now (cards whose image "
+                    "changed go first; cards in use and the library's are "
+                    "kept).\n\nEach re-copies on its next boot. Go ahead?"
+                    % (rig.human_size(used), gb)):
+                self._cache_patch(limit=cur.get("limit"))
+                return False
+        self._cache_patch(busy=True, hint="Setting the limit…")
+
+        def run():
+            try:
+                out = self._run(self._cmd("cardmount.sh", "--cache-limit",
+                                          str(gb)),
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=600)
+                for line in out.stdout.decode("utf-8",
+                                              "replace").splitlines():
+                    self._log("[emulate] " + line)
+            except Exception as exc:                     # noqa: BLE001
+                self._log("[emulate] cache limit failed: %s" % exc)
+            self._post(self.cache_refresh)
+
+        self._thread(run)
+        return True
 
     @rpc
     def cache_delete(self):
         labels = list(self._cache_sel)
         if not self._cache_open or not labels:
             return False
-        freed = sum(self._cache_entries.get(l, {}).get("real_kb", 0)
-                    for l in labels)
-        if not compat.messagebox.askyesno(
+        # a card a running emulator reads, or one being copied, is never
+        # deleted from here (the rig refuses as well)
+        locked = [l for l in labels
+                  if self._cache_entries.get(l, {}).get("use")]
+        labels = [l for l in labels if l not in locked]
+        if not labels:
+            compat.messagebox.showinfo(
                 "Delete cached cards",
-                "Delete %d cached card%s, freeing about %s?\n\n"
-                "Each re-copies on its next boot — nothing is lost."
-                % (len(labels), "" if len(labels) == 1 else "s",
-                   rig.human_size(freed))):
+                "The selected card%s in use by a running emulator or being "
+                "copied, so %s kept. Stop the emulator first."
+                % (" is" if len(locked) == 1 else "s are",
+                   "it is" if len(locked) == 1 else "they are"))
+            return False
+        es = [self._cache_entries.get(l, {}) for l in labels]
+        freed = sum(e.get("real_kb", 0) for e in es)
+        msg = ("Delete %d cached card%s, freeing about %s inside WSL?\n\n"
+               "Each is copied again from its image the next time it boots "
+               "(a minute or two a card). The images themselves, your "
+               "projects, edits and overrides are not touched."
+               % (len(labels), "" if len(labels) == 1 else "s",
+                  rig.human_size(freed)))
+        gone = [e for e in es if e.get("source") in ("gone", "unreachable")]
+        if gone:
+            msg += ("\n\n%d of them %s an image that is not on this PC now "
+                    "(deleted, renamed, or on a drive not attached): that "
+                    "card cannot boot again until its image is back."
+                    % (len(gone), "is a copy of" if len(gone) == 1
+                       else "are copies of"))
+        if locked:
+            msg += ("\n\n%d selected card%s in use and will be kept."
+                    % (len(locked), " is" if len(locked) == 1 else "s are"))
+        if not compat.messagebox.askyesno("Delete cached cards", msg):
             return False
         self._cache_patch(busy=True, hint="Deleting…")
 
         def run():
+            failed = []
             for label in labels:
                 try:
                     out = self._run(
                         self._cmd("cardmount.sh", "--cache-drop", label),
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        timeout=30)
-                    for line in out.stdout.decode(
-                            "utf-8", "replace").splitlines():
+                        timeout=60)
+                    text = out.stdout.decode("utf-8", "replace")
+                    for line in text.splitlines():
                         self._log("[emulate] " + line)
+                    if out.returncode:
+                        lines = [x for x in text.splitlines() if x.strip()]
+                        failed.append((label, (lines[-1] if lines else
+                                               "exit %d" % out.returncode)
+                                       .replace("[card] ", "")))
                 except Exception as exc:                 # noqa: BLE001
                     self._log("[emulate] cache drop %s failed: %s"
                               % (label, exc))
-
-            def done():
-                self._cache_patch(hint="Deleting frees the space now; the "
-                                       "card re-copies on its next boot.")
-                self.cache_refresh()
-            self._post(done)
+                    failed.append((label, str(exc)))
+            if failed:
+                hint = ("Deleted %d of %d. Not deleted: %s"
+                        % (len(labels) - len(failed), len(labels),
+                           "; ".join("%s (%s)" % f for f in failed[:3])
+                           + (" and %d more" % (len(failed) - 3)
+                              if len(failed) > 3 else "")))
+            else:
+                hint = ("Deleted %d cached card%s, about %s freed inside WSL."
+                        % (len(labels), "" if len(labels) == 1 else "s",
+                           rig.human_size(freed)))
+                # PAD-739: a user deleted 120 GB this way and saw nothing
+                # change on his drive - the disk file has to be compacted
+                from ..emu_cache import on_distro_disk
+                if on_distro_disk(self._cache_meta):
+                    hint += (" Windows gets the space back when you use "
+                             "Reclaim space to Windows in Settings ▸ Manage "
+                             "disk space.")
+            self._post(self.cache_refresh, hint)
 
         self._thread(run)
         return True
@@ -1847,8 +2502,9 @@ class EmulateTab(TabService):
         fp = rig.assets_fingerprint(assets)
         manifest = stern_engine.read_override_manifest(out)
         scenes_on = self._scene_edits_on()
+        left = self._leave_out()
         why = rig.overrides_reason(manifest, card, assets, fp, run_card=picked,
-                                   scene_edits=scenes_on)
+                                   scene_edits=scenes_on, left_out=left)
         if not why:
             why = rig.preview_modes_reason(manifest, assets)
         if not why:
@@ -1857,7 +2513,12 @@ class EmulateTab(TabService):
             return self._live_ready(assets, out, self._with_override_modes(
                 out, ["PAD_OVERRIDE_DIR=%s" % rig.wsl_path(out)]))
         self._log("[emulate] preparing your edits (%s)" % why)
-        self._preparing = "Preparing your edits…"
+        # PAD-863: a set laid down whole is the long wait; say so up front
+        head = "Preparing your edits"
+        if not stern_engine.override_set_kept(out, card):
+            self._log(rig.FIRST_SET_NOTE)
+            head = rig.FIRST_SET_WORDS
+        self._preparing = head + "…"
         self._preparing_kind = "edits"
         self._post(self._repaint_preparing)
 
@@ -1865,13 +2526,14 @@ class EmulateTab(TabService):
             # PAD-489: the build's own bar and words, not a still "Preparing"
             words = str(words or "").strip().rstrip(".…")
             self._show_preparing(
-                "Preparing your edits: %s%s" % (words[:1].lower(), words[1:])
-                if words else "Preparing your edits…",
+                "%s: %s%s" % (head, words[:1].lower(), words[1:])
+                if words else head + "…",
                 int(done * 100 / total) if total else None)
 
         try:
             counts, _mode, _val, files = stern_engine.write_overrides(
                 card, assets, out, scene_edits=scenes_on, progress=progress,
+                **({"leave_out": left} if left else {}),
                 log=lambda msg, level="info": self._log("[emulate] " + msg),
                 cancel=lambda: (self._stopping or self._stopped
                                 or self._cancel_prepare),
@@ -1892,7 +2554,7 @@ class EmulateTab(TabService):
             # the one button said "Cancel" for this; now it is "Starting…"
             self._post(self._paint_run_btn)
         if counts is None:
-            self._overrides_refuse("the preparation was cancelled")
+            self._overrides_refuse("the preparation was canceled")
             return None
         stern_engine.stamp_override_manifest(
             out, assets_fingerprint=rig.assets_fingerprint(assets))
@@ -2052,8 +2714,12 @@ class EmulateTab(TabService):
         try:
             # "Runs on the caller's worker thread" (App's docstring), as
             # the Tk panel called it
+            # PAD-1197: a kind left out is not converted (only named when one is:
+            # the stand-ins for the App's callback keep its older signature)
+            left = self._leave_out()
             got = stage(assets, cancel_cb=cancelled, progress_cb=progress,
-                        confirm_cb=confirm)
+                        confirm_cb=confirm,
+                        **({"leave_out": left} if left else {}))
         except Exception as exc:                         # noqa: BLE001
             self._overrides_refuse(
                 "The replacements you assigned could not be applied to %s: %s"
@@ -2081,8 +2747,8 @@ class EmulateTab(TabService):
                 if callable(notify):
                     self._post(notify, assets)
             done = tracker[0].converted if tracker else 0
-            said = ("Cancelled: the game was not started."
-                    + (" The %d video%s converted before you cancelled %s "
+            said = ("Canceled: the game was not started."
+                    + (" The %d video%s converted before you canceled %s "
                        "kept, so the next Start goes on from there."
                        % (done, "" if done == 1 else "s",
                           "is" if done == 1 else "are") if done else ""))
@@ -2178,9 +2844,46 @@ class EmulateTab(TabService):
     def _overrides_refuse(self, message, say=True):
         """A refused Start: the reason stays beside the opt-in (orange)
         until the box or the folder changes, and goes to the log."""
+        self._last_refusal = message            # PAD-1382: menu_shot says it on the Service menu tab
         if say:
             self._log("[emulate] " + message)
         self._post(lambda: self.set(ovr_hint=message, ovr_refused=True))
+
+    # -- PAD-1382: the Service menu tab's "Show the real menu" ----------------
+    def menu_shot(self, card, assets, steps, png, game=""):
+        """Boot *card* with the project's edits (the same override set a Start prepares and reuses), hidden and muted,
+        walk the operator menu by *steps* (switch numbers, ``w<s>`` waits; ``menushot.sh``) and write the frame shown
+        to *png*. Runs on the caller's worker thread; ``""`` when the picture is written, else why not. Refused while
+        this tab has a run up: the rig and the override set are the run's."""
+        if self._proc is not None or self._last_up or self._starting or self._preparing is not None \
+                or getattr(self, "_menushot", False):
+            return "The emulator is busy: stop it on the Emulate tab, then read the real menu again."
+        if no_rig() or not rig.rig_available():
+            return "This computer has no emulator set up yet (Emulate tab)."
+        self._menushot = True
+        try:
+            self.log("[emulate] Service menu: reading the game's real menu (a hidden, muted run)")
+            self._last_refusal = ""
+            if not self._rig_layer_up():         # as a Start: the rig's own layer before an install
+                return getattr(self, "_last_refusal", "") or "This rig could not be set up for the run."
+            env = self._prepare_overrides(card, assets)
+            if env is None:
+                return getattr(self, "_last_refusal", "") or                     "The project's edits could not be prepared for the emulator (see the log)."
+            env = list(env) + ["PAD_MENUSHOT_GAME=%s" % (game or "game"), "PAD_HIDDEN=1", "PAD_AUDIO=0",
+                               "PAD_PLAYFIELD=0"]
+            cmd = self._cmd("menushot.sh", rig.wsl_path(card), rig.wsl_path(png), *[str(s) for s in steps], env=env)
+            try:
+                r = self._run(cmd, capture_output=True, timeout=1800)
+                said = ((r.stdout or b"") + (r.stderr or b"")).decode("utf8", "replace")
+            except (OSError, subprocess.SubprocessError) as exc:
+                return "The emulator could not be run: %s" % exc
+            verdict = [ln for ln in said.splitlines() if "VERDICT" in ln]
+            if r.returncode == 0 and os.path.isfile(png) and os.path.getsize(png):
+                return ""
+            return "The emulator could not show the menu: %s" % ((verdict[-1] if verdict else said.strip()[-300:])
+                                                                   or "no answer")
+        finally:
+            self._menushot = False
 
     # -- the launch API the Modes tab uses (item 127) ----------------------
     def prepare_refuse(self, reason, say=True):
@@ -2241,7 +2944,11 @@ class EmulateTab(TabService):
     def launch_as_root(self):
         if no_rig():
             return False
-        return sys.platform == "win32" and bool(rig.wsl_home())
+        if sys.platform == "win32":
+            return bool(rig.wsl_home())
+        # a Linux desktop's Start is root where root needs no password
+        # (PAD-871, rig.watch_cmd)
+        return sys.platform != "darwin" and rig.linux_root_head() is not None
 
     def launch_state(self):
         return {
@@ -2271,13 +2978,17 @@ class EmulateTab(TabService):
         if self._preparing is not None and not self._stopping:
             if not self._cancel_prepare:
                 self._cancel_prepare = True
-                self.log("[emulate] cancelling the preparation…")
+                self.log("[emulate] canceling the preparation…")
                 # PAD-489: said at once, and until the work has really
                 # stopped (the clip being converted, then nothing more)
                 self._preparing = CANCELLING
                 self._repaint_preparing()
             return True
         if self._starting or self._stopping:
+            return False
+        if getattr(self, "_menushot", False) and not (self._last_up or self._launched()):
+            # PAD-1382: the Service menu tab is reading the real menu on this rig
+            self.log("[emulate] the Service menu tab is reading the game's real menu on this rig; Start when it is done")
             return False
         if self._last_up or self._launched():
             self.stop()
@@ -2308,8 +3019,10 @@ class EmulateTab(TabService):
             btn = ({"label": CANCELLING, "enabled": False, "mode": "busy"}
                    if self._cancel_prepare else
                    {"label": "Cancel", "enabled": True, "mode": "cancel"})
-        elif busy:
-            btn = {"label": "Stopping…" if self._stopping else "Starting…",
+        elif busy or self._restart_wait or self._rebooting:
+            btn = {"label": ("Restarting…" if self._restart_wait
+                             or self._rebooting else
+                             "Stopping…" if self._stopping else "Starting…"),
                    "enabled": False, "mode": "busy"}
         elif up:
             btn = {"label": "Stop emulator", "enabled": True, "mode": "stop"}
@@ -2332,12 +3045,31 @@ class EmulateTab(TabService):
                   "untouched, and PAD_RUNTIME=0 goes back to using it."
                   % runtime.DISTRO)
 
+    def _clip_names_for_run(self):
+        """PAD-827: the playfield window's CLIPS list names each clip as the
+        project's Video tab row does, from a map beside the volume file; what
+        it sees comes back beside it and the status poll folds it into the
+        project (plugins/stern/clip_seen.py)."""
+        from ...core import rigslot
+        from ...plugins.stern import clip_seen
+        d = os.path.dirname(audio_ctl_file())
+        n = rigslot.slot()
+        project = self._assets()
+        named = clip_seen.write_names(clip_seen.names_file(d, n), project)
+        self._clip_merger = (clip_seen.Merger(clip_seen.seen_file(d, n), project)
+                             if named else None)
+        self._elog_new_run(project)       # PAD-1071: and the log lists this run's
+
     def _launch_env(self, src):
+        # PAD_PACER: on a Mac the app's own binary paces the sound between
+        # docker exec and ffplay (padbox.sh host_player, PAD-1109)
         # PAD_AUDIO=1: a rig is silent unless it is asked (PAD-253), and this
         # tab's run is the one that has a window and a Volume / Mute.
-        env = ["PAD_AUDIO=1", "PAD_AUDIO_DUMP=30",
+        # PAD_SOUNDLOG=1: the Sound and video log's sounds (PAD-1071, modes/soundlog.sh)
+        env = ["PAD_AUDIO=1", "PAD_AUDIO_DUMP=30", "PAD_SOUNDLOG=1",
                "PAD_AUDIO_CTL=" + audio_ctl_file()] + \
-            list(src) + self._machine_env() + self._screen_env()
+            list(src) + self._machine_env() + self._edition_env() + \
+            self._screen_env() + rig.mac_pacer_env()
         if self._launch_slot:
             env.append("PAD_SELECT=0")
         elif self._select_touched:
@@ -2355,6 +3087,9 @@ class EmulateTab(TabService):
     def _kill_cmd(self):
         return self._cmd("killgame.sh") if no_rig() else rig.kill_cmd()
 
+    def _reboot_cmd(self):
+        return self._cmd("restartgame.sh") if no_rig() else rig.restart_cmd()
+
     def _load_cmd(self, slot):
         if no_rig():
             return self._cmd("loadgame.sh", slot, env=("PAD_RESTORE_KILL=1",))
@@ -2367,6 +3102,20 @@ class EmulateTab(TabService):
         self._select_var.set(bool(select))
         self._select_touched = True
         self._select_hint()
+        self.start()
+
+    def launch_spike3_card(self, path):
+        """PAD-1263, the Multi-boot tab's Run in emulator for a Spike 3
+        multi-boot card: the tab already knows it is a Spike 3 card, so it is
+        started on the Spike 3 rig at once rather than after the probe
+        answers.  The rig runs the card's /games/game, which is its boot menu,
+        so the menu comes up first as on the machine."""
+        self.emulate_card_var.set(path or "")
+        # marked after the card is set: the card's own probe, if it ran,
+        # finds it probed already (and would only say the same)
+        self._spike3_probed = self._card()
+        self._spike3 = True
+        self._spike3_why = ""
         self.start()
 
     def launch_with(self, prepare):
@@ -2413,15 +3162,45 @@ class EmulateTab(TabService):
         if self._starting or self._stopping:
             self._refuse_start("the emulator is already starting or stopping")
             return
+        try:            # PAD-1198: a Stop the last run's window left behind
+            os.remove(stop_req_file())
+        except OSError:
+            pass
         if self._launched():
             # the watch.sh this tab started is still up: a second one would
             # be a second launcher (must survive #0)
             self._refuse_start("the emulator is already running: stop it "
                                "first, then try again.")
             return
+        if self._backup and self._backup_probed == self._card():
+            self._refuse_start(self._backup)
+            return
         if not rig.rig_available():
             self._refuse_start("the emulator is not set up on this PC; use "
                                "Check setup on the Emulate tab")
+            return
+        # PAD-367: a Spike 3 card cannot be emulated - refuse it here, before
+        # the rig is claimed and a 60 GB cache copy is made, with the reason
+        # rather than the fuse2fs refusal the run would otherwise hit. Only a
+        # card the pick-time probe has CONFIRMED is one; None (not yet asked,
+        # or could not be asked) falls through and the run's own guard
+        # (watch.sh) catches it without the copy.
+        if self._spike3 is True:
+            # PAD-1090: the Spike 3 rig, where this PC has it - the launcher
+            # checks the rest (root, its build, qemu, CUSE) and says what is
+            # missing; without it, PAD-367's refusal stands.
+            if not rig.spike3_rig_present() or rig.spike3_check_cmd() is None:
+                self._refuse_start(
+                    "%s is a Stern Spike 3 card and cannot be emulated on "
+                    "this PC (Spike 3 emulation is not set up here). Its "
+                    "partitions are encrypted with a key kept in the "
+                    "machine, not on the card%s." % (
+                        os.path.basename(self._card()) or "this card",
+                        " (%s)" % self._spike3_why if self._spike3_why else ""))
+                return
+            self._start_spike3(prepare)
+            # PAD-1272: a Try it (launch_with) on a Spike 3 card runs its prepare there
+            self._launch_accepted = prepare is not None
             return
         # A TICKET'S RIG IS TAKEN NOW, for this run, and given back at Stop
         # (core/rigslot.py claim_for_run). Nothing changes without a ticket.
@@ -2445,6 +3224,7 @@ class EmulateTab(TabService):
             self._refuse_start(self.get("hint") or "")
             return
         env = self._launch_env(src)
+        self._clip_names_for_run()
         # PAD-173: a lock this game will not give is worth saying once more
         # here, because the log is what a user sends when it "did not work".
         if self._mains_note:
@@ -2530,14 +3310,16 @@ class EmulateTab(TabService):
                     self._post(down)
                     return
                 if self._cancel_prepare:
-                    self.prepare_refuse("the preparation was cancelled; "
+                    self.prepare_refuse("the preparation was canceled; "
                                         "nothing was started")
                     self._starting = False
                     self._post(down)
                     over()
                     return
                 env.extend(more)
+            env.extend(self._elog_stage_env(env, prepare_card))
             self.last_refusal = ""
+            timesync.quiet_clocks_async(self._log)   # PAD-1307: the clock
             cmd = self._watch_cmd(env)
             self._log("[emulate] %s" % " ".join(str(c) for c in cmd))
             try:
@@ -2558,13 +3340,25 @@ class EmulateTab(TabService):
             # cadence (10 s) - an enabled Start there was a second launcher.
             self._post(lambda: (self._run_label(False, True),
                                 self._poll_soon()))
+            box = {}
             try:
                 for raw in self._proc.stdout:
                     line = raw.decode("utf-8", "replace").rstrip()
                     self._log("[emulate] " + line)
                     prog = rig.card_copy_progress(line)
-                    if prog is not None and not self._stopping:
+                    building = rig.box_build_line(line, box)
+                    if building is not None and prog is None:
+                        # PAD-769: the Mac's first Start builds a container,
+                        # and the label says so instead of "Not running"
+                        self._copying = None if self._stopping \
+                            else (building or None)
+                        self._copying_pct = None
+                        self._copying_tip = rig._BOX_EXPLAIN
+                        if self._copying:
+                            self._post(self._push_copy, self._copying, None)
+                    elif prog is not None and not self._stopping:
                         self._copying = prog
+                        self._copying_tip = rig._COPY_EXPLAIN
                         m = rig._CARD_COPY_RE.match(line)
                         self._copying_pct = int(m.group(4)) if m else None
                         self._post(self._push_copy, prog, self._copying_pct)
@@ -2602,6 +3396,220 @@ class EmulateTab(TabService):
         self._launch_accepted = prepare is not None
         self._thread(guarded)
 
+    def _s3_prepare(self, prepare, card):
+        """PAD-1272: Try it's preparation for a Spike 3 run (the Spike 2 start's
+        protocol): its env lines, or None when it refused or was canceled
+        (said, as there)."""
+        self._preparing = "Preparing your modes…"
+        self._preparing_kind = "modes"
+        self._post(self._repaint_preparing)
+        try:
+            more = prepare(card)
+        except Exception as exc:                     # noqa: BLE001
+            self._log("[emulate] the run could not be prepared: %s" % exc)
+            more = None
+        finally:
+            self._preparing = None
+            self._preparing_pct = None
+            self._preparing_kind = None
+            self._post(self._paint_run_btn)
+        if more is None:
+            reason = getattr(prepare, "last_reason", "")
+            self.prepare_refuse(reason or "the run was not prepared (the Modes tab "
+                                          "says why)", say=not reason)
+            return None
+        if self._cancel_prepare:
+            self.prepare_refuse("the preparation was canceled; nothing was started")
+            return None
+        return list(more)
+
+    # -- PAD-1090: a Spike 3 card, on the Spike 3 rig ----------------------
+    #: How long a Spike 3 run may last before the rig ends it itself, like
+    #: the Spike 2 run's BACKSTOP_MIN.
+    S3_MINUTES = 240
+
+    def _start_spike3(self, prepare=None):
+        """Check the Spike 3 rig, take a rig slot, and run the card in its
+        window (s3launch.sh: the card into the store the first time, then
+        s3run.sh --window). The run's lines go to the log; the button is
+        Stop while it runs; Stop asks s3launch.sh --stop.
+
+        PAD-1272: *prepare* (Try it, :meth:`launch_with`) is called with the
+        card once the rig is checked; its ``PAD_S3_MODE_SO`` /
+        ``PAD_S3_MODE_FILES`` lines become the launcher's ``--mode-so`` /
+        ``--mode-files``. None from it refuses the run, as on Spike 2."""
+        from ...core import rigslot
+        slot = rigslot.claim_for_run()
+        if slot is None:
+            busy = ", ".join("rig %d: %s" % (r["slot"], r["holder"])
+                             for r in rigslot.board()[1:] if r["holder"])
+            self._refuse_start("every emulator rig is in use right now (%s). "
+                               "Try again when one is free." % busy)
+            return
+        slot = slot or 1                    # 0 = no ticket: the first slot
+        card = self._card()
+        # sound on, and the panel's volume / Mute follow it LIVE through
+        # audio_ctl.json, as on Spike 2 - deciding Mute once at Start meant a
+        # box unticked after Start never sounded (David). Off only for the
+        # runs that are always silent (a session's, a hidden one: PAD-309)
+        from ...core import rigslot as _rs
+        audio = not _rs.muted()
+        try:            # PAD-1198: a Stop an earlier window left on this rig
+            os.remove(stop_req_file(slot))
+        except OSError:
+            pass
+        self._starting = True
+        self._cancel_prepare = False
+        self._s3_slot = slot
+        self._s3_label = "Starting Spike 3…"
+        self._s3_foot = ("boot", 40, "Starting the Spike 3 emulator")
+        self._run_label(False, True)
+        self._set("state", self._s3_label)
+
+        def run():
+            try:
+                # the shared card store holds the cards already decrypted
+                # (s3store.py default_store): a WSL restart detaches it
+                if sys.platform == "win32":
+                    self._reattach_card_store(runtime.wsl_distro())
+                out = self._run(rig.spike3_check_cmd(), stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=60)
+                text = out.stdout.decode("utf-8", "replace")
+                ok, what = rig.parse_s3check(text)
+                if ok is False and "s3setup:" in text and what.startswith("packages:"):
+                    # only packages missing: install them, once, and look again
+                    self._log("[emulate] setting up Spike 3 emulation on this "
+                              "PC (once, a few minutes): %s" % what)
+                    self._post(self._set, "state", "Setting up Spike 3 emulation…")
+                    sp = self._popen(rig.spike3_setup_cmd(), stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT)
+                    for raw in sp.stdout:
+                        line = raw.decode("utf-8", "replace").rstrip()
+                        if line:
+                            self._log("[emulate] " + line)
+                    sp.wait()
+                    out = self._run(rig.spike3_check_cmd(), stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, timeout=60)
+                    ok, what = rig.parse_s3check(out.stdout.decode("utf-8", "replace"))
+                if ok is not True:
+                    self._starting = False
+                    self._s3_slot = self._s3_label = None
+                    rigslot.release_claimed()
+                    msg = ("Spike 3 emulation is not set up on this PC: %s." % what
+                           if what else "Spike 3 emulation could not be checked on this PC.")
+                    self._post(lambda: (self._refuse_start(msg),
+                                        self._set("state", "Not running"),
+                                        self._paint_run_btn()))
+                    return
+                keyfile = rig.spike3_keyfile(card, project=self._assets() or None)
+                if keyfile:
+                    self._log("[emulate] Spike 3 key: %s" % keyfile)
+                mode_so = mode_files = None
+                if prepare is not None:
+                    more = self._s3_prepare(prepare, card)
+                    if more is None:
+                        self._starting = False
+                        self._s3_slot = self._s3_label = None
+                        rigslot.release_claimed()
+                        self._post(lambda: (self._set("state", "Not running"),
+                                            self._paint_run_btn()))
+                        return
+                    kv = dict(e.split("=", 1) for e in more if "=" in e)
+                    mode_so, mode_files = kv.get("PAD_S3_MODE_SO"), kv.get("PAD_S3_MODE_FILES")
+                restore, self._s3_restore = self._s3_restore, None
+                cmd = rig.spike3_launch_cmd(card, slot, self.S3_MINUTES, audio=audio,
+                                            keyfile=keyfile,
+                                            audio_ctl=audio_ctl_file() if audio else None,
+                                            restore=None if mode_so else restore,
+                                            mode_so=mode_so, mode_files=mode_files)
+                self._log("[emulate] %s" % " ".join(str(c) for c in cmd))
+                self._proc = self._popen(cmd, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT)
+                self._starting = False
+                self._started_here = True
+                self._post(self._paint_run_btn)
+                decade = [-1]               # the last tenth of the decrypt logged
+                for raw in self._proc.stdout:
+                    line = raw.decode("utf-8", "replace").rstrip()
+                    foot = self._s3_footer_for(line)
+                    if s3_progress_logged(line, decade):
+                        m = S3_STORE_PROGRESS.match(line)
+                        self._log("[emulate] " + ("%s (%s%%)" % (foot[2], m.group(1))
+                                                  if m else line))
+                    fields = rig.playfield_launch(line)
+                    if fields:                  # the virtual playfield (s3pf.py)
+                        self._post(self._open_playfield, fields)
+                    if foot:
+                        self._s3_foot = foot
+                        self._post(self._footer, *foot)
+                        self._s3_label = (foot[2] if foot[0] != "run"
+                                          else "Running (Spike 3, rig %s)" % slot)
+                        self._post(self._set, "state", self._s3_label)
+                        continue
+                    label = self._s3_progress(line, slot)
+                    if label:
+                        self._s3_label = label
+                        self._post(self._set, "state", label)
+            except Exception as exc:                     # noqa: BLE001
+                log.exception("spike3 start")
+                self._log("[emulate] failed to start: %s" % exc)
+            finally:
+                self._proc = None
+                self._starting = False
+                self._s3_label = None
+                self._s3_foot = None
+                if not self._stopping:
+                    self._s3_slot = None
+                    rigslot.release_claimed()
+                    self._post(lambda: (self._set("state", "Not running"),
+                                        self._paint_run_btn()))
+
+        self._thread(run)
+
+    @staticmethod
+    def _s3_progress(line, slot):
+        """The state label a launcher line moves the tab to, or None."""
+        if line.startswith("s3launch: failed - "):
+            return "Not running - " + line[len("s3launch: failed - "):]
+        if line.startswith("s3launch: decrypting"):
+            return "Preparing the Spike 3 card (first time only)…"
+        if line.startswith("[s3run] exec "):
+            return "Running (Spike 3, rig %s)" % slot
+        return None
+
+    @staticmethod
+    def _s3_footer_for(line):
+        """(kind, pct, text) for the footer's steps (Copy card, Boot, Node
+        boards, Ready) from a Spike 3 run line, or None - the Spike 3 twin of
+        status.sh's boot_pct. s3prog.py says the boot's progress; the
+        launcher says the once-only steps before it."""
+        m = re.match(r"\[s3run\] progress (\w+) (\d+) (.*)$", line)
+        if m:
+            return m.group(1), int(m.group(2)), m.group(3)
+        if line.startswith("s3launch: decrypting"):
+            return "copy", 5, "Preparing the Spike 3 card (first time only)…"
+        m = S3_STORE_PROGRESS.match(line)
+        if m:       # PAD-1238: the bytes read of the whole card, every 2 s
+            pct, done, total, eta = (int(m.group(1)), int(m.group(2)),
+                                     int(m.group(3)), m.group(4))
+            text = "Preparing the Spike 3 card (first time only): %.1f of %.1f GB" % (
+                done / 1000.0, total / 1000.0)
+            if eta != "-" and pct < 100:
+                text += ", " + _eta_text(int(eta))
+            return "copy", 5 + pct * 90 // 100, text
+        if line.startswith("s3launch: building the Spike 3 rig"):
+            return "copy", 50, "Building the Spike 3 emulator (first time only)…"
+        if line.startswith("s3launch: starting slot"):
+            return "boot", 40, "Starting the Spike 3 emulator"
+        return None
+
+    def _muted_for_spike3(self):
+        """The panel's Mute: Spike 3 sound plays only when it is off."""
+        try:
+            return bool(self._mute_var.get())
+        except Exception:                                # noqa: BLE001
+            return True                     # unknown: rig runs stay muted
+
     def _open_playfield(self, fields):
         if sys.platform != "win32":
             return
@@ -2618,7 +3626,11 @@ class EmulateTab(TabService):
         if fields.get("savestates") == "1":
             cmd.append("--savestates")
         env = dict(os.environ)
-        for key, name in (("root", "PAD_ROOT"), ("tables", "PAD_TABLES")):
+        # logdir: a Spike 3 run's slot directory, where its padvid.log feeds
+        # the window's CLIPS list (PAD-1183); a Spike 2 run's window finds
+        # its logs from PAD_ROOT itself
+        for key, name in (("root", "PAD_ROOT"), ("tables", "PAD_TABLES"),
+                          ("root_wsl", "PAD_ROOT_WSL"), ("logdir", "PAD_LOGDIR")):
             if fields.get(key):
                 env[name] = fields[key]
         # WHICH RIG (core/rigslot.py): the window titles itself with it, and a
@@ -2631,10 +3643,32 @@ class EmulateTab(TabService):
             cmd.append("--pad-slot=%d" % n)
         if rigslot.label():
             env["PAD_LABEL"] = rigslot.label()
+        # its switch helpers call back into the distro the rig runs in
+        if not env.get("PAD_WSL_DISTRO"):
+            from ...core import runtime as _rt
+            try:
+                d = _rt.wsl_distro()
+            except Exception:                            # noqa: BLE001
+                d = None
+            if d:
+                env["PAD_WSL_DISTRO"] = d
         # PAD-204: the window's status bar moves this tab's volume / Mute
         env["PAD_AUDIO_CTL"] = audio_ctl_file()
         try:
-            self._pf_proc = self._popen(cmd, env=env)
+            # its own output to a file: a window that dies at once left no
+            # trace at all (PAD-1090: "I'm not seeing the playfield window")
+            pflog = os.path.join(tempfile.gettempdir(),
+                                 "pad_playfield_rig%d.log" % (n or 0))
+            try:
+                out = open(pflog, "w", encoding="utf-8", errors="replace")
+            except OSError:
+                out = None
+            if out is not None:
+                self._pf_proc = self._popen(cmd, env=env, stdout=out,
+                                            stderr=subprocess.STDOUT)
+                self._log("[emulate] the playfield window's own log: %s" % pflog)
+            else:
+                self._pf_proc = self._popen(cmd, env=env)
             self._log("[emulate] opened the virtual playfield window here — "
                       "this WSL cannot start Windows programs itself.")
         except Exception as exc:                         # noqa: BLE001
@@ -2668,8 +3702,26 @@ class EmulateTab(TabService):
 
         def run():
             needs_restart = False
+            s3 = self._s3_slot
+            if s3 is None and self._spike3_era() and rig.spike3_rig_present():
+                # a Spike 3 card after an app restart: this app no longer
+                # knows the run's slot, and the Spike 2 stop (killgame.sh on
+                # slot 0) cannot end it (David: "it looks like it's already
+                # running but it's not"). The Spike 3 stop of this app's rig
+                # slot, which also ends anything a run left behind there.
+                from ...core import rigslot as _rs
+                s3 = _rs.slot()
+                if not s3:
+                    try:            # the slot the lock board says is ours
+                        mine = [r["slot"] for r in _rs.board()[1:]
+                                if r.get("holder") and r["holder"] == _rs.label()]
+                    except Exception:                    # noqa: BLE001
+                        mine = []
+                    s3 = mine[0] if mine else 1
             try:
-                out = self._run(self._kill_cmd(), stdout=subprocess.PIPE,
+                kill = (rig.spike3_stop_cmd(s3) if s3 is not None
+                        else self._kill_cmd())
+                out = self._run(kill, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=60)
                 for line in out.stdout.decode("utf-8",
                                               "replace").splitlines():
@@ -2691,6 +3743,7 @@ class EmulateTab(TabService):
             # the rig goes back the moment it is not used (claim_for_run)
             from ...core import rigslot
             rigslot.release_claimed()
+            self._s3_slot = self._s3_label = None
             self._stopping = False
             if self._restart_wait:
                 self._post(self._restart_when_down)
@@ -2723,14 +3776,127 @@ class EmulateTab(TabService):
         self.start()
         return "Starting the game with your color profile..."
 
+    # -- PAD-735: Restart game ----------------------------------------------
+    @rpc
+    def restart(self):
+        """The Restart game button (here, and the playfield window's): the
+        game booted again, as switching the machine off and on does - and
+        ONLY the game (PAD-738). The run that is up does it itself
+        (restartgame.sh asks watch.sh), so the game window goes back to the
+        boot screen and the virtual playfield stays open. A run that does not
+        take the request in time is restarted the old way, Stop and then
+        Start."""
+        if self._starting or self._stopping or self._preparing is not None \
+                or self._restart_wait or self._rebooting:
+            return False
+        if not (self._last_up or self._launched()):
+            return False
+        if self._s3_slot is not None:
+            # a Spike 3 run has no restartgame.sh of its own (that one asks
+            # the Spike 2 rig of the same number): Stop, then Start again
+            self.log("[emulate] restarting the Spike 3 game: it stops and "
+                     "starts again.")
+            self._restart_wait = 40
+            self.stop()
+            return True
+        self.log("[emulate] restarting the game: it boots again; the game "
+                 "window and the playfield stay open.")
+        self._rebooting = True
+        self._paint_run_btn()
+
+        def run():
+            fallback = False
+            try:
+                out = self._run(self._reboot_cmd(), stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=60)
+                for line in (out.stdout or b"").decode(
+                        "utf-8", "replace").splitlines():
+                    if line.strip():
+                        self._log("[emulate] " + line)
+                fallback = out.returncode == 3
+            except Exception as exc:                     # noqa: BLE001
+                self._log("[emulate] restart failed: %s" % exc)
+                fallback = True
+            self._post(self._rebooted, fallback)
+
+        self._thread(run)
+        return True
+
+    def _rebooted(self, fallback):
+        """After restartgame.sh: the button back, or - when the run did not
+        take the request - the old Restart, Stop and then Start."""
+        self._rebooting = False
+        if fallback and not (self._starting or self._stopping) \
+                and (self._last_up or self._launched()):
+            self.log("[emulate] the run did not take the restart; stopping "
+                     "it and starting it again.")
+            self._restart_wait = 40
+            self.stop()
+            return
+        self._paint_run_btn()
+
+    def _follow_restart_req(self):
+        """The playfield window's Restart game (PAD-735): it cannot stop and
+        start the run itself (Stop closes it), so it leaves a request beside
+        the volume file, one per rig, and this poll acts on it. A request
+        older than RESTART_REQ_S is from a run that is gone and is dropped."""
+        age = self._take_req(restart_req_file)
+        if age is None or age > RESTART_REQ_S:
+            return
+        if self.restart():
+            self.log("[emulate] (asked for by the playfield window)")
+
+    def _take_req(self, name):
+        """A playfield window's request file, taken (removed) - its age in
+        seconds, or None with none there. Looked for under this app's rig
+        AND the rig its Spike 3 run is on: an app on rig 0 runs Spike 3 on
+        rig 1 (``slot or 1``), and the window names its files by its own rig
+        (PAD-1198: Restart game and Stop from a Spike 3 window went unread)."""
+        from ...core import rigslot
+        rigs = [rigslot.slot()]
+        s3 = getattr(self, "_s3_slot", None)
+        if s3 is not None and s3 not in rigs:
+            rigs.append(s3)
+        got = None
+        for n in rigs:
+            path = name(n)
+            try:
+                age = time.time() - os.stat(path).st_mtime
+                os.remove(path)
+            except OSError:
+                continue
+            got = age if got is None else min(got, age)
+        return got
+
+    def _follow_stop_req(self):
+        """The playfield window's Stop emulator, or its X (PAD-1198): the
+        same request-file shape as Restart game. Acted on only while this
+        tab's run is up and not already stopping - a request left by a
+        window that closed with its run (or older than RESTART_REQ_S) ends
+        nothing, least of all the next run."""
+        age = self._take_req(stop_req_file)
+        if age is None or age > RESTART_REQ_S or self._stopping:
+            return False
+        if not (self._last_up or self._launched()
+                or self._s3_slot is not None):
+            return False
+        self.log("[emulate] stopping: asked for by the playfield window")
+        self.stop()
+        return True
+
     def _restart_when_down(self):
-        """After a Try-it Stop: Start once the rig says nothing is up."""
+        """After a Try-it or Restart game Stop: Start once the rig says
+        nothing is up."""
         if not self._restart_wait:
             return
         if self._stopping or self._last_up or self._launched():
             self._restart_wait -= 1
             if self._restart_wait > 0:
                 self._after(500, self._restart_when_down)
+            else:
+                self.log("[emulate] the game did not stop in time to start "
+                         "it again; press Start emulator when it has.")
+                self._paint_run_btn()
             return
         self._restart_wait = 0
         self.start()
@@ -2877,6 +4043,76 @@ class EmulateTab(TabService):
         self._thread(run)
         return True
 
+    # ------------------------------------------------------------------
+    # PAD-811: the game display
+    # ------------------------------------------------------------------
+    def _display_paint(self):
+        """The Game display control: padisplay's setting, the monitors as
+        they are now, and the line that says what the two make."""
+        mod = padisplay_mod()
+        if mod is None:
+            self.set(gdisp=None)
+            return
+        try:
+            s = mod.load(mod.CONF)
+            mons = physical(mod.monitors)
+            text = mod.describe(s, mons)
+        except Exception:                                # noqa: BLE001
+            log.exception("game display")
+            self.set(gdisp=None)
+            return
+        opts = [{"value": str(m["n"]),
+                 "label": "%d - %dx%d%s" % (m["n"], m["w"], m["h"],
+                                            " (main)" if m["primary"] else "")}
+                for m in mons]
+        n = int(s.get("monitor") or 1)
+        if not any(m["n"] == n for m in mons):
+            opts.append({"value": str(n), "label": "%d - not connected" % n})
+        win = dict(DISPLAY_WINDOW, **{k: s[k] for k in DISPLAY_WINDOW if k in s})
+        self.set(gdisp=dict(win, mode=s["mode"], monitor=str(n),
+                            border=bool(s.get("border")), mons=opts,
+                            text=text))
+
+    @rpc
+    def display_set(self, key, value):
+        """One change to the game display, saved at once: a running game's
+        window follows it within half a second."""
+        mod = padisplay_mod()
+        if mod is None:
+            return False
+        s = mod.load(mod.CONF)
+        try:
+            if key == "mode":
+                if value not in mod.MODES:
+                    return False
+                if s["mode"] == "free" and value != "free":
+                    s["border"] = False         # a new choice starts borderless
+                if value == "window" and s["mode"] != "window":
+                    # full screen's line holds the monitor's size: start
+                    # from the machine's own screen instead
+                    s.update(DISPLAY_WINDOW)
+                s["mode"] = value
+            elif key == "monitor":
+                s["monitor"] = max(1, int(value))
+            elif key == "border":
+                s["border"] = bool(value)
+            elif key in DISPLAY_WINDOW:
+                v = int(float(value))
+                s[key] = max(64, v) if key in ("w", "h") else v
+            else:
+                return False
+        except (TypeError, ValueError):
+            self._display_paint()               # the field shows what holds
+            return False
+        try:
+            physical(mod.save, s, mod.CONF)
+        except OSError as exc:
+            self._log("[emulate] game display not saved: %s" % exc)
+            return False
+        self._display_paint()
+        self._log("[emulate] game display: %s" % (self.get("gdisp") or {}).get("text", ""))
+        return True
+
     def _restart_wsl(self, why, pre_kill=False):
         self._resetting = True
         self.set(fixaud_enabled=False)
@@ -2925,6 +4161,7 @@ class EmulateTab(TabService):
         (PAD-253, David: "when i close the dev pad app, it should not kill
         all rigs, only the emulation window it spawns (if done) itself").
         Its own playfield window closes either way."""
+        self._elog_win.shutdown()
         if not (self._launched() or self._started_here):
             self._close_playfield(grace=3)
             return
@@ -2978,7 +4215,9 @@ class EmulateTab(TabService):
 
         def run():
             try:
-                out = self._run(self._cmd("status.sh"),
+                # as root: the rig is told apart from the others by a read
+                # only root can make (rig.status_cmd, PAD-496)
+                out = self._run(rig.status_cmd(),
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, timeout=20)
                 text = out.stdout.decode("utf-8", "replace")
@@ -2996,6 +4235,12 @@ class EmulateTab(TabService):
                 rigs = rigslot.board()
             except Exception:                            # noqa: BLE001
                 rigs = []
+            merger = getattr(self, "_clip_merger", None)
+            if merger is not None:
+                try:
+                    merger.poll()
+                except Exception:                        # noqa: BLE001
+                    pass
             if self._stopped:
                 self._poll_busy = False
                 return
@@ -3006,6 +4251,8 @@ class EmulateTab(TabService):
                 self._runtime_apply(rt)
                 self._apply(info)
                 self._follow_audio_ctl()
+                self._follow_restart_req()
+                self._follow_stop_req()
                 self.set(rigs=rigs)
             self._post(apply_and_release)
 
@@ -3014,10 +4261,17 @@ class EmulateTab(TabService):
 
     def _push_copy(self, text, pct):
         self._set("state", text)
-        self.set(state_tip=rig._COPY_EXPLAIN)
+        self.set(state_tip=self._copying_tip)
         self._footer("copy", pct, text)
 
     def _paint_footer(self, info=None):
+        if getattr(self, "_s3_slot", None) is not None:
+            # a Spike 3 run paints its own steps (s3prog.py); the Spike 2
+            # status poll sees no Spike 2 game and would paint "idle"
+            foot = getattr(self, "_s3_foot", None)
+            if foot:
+                self._footer(*foot)
+            return
         info = info if info is not None else self._last_info
         preparing = self._preparing is not None and not self._stopping
         copying = self._copying is not None and not self._stopping
@@ -3030,10 +4284,14 @@ class EmulateTab(TabService):
             st = info.get("state")
             if st in ("attract", "running"):
                 self._footer("run", None, st_label)
-            elif st == "techalerts":
-                self._footer("techalerts", None, st_label)
             else:
-                self._footer("boot", None, st_label)
+                # PAD-744: the steps inside Boot and Node boards (bootprog.py)
+                try:
+                    pct = int(info.get("boot_pct", ""))
+                except ValueError:
+                    pct = None
+                self._footer("techalerts" if st == "techalerts" else "boot",
+                             pct, st_label)
         else:
             self._footer("idle")
 
@@ -3060,8 +4318,10 @@ class EmulateTab(TabService):
             label = self._preparing
         elif copying:
             label = self._copying
+        elif self._s3_label:            # a Spike 3 run: the rig's status
+            label = self._s3_label      # (watch.sh's) knows nothing of it
         self.set(state_tip=(self._preparing_explain() if preparing else
-                            (rig._COPY_EXPLAIN if copying else hint)) or "")
+                            (self._copying_tip if copying else hint)) or "")
         self._set("state", label)
         self._hint("")
         self._paint_footer(info)
@@ -3072,8 +4332,9 @@ class EmulateTab(TabService):
         if info.get("running") == "1":
             self._set("cpu", "%s%% of one core, %s MB"
                       % (info.get("cpu", "?"), info.get("rss", "?")))
-            self._set("host", "%s%% CPU, %s fps"
-                      % (info.get("host_cpu", "?"), info.get("fps", "—")))
+            host, host_tip = rig.renderer_text(info)
+            self.set(host_tip=host_tip)
+            self._set("host", host)
             pcm = info.get("pcm")
             if pcm is None:
                 self._set("audio", "not sampled")
@@ -3082,6 +4343,7 @@ class EmulateTab(TabService):
                 self._set("audio", "%s frames played, %s dropped%s" % (
                     pcm, drop, "" if drop == "0" else "   <-- dropping"))
         else:
+            self.set(host_tip="")
             for k in ("cpu", "host", "audio"):
                 self._set(k, "—")
 

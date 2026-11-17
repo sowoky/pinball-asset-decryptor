@@ -12,6 +12,7 @@ with the playfield focused".
 Every WSL helper is stubbed before anything is built: nothing here may reach
 wsl.exe or a rig.
 """
+import json
 import os
 import shutil
 import struct
@@ -144,7 +145,7 @@ def test_a_frame_carries_only_what_changed(pf, monkeypatch, tmp_path):
     with open(pf.LED_PATH, "wb") as f:
         f.write(_led_block(pf, {(8, 3): 255}))
     frame = view.tick(0.0)
-    assert frame["fx"][0][:3] == [255, 251, 0]      # the orange ramp at full
+    assert frame["fx"][0][:3] == [255, 255, 255]    # one colour, not set: white (PAD-668)
     assert frame["fx"][1] == 0                      # painted dark, once
     # nothing moved: nothing painted again
     frame = view.tick(0.0)
@@ -164,6 +165,155 @@ def test_a_frame_carries_only_what_changed(pf, monkeypatch, tmp_path):
         if gone is None:
             break
     assert gone is None
+
+
+def _one_colour_field(pf, monkeypatch):
+    fixtures = [dict(name="MASER", channels={"W": (8, 3)}, x=10, y=20, group=6),
+                dict(name="SHIELD", channels={"R": (9, 0), "G": (9, 1), "B": (9, 2)}, x=30, y=40, group=7),
+                dict(name="BRIDGE", channels={"W": (8, 4)}, x=50, y=60, group=6)]
+    monkeypatch.setattr(pf, "layout_is_usable", lambda: True)
+    monkeypatch.setattr(pf, "load_switches", lambda: [])
+    monkeypatch.setattr(pf, "load_switch_list", lambda: [])
+    monkeypatch.setattr(pf, "load_leds", lambda: [])
+    monkeypatch.setattr(pf, "load_coils", lambda: [])
+    monkeypatch.setattr(pf, "group_fixtures", lambda leds: [dict(f) for f in fixtures])
+    monkeypatch.setattr(pf, "layout_art", lambda: None)
+    monkeypatch.setattr(pf, "layout_extent", lambda pad=14: (100, 200))
+    monkeypatch.setattr(pf, "FADE_MS", 0.0)
+    monkeypatch.setattr(pf, "GROUP_NODE", {6: 8, 7: 9})
+    monkeypatch.setattr(pf, "GAME", "godzilla_le")
+    monkeypatch.setattr(pf, "_LENS", None)
+    return pf.Playfield()
+
+
+def test_a_mode_s_colour_on_a_one_colour_insert_is_named_not_drawn(pf, monkeypatch):
+    """PAD-668: a mode's light show paints a one-colour insert red; the board gets one level, and on the machine
+    the insert glows in its own colour. The view draws it white (not set) at the wire's level and names the colour
+    the mode asked for in its tooltip - PAD-658 had drawn it red."""
+    import coilmap
+    view = _one_colour_field(pf, monkeypatch).view
+    b = bytearray(16384)
+    b[:pf.PADLED_READ] = _led_block(pf, {(8, 3): 128})
+    struct.pack_into("<I", b, coilmap.PAINT_OFF, coilmap.PAINT_MAGIC)
+    b[coilmap.PAINT_OFF + 8:coilmap.PAINT_OFF + 14] = bytes((6, 3, 255, 0, 0, 1))     # the mode painted it red
+    with open(pf.LED_PATH, "wb") as f:
+        f.write(bytes(b))
+    frame = view.tick(0.0)
+    r, g, bl = frame["fx"][0][:3]
+    assert r == g == bl and r > 128                                                   # white, lifted; not red
+    tip = view.describe("led", 0)
+    assert "MASER   (one colour)" in tip and "value 128" in tip
+    assert "its colour not set (white) - the card does not say it: see INSERT COLOURS" in tip
+    assert "a mode asks for #ff0000" in tip and "glows in its own colour" in tip
+    with open(pf.LED_PATH, "wb") as f:
+        f.write(_led_block(pf, {(8, 3): 128}))                                         # no mode holds it
+    view.tick(0.0)
+    assert "mode" not in view.describe("led", 0)
+
+
+def test_a_one_colour_insert_is_white_until_given_its_colour():
+    """PAD-668: the default is white ("not known"), at the wire's level; a colour from the table is drawn instead.
+    An RGB insert's colour stays the wire's own."""
+    import playfield
+    assert playfield.fixture_color({"W": 255}) == ((255, 255, 255), 1.0)
+    assert playfield.fixture_color({"W": 0}) == (None, 0.0)
+    assert playfield.fixture_color({"W": 255}, (0, 64, 255)) == ((0, 64, 255), 1.0)
+    col, level = playfield.fixture_color({"W": 64}, (255, 0, 0))
+    assert col[1:] == (0, 0) and 100 < col[0] < 255 and level == 64 / 255.0          # dim red keeps its hue
+    assert playfield.fixture_color({"R": 255, "G": 0, "B": 0}, (0, 0, 255))[0] == (255, 0, 0)
+
+
+def test_a_lamp_named_for_its_colour_glows_in_it_until_the_user_sets_one(pf, monkeypatch):
+    """PAD-1144: Spike 3's Star Wars 2025 names one-colour lamps for their colour ("TOP GI-BLU (x10)"); Real LEDs
+    drew them white like a lamp the card says nothing about. It glows blue now, INSERT COLOURS shows blue as its
+    default, a colour the user picks still wins, and x goes back to blue, not white."""
+    ctl = _one_colour_field(pf, monkeypatch)
+    view = ctl.view
+    view.fixtures[2]["name"] = "TOP GI-BLU (x10)"
+    spec = ctl.state("main")["view"]
+    assert ["TOP GI-BLU (x10)", "", [2], "#306eff"] in spec["lens"]
+    assert ["MASER", "", [0], ""] in spec["lens"]                                     # no colour in its name
+    with open(pf.LED_PATH, "wb") as f:
+        f.write(_led_block(pf, {(8, 3): 255, (8, 4): 255}))
+    fx = view.tick(0.0)["fx"]
+    assert fx[2][:3] == [48, 110, 255]                                                # its name's blue
+    assert fx[0][:3] == [255, 255, 255]                                               # MASER: still white
+    assert "from its name" in view.describe("led", 2)
+    assert ctl.api_lens("TOP GI-BLU (x10)", "#ff2000") == "#ff2000"
+    assert view.tick(0.0)["fx"][2][:3] == [255, 32, 0]                                # the user's colour wins
+    assert ctl.api_lens("TOP GI-BLU (x10)", None) == ""
+    assert view.tick(0.0)["fx"][2][:3] == [48, 110, 255]                              # x: back to its name's
+
+
+def test_the_insert_colours_table_is_edited_from_the_page_and_kept_per_title(pf, monkeypatch):
+    """PAD-668: the side panel's INSERT COLOURS lists the one-colour inserts by name (RGB ones are not in it);
+    a colour picked there is drawn at once, kept in the state file under the title for the next run, and x puts it
+    back to white."""
+    ctl = _one_colour_field(pf, monkeypatch)
+    view = ctl.view
+    spec = ctl.state("main")["view"]
+    assert spec["lens"] == [["BRIDGE", "", [2], ""], ["MASER", "", [0], ""]]
+    with open(pf.LED_PATH, "wb") as f:
+        f.write(_led_block(pf, {(8, 3): 255}))
+    assert view.tick(0.0)["fx"][0][:3] == [255, 255, 255]
+    assert ctl.api_lens("MASER", "#FF2000") == "#ff2000"
+    assert view.tick(0.0)["fx"][0][:3] == [255, 32, 0]                                # redrawn at once
+    assert "its colour #ff2000, as set under INSERT COLOURS" in view.describe("led", 0)
+    st = pf.load_state()
+    assert st["lens_colours"] == {"godzilla_le": {"MASER": "#ff2000"}}
+    assert pf.lens_colours("godzilla_pro") == {}                                      # another title: its own
+    monkeypatch.setattr(pf, "_LENS", None)                                           # the next run reads it back
+    assert pf.Playfield().state("main")["view"]["lens"][1] == ["MASER", "#ff2000", [0], ""]
+    assert ctl.api_lens("MASER", None) == ""                                          # x: back to white
+    assert view.tick(0.0)["fx"][0][:3] == [255, 255, 255]
+    assert pf.load_state()["lens_colours"] == {"godzilla_le": {}}
+    assert ctl.api_lens("MASER", "not a colour") == ""
+
+
+def test_all_rgb_draws_a_mode_s_colour_on_a_one_colour_insert_and_real_leds_does_not(pf, monkeypatch):
+    """PAD-668: the picture's Real LEDs / All RGB switch. Real LEDs (the default) draws a single-colour insert a
+    mode paints in its own colour; All RGB draws it in the mode's colour at the wire's level (PAD-658's view), as
+    the Modes tab's preview does. Kept for the next run; RGB inserts and unheld inserts are the same either way."""
+    import coilmap
+    ctl = _one_colour_field(pf, monkeypatch)
+    view = ctl.view
+    assert ctl.state("main")["view"]["insert_look"] == "real"
+    b = bytearray(16384)
+    b[:pf.PADLED_READ] = _led_block(pf, {(8, 3): 255, (8, 4): 255})
+    struct.pack_into("<I", b, coilmap.PAINT_OFF, coilmap.PAINT_MAGIC)
+    b[coilmap.PAINT_OFF + 8:coilmap.PAINT_OFF + 14] = bytes((6, 3, 255, 0, 0, 1))     # MASER painted red
+    with open(pf.LED_PATH, "wb") as f:
+        f.write(bytes(b))
+    frame = view.tick(0.0)
+    assert frame["fx"][0][:3] == [255, 255, 255] and frame["fx"][2][:3] == [255, 255, 255]
+    assert ctl.api_insert_look("rgb") == "rgb"
+    frame = view.tick(0.0)
+    assert frame["fx"][0][:3] == [255, 0, 0]                                          # the mode's red
+    assert 2 not in frame["fx"]                                                       # BRIDGE: no mode, unchanged
+    assert "drawn #ff0000, the mode's colour (All RGB)" in view.describe("led", 0)
+    assert pf.load_state()["insert_look"] == "rgb"
+    assert pf.Playfield().state("main")["view"]["insert_look"] == "rgb"              # the next run
+    assert ctl.api_insert_look("real") == "real"
+    assert view.tick(0.0)["fx"][0][:3] == [255, 255, 255]
+    assert ctl.api_insert_look("nonsense") == "real"
+
+
+def test_the_ball_controls_are_never_over_the_playfield():
+    """PAD-668 (David: "we should never show those over the playfield"): before the key panel comes, the trough and
+    the actions are a BALLS box in the side panel, in both views - no overlay on the picture, no bar of their own."""
+    js = open(os.path.join(RIG, "pfpage", "pf.js"), encoding="utf-8").read()
+    css = open(os.path.join(RIG, "pfpage", "pf.css"), encoding="utf-8").read()
+    assert "pf-overlay" not in js and "pf-overlay" not in css and "pf-acts" not in js
+    assert js.count("const balls = ballsBox(V, D);") == 2                       # the field and the schematic view
+    assert js.count("side: balls ? balls.el : null,") == 2
+    assert 'h.append(el("span", "kp-group", "BALLS"));' in js
+
+
+def test_the_page_has_the_insert_colours_table():
+    js = open(os.path.join(RIG, "pfpage", "pf.js"), encoding="utf-8").read()
+    assert 'function lensPanel(rows)' in js and 'api("lens", name, pick.value)' in js
+    assert 'api("lens", name, null)' in js and "markInserts(fids)" in js
+    assert 'api("insert_look", k)' in js and '"Real LEDs"' in js and '"All RGB"' in js
 
 
 def test_the_page_script_parses():
@@ -200,3 +350,50 @@ def test_the_switch_list_gets_its_trough_strip_back_when_the_panel_goes(
     assert frame.get("layout") and ctl.key_panel is None
     assert view.trough is not None and view.trough.clickable
     assert ctl.state("main")["view"]["trough"]["pos"] == [1, 2, 3, 4, 5, 6]
+
+
+def _field_ctl(pf, monkeypatch):
+    monkeypatch.setattr(pf, "layout_is_usable", lambda: True)
+    monkeypatch.setattr(pf, "load_switches", lambda: [])
+    monkeypatch.setattr(pf, "load_switch_list", lambda: [])
+    monkeypatch.setattr(pf, "load_leds", lambda: [])
+    monkeypatch.setattr(pf, "load_coils", lambda: [])
+    monkeypatch.setattr(pf, "group_fixtures", lambda leds: [])
+    monkeypatch.setattr(pf, "layout_art", lambda: None)
+    monkeypatch.setattr(pf, "layout_extent", lambda pad=14: (100, 200))
+    return pf.Playfield()
+
+
+def test_the_picture_is_x_ray_until_switched_and_kept_for_the_next_run(pf, monkeypatch):
+    # PAD-628: the Modes tab's x-ray look by default; the switch is kept in
+    # the window's state file (the page's own storage is private to a run)
+    ctl = _field_ctl(pf, monkeypatch)
+    assert pf.art_look() == "xray"
+    assert ctl.state("main")["view"]["look"] == "xray"
+    with open(pf.STATE, "w") as f:
+        json.dump({"playfield_pos": [10, 20]}, f)
+    assert pf.Playfield.api_art_look(ctl, "drawing") == "drawing"
+    assert json.load(open(pf.STATE)) == {"playfield_pos": [10, 20], "art_look": "drawing"}
+    assert _field_ctl(pf, monkeypatch).state("main")["view"]["look"] == "drawing"
+    # anything else the page might send is the default, never stored as is
+    assert pf.Playfield.api_art_look(ctl, "sepia") == "xray"
+    assert pf.art_look() == "xray"
+    with open(pf.STATE, "w") as f:
+        json.dump({"art_look": 7}, f)
+    assert pf.art_look() == "xray"
+
+
+def test_the_page_has_the_switch_on_the_picture():
+    js = open(os.path.join(RIG, "pfpage", "pf.js"), encoding="utf-8").read()
+    body = js[js.index("function fieldView("):js.index("function draw()", js.index("function fieldView("))]
+    assert 'V.look === "drawing"' in body          # anything but "drawing" is the X-ray
+    assert '"X-ray"' in body and '"Drawing"' in body
+    assert 'api("art_look", k)' in body
+    assert ".blur()" in body                       # the space bar is the Action Button
+    css = open(os.path.join(RIG, "pfpage", "pf.css"), encoding="utf-8").read()
+    # the same look as the Modes tab's playfield picture
+    modes = open(os.path.join(os.path.dirname(RIG), "..", "pinball_decryptor", "webui", "static", "css",
+                              "tabs", "modes.css"), encoding="utf-8").read()
+    look = "filter: invert(.88) hue-rotate(180deg); opacity: .5;"
+    assert ".pf-art { " + look in modes
+    assert ".pf-stage.xray img.art { " + look in css

@@ -32,6 +32,7 @@ export const WHAT = {
   emulate_spooky: "Run the game on this computer from its update file.",
   emulate_pb: "Run the game on this computer from its update file (Predator so far).",
   emulate_spike1: "Run the game on this computer.",
+  vpx: "Play a Visual Pinball table with this game behind it.",
   multiboot: "Put it on one card with other games behind a boot menu.",
   defaults: "Change the game's factory settings.",
   modes: "Make your own modes.",
@@ -46,12 +47,19 @@ export const WHAT = {
   modpack: "Share your changes as a zip, or apply someone else's.",
 };
 
-// null when rail entry *t* can be used, else {short, long, need}
-export function tabLock(t, ps) {
+// null when rail entry *t* can be used, else {short, long, need}.  *key*:
+// shell.spike3_key - whether the user's Spike 3 OTP key is on file (PAD-1090)
+export function tabLock(t, ps, key) {
   const need = needOf(t);
   const label = t.label;
-  if (!need || ps === undefined) return null;
   const tab = "The " + label + " tab";
+  if (need === "spike3key") {
+    if (key !== false) return null;
+    return { need, short: "Needs your Spike 3 OTP key.",
+      long: tab + " needs your Spike 3 machine's OTP key: the card is encrypted with it, and PAD never ships it. "
+        + "Give it to PAD once, below, and every Spike 3 tab can use it." };
+  }
+  if (!need || ps === undefined) return null;
   if (need === "project") {
     if (ps) return null;
     return { need, short: "Needs a project folder: there isn't one yet.",

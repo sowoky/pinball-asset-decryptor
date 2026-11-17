@@ -25,7 +25,16 @@ resolve to LED devices whose names carry -R/-G/-B where the lamp table says red,
 
 A `lamp` line (MODE_SDK.md):
     lamp <light ids: R,G,B or one> <shot mask or 0> <the game's name for the insert>
+
+PAD-1040: the cabinet's EXPRESSION LIGHTS (the blades down its sides, "EXPRESSIVE LIGHTING L 1".."R 96", and the
+backbox speaker lights, "SPEAKER 1".."23") are lamps of the same tables, but not inserts, whatever picture a title draws
+them on (John Wick, King Kong and Metallica draw the blades down the playfield picture's edges). They are `cablamp`
+lines, each placed on the CABINET drawing (:func:`cabinet`):
+    cablamp <light ids> <u> <the game's name>  # lamp N, I/O group G index I, at X,Y, <blade L|blade R|speaker>
+u is the light's place along its strip, 0..999: a blade's from the bottom up, a speaker ring's from the top round
+clockwise (the runtime's song shows paint by it, pad_mode_runtime.c "SONG SHOWS").
 """
+import math
 import re
 import struct
 
@@ -365,12 +374,60 @@ def shot_lamps(elf):
         if mask and not mask & (mask - 1) and lamp:
             out[mask] = lamp
     if not out:
-        return None, "the cshot initialiser at 0x%x ran but set no shot lamp" % fn
+        return None, "the cshot initializer at 0x%x ran but set no shot lamp" % fn
     return out, "read from %d cshot objects built by 0x%x" % (len(writes), fn)
 
 
 # ---- output ---------------------------------------------------------------------------------
 _NOT_PLAYFIELD = ("system/", "topper", "backpanel", "back_panel", "speaker", "cabinet", "front", "backbox")
+
+
+#: PAD-1040: the cabinet's expression lights by their names: a blade pixel (King Kong names no side: 1-48 is the left
+#: blade, as on the titles that do) and a speaker light (Batman 66: LEFT / RIGHT SPEAKER n, one ring each)
+_BLADE = re.compile(r"^EXPRESSIVE LIGHTING(?: ([LR]))? (\d+)$")
+_SPEAKER = re.compile(r"^(?:(LEFT|RIGHT) )?SPEAKER (\d+)$")
+#: PAD-1328: Spike 3's names (each pixel three lamps, -R / -G / -B, folded into one RGB light by the drafter): Star Wars
+#: 2025's blades `EXPRESSION LIGHTING L 1..48` / `R 49..96`; Fallout, Pokemon, Transformers and Walking Dead
+#: Remastered's six cabinet strips `CABINET L-IN UPPER 1..24`, `L-IN LOWER 25..48`, `R-IN UPPER / LOWER 49..96`,
+#: `L-OUT 97..120`, `R-OUT 121..144`; every one's speaker rings `SPEAKER L 1..20` / `SPEAKER R 1..20`
+_BLADE3 = re.compile(r"^EXPRESSION LIGHTING ([LR]) (\d+)$")
+_STRIP3 = re.compile(r"^CABINET ([LR])-(IN UPPER|IN LOWER|OUT) (\d+)$")
+_SPEAKER3 = re.compile(r"^SPEAKER ([LR]) (\d+)$")
+#: the cabinet drawing (the 0-300 x 0-600 a light show's patterns run over): the blades down its sides from the bottom
+#: to CAB_BLADE_TOP, the speaker ring(s) in the backbox above them
+CAB_BLADE_X = {"L": 12, "R": 288}
+CAB_BLADE_TOP, CAB_BLADE_BOTTOM = 140, 600
+CAB_RING = {"": (150, 70, 50), "L": (95, 70, 42), "R": (205, 70, 42)}
+#: PAD-1328: a Spike 3 cabinet's two strips a side: the inner one (UPPER + LOWER) and the outer one, each its own
+#: run along the side (x: the runtime reads a light's side off it, < 150 left); numbered from the TOP down (UPPER holds
+#: the first numbers), where the Spike 2 blades are numbered bottom up
+CAB_STRIP_X = {("L", "IN"): 22, ("L", "OUT"): 4, ("R", "IN"): 278, ("R", "OUT"): 296}
+
+
+def cabinet_role(name):
+    """PAD-1040: ("blade" | "speaker", side "L"/"R"/"", number) for a cabinet expression light's name, else None."""
+    m = _BLADE.match(name or "")
+    if m:
+        return "blade", m.group(1) or "", int(m.group(2))
+    m = _SPEAKER.match(name or "")
+    if m:
+        return "speaker", (m.group(1) or "")[:1], int(m.group(2))
+    m = _BLADE3.match(name or "")                       # PAD-1328: Spike 3's
+    if m:
+        return "blade", m.group(1), int(m.group(2))
+    m = _STRIP3.match(name or "")
+    if m:
+        return "blade", m.group(1), int(m.group(3))
+    m = _SPEAKER3.match(name or "")
+    if m:
+        return "speaker", m.group(1), int(m.group(2))
+    return None
+
+
+def cabinet_strip(name):
+    """PAD-1328: which of a Spike 3 cabinet's strips a blade light is on ("IN" / "OUT"), "" for a plain blade."""
+    m = _STRIP3.match(name or "")
+    return ("IN" if m.group(2).startswith("IN") else "OUT") if m else ""
 
 
 def playfield_image(t):
@@ -421,6 +478,8 @@ def inserts(elf, image=None):
         elif len(ids) != 1:
             continue
         name = _stem(lights[ids[0]]["name"])
+        if cabinet_role(name):              # PAD-1040: the cabinet's expression lights are `cablamp` lines
+            continue
         d0 = lights[ids[0]]
         suf = _suffix(d0["name"]) if len(ids) == 1 else None
         if suf and name in by_stem:
@@ -443,6 +502,97 @@ def inserts(elf, image=None):
     return out, how, t
 
 
+def cabinet(elf, t=None):
+    """PAD-1040: the cabinet's expression lights, [{lamp, name, lights (R,G,B order, or one), role, side, n, group,
+    index, x, y}], each placed on the cabinet drawing: a blade's pixels bottom up along its side (a title that names
+    no side splits at the middle number), a speaker ring's round from the top, clockwise."""
+    t = t or find_tables(elf)
+    lights, order, out = t["lights"], {"R": 0, "G": 1, "B": 2}, []
+    for l in t["lamps"]:
+        ids = [i for i in l["lights"] if 0 < i < len(lights)]
+        if len(ids) not in (1, 3):
+            continue
+        name = _stem(lights[ids[0]]["name"])
+        role = cabinet_role(name)
+        if not role or any(_stem(lights[i]["name"]) != name for i in ids):
+            continue
+        if len(ids) == 3:
+            if sorted(_suffix(lights[i]["name"]) or "" for i in ids) != ["B", "G", "R"]:
+                continue
+            ids = sorted(ids, key=lambda i: order[_suffix(lights[i]["name"])])
+        d0 = lights[ids[0]]
+        out.append(dict(lamp=l["lamp"], name=name, lights=ids, role=role[0], side=role[1], n=role[2],
+                        group=d0["group"], index=d0["index"], x=0, y=0))
+    return place_cabinet(out)
+
+
+def cabinet_from_port(lamps):
+    """PAD-1040: :func:`cabinet` for a build whose tables this module does not read (the newer generation's light
+    table, Rush LE 1.18): its port's own cabinet `lamp` lines, ``[(name, (r, g, b))]``, placed the same way."""
+    out = []
+    for name, ids in lamps:
+        role = cabinet_role(name)
+        if role:
+            out.append(dict(lamp=0, name=name, lights=[i for i in ids if i] if sum(1 for i in ids if i) == 1
+                            else list(ids), role=role[0], side=role[1], n=role[2], group=-1, index=-1, x=0, y=0))
+    return place_cabinet(out)
+
+
+def place_cabinet(out):
+    """PAD-1040: each cabinet light's place on the cabinet drawing (x, y) and along its strip (u), in place."""
+    blades = [c for c in out if c["role"] == "blade"]
+    if blades and not any(c["side"] for c in blades):
+        half = max(c["n"] for c in blades) // 2
+        for c in blades:
+            c["side"] = "L" if c["n"] <= half else "R"
+    # the backbox's two speakers, a ring of lights round each: a title that numbers them 1..23 with no side has the
+    # first half round the left speaker and the rest round the right (Batman 66 names LEFT / RIGHT itself)
+    speakers = sorted((c for c in out if c["role"] == "speaker"), key=lambda c: c["n"])
+    if len(speakers) > 1 and not any(c["side"] for c in speakers):
+        for i, c in enumerate(speakers):
+            c["side"] = "L" if i < (len(speakers) + 1) // 2 else "R"
+    for c in out:
+        c.setdefault("strip", cabinet_strip(c["name"]) if c["role"] == "blade" else "")
+    for role in ("blade", "speaker"):
+        for side in ("", "L", "R"):
+          for strip in ("", "IN", "OUT"):
+            row = sorted((c for c in out if c["role"] == role and c["side"] == side and c["strip"] == strip),
+                         key=lambda c: c["n"])
+            if strip:                                   # PAD-1328: a Spike 3 strip is numbered from the top down
+                row.reverse()
+            for i, c in enumerate(row):
+                c["u"] = int((i + 0.5) * 1000 / len(row))
+                if role == "blade":
+                    c["x"] = CAB_STRIP_X[(side, strip)] if strip else CAB_BLADE_X.get(side, 150)
+                    c["y"] = CAB_BLADE_BOTTOM - round((i + 0.5) * (CAB_BLADE_BOTTOM - CAB_BLADE_TOP) / len(row))
+                else:
+                    cx, cy, r = CAB_RING.get(side, CAB_RING[""])
+                    a = 2 * math.pi * i / len(row)
+                    c["x"], c["y"] = round(cx + r * math.sin(a)), round(cy - r * math.cos(a))
+    return out
+
+
+def cabinet_line(c):
+    """PAD-1040: one port line: `cablamp <lights> <u> <name>  # where it is, on the cabinet drawing`."""
+    where = ("lamp %d, I/O group %d index %d, " % (c["lamp"], c["group"], c["index"])) if c["group"] >= 0 else ""
+    return "cablamp %-12s %-3d %s  # %sat %d,%d, %s" % (
+        ",".join(map(str, c["lights"])), c["u"], c["name"], where, c["x"], c["y"],
+        ("%s %s" % (c["role"], c["side"]) if c["side"] else c["role"]) + (" %s" % c["strip"].lower()
+                                                                           if c.get("strip") else ""))
+
+
+def cabinet_lines(elf, t=None, cab=None):
+    """PAD-1040: the port's `cablamp` lines (none on a title with no expression lights); *cab* a list already read
+    (:func:`cabinet_from_port`)."""
+    cab = cabinet(elf, t) if cab is None else cab
+    if not cab:
+        return []
+    return ["# ---- cabinet: cablamp <light ids R,G,B | one> <u> <name> - the expression lights, read by lamp_map.py ----",
+            "# %d blade pixel(s), %d speaker light(s), placed on the cabinet drawing (PAD-1040)"
+            % (sum(c["role"] == "blade" for c in cab), sum(c["role"] == "speaker" for c in cab))] + \
+        [cabinet_line(c) for c in cab]
+
+
 def lamp_line(ins):
     """One port line: `lamp <lights> <shot mask> <name>  # where it is`."""
     return "lamp %-12s %-14s %s  # lamp %s, I/O group %d index %d, at %d,%d" % (
@@ -459,7 +609,7 @@ def port_lines(elf, image=None):
              % (len(ins), image, t["light_tab"], t["dev_tab"], t["lamp_tab"], t["lamp_count"]),
              "# shot masks: %s" % how]
     lines += [lamp_line(i) for i in ins]
-    return lines
+    return lines + cabinet_lines(elf, t)
 
 
 def parse_lamp(rest):

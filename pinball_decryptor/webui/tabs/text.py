@@ -32,6 +32,7 @@ import threading
 import time
 
 from .. import compat
+from .. import game_filled
 from .. import text_rules as R
 from .base import TabService, rpc
 
@@ -40,7 +41,7 @@ EMPTY_SCANNING = "Scanning for on-screen text…"
 EMPTY_NONE = ("No editable on-screen text found in this folder.\n"
               "Run Extract on a Spike 2 card first — it writes "
               "text/strings.tsv.")
-EMPTY_CANCELLED = "Scan cancelled — click Scan to try again."
+EMPTY_CANCELLED = "Scan canceled — click Scan to try again."
 
 #: Sortable columns: Tk's _text_sort_cfg ids, and whether each starts
 #: descending (Max does).
@@ -162,7 +163,12 @@ class TextTab(TabService):
             self.fonts.close(force=True)
         self._clear_edit_panel()
         self._refresh_list()
-        self.set(scanning=False, empty=EMPTY_NO_FOLDER)
+        # PAD-869: the scene actions only where there is a Scenes tab (not a
+        # DMD game's, whose every line is the game program's)
+        caps = getattr(mfr, "capabilities", None)
+        self.set(scanning=False, empty=EMPTY_NO_FOLDER,
+                 scenes=bool(getattr(caps, "replace_image", False)
+                             and not getattr(caps, "dmd_shades", False)))
         self._mirror_folder()
 
     def on_show(self):
@@ -210,6 +216,15 @@ class TextTab(TabService):
         self._text_scan_dir = ""
         if self._is_visible():
             self._scan_text_strings()
+
+    def forget_reset(self, assets_dir, kinds):
+        """PAD-569 Reset…: the Scenes and Fonts windows show what it resets (their undo
+        history could put it back): they close.  Reset text edits leave no edit here."""
+        self.scenes.close()
+        self.fonts.close(force=True)
+        if "text" in kinds:
+            for r in self._text_rows:
+                r["replacement"] = ""
 
     def refresh_after_revert(self):
         """The revert wiped the manifest: reload it if it had been scanned."""
@@ -291,7 +306,7 @@ class TextTab(TabService):
         self._text_scan_id += 1
         t0, self._scan_t0 = self._scan_t0, None
         if t0 is not None:
-            self.log("Text scan cancelled after %.1f s."
+            self.log("Text scan canceled after %.1f s."
                      % (time.monotonic() - t0), "info")
         self.set(scanning=False, view=[], empty=EMPTY_CANCELLED)
         return True
@@ -353,6 +368,10 @@ class TextTab(TabService):
         self._clear_edit_panel()
         self._refresh_list(rebuild_rows=True)
         self.set(empty=EMPTY_NONE if not rows else "")
+        # PAD-513: the scan may have read the card again (the program's node paths), and the
+        # Scenes tab marks the boxes the game fills from that reading
+        if getattr(self.scenes, "_filled_memo", None) is not None:
+            self.scenes.text_edits_changed()
 
     # ------------------------------------------------------------------
     # the list
@@ -471,6 +490,20 @@ class TextTab(TabService):
         else:
             extra = "  (%d shown)" % shown if shown != total else ""
             status = "%d string(s), %d edited%s" % (total, edited, extra)
+            # A search the Show / Scene filter narrows (a scene picked
+            # earlier is kept per folder) can come up empty while the
+            # line is right there under All: say so, or the words look
+            # missing from the Text tab altogether (PAD-1261).
+            if query and (want_changed is not None or scene is not None):
+                hidden = sum(1 for r in rows
+                             if R.row_matches(r, query, None, None)) - shown
+                if hidden > 0:
+                    held = [n for n, on in (
+                        ("Show: All", want_changed is not None),
+                        ("Scene: All scenes", scene is not None)) if on]
+                    status += "  %d more match%s with %s" % (
+                        hidden, "" if hidden == 1 else "es",
+                        " and ".join(held))
         self.text_status_var.set(status)
         self.set(view=visible, total=total, edited=edited,
                  sort={"col": col, "desc": desc})
@@ -537,14 +570,17 @@ class TextTab(TabService):
         if r is None:
             return False
         self._current = i
-        if R.row_is_scene(r):
+        locked = self._locked(r)
+        if locked:
+            note = game_filled.locked_note(r["original"], self._text_rows)
+        elif R.row_is_scene(r):
             note = R.scene_note(r, self._scene_name(r["path"]))
         else:
             note = R.program_note(r)
         # Pre-fill with the current effective text so the user edits from
         # what's shown today.
         self.set(sel=i, orig=r["original"], scene_note=note, can_edit=True,
-                 sel_edited=R.is_edited(r))
+                 sel_edited=R.is_edited(r), locked=locked)
         self.text_new_var.set(r["replacement"] or r["original"])
         self._update_budget()
         return True
@@ -554,7 +590,7 @@ class TextTab(TabService):
         self.text_new_var.set("")
         self.text_budget_var.set("")
         self.set(sel=None, orig="", scene_note="", can_edit=False,
-                 budget_over=False, sel_edited=False)
+                 budget_over=False, sel_edited=False, locked=False)
 
     def _update_budget(self):
         i, r = self._row(self._current)
@@ -576,18 +612,33 @@ class TextTab(TabService):
             return False
         orig = r["original"]
         new = self.text_new_var.get()
+        if new != orig and self._locked(r):
+            compat.messagebox.showinfo("The game writes this line",
+                                       game_filled.locked_note(orig, self._text_rows))
+            return False
         if R.row_len(r, new) > R.row_budget(r):
             compat.messagebox.showwarning("Replacement too long",
                                           R.too_long_message(r, new))
             return False
+        why = R.fill_in_message(r, new)
+        if why:
+            compat.messagebox.showwarning("Keep the game's fill-ins", why)
+            return False
         eff = "" if new == orig else new
         if self._apply_all(r):
+            # a scene line the game writes itself keeps its words (PAD-513)
             targets = [rr for rr in self._text_rows
-                       if rr["original"] == orig and not R.row_part(rr)]
+                       if rr["original"] == orig and not R.row_part(rr)
+                       and (rr is r or not eff or not self._locked(rr))]
         else:
             targets = [r]
         self._set_replacements([(rr, eff) for rr in targets])
         return True
+
+    def _locked(self, r):
+        """PAD-513 (DragonRR): a scene line every box of which the game writes as it plays
+        (:mod:`..game_filled`): new words for it would never show, so they are refused."""
+        return game_filled.is_locked(self._text_scan_dir or self._assets_path(), r)
 
     def _apply_all(self, r):
         """Does an edit of row *r* go to every row with its original? Never
@@ -845,11 +896,17 @@ class TextTab(TabService):
 
     MAX_LISTED = 200
 
+    def _replace_plan(self, find, repl, case):
+        """Replace everywhere's plan without the scene lines the game writes itself (PAD-513),
+        and how many those were."""
+        plan = R.replace_plan(self._text_rows, find or "", repl or "", bool(case))
+        keep = [p for p in plan if p["new"] == p["row"]["original"] or not self._locked(p["row"])]
+        return keep, len(plan) - len(keep)
+
     @rpc
     def replace_plan(self, find, repl, case=True):
         """The dialog's live readout: count line, Apply enable, misfits."""
-        plan = R.replace_plan(self._text_rows, find or "", repl or "",
-                              bool(case))
+        plan, locked = self._replace_plan(find, repl, case)
         fits = [p for p in plan if p["fits"]]
         n, m = len(fits), len(plan)
         already = sum(1 for p in fits
@@ -865,6 +922,9 @@ class TextTab(TabService):
             if already:
                 text += " (%d already edited: their edit is replaced)" \
                         % already
+            if locked:
+                text += "; %d line(s) the game writes itself are left as they are" \
+                        % locked
         misfits = [p for p in plan if not p["fits"]]
         rows = [{"o": p["row"]["original"], "n": p["new"],
                  "b": R.row_len(p["row"], p["new"]),
@@ -878,8 +938,7 @@ class TextTab(TabService):
     def replace_apply(self, find, repl, case=True):
         """Apply: land every fitting row through the per-row path, then name
         the skipped rows.  Returns ``{applied, skipped}`` or None."""
-        plan = R.replace_plan(self._text_rows, find or "", repl or "",
-                              bool(case))
+        plan, _locked = self._replace_plan(find, repl, case)
         fits = [p for p in plan if p["fits"]]
         if not fits:
             return None
@@ -1320,6 +1379,10 @@ class TextTab(TabService):
         if not rows:
             return None
         new = original if new is None else new
+        if new != original and self._locked(rows[0]):
+            compat.messagebox.showinfo("The game writes this line",
+                                       game_filled.locked_note(original, self._text_rows))
+            return False
         if R.row_len(rows[0], new) > R.row_budget(rows[0]):
             compat.messagebox.showwarning("Replacement too long",
                                           R.too_long_message(rows[0], new))

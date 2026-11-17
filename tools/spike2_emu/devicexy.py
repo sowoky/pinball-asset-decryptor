@@ -97,6 +97,16 @@ NAME_OFF = 0x24 - STRIDE
 #: title, which is what the comment here used to claim - see layout_image().
 PLAYFIELD_IMAGE = "playfield"
 
+#: ★ IMAGE NAMES THAT ARE ONE BARE WORD, no folder. Every other image name is a
+#: path, which is what makes "/" the test; these two are the only bare words
+#: the library's device tables point at (PAD-705, 2026-10-24, all 60 newest
+#: cards). `backpanel` is the cabinet's back panel, on 16 builds: Avengers,
+#: Deadpool, Iron Maiden, Bond, Jaws, John Wick, Jurassic Park, Stranger Things
+#: and X-Men put their backpanel lamps on it, and Iron Maiden and Star Wars LE
+#: and Stranger Things LE some switches and coils too. Refused as "no slash",
+#: those devices were missing from every table this file feeds.
+BARE_IMAGES = (PLAYFIELD_IMAGE, "backpanel")
+
 #: ★ ARTWORK-LESS BUILDS SHIP THE SAME TABLE WITH THE DRAWING LEFT OUT, and
 #: until 2026-08-28 this file could not see one at all. led_zeppelin_le 1.22.0
 #: carries all 388 records - class, (group, index) and NAME, every field this
@@ -135,6 +145,11 @@ BLANK_IMAGE = ""
 #: The longest in the library is 41 characters (`part:112-5034-08F 520-7000-00
 #: (Bot.Arch)`); this only bounds the NUL search, it is not a limit to tune.
 TEXT_MAX = 200
+
+#: The same bound for an UNPLACED lamp (_one, PAD-517), whose part text is a
+#: list of rects: Bond's SPEAKER 23-B points at 216 characters. Kept apart so
+#: an artwork-less table reads exactly what it did.
+UNPLACED_TEXT_MAX = 1000
 
 #: How many times a word must appear before it is taken for a candidate shared
 #: empty string. The pointer is repeated once per record and once more per
@@ -215,7 +230,8 @@ def layout_image(recs):
         # shares. Counted as one it would win this vote outright on an
         # artwork-less title - every record carries it - and hand the playfield
         # renderer 388 markers stacked on (0, 0).
-        if r["image"] == BLANK_IMAGE:
+        # An unplaced lamp (PAD-517) names a picture it is not drawn on.
+        if r["image"] == BLANK_IMAGE or _unplaced(r):
             continue
         per.setdefault(r["image"], []).append(r)
     if not per:
@@ -267,6 +283,44 @@ def load(path=None):
     return d, cstr
 
 
+#: Typographic characters a device NAME may carry, and the plain text each is
+#: written as - see _name().
+_NAME_ASCII = {"\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+               "\u201c": '"', "\u201d": '"', "\u2013": "-", "\u2014": "-",
+               "\u2026": "...", "\u00a0": " "}
+
+
+def _name(d, cstr, va):
+    """The device NAME at `va`, in plain ASCII, or None.
+
+    ★ STERN TYPES SOME NAMES WITH CURLY QUOTES (PAD-703, 2026-10-24).
+    stranger_things_le 1.13.0 calls the centre-column insert at 6:36 `TRAP
+    ‘EM` and the left one at 7:48 `WHERE’S BARB?`, in UTF-8. cstr() is ASCII
+    only - right for an image path or a connector, which are never typed like
+    that - so both records failed, and the two inserts were empty holes on the
+    virtual playfield while every lamp round them lit. Each such name is mapped
+    to the plain character a reader would type (`TRAP 'EM`), because the name
+    is written into device_xy.txt, which the Windows side reads in its own
+    codepage, and is matched by people typing it. Anything else non-ASCII, or
+    any control character, still refuses the record, as it always did.
+    """
+    t = cstr(va)
+    if t is not None:
+        return t
+    o = va - VA_BIAS
+    if o < 0 or o >= len(d):
+        return None
+    e = d.find(b"\0", o, o + 71)
+    if e <= o:
+        return None
+    try:
+        t = d[o:e].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    t = "".join(_NAME_ASCII.get(c, c) for c in t)
+    return t if all(32 <= ord(c) < 127 for c in t) else None
+
+
 def blank_str(d, va):
     """True if `va` points at an EMPTY C string inside this binary.
 
@@ -278,7 +332,7 @@ def blank_str(d, va):
     return 0 <= o < len(d) and d[o] == 0
 
 
-def _text_ptr(d, va):
+def _text_ptr(d, va, limit=TEXT_MAX):
     """True if `va` is null or points at a NUL-terminated run of TEXT.
 
     What an artwork-less record's connector and part fields hold (BLANK_IMAGE).
@@ -294,7 +348,7 @@ def _text_ptr(d, va):
     o = va - VA_BIAS
     if o < 0 or o >= len(d):
         return False
-    e = d.find(b"\0", o, o + TEXT_MAX + 1)
+    e = d.find(b"\0", o, o + limit + 1)
     if e < 0:
         return False
     return all(32 <= c < 127 or c in (9, 10, 13) for c in d[o:e])
@@ -327,9 +381,9 @@ def _one(d, cstr, va):
         if not blank_str(d, imgva):
             return None
         img, blank = BLANK_IMAGE, True
-    elif "/" not in img and img != PLAYFIELD_IMAGE:
+    elif "/" not in img and img not in BARE_IMAGES:
         return None
-    name = cstr(struct.unpack_from("<I", d, o + NAME_OFF)[0])
+    name = _name(d, cstr, struct.unpack_from("<I", d, o + NAME_OFF)[0])
     if not name:
         return None
     x, y = struct.unpack_from("<hh", d, o + 0x10)
@@ -337,11 +391,28 @@ def _one(d, cstr, va):
     conn = struct.unpack_from("<I", d, o + 0x18)[0]
     part = struct.unpack_from("<I", d, o + 0x1C)[0]
     cls = struct.unpack_from("<h", d, o + 0x08)[0]
-    if blank:
+    # ★ A NAMED IMAGE WITH NO RECT IS AN UNPLACED RECORD (PAD-517). Godzilla,
+    # Bond, Jaws, John Wick and D&D point their backbox speaker lights, SPEAKER
+    # 1-R .. 23-B on node 7, at `System/TestMode/spike_2_speaker_panel_cropped`
+    # and leave x, y, w, h zero: the places are in the part text instead
+    # (`rect:320,126,30,30,56,126,30,30#part:511-1135-00`, both rings). The
+    # size test below refused all 69, so those titles had no speaker lights at
+    # all while the artwork-less ones (Venom, Rush) did. Taken on the blank
+    # variant's tighter terms, never as a position, and for LAMPS only: the
+    # same shape also carries Bond's cabinet switches and coils, and a new
+    # switch row moves every swelf id after it. One on the layout picture
+    # itself is dropped by records() (a marker at 0, 0 on the artwork).
+    unplaced = not blank and not (x or y or w or h)
+    if unplaced and cls != 3:
+        return None
+    if blank or unplaced:
         if x or y or w or h or cls not in (1, 2, 3):
             return None
-        # Null, or text - see BLANK_IMAGE for the title that needed this.
-        if not (_text_ptr(d, conn) and _text_ptr(d, part)):
+        # Null, or text - see BLANK_IMAGE for the title that needed this. An
+        # unplaced lamp's part text lists its rects, and Bond's SPEAKER 23-B
+        # runs to 216 characters.
+        limit = UNPLACED_TEXT_MAX if unplaced else TEXT_MAX
+        if not (_text_ptr(d, conn, limit) and _text_ptr(d, part, limit)):
             return None
     elif not (0 <= x <= 4000 and 0 <= y <= 4000
               and 0 < w <= 200 and 0 < h <= 200):
@@ -405,7 +476,7 @@ def seeds(d):
     string) because this runs over every printable run in an 8 MB binary.
     """
     want = blank_seeds(d)
-    pf = PLAYFIELD_IMAGE.encode()
+    bare = [w.encode() for w in BARE_IMAGES]
     for m in _STRINGS.finditer(d):
         s, base = m.group(1), m.start(1) + VA_BIAS
         # Every suffix that still holds the LAST "/" passes "/ in s", so each
@@ -414,10 +485,12 @@ def seeds(d):
         cut = s.rfind(b"/")
         for i in range(cut + 1):
             want.add(base + i)
-        # ...and a tail that is exactly the bare playfield name passes too.
-        # This is the godzilla_le case, where the tail starts AFTER the slash.
-        if s.endswith(pf) and len(s) - len(pf) > cut:
-            want.add(base + len(s) - len(pf))
+        # ...and a tail that is exactly a bare image name passes too. This is
+        # the godzilla_le case, where the tail starts AFTER the slash; a
+        # whole string that is one (cut == -1) is the tail at 0.
+        for w in bare:
+            if s.endswith(w) and len(s) - len(w) > cut:
+                want.add(base + len(s) - len(w))
     if not want:
         return []
     out = []
@@ -489,8 +562,61 @@ def records(d, cstr):
             seen.add(cur)
             cur += STRIDE
         if len(run) >= 4:                 # a lone match is noise, a run is a table
-            out.extend(run)
-    return out
+            out.extend(_old_runs(run))
+    # An unplaced lamp (_one, PAD-517) on the title's own layout picture would
+    # be a marker at 0, 0 on the artwork: D&D's LEFT/RIGHT GI on its Rope
+    # drawing. The layout is the placed records' vote, so these cannot move it.
+    lay = layout_image(out)
+    return [_moved(r) for r in out
+            if not (_unplaced(r) and r["image"] == lay)]
+
+
+#: ★ PLACES STERN GOT WRONG ON ITS OWN DRAWING (PAD-703, 2026-10-24), as
+#: (image, name, group, index, x, y) -> the insert's real centre. Stranger
+#: Things 1.13.0, Pro and LE, puts RIGHT RAMP MODE START 2 11 px below its
+#: insert, half on the one under it, and DEMODO(G) 10 px right of its small
+#: insert, on the DEMODOG target; both inserts stayed dark on the virtual
+#: playfield. The centres are measured off the card's playfield drawing,
+#: where the same measure puts every lamp round them within a pixel of its
+#: table place. Keyed on the wrong place itself, so a build that corrects it,
+#: or any other title, is never touched.
+MOVED = {
+    ("playfield", "RIGHT RAMP MODE START 2", 6, 31, 225, 369): (225, 360),
+    ("playfield", "DEMODO(G)", 6, 21, 250, 399): (241, 399),
+}
+
+
+def _moved(r):
+    """`r` at the place MOVED says its insert really is, else as read."""
+    to = MOVED.get((r["image"], r["name"], r["group"], r["index"],
+                    r["x"], r["y"]))
+    if to:
+        r = dict(r, x=to[0], y=to[1])
+    return r
+
+
+def _unplaced(r):
+    """A record naming an image but no rect on it (_one, PAD-517)."""
+    return r["image"] != BLANK_IMAGE and not (r["x"] or r["y"] or r["w"] or r["h"])
+
+
+def _old_runs(run):
+    """`run` with every other record judged as it was before unplaced lamps
+    were read: a stretch of them between two unplaced lamps is kept only if it
+    is a run of four on its own. Star Wars ELG's unplaced lamps join two short
+    stretches into one long run, which would have read a blank switch the
+    title never had - and a new switch row moves every swelf id after it."""
+    out, part = [], []
+    for r in run + [None]:
+        if r is None or _unplaced(r):
+            if len(part) >= 4:
+                out.extend(part)
+            part = []
+            if r is not None:
+                out.append(r)
+        else:
+            part.append(r)
+    return sorted(out, key=lambda r: r["va"])
 
 
 def build(game=None, elf_path=None):
@@ -597,7 +723,7 @@ def counts(keep):
 #: refuses a table recording another revision, or none, which re-derives it
 #: once through the same path a new build takes. BUMP THIS whenever a change to
 #: devicexy or swelf would alter a cached table for an unchanged binary.
-READER_REV = 2
+READER_REV = 5                  # 3: unplaced records (PAD-517); 4: curly-quote names, MOVED (PAD-703); 5: backpanel image (PAD-705)
 READER_TAG = "# reader: "
 
 

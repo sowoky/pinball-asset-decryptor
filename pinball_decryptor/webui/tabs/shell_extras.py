@@ -8,13 +8,16 @@ What the Tk ``MainWindow`` kept around the notebook, on the page:
 * the voice recognition quality (``voice_quality`` + ``voice_choices``), which
   the Extract tab shows beside Auto-name call-outs (PAD-460);
 * the green ? "Tips for this tab" window (``webui/help_content.py``);
+* the Report a problem window (``shellx_report.py``, PAD-780);
 * the Project menu's windows (``shellx_projects.py``) and Manage disk space
-  (``shellx_disk.py``);
+  (``shellx_disk.py``), and the top bar's Reset... (``shellx_reset.py``, PAD-569);
 * updates: the blue banner, the "Up to date" answer, the download progress
   window (``show_update_banner`` & co, which the run logic calls);
 * the amber "source image changed" banner on the asset-editing tabs;
 * the log drawer's extras (previous sessions above a cut line, Save As, the
-  on-disk logs), the picker's cards and the prerequisites strip's facts.
+  on-disk logs), the picker's cards and the prerequisites strip's facts;
+* My machines on the picker's home (``shellx_machines.py``, PAD-783);
+* the Getting started page (``shellx_getting_started.py``, PAD-813).
 
 The page half is ``static/js/shell.js`` (menus, strip, picker, log drawer)
 and ``static/js/shellx_dialogs.js`` (the windows).
@@ -31,9 +34,21 @@ from ...core import session_log
 from .. import compat
 from ..picker_data import MFR_VISUALS, peek_text, tooltip_text
 from ..shellx_disk import DiskMixin
+from ..shellx_machines import MachinesMixin
+from ..shellx_donations import DonationsMixin
+from ..shellx_getting_started import GettingStartedMixin
 from ..shellx_projects import ProjectsMixin
+from ..shellx_report import ReportMixin
+from ..shellx_reset import ResetMixin
+from ..shellx_team import TeamMixin
 from ..update_interval import (UPDATE_INTERVAL_CHOICES,
                                normalize_update_interval)
+from ...core.updater import (AUTO_DOWNLOAD_DEFAULT, AUTO_DOWNLOAD_KEY,
+                              AUTO_DOWNLOAD_TIP)
+from ...core.old_versions import (OLD_VERSIONS_CHOICES, OLD_VERSIONS_TIP,
+                                  normalize_old_versions, running_appimage)
+from ..autosave_interval import (AUTOSAVE_INTERVAL_CHOICES, AUTOSAVE_TIP,
+                                 normalize_autosave_interval)
 from .base import TabService, rpc
 
 log = logging.getLogger(__name__)
@@ -53,6 +68,32 @@ ASSET_TAB_KEYS = ("Write", "Replace Audio", "Replace Video",
 
 #: previous-session lines seeded above the log's cut line (Tk LOG_SEED_LINES)
 LOG_SEED_LINES = 600
+
+#: the PAD Discord server (PAD-815): the top bar's Discord button and
+#: Settings > Join our Discord open it.  A permanent invite (never expires,
+#: no use limit) into #read-me-first, made by the PAD bot.
+DISCORD_URL = "https://discord.gg/343hTHykka"
+
+#: ⚙ → Let AI agents control PAD (PAD-844)
+AGENT_ACCESS_TIP = (
+    "Lets an AI agent on this PC (one that supports MCP servers, such as "
+    "Claude or Cursor) use PAD for you while PAD is open: find and change "
+    "pictures, sounds, videos, text and scenes, and run builds "
+    "through the same checks as clicking. Off by default; only programs "
+    "running as you on this PC can reach it.")
+
+
+def not_elevated_on_windows():
+    """True when this is Windows and the app runs WITHOUT Administrator rights (PAD-1336).
+
+    The shipped build starts elevated through launcher.vbs; a shortcut or a run that skips it
+    starts plain, and card writes, USB passthrough and some WSL work then fail or ask for UAC
+    one by one.  The top bar names it.  Never on Linux or a Mac, where nothing asks for root up
+    front."""
+    if sys.platform != "win32":
+        return False
+    from ...core.admin import is_admin
+    return not is_admin()
 
 
 def update_action_verb(installer):
@@ -75,18 +116,22 @@ def _visuals():
     return dict(MFR_VISUALS)
 
 
-class ShellExtras(ProjectsMixin, DiskMixin, TabService):
+class ShellExtras(ProjectsMixin, MachinesMixin, DiskMixin, ResetMixin, TeamMixin,
+                  DonationsMixin, ReportMixin, GettingStartedMixin, TabService):
     ns = "shellx"
     key = ""
     label = ""
     group = ""
     icon = ""
     exports = (
-        "voice_quality_var", "update_interval_var", "show_log_history_var",
-        "scenes_own_colours_var",
+        "voice_quality_var", "update_interval_var", "autosave_interval_var",
+        "old_versions_var", "update_auto_download_var",
+        "show_log_history_var",
+        "scenes_own_colours_var", "agent_access_var",
         "set_update_check_running", "show_update_banner",
         "show_up_to_date_toast", "open_update_download_dialog",
         "apply_preview_features",
+        "note_card_written",
     )
 
     def __init__(self, window):
@@ -99,6 +144,17 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
         self.update_interval_var = self.var(
             "update_interval", "int",
             normalize_update_interval(cb.get("initial_update_interval")))
+        self.old_versions_var = self.var(
+            "old_versions", "int",
+            normalize_old_versions(cb.get("initial_old_versions")))
+        # PAD-1024: fetch a found update while the user works
+        self.update_auto_download_var = self.var(
+            "update_auto_download", "bool",
+            bool(cb.get("initial_update_auto_download",
+                        AUTO_DOWNLOAD_DEFAULT)))
+        self.autosave_interval_var = self.var(
+            "autosave_interval", "int",
+            normalize_autosave_interval(cb.get("initial_autosave_interval")))
         self.show_log_history_var = self.var(
             "show_log_history", "bool",
             bool(cb.get("initial_show_log_history", True)))
@@ -107,8 +163,14 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
         self.scenes_own_colours_var = self.var(
             "scenes_own_colours", "bool",
             bool(cb.get("initial_scenes_own_colours", False)))
+        # PAD-844: an AI agent may drive the app through its MCP server
+        self.agent_access_var = self.var(
+            "agent_access", "bool",
+            bool(cb.get("initial_agent_access", False)))
         self._update_check_busy = False
         self._update_available = None       # (version, url, installer|None)
+        self._update_stage = None           # None | "downloading" | "ready"
+        self._update_pct = None
         self._update_banner_url = None
         self._update_banner_dismissed = None
         self._update_banner_shown = False
@@ -120,6 +182,10 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
         self._log_seeded = False
         self._projects_init()
         self._disk_init()
+        self._reset_init()
+        self._team_init()
+        self._machines_init()
+        self._gs_init()
         self.set(update_state="", download=None, log_seed=None,
                  disk_badge="", picker=self._picker_cards(),
                  prereq_hints={}, platform=sys.platform,
@@ -135,11 +201,19 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
         # both, back when nothing on a Mac was probed for real; now a Mac's
         # host tools are (Barrels of Fun's gpg, PAD-220) and Install Missing
         # installs them with Homebrew or MacPorts (core.mac_install).
-        self.ctx.store.set("shell", prereq_buttons=True, help_items=[])
+        self.ctx.store.set("shell", prereq_buttons=True, help_items=[],
+                           not_admin=not_elevated_on_windows())
         self.publish_settings_items()
+        # PAD-754: the paw chip's total, from the cache at once and the
+        # service in the background
+        self._donations_init()
+        # PAD-780: the Report a problem window's memory and state
+        self._report_init()
         if sys.platform == "win32":
             try:
-                self.ctx.loop.after(1500, self.start_disk_badge_check)
+                # the badge, after the automatic clean-up's first look
+                # (PAD-613), which re-arms itself every half hour
+                self.ctx.loop.after(1500, self._keeper_tick)
             except Exception:                           # noqa: BLE001
                 pass
 
@@ -157,6 +231,8 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
             action)
         handlers["stale_source"] = (
             lambda _win, action: self._stale_banner_action(action))
+        handlers["report_answer"] = (
+            lambda _win, action: self._report_banner_action(action))
         win.banner_handlers = handlers
 
     def _settings_action_table(self):
@@ -165,19 +241,28 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
             "download_update": self._open_update_url,
             "check_updates": self._handle_check_updates,
             "update_interval": self._pick_update_interval,
+            "old_versions": self._pick_old_versions,
+            "toggle_update_auto_download": self._toggle_update_auto_download,
+            "autosave_interval": self._pick_autosave_interval,
             "disk_space": lambda: self._open_dialog("disk_space"),
             "log_history": self._open_log_history,
             "open_log_file": self._open_log_history,
             "project_log": self._open_project_log,
             "toggle_log_history": self._toggle_log_history,
             "toggle_scenes_own_colours": self._toggle_scenes_own_colours,
+            "toggle_agent_access": self._toggle_agent_access,
+            "agent_setup": self._show_agent_setup,
             "voice_quality": self._pick_voice_quality,
             "clear_voice_models": self._clear_voice_models,
             "recheck_prereqs": self._recheck_prereqs,
             "install_prereqs": self.install_prereqs,
             "preview_features": lambda: self._open_dialog("preview_features"),
+            "donations": lambda: self._open_dialog("donations"),
+            "discord": self.open_discord,
+            "report_problem": lambda: self._open_dialog("report"),
             "view_disclaimer": lambda: self._open_dialog("disclaimer"),
             "tips": lambda: self._open_dialog("tips"),
+            "getting_started": self.getting_started_open,
             "change_history": self.change_history,
         }
 
@@ -277,14 +362,26 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
     # the gear menu
     # ------------------------------------------------------------------
     def publish_settings_items(self):
-        """The gear menu, in Tk's order and with Tk's cascades
-        (_build_settings_menu): an item with ``submenu`` is a cascade.  The
-        page puts its own Appearance and Zoom cascades after the leading
-        update entry, where Tk had the theme toggle."""
+        """The gear menu: an item with ``submenu`` is a cascade.  The page
+        puts its own Appearance, Language and Zoom cascades after the
+        leading update entry.  Grouped and re-ordered in PAD-844 (it had
+        grown a row at a time from Tk's)."""
         items = []
         if self._update_available:
             version, _url, installer = self._update_available
-            if installer and self.window.cb.get("on_install_update"):
+            if self._update_stage == "downloading":
+                items.append({"id": "install_update", "dot": True,
+                              "disabled": True,
+                              "label": "Downloading update v%s…%s" % (
+                                  version, self._pct_text())})
+            elif self._update_stage == "installing":
+                items.append({"id": "install_update", "dot": True,
+                              "disabled": True,
+                              "label": "Installing update v%s…" % version})
+            elif self._update_stage == "ready":
+                items.append({"id": "install_update", "dot": True,
+                              "label": "Restart to update to v%s" % version})
+            elif installer and self.window.cb.get("on_install_update"):
                 items.append({"id": "install_update", "dot": True,
                               "label": "%s v%s…" % (
                                   update_action_verb(installer), version)})
@@ -292,45 +389,64 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
                 items.append({"id": "download_update", "dot": True,
                               "label": "Download update v%s…" % version})
             items.append({"sep": True})
-        items.append({"id": "check_updates",
-                      "label": ("Checking for updates…"
-                                if self._update_check_busy
-                                else "Check for updates"),
-                      "disabled": self._update_check_busy})
+        # PAD-844: one rule for the whole menu - the top level only opens
+        # things (a window, or a submenu ▸); every choice and on/off switch
+        # sits in a submenu, where the check column lines its rows up.
+        # Groups: how the app looks (the page's Appearance / Language / Zoom,
+        # above these), how it runs, upkeep, then help and the rest.
         cur = self._int(self.update_interval_var.get())
-        items.append({"label": "Check automatically", "submenu": [
+        updates = [
+            {"id": "check_updates",
+             "label": ("Checking for updates…" if self._update_check_busy
+                       else "Check for updates now"),
+             "disabled": self._update_check_busy},
+            {"header": "Check automatically"}] + [
             {"id": "update_interval", "args": [hours], "label": label,
              "checked": cur == hours, "radio": True}
-            for hours, label in UPDATE_INTERVAL_CHOICES]})
+            for hours, label in UPDATE_INTERVAL_CHOICES]
+        updates += [{"sep": True},
+                    {"id": "toggle_update_auto_download",
+                     "label": "Download and install updates in the "
+                              "background",
+                     "checked": bool(self.update_auto_download_var.get()),
+                     "title": AUTO_DOWNLOAD_TIP}]
+        if running_appimage():
+            # PAD-937: only an AppImage keeps its old versions (Windows and
+            # macOS install over the top), so only an AppImage asks
+            keep = normalize_old_versions(self.old_versions_var.get())
+            updates += [{"header": "Old versions"}] + [
+                {"id": "old_versions", "args": [k], "label": label,
+                 "checked": keep == k, "radio": True,
+                 "title": OLD_VERSIONS_TIP}
+                for k, label in OLD_VERSIONS_CHOICES]
+        items.append({"label": "Updates", "submenu": updates})
+        cur = self._int(self.autosave_interval_var.get())
+        items.append({"label": "Save automatically", "submenu": [
+            {"id": "autosave_interval", "args": [minutes], "label": label,
+             "checked": cur == minutes, "radio": True, "title": AUTOSAVE_TIP}
+            for minutes, label in AUTOSAVE_INTERVAL_CHOICES]})
+        items.append({"label": "Logs", "submenu": [
+            {"id": "log_history", "label": "View log history…"},
+            {"id": "project_log", "label": "View this project's log…"},
+            {"sep": True},
+            {"id": "toggle_log_history",
+             "label": "Show previous sessions in the log",
+             "checked": bool(self.show_log_history_var.get())}]})
+        items.append({"label": "AI agents", "submenu": [
+            {"id": "toggle_agent_access",
+             "label": "Let AI agents control PAD",
+             "checked": bool(self.agent_access_var.get()),
+             "title": AGENT_ACCESS_TIP},
+            {"id": "agent_setup", "label": "Connect an agent…",
+             "disabled": not self.agent_access_var.get(),
+             "title": "The lines to add to an AI agent's MCP servers."}]})
+        items.append({"sep": True})
         if sys.platform == "win32":
             label = "Manage disk space…"
             if self.disk_badge_suffix:
                 label += "   %s" % self.disk_badge_suffix
             items.append({"id": "disk_space", "label": label,
                           "warn": bool(self.disk_badge_suffix)})
-        items.append({"label": "Logs", "submenu": [
-            {"id": "log_history", "label": "View log history…"},
-            {"id": "project_log", "label": "View this project's log…"},
-            {"id": "toggle_log_history",
-             "label": "Show previous sessions in the log",
-             "checked": bool(self.show_log_history_var.get())}]})
-        items.append({"id": "toggle_scenes_own_colours",
-                      "label": "Files with no color profile attached skip the Machine screen",
-                      "checked": bool(self.scenes_own_colours_var.get()),
-                      "title": ("With the Machine screen ticked under Preview "
-                                "colors, in Scenes and on the Video tab's players, a "
-                                "file with no color profile attached (red palette) "
-                                "shows as you made it instead of through the machine's "
-                                "screen (the whole screen overlay still applies). Off "
-                                "(the default) draws every file through the screen, "
-                                "an added test card too.")})
-        items.append({"sep": True})
-        # the quality itself is picked beside Auto-name call-outs on the
-        # Extract tab (PAD-460); clearing the downloads stays a setting
-        items.append({"id": "clear_voice_models",
-                      "label": "Clear downloaded voice models…",
-                      "needs_idle": True})
-        items.append({"sep": True})
         # the cascade's LABEL is the live prerequisite summary, so the state
         # shows without opening it (the page counts shell.prereqs, which
         # the probes fill in)
@@ -343,9 +459,21 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
                            "label_missing": "Install missing prerequisites…"})
         items.append({"label": "Prerequisites", "prereq_summary": True,
                       "submenu": prereq})
+        # the quality itself is picked beside Auto-name call-outs on the
+        # Extract tab (PAD-460); clearing the downloads stays a setting
+        items.append({"id": "clear_voice_models",
+                      "label": "Clear downloaded voice models…",
+                      "needs_idle": True})
         items.append({"sep": True})
-        items.append({"id": "preview_features",
-                      "label": "Preview features…"})
+        from ...core import preview
+        if preview.FEATURES:
+            # only while a version has a preview to unlock (none since PAD-763)
+            items.append({"id": "preview_features",
+                          "label": "Preview features…"})
+        items.append({"id": "getting_started", "label": "Getting started…"})
+        items.append({"id": "discord", "label": "Join our Discord"})
+        items.append({"id": "donations", "label": "Animal shelters…"})
+        items.append({"id": "report_problem", "label": "Report a problem…"})
         items.append({"id": "view_disclaimer", "label": "View disclaimer…"})
         self.ctx.store.set("shell", settings_items=items,
                            gear_dots={"update": bool(self._update_available),
@@ -364,6 +492,34 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
         fn = self.window.cb.get("on_update_interval_change")
         if fn is not None:
             fn(self.update_interval_var.get())
+        self.publish_settings_items()
+        return True
+
+    def _toggle_update_auto_download(self):
+        """⚙ Updates > Download updates in the background (PAD-1024)."""
+        on = not bool(self.update_auto_download_var.get())
+        self.update_auto_download_var.set(on)
+        fn = self.window.cb.get("on_update_auto_download_change")
+        if fn is not None:
+            fn(on)
+        self.publish_settings_items()
+        return True
+
+    def _pick_old_versions(self, keep):
+        keep = normalize_old_versions(keep)
+        self.old_versions_var.set(keep)
+        fn = self.window.cb.get("on_old_versions_change")
+        if fn is not None:
+            fn(self.old_versions_var.get())
+        self.publish_settings_items()
+        return True
+
+    def _pick_autosave_interval(self, minutes):
+        minutes = normalize_autosave_interval(minutes)
+        self.autosave_interval_var.set(minutes)
+        fn = self.window.cb.get("on_autosave_interval_change")
+        if fn is not None:
+            fn(self.autosave_interval_var.get())
         self.publish_settings_items()
         return True
 
@@ -484,6 +640,40 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
                    "────────────" % LOG_SEED_LINES)
         self.set(log_seed={"lines": lines, "cut": cut})
 
+    def _toggle_agent_access(self):
+        """⚙ → Let AI agents control PAD (PAD-844): publish or take away the
+        link an MCP server reaches the app by, and say how to use it."""
+        from .. import agent_link
+        on = not bool(self.agent_access_var.get())
+        self.agent_access_var.set(on)
+        fn = self.window.cb.get("on_agent_access_change")
+        if fn is not None:
+            fn(on)
+        self.publish_settings_items()
+        path = agent_link.set_enabled(self.ctx, on, __version__)
+        if not on:
+            self.log("AI agents can no longer control PAD.", "info")
+            return True
+        if path is None:
+            self.log("AI agents: the link file could not be written; see "
+                     "the log history.", "warning")
+            return True
+        self.log("AI agents can control PAD while it is open (link: %s)."
+                 % path, "info")
+        return self._show_agent_setup()
+
+    def _show_agent_setup(self):
+        """⚙ → AI agents → Connect an agent…: the MCP server lines to paste."""
+        from .. import agent_link
+        compat.messagebox.showinfo(
+            "Let AI agents control PAD",
+            "An AI agent that supports MCP (Claude Desktop, Claude Code, "
+            "Cursor, VS Code and others) can now use PAD while it is open: "
+            "every button and field, through the same checks as a click. "
+            "Add this to the agent's MCP servers:",
+            detail=agent_link.mcp_config_snippet())
+        return True
+
     def _toggle_scenes_own_colours(self):
         on = not bool(self.scenes_own_colours_var.get())
         self.scenes_own_colours_var.set(on)
@@ -550,40 +740,122 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
         compat.messagebox.showinfo(
             "Up to date", f"You're on the latest version (v{__version__}).")
 
-    def show_update_banner(self, version, url, installer=None):
+    def _pct_text(self):
+        return (" %d%%" % self._update_pct
+                if self._update_pct is not None else "")
+
+    def show_update_banner(self, version, url, installer=None, stage=None,
+                           pct=None, pending=None):
         """MainWindow.show_update_banner: the blue banner, the gear's dot and
         its menu entry.  A version already dismissed this session does not
-        re-open the banner; a newer one does."""
+        re-open the banner; a newer one does.
+
+        ``stage`` (PAD-1024) is where the background update is: ``None``
+        when there is none (the update waits for Install update),
+        ``"downloading"`` with its ``pct`` while it runs, ``"installing"``
+        while the new version is installed beside this one, and ``"ready"``
+        once it is all done, when the one button left is Restart to
+        update.
+
+        ``pending`` is a restart the user already asked for, waiting on a
+        newer release (``{"version", "publishing"}``): the banner says PAD
+        restarts by itself and offers Don't restart."""
         self._update_banner_url = url
         muted = (version == self._update_banner_dismissed
                  and not self._update_banner_shown)
         can_auto = bool(installer and self.window.cb.get("on_install_update"))
+        if not can_auto:
+            stage = None
+        self._update_stage = stage
+        self._update_pct = (pct if stage in ("downloading", "installing")
+                            else None)
         self._update_available = (version, url,
                                   installer if can_auto else None)
         verb = update_action_verb(installer) if can_auto else ""
+        if stage == "downloading":
+            label = "Downloading v%s…%s" % (version, self._pct_text())
+            tip = ("Pinball Asset Decryptor v%s is downloading in the "
+                   "background — you're on v%s." % (version, __version__))
+        elif stage == "installing":
+            label = "Installing v%s…%s" % (version, self._pct_text())
+            tip = ("Pinball Asset Decryptor v%s is installing in the "
+                   "background — you're on v%s." % (version, __version__))
+        elif stage == "ready":
+            label = "Restart to update"
+            tip = ("Pinball Asset Decryptor v%s is downloaded — restart to "
+                   "update from v%s." % (version, __version__))
+        else:
+            label = (("%s v%s" % (verb, version)) if can_auto
+                     else "v%s available" % version)
+            tip = ("Pinball Asset Decryptor v%s is available — you're on "
+                   "v%s." % (version, __version__))
         self.ctx.store.set("shell", update={
-            "available": True, "version": version,
-            "label": ("%s v%s" % (verb, version)) if can_auto
-            else "v%s available" % version})
+            "available": True, "version": version, "label": label,
+            "tip": tip, "stage": stage or ""})
         self.set(update_state="available")
         self.publish_settings_items()
-        if muted:
+        if muted and not pending:
             return
-        if can_auto:
+        not_now = {"id": "not_now", "label": "Don't restart"}
+        if pending and pending.get("publishing") and stage == "ready":
+            text = ("Pinball Asset Decryptor v%s was just released and is "
+                    "still being published — PAD restarts into it as soon "
+                    "as it's ready." % pending.get("version"))
+            actions = [{"id": "restart_now",
+                        "label": "Restart with v%s now" % version}, not_now]
+        elif pending and stage in ("downloading", "installing"):
+            text = ("Pinball Asset Decryptor v%s is %s in the background%s "
+                    "— PAD restarts into it by itself when it's ready."
+                    % (version, stage,
+                       " (%d%%)" % pct if pct is not None else ""))
+            actions = [not_now]
+        elif stage == "downloading":
+            text = ("Pinball Asset Decryptor v%s is downloading in the "
+                    "background%s — you're on v%s. Keep working; it will be "
+                    "ready to install in a moment."
+                    % (version, " (%d%%)" % pct if pct is not None else "",
+                       __version__))
+            actions = [{"id": "notes", "label": "Release notes"}]
+        elif stage == "installing":
+            text = ("Pinball Asset Decryptor v%s is installing in the "
+                    "background%s — you're on v%s. Keep working; Restart to "
+                    "update appears when it's done."
+                    % (version, " (%d%%)" % pct if pct is not None else "",
+                       __version__))
+            actions = [{"id": "notes", "label": "Release notes"}]
+        elif stage == "ready":
+            text = ("Pinball Asset Decryptor v%s is ready — restart to "
+                    "update. You're on v%s." % (version, __version__))
+            actions = [{"id": "install", "label": "Restart to update",
+                        "primary": True},
+                       {"id": "notes", "label": "Release notes"}]
+        elif can_auto:
+            text = ("Pinball Asset Decryptor v%s is available — you're on "
+                    "v%s." % (version, __version__))
             actions = [{"id": "install", "label": verb, "primary": True},
                        {"id": "notes", "label": "Release notes"}]
         else:
+            text = ("Pinball Asset Decryptor v%s is available — you're on "
+                    "v%s." % (version, __version__))
             actions = [{"id": "notes", "label": "Download", "primary": True}]
-        self.window.set_banner("update", {
-            "kind": "info", "icon": "bolt",
-            "text": "Pinball Asset Decryptor v%s is available — you're on "
-                    "v%s." % (version, __version__),
-            "actions": actions, "dismiss": True})
+        banner = {"kind": "info", "icon": "bolt", "text": text,
+                  "actions": actions, "dismiss": True}
+        if stage in ("downloading", "installing"):
+            # PAD-1029: a bar while it works - the percent when there is
+            # one, a spinner until the first one comes in
+            banner["progress"] = (self._update_pct
+                                  if self._update_pct is not None else -1)
+        self.window.set_banner("update", banner)
         self._update_banner_shown = True
 
     def _update_banner_action(self, action):
         if action == "install":
             return self._install_update_clicked()
+        if action in ("not_now", "restart_now"):
+            fn = self.window.cb.get("on_update_" + action)
+            if fn is not None:
+                fn()
+            return True
         if action == "notes":
             return self._open_update_url()
         if action == "dismiss":
@@ -599,6 +871,8 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
         if not self._update_available:
             return False
         version, url, installer = self._update_available
+        if self._update_stage in ("downloading", "installing"):
+            return True        # nothing to press yet; the banner says so
         fn = self.window.cb.get("on_install_update")
         if installer and fn is not None:
             fn(version, installer)
@@ -618,6 +892,13 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
         if not isinstance(url, str) or not url.strip():
             return False
         self.open_link_checked(url.strip(), what="that link")
+        return True
+
+    @rpc
+    def open_discord(self):
+        """The top bar's Discord button (PAD-815): the PAD server's invite
+        in the browser, or on the clipboard when nothing can open it."""
+        self.open_link_checked(DISCORD_URL, what="the PAD Discord server")
         return True
 
     def open_link_checked(self, url, what="that link"):
@@ -687,7 +968,7 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
             return False
         st["cancelled"] = True
         cur = dict(self.get("download") or {})
-        cur.update(detail="Cancelling…", cancelling=True)
+        cur.update(detail="Canceling…", cancelling=True)
         self.set(download=cur)
         try:
             st["on_cancel"]()
@@ -776,11 +1057,16 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
         its own sections, then the General ones, each [title, blocks, anchor]
         (webui/tips_render.py draws the words as blocks, PAD-386)."""
         key = tab_key or self.window.current_tab_key() or "Extract"
+        # PAD-458: the words are translated here, a block at a time, before
+        # bold and links split them (anchors stay the English headings')
+        from ..i18n import translator
+        tr = translator(self.ctx.store.get("shell", "lang"))
         try:
             from ..help_content import GENERAL_CONTENT, sections_for
             from ..tips_render import render, slug
-            sections = [(t, render(b), slug(t)) for t, b in sections_for(key)]
-            general = [(t, render(b), slug(t)) for t, b in GENERAL_CONTENT]
+            sections = [(tr(t), render(b, tr=tr), slug(t))
+                        for t, b in sections_for(key, getattr(self.window, "current_mfr", None))]
+            general = [(tr(t), render(b, tr=tr), slug(t)) for t, b in GENERAL_CONTENT]
         except Exception:                               # noqa: BLE001
             log.exception("tips content")
             sections, general = [], []
@@ -789,7 +1075,7 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
             if getattr(svc, "_visible", False) and svc.key:
                 tabs.append({"key": svc.key, "label": svc.label,
                              "ns": svc.ns})
-        return {"tab": key, "title": ("Tips — %s" % key) if key else "Tips",
+        return {"tab": key, "title": tr(("Tips — %s" % key) if key else "Tips"),
                 "sections": [list(s) for s in sections],
                 "general": [list(s) for s in general],
                 "tabs": tabs}
@@ -824,18 +1110,21 @@ class ShellExtras(ProjectsMixin, DiskMixin, TabService):
         self.apply_preview_features()
 
     def apply_preview_features(self):
-        """Show or hide what the preview switch gates (the Modes tab) for
-        the manufacturer on screen."""
+        """Show or hide what the preview switches gate (the Modes tab, the
+        Visual Pinball tab) for the manufacturer on screen."""
         win = self.window
         mfr = win.current_mfr
         if mfr is None:
             return
         on = win.modes_preview_on(mfr)
+        gates = win._gate(mfr)
         panel = None
         for svc in win.tabs:
             if svc.key == "Modes":
                 svc._visible = bool(on)
                 panel = svc
+            elif svc.key == "Visual Pinball":
+                svc._visible = bool(gates.get(svc.key, False))
         win.refresh_rail()
         win._ensure_visible_selection()
         if on and panel is not None:

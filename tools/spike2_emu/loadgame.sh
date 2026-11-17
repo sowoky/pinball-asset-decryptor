@@ -12,6 +12,10 @@ RIG=$(cd "$(dirname "$0")" && pwd)
 # The running guest is found among THIS rig slot's processes (PAD_SLOT).
 . "$RIG/padslot.sh"
 SLOT=${1:-quicksave}
+# A SPIKE 3 GAME in this rig slot (PAD-1147): the Spike 3 rig loads it.
+if [ -n "${PAD_SLOT:-}" ] && bash "$RIG/../spike3_emu/s3state.sh" running "$PAD_SLOT" 2>/dev/null; then
+    exec bash "$RIG/../spike3_emu/s3state.sh" load "$PAD_SLOT" "$SLOT"
+fi
 # A SUBSHELL, because padpath.sh sets ROOT and this script's ROOT comes from
 # the RUNNING GUEST's own environment first (see below) - sourcing it here
 # would quietly overrule that. All that is wanted is the one definition of
@@ -97,7 +101,7 @@ trap 'rm -f "$RELOAD_FLAG" 2>/dev/null; [ -n "$STAGE" ] && rm -rf "$STAGE"' EXIT
 DDIR=$DIR
 if [ -f "$DIR/slot.tar.zst" ]; then
     command -v zstd >/dev/null 2>&1 \
-        || { echo "loadgame: slot '$SLOT' is packed but WSL has no zstd"; exit 1; }
+        || { echo "loadgame: slot '$SLOT' is packed but there is no zstd here"; exit 1; }
     STAGE=$(mktemp -d /var/tmp/padslot.XXXXXX) \
         || { echo "loadgame: cannot make a staging dir"; exit 1; }
     if ! zstd -d -q -c "$DIR/slot.tar.zst" | tar -C "$STAGE" -xf -; then
@@ -116,6 +120,12 @@ fi
 # for the video host's resume restart (restorestate falls back to the restored
 # guest's environ if the slot predates this field).
 SGAME=$(sed -n 's/^game=//p' "$DIR/slot.meta")
+# PAD-764: THE RUN'S RECORDING ENDS HERE. A restored guest is the save's game,
+# with the save's clock, and its NVRAM is not the one the recording began from,
+# so what it does is no replay of this boot: the recording keeps its switches up
+# to the load, and says so. Before the restore, which truncates the guest log.
+[ "${PAD_RECORD:-1}" != 0 ] && python3 "$RIG/runrec.py" finish "$(. "$RIG/padpath.sh"; echo "$PAD_LOGDIR")" \
+    "ended where save state '$SLOT' was loaded" 2>&1 | sed 's/^\[watch\]/[loadgame]/'
 PAD_ROOT="$ROOT" PAD_GAME="$SGAME" PAD_RESTORE_KILL=1 CRIU="$CRIU" \
     bash "$RIG/restorestate.sh" "$DDIR" \
     || { echo "[loadgame] FAILED"; exit 1; }

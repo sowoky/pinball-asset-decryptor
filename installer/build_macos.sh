@@ -36,6 +36,14 @@ cd "$ROOT_DIR"
 # install must abort the build, not silently ship a broken bundle.
 pip3 install -r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-build.txt" -r "$ROOT_DIR/requirements-ui.txt"
 
+# The e2fsprogs tools every CGC extract/write and every Stern card write on a
+# Mac runs (debugfs, e2fsck, ...): a Mac has none of them, so the app ships
+# its own instead of sending the user to Homebrew (PAD-573).  Built from the
+# release tarball for the oldest macOS the app runs on; see the script.
+E2FS_DIR="$SCRIPT_DIR/build/e2fsprogs"
+rm -rf "$E2FS_DIR"
+bash "$SCRIPT_DIR/build_mac_e2fsprogs.sh" "$E2FS_DIR"
+
 # --add-data lines bundle the per-plugin Dockerfiles so the macOS
 # DockerExecutor in spooky / jjp can find them at runtime.
 #
@@ -75,6 +83,13 @@ pyinstaller \
     --icon "$SCRIPT_DIR/build/icon.icns" \
     --paths "$ROOT_DIR" \
     --add-data "$ROOT_DIR/pinball_decryptor/icon.png:pinball_decryptor" \
+    `# executor.bundled_e2fsprogs_dir() finds these in <bundle>/e2fsprogs.` \
+    --add-binary "$E2FS_DIR/debugfs:e2fsprogs" \
+    --add-binary "$E2FS_DIR/e2fsck:e2fsprogs" \
+    --add-binary "$E2FS_DIR/dumpe2fs:e2fsprogs" \
+    --add-binary "$E2FS_DIR/mke2fs:e2fsprogs" \
+    --add-data "$E2FS_DIR/NOTICE:e2fsprogs" \
+    --add-data "$E2FS_DIR/SOURCE:e2fsprogs" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/spooky/Dockerfile:pinball_decryptor/plugins/spooky" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/jjp/Dockerfile:pinball_decryptor/plugins/jjp" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/jjp/partclone_to_raw.py:pinball_decryptor/plugins/jjp" \
@@ -83,6 +98,14 @@ pyinstaller \
     `# namespaces - so tools/spike2_emu/docker runs it in a container and exports` \
     `# the display over VNC, which macOS Screen Sharing opens with no install.` \
     --add-data "$ROOT_DIR/tools/spike2_emu:tools/spike2_emu" \
+    `# The Spike 3 rig (PAD-1090) and what its card store loads by path (see` \
+    `# build_linux.sh); luks_otp.py is also what the app's own Spike 3` \
+    `# decryption loads, which no macOS build carried.` \
+    --add-data "$ROOT_DIR/tools/spike3_emu:tools/spike3_emu" \
+    --add-data "$ROOT_DIR/stern-spike-3/tools/luks_otp.py:stern-spike-3/tools" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/spike3.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/spike3_keys.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/ext4.py:pinball_decryptor/plugins/stern" \
     `# The JJP rig. The Multi-boot tab and "install an ISO onto a game SSD"` \
     `# both run tools/jjp_emu/mkjjpmulti.py with python3 from beside the` \
     `# package. PAD-162 added this line to the Windows installer and to the` \
@@ -96,12 +119,53 @@ pyinstaller \
     `# into the tab's container with the two leaf modules mkbofmulti.py` \
     `# imports from a bare python3 (multiboot_docker._PACKAGE_FILES).` \
     --add-data "$ROOT_DIR/tools/bof_emu:tools/bof_emu" \
+    `# The Dutch Pinball rig, for the Big Lebowski Multi-boot tab (PAD-853),` \
+    `# staged into the tab's container like the others (multiboot_docker._RIGS).` \
+    --add-data "$ROOT_DIR/tools/dp_emu:tools/dp_emu" \
+    `# The Spooky rig (PAD-953): the Emulate Spooky tab runs it in a container` \
+    `# (tools/spooky_emu/docker/spkbox.sh), which mounts it with the rigs it` \
+    `# borrows from - proc_emu (the P-ROC board), ap_emu (the games' Python and` \
+    `# the playfield window), rigboard.sh - and the Spooky plugin's games.py,` \
+    `# read from disk by the rig's python3 for the update files' keys.` \
+    --add-data "$ROOT_DIR/tools/spooky_emu:tools/spooky_emu" \
+    --add-data "$ROOT_DIR/tools/proc_emu:tools/proc_emu" \
+    --add-data "$ROOT_DIR/tools/ap_emu:tools/ap_emu" \
+    --add-data "$ROOT_DIR/tools/rigboard.sh:tools" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/spooky/games.py:pinball_decryptor/plugins/spooky"     `# Spooky Multi-boot leaf modules (mkspkmulti.py, PAD-980): the updates are`     `# read and packed with the plugin's own detection and GPG layers.`     --add-data "$ROOT_DIR/pinball_decryptor/plugins/spooky/formats.py:pinball_decryptor/plugins/spooky"     --add-data "$ROOT_DIR/pinball_decryptor/plugins/spooky/gpg.py:pinball_decryptor/plugins/spooky" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/bof/pck_directory.py:pinball_decryptor/plugins/bof" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/bof/aes_py.py:pinball_decryptor/plugins/bof" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/bof/source_converter.py:pinball_decryptor/plugins/bof" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/bof/qoa_codec.py:pinball_decryptor/plugins/bof" \
+    `# Stern Spike 2 Multi-boot leaf modules (mkmulticard.py + selectmedia.py):` \
+    `# imported by the rig's bare python3 inside the container, so they must` \
+    `# exist on disk beside tools/spike2_emu rather than only inside the` \
+    `# frozen PYZ archive (multiboot_docker._PACKAGE_FILES).` \
+    --add-data "$ROOT_DIR/pinball_decryptor/core/audio.py:pinball_decryptor/core" \
+    --add-data "$ROOT_DIR/pinball_decryptor/core/checksums.py:pinball_decryptor/core" \
+    --add-data "$ROOT_DIR/pinball_decryptor/core/colour_profile.py:pinball_decryptor/core" \
+    --add-data "$ROOT_DIR/pinball_decryptor/core/longpath.py:pinball_decryptor/core" \
+    --add-data "$ROOT_DIR/pinball_decryptor/core/rawdevice.py:pinball_decryptor/core" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/adjustments.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/editions.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/engine.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/explorer.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/ext4.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/factory_volume.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/formats.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/games.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/menu_settings.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/progreloc.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/shader_profile.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/sidx.py:pinball_decryptor/plugins/stern" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/valpatch.py:pinball_decryptor/plugins/stern" \
     `# the official Stern stock fingerprints (PAD-426): data, not code` \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/data/stock_prints.json.xz:pinball_decryptor/plugins/stern/data" \
+    `# Spike 3 LUKS2 verifier/decryptor: stern/spike3.py loads it by path at run` \
+    `# time (_luks_otp(), four parents up from the plugin then` \
+    `# stern-spike-3/tools/luks_otp.py), so the whole Spike 3 key/decrypt path` \
+    `# throws without it. It lives outside the package; ship it at the exact` \
+    `# _MEIPASS-relative path _luks_otp() rebuilds.` \
+    --add-data "$ROOT_DIR/stern-spike-3/tools/luks_otp.py:stern-spike-3/tools" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/jjp/crypto.py:pinball_decryptor/plugins/jjp" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/jjp/crypto_v3.py:pinball_decryptor/plugins/jjp" \
     --add-data "$ROOT_DIR/pinball_decryptor/plugins/jjp/filelist.py:pinball_decryptor/plugins/jjp" \
@@ -128,11 +192,37 @@ pyinstaller \
     --hidden-import "pinball_decryptor.plugins.dp" \
     --hidden-import "pinball_decryptor.plugins.stern" \
     --hidden-import "pinball_decryptor.plugins.stern.engine" \
+    --hidden-import "pinball_decryptor.plugins.stern.emulator_log" \
     --hidden-import "pinball_decryptor.plugins.stern.cards" \
     --hidden-import "pinball_decryptor.plugins.stern.spike1" \
+    --hidden-import "pinball_decryptor.plugins.stern.sam_audio" \
+    --hidden-import "pinball_decryptor.plugins.pinmame_classic.sam_sound" \
+    --hidden-import "pinball_decryptor.plugins.pinmame_classic.capcom" \
+    --hidden-import "pinball_decryptor.plugins.pinmame_classic.capcom_sound" \
+    --hidden-import "pinball_decryptor.plugins.stern.sam_images" \
+    --hidden-import "pinball_decryptor.plugins.pinmame_classic.sam_art" \
+    --hidden-import "pinball_decryptor.plugins.stern.sam_anim_assets" \
+    --hidden-import "pinball_decryptor.plugins.pinmame_classic.sam_anim" \
     --hidden-import "pinball_decryptor.plugins.stern.spike1_adjustments" \
     --hidden-import "pinball_decryptor.plugins.stern.spike1_emulate" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike1_images" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike1_text" \
     --hidden-import "pinball_decryptor.plugins.stern.sidx" \
+    --hidden-import "pinball_decryptor.plugins.stern.run_leave_out" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_extract" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_card" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_write" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_modes" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_music" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_menu" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_games" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_keys" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_requests" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_sound" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_spk" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_sound" \
+    --hidden-import "pinball_decryptor.plugins.stern.spks" \
     --hidden-import "pinball_decryptor.plugins.stern.valpatch" \
     --hidden-import "pinball_decryptor.plugins.stern.ext4" \
     --hidden-import "pinball_decryptor.plugins.stern.explorer" \
@@ -140,11 +230,18 @@ pyinstaller \
     --hidden-import "pinball_decryptor.plugins.stern.factory_volume" \
     --hidden-import "pinball_decryptor.plugins.stern.high_scores" \
     --hidden-import "pinball_decryptor.plugins.stern.menu_visibility" \
+    --hidden-import "pinball_decryptor.plugins.stern.coin_door" \
     --hidden-import "pinball_decryptor.plugins.stern.info" \
     --hidden-import "pinball_decryptor.plugins.stern.compare" \
     --hidden-import "pinball_decryptor.plugins.stern.stock_prints" \
+    `# My machines (PAD-783): imported function-locally by webui/shellx_machines.py` \
+    --hidden-import "pinball_decryptor.plugins.stern.machine_info" \
+    --hidden-import "pinball_decryptor.core.machines" \
+    --hidden-import "pinball_decryptor.core.code_watch" \
     --hidden-import "pinball_decryptor.plugins.stern.multiimage" \
     --hidden-import "pinball_decryptor.plugins.stern.card_size" \
+    --hidden-import "pinball_decryptor.plugins.stern.bank_build" \
+    --hidden-import "pinball_decryptor.plugins.stern.image_compact" \
     --hidden-import "pinball_decryptor.core.image_info" \
     --hidden-import "pinball_decryptor.core.hashcache" \
     --hidden-import "pinball_decryptor.core.rawdevice" \
@@ -161,7 +258,9 @@ pyinstaller \
     --hidden-import "pinball_decryptor.plugins.stern.scene_eval" \
     --hidden-import "pinball_decryptor.plugins.stern.scene_edit" \
     --hidden-import "pinball_decryptor.plugins.stern.scene_share" \
+    --hidden-import "pinball_decryptor.plugins.stern.screen_time" \
     --hidden-import "pinball_decryptor.plugins.stern.game_text_layout" \
+    --hidden-import "pinball_decryptor.plugins.stern.score_colours" \
     --hidden-import "pinball_decryptor.plugins.stern.text_colour" \
     --hidden-import "pinball_decryptor.plugins.stern.font_copy" \
     --hidden-import "pinball_decryptor.plugins.stern.sidx_append" \
@@ -176,26 +275,50 @@ pyinstaller \
     `# Python, so nothing there is traced at all (PAD-192).` \
     --hidden-import "pinball_decryptor.plugins.stern.code_modes" \
     --hidden-import "pinball_decryptor.plugins.stern.block_modes" \
+    --hidden-import "pinball_decryptor.plugins.stern.blocks_sim" \
+    --hidden-import "pinball_decryptor.plugins.stern.rules_sheet" \
+    --hidden-import "pinball_decryptor.core.pdf_sheet" \
     --hidden-import "pinball_decryptor.plugins.stern.mode_assets" \
     --hidden-import "pinball_decryptor.plugins.stern.mode_hud" \
+    --hidden-import "pinball_decryptor.plugins.stern.more_kaiju" \
+    --hidden-import "pinball_decryptor.plugins.stern.battle_select" \
     --hidden-import "pinball_decryptor.plugins.stern.mode_project" \
+    --hidden-import "pinball_decryptor.plugins.stern.mode_records" \
     --hidden-import "pinball_decryptor.plugins.stern.mode_runtime" \
     --hidden-import "pinball_decryptor.plugins.stern.mode_sounds" \
     --hidden-import "pinball_decryptor.plugins.stern.mode_tryit" \
     --hidden-import "pinball_decryptor.plugins.stern.mode_write" \
     --hidden-import "pinball_decryptor.plugins.stern.video_bank" \
+    --hidden-import "pinball_decryptor.plugins.stern.clip_files" \
     --hidden-import "pinball_decryptor.plugins.stern.clip_modes" \
     --hidden-import "pinball_decryptor.plugins.stern.clip_sounds" \
+    --hidden-import "pinball_decryptor.plugins.stern.clip_seen" \
+    --hidden-import "pinball_decryptor.plugins.stern.clip_static" \
     --hidden-import "pinball_decryptor.plugins.stern.clip_variants" \
+    --hidden-import "pinball_decryptor.plugins.stern.sound_modes" \
+    --hidden-import "pinball_decryptor.plugins.stern.jukebox" \
+    --hidden-import "pinball_decryptor.plugins.stern.attract_items" \
+    --hidden-import "pinball_decryptor.plugins.stern.portattract" \
+    --hidden-import "pinball_decryptor.plugins.stern.media_share" \
+    --hidden-import "pinball_decryptor.plugins.stern.menu_settings" \
+    --hidden-import "pinball_decryptor.plugins.stern.picture_settings" \
+    --hidden-import "pinball_decryptor.plugins.stern.service_menu" \
+    --hidden-import "pinball_decryptor.plugins.stern.editions" \
     --hidden-import "pinball_decryptor.plugins.stern.text_modes" \
     --hidden-import "pinball_decryptor.plugins.stern.mode_from_card" \
+    --hidden-import "pinball_decryptor.plugins.stern.playfield_art" \
+    --hidden-import "pinball_decryptor.plugins.stern.insert_colours" \
+    --hidden-import "pinball_decryptor.plugins.stern.mode_script" \
     --hidden-import "pinball_decryptor.plugins.stern.stock_modes" \
     --hidden-import "pinball_decryptor.plugins.stern.stock_mode_tables" \
     --hidden-import "pinball_decryptor.plugins.stern.lampmap" \
     --hidden-import "pinball_decryptor.plugins.stern.mains_check" \
+    --hidden-import "pinball_decryptor.plugins.stern.cabinet_model" \
     --hidden-import "pinball_decryptor.plugins.stern.port_derive" \
     --hidden-import "pinball_decryptor.plugins.stern.portgen" \
     --hidden-import "pinball_decryptor.plugins.stern.portshots" \
+    --hidden-import "pinball_decryptor.plugins.stern.portchallenge" \
+    --hidden-import "pinball_decryptor.plugins.stern.mode_framework" \
     --hidden-import "pinball_decryptor.plugins.stern.stock_reader" \
     --hidden-import "pinball_decryptor.plugins.stern.stock_scan" \
     --hidden-import "pinball_decryptor.plugins.stern.stock_scan_c" \
@@ -208,6 +331,17 @@ pyinstaller \
     --hidden-import "pinball_decryptor.plugins.stern.source_find" \
     --hidden-import "pinball_decryptor.plugins.stern.text_colors" \
     --hidden-import "pinball_decryptor.plugins.stern.text_layout" \
+    --hidden-import "pinball_decryptor.plugins.stern.topper" \
+    --hidden-import "pinball_decryptor.plugins.stern.coop_play" \
+    --add-data "$ROOT_DIR/pinball_decryptor/plugins/stern/coop_presets:pinball_decryptor/plugins/stern/coop_presets" \
+    --hidden-import "pinball_decryptor.plugins.stern.portcoop" \
+    --hidden-import "pinball_decryptor.plugins.stern.idle_pause" \
+    --hidden-import "pinball_decryptor.plugins.stern.handicap" \
+    --hidden-import "pinball_decryptor.plugins.stern.prolonged_comp" \
+    --hidden-import "pinball_decryptor.plugins.stern.score_feed" \
+    --hidden-import "pinball_decryptor.plugins.stern.cab_shows" \
+    --hidden-import "pinball_decryptor.plugins.stern.cab_stock" \
+    --hidden-import "pinball_decryptor.plugins.stern.cab_auto" \
     --hidden-import "pinball_decryptor.plugins.stern.dds" \
     --hidden-import "pinball_decryptor.plugins.stern.spine" \
     --hidden-import "pinball_decryptor.plugins.stern.spike2" \
@@ -221,7 +355,27 @@ pyinstaller \
     --hidden-import "pinball_decryptor.plugins.stern.spike2.category" \
     --hidden-import "pinball_decryptor.plugins.stern.spike2.sfx_names" \
     --hidden-import "pinball_decryptor.plugins.stern.spike2.sound_requests" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike2.soundbank" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike2.netbridge" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike2.window" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_extract" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_card" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_write" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_modes" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_music" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_menu" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_games" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_keys" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_requests" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_selfextract" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_sound" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_spk" \
+    --hidden-import "pinball_decryptor.plugins.stern.spike3_sound" \
+    --hidden-import "pinball_decryptor.plugins.stern.spks" \
     --hidden-import "pinball_decryptor.plugins.stern.game_check" \
+    --hidden-import "pinball_decryptor.plugins.stern.final_wizard" \
+    --hidden-import "pinball_decryptor.plugins.stern.memory_budget" \
     --collect-all "unicorn" \
     --collect-all "capstone" \
     --collect-all "numpy" \
@@ -263,6 +417,17 @@ pyinstaller \
     "$SCRIPT_DIR/pyinstaller_entry.py"
 
 APP_PATH="$SCRIPT_DIR/build/dist/Pinball Asset Decryptor.app"
+
+# The bundled e2fsprogs must be where the app looks and must run there with
+# nothing from Homebrew on the PATH (PAD-573).
+for t in debugfs e2fsck dumpe2fs mke2fs; do
+    b="$APP_PATH/Contents/Frameworks/e2fsprogs/$t"
+    if [ ! -x "$b" ]; then
+        echo "ERROR: $b is missing or not executable" >&2
+        exit 1
+    fi
+done
+env -i PATH=/usr/bin:/bin "$APP_PATH/Contents/Frameworks/e2fsprogs/debugfs" -V
 
 # --- Ad-hoc code signing so macOS doesn't flag the app as "damaged" ------
 echo "Ad-hoc code signing..."

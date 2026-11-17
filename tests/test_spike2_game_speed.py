@@ -354,7 +354,7 @@ def test_the_helpers_keep_the_games_time():
     swpoke = _text("swpoke.py")
     assert "padsw.game_sleep(m, ms / 1000.0)" in swpoke and "time.sleep(ms" not in swpoke
     plunge = _text("plunge.py")
-    assert "time.sleep(" not in plunge and plunge.count("padsw.game_sleep(m, ") == 8
+    assert "time.sleep(" not in plunge and plunge.count("padsw.game_sleep(m, ") == 9    # PAD-654: wait_serve
     sx = _text("swexercise.py")
     assert "padsw.game_sleep(m, press_ms / 1000.0)" in sx and "padsw.game_sleep(m, gap_ms / 1000.0)" in sx
     bf = _text("ballfeed.py")
@@ -504,11 +504,11 @@ export PAD_RIGBATCH_ASSUME_MOUNTED=1
 bash "$t/rig/rigbatch.sh" -n 1 --who PAD-9 --out "$t/out" --no-stage --fps 15 "$t/l.list" \
     -- bash "$t/job.sh" > "$t/stdout" 2>&1
 echo "rc=$?"
-grep -o "for PAD-9, 15 fps" "$t/out/progress.txt"
+grep -o "for PAD-9 at 4x, 15 fps" "$t/out/progress.txt"
 bash "$t/rig/rigbatch.sh" -n 1 --who PAD-9 --out "$t/out2" --no-stage "$t/l.list" -- bash "$t/job.sh" > /dev/null 2>&1
 bash "$t/rig/rigbatch.sh" -n 1 --who PAD-9 --out "$t/out4" --no-stage --fps 30 "$t/l.list" \
     -- bash "$t/job.sh" > /dev/null 2>&1
-grep -o "for PAD-9, 30 fps" "$t/out4/progress.txt"
+grep -o "for PAD-9 at 4x, 30 fps" "$t/out4/progress.txt"
 bash "$t/rig/rigbatch.sh" -n 1 --who PAD-9 --out "$t/out3" --no-stage --fps 25 "$t/l.list" \
     -- bash "$t/job.sh" > /dev/null 2>"$t/err"
 echo "rc25=$? $(cat "$t/err")"
@@ -526,7 +526,7 @@ def test_a_batch_caps_every_jobs_frame_rate_with_fps():
                          timeout=120)
     lines = out.stdout.split("\n")
     assert "rc=0" in lines, out.stdout + out.stderr
-    assert "for PAD-9, 15 fps" in lines and "for PAD-9, 30 fps" in lines
+    assert "for PAD-9 at 4x, 15 fps" in lines and "for PAD-9 at 4x, 30 fps" in lines
     assert lines.count("a vblanks=4") == 2 and lines.count("a vblanks=2") == 1    # --fps 15, no --fps, --fps 30
     assert lines.count("b vblanks=2") == 3 and "a vblanks=unset" not in lines
     rc25 = [ln for ln in lines if ln.startswith("rc25=")][0]
@@ -543,11 +543,14 @@ def test_a_hidden_run_builds_the_tables_and_opens_no_window():
     a slot: every id one off - Tournament Start pressed for Start, the coin door latched on the wrong switch ("48V
     DISABLED"), no ball feeder - and "no game started after three tries"."""
     w = _text("watch.sh")
-    i = w.index('if [ "${PAD_PLAYFIELD:-1}" != 0 ] || [ "${PAD_HIDDEN:-0}" = 1 ]; then')
+    # PAD-882: every run builds them, a visible one with no window (Visual
+    # Pinball's) included - no PAD_PLAYFIELD/PAD_HIDDEN gate in front
+    i = w.index("# PAD-882: AND A VISIBLE RUN WITH NO PLAYFIELD WINDOW IS ONE TOO.")
+    i = w.index("\nif :; then\n", i) + 1
     end = w.index("\nfi\n", i)
     tables = w[i:end]
-    assert 'python3 "$RIG/mktables.py" > "$TBL_OUT" 2>&1' in tables                 # pass one
-    assert '"$RIG/mktables.py" --log "$LOG" --wait "$PF_WAIT"' in tables           # pass two
+    assert 'python3 "$RIG/mktables.py" "${MKT_ARGS[@]}" > "$TBL_OUT" 2>&1' in tables  # pass one
+    assert '"$RIG/mktables.py" "${MKT_ARGS[@]}" --log "$LOG" --wait "$PF_WAIT"' in tables  # pass two
     assert "playfield.py" not in tables
     # with no window, nothing waits on the switch list in the foreground
     assert 'elif [ "${PAD_PLAYFIELD:-1}" = 0 ] || grep -q \'^drawable=yes\' "$TBL_OUT"; then' in tables

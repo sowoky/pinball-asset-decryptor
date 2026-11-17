@@ -26,8 +26,10 @@ import threading
 import time
 
 from .. import compat, look_switches
+from ..colour_save import ColourSaveMixin
 from ..find_originals import FindOriginalsMixin
 from .base import TabService, rpc
+from ..testcard_tags import TestTagMixin
 
 #: Tk's iid prefix for a "Group by scene" header row; the page's id for one.
 GROUP_IID = "::grp::"
@@ -52,11 +54,12 @@ LOOKS_KEPT = 128
 log = logging.getLogger(__name__)
 LABEL = "Replace Images"
 SCAN_LABEL = "Images"
+SAME_TITLE = "Clear replacements identical to the original"
 
 EMPTY_NO_FOLDER = "Set the project folder on the Extract tab, then click Scan."
 EMPTY_SCANNING = "Scanning for image files…"
 EMPTY_NONE = "No replaceable image found in this folder."
-EMPTY_CANCELLED = "Scan cancelled — click Scan to try again."
+EMPTY_CANCELLED = "Scan canceled — click Scan to try again."
 
 _BLANK_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAEklEQVR42mNgGAWjYBSM"
@@ -170,6 +173,60 @@ def scan_image_groups(assets_path):
     return groups, occ, where
 
 
+_TREES = {"key": None, "trees": {}}
+_TREES_LOCK = threading.Lock()
+
+
+def _trees(assets_path):
+    """The project's scene trees, read once per ``scene_tree.json``."""
+    from ...plugins.stern import scene_edit
+    stamp = scene_edit._trees_stamp(assets_path)
+    with _TREES_LOCK:
+        if _TREES["key"] != (assets_path, stamp):
+            _TREES["key"], _TREES["trees"] = (assets_path, stamp), scene_edit.trees_of(assets_path)
+        return _TREES["trees"]
+
+
+def scene_turns(assets_path, rel, cards):
+    """PAD-534 (DragonRR): ``{card: [(degrees clockwise, mirrored), ...]}``, how each scene
+    in *cards* turns picture *rel* where it draws it at rest (the Scenes window's still);
+    a scene that draws it upright, or not at rest, is left out.  Planet X's bridge pointer
+    is a south-pointing picture the game draws turned 48 degrees."""
+    from ...plugins.stern import scene_eval
+    trees = _trees(assets_path)
+    image = rel[len("images/"):] if rel.startswith("images/") else rel
+    out = {}
+    for card in cards:
+        man = trees.get(card)
+        if not man:
+            continue
+        try:
+            draws = scene_eval.draw_list(man)
+        except Exception:                                # noqa: BLE001
+            log.exception("scene turns %s", card)
+            continue
+        turns = []
+        for d in draws:
+            if d.get("image") == image and d["kind"] in ("bitmap", "flip"):
+                deg, mirrored = scene_eval.turn_of(d["m"])
+                if (abs(deg) >= 0.5 or mirrored) and (deg, mirrored) not in turns:
+                    turns.append((deg, mirrored))
+        if turns:
+            out[card] = turns
+    return out
+
+
+def turn_words(deg, mirrored):
+    """``"turned 48° clockwise"`` (the Scenes panel's gameTurnText)."""
+    a = abs(deg)
+    a = int(a) if a == int(a) else a
+    turn = ("" if a < 0.5 else "turned upside down" if a == 180 else
+            "turned %s° %s" % (a, "clockwise" if deg > 0 else "anticlockwise"))
+    if mirrored:
+        return "mirrored and " + turn if turn else "mirrored"
+    return turn
+
+
 def compute_key_tails(groups, groups_all):
     """``{group_key(lower): distinguishing tail}`` (Tk
     ``_compute_image_key_tails``)."""
@@ -228,8 +285,49 @@ def _plural(n, word):
     return "%d %s%s" % (n, word, "" if n == 1 else "s")
 
 
+def same_picture(a, b):
+    """Whether pictures *a* and *b* look the same: the same bytes, else the
+    same size and the same pixels once both are RGBA (a PNG saved again, an
+    RGB copy of an opaque picture).  A fully clear pixel is clear whatever
+    color it holds underneath, since nothing of it is drawn (PAD-1016)."""
+    try:
+        if os.path.getsize(a) == os.path.getsize(b):
+            with open(a, "rb") as fa, open(b, "rb") as fb:
+                if fa.read() == fb.read():
+                    return True
+    except OSError:
+        return False
+    from PIL import Image
+    try:
+        with Image.open(a) as ia, Image.open(b) as ib:
+            if ia.size != ib.size:
+                return False
+            ia, ib = ia.convert("RGBA"), ib.convert("RGBA")
+    except Exception:                                    # noqa: BLE001
+        return False
+    if ia.tobytes() == ib.tobytes():
+        return True
+    da, db = ia.getchannel("A"), ib.getchannel("A")
+    if da.tobytes() != db.tobytes():
+        return False
+    # differ only under clear pixels? blank those on both and look again
+    clear = da.point(lambda v: 255 if v == 0 else 0)
+    blank = Image.new("RGBA", ia.size, (0, 0, 0, 0))
+    ia.paste(blank, (0, 0), clear)
+    ib.paste(blank, (0, 0), clear)
+    return ia.tobytes() == ib.tobytes()
+
+
 # ---------------------------------------------------------------------------
-class ImagesTab(FindOriginalsMixin, TabService):
+class ImagesTab(TestTagMixin, ColourSaveMixin, FindOriginalsMixin, TabService):
+    _tc_kind = "image"                # PAD-1279: a TEST tick puts the row on the test card
+
+    def _tc_project(self):
+        return self._assets_dir()
+
+    def _tc_file(self, rel):
+        return self._cs_source(rel)
+
     ns = "images"
     key = "Replace Images"
     label = "Images"
@@ -268,6 +366,8 @@ class ImagesTab(FindOriginalsMixin, TabService):
         self._groups_all = {}
         self._key_tails = {}
         self._group_tags = {}
+        self._turns = {}        # PAD-534: {(scan dir, rel): scene_turns}
+        self._turns_busy = set()
         self._scan_id = 0
         self._scan_dir = ""
         self._scan_dir_prev = ""
@@ -306,6 +406,7 @@ class ImagesTab(FindOriginalsMixin, TabService):
         self._cmp = []               # Compare's tiles
         self._cmp_ids = 0
         self._cmp_open = False
+        self._same_cancel = None
         for v in (self.image_search_var, self.image_source_filter_var,
                   self.image_change_filter_var,
                   self.image_group_by_scene_var):
@@ -315,7 +416,7 @@ class ImagesTab(FindOriginalsMixin, TabService):
                  sort={"key": "#0", "desc": False},
                  cols={"n": False, "keep": False, "color": False},
                  color_unlock={"offered": False, "on": False},
-                 can_clear=False,
+                 can_clear=False, same=None,
                  running=False, preview=self._empty_preview(), dir="",
                  focus=None, total=0, shown=0,
                  reveal_label=reveal_menu_label(), sources=list(SOURCES),
@@ -379,12 +480,17 @@ class ImagesTab(FindOriginalsMixin, TabService):
             note = ""
         self.set(note=note, scanning=False, dir="",
                  pex=self._pex_available(),
+                 # Stern SAM's DMD: shades of one color - no Colors bar,
+                 # no scenes to group by
+                 shades_only=bool(getattr(mfr.capabilities, "dmd_shades",
+                                          False)),
                  empty={"text": EMPTY_NO_FOLDER, "busy": False})
         self._refresh_pillow()
         self._refresh_image_list()
 
     def on_show(self):
         self._refresh_pillow()
+        self._tc_publish()           # PAD-1279: the TEST column
         self._maybe_rescan_image()
         self.set(pex=self._pex_available())
         # the Color profile tab's profiles change elsewhere (PAD-463)
@@ -460,7 +566,12 @@ class ImagesTab(FindOriginalsMixin, TabService):
             except Exception:                            # noqa: BLE001
                 exts = None
             try:
+                keep = mfr.slot_keep_dirs(assets_path) if mfr else ()
+            except Exception:                           # noqa: BLE001
+                keep = ()
+            try:
                 slots = scan_image_slots(assets_path, roots=roots, exts=exts,
+                                         keep_dirs=keep,
                                          probe=False)
             except Exception:                            # noqa: BLE001
                 slots = []
@@ -500,7 +611,7 @@ class ImagesTab(FindOriginalsMixin, TabService):
         """Tk _cancel_scan."""
         self._scan_id += 1
         if self._scan_t0 is not None:
-            self.log("%s scan cancelled after %.1f s."
+            self.log("%s scan canceled after %.1f s."
                      % (SCAN_LABEL, time.monotonic() - self._scan_t0))
         self._scan_t0 = None
         self.set(scanning=False, view=[],
@@ -520,6 +631,7 @@ class ImagesTab(FindOriginalsMixin, TabService):
         self._groups = groups or {}
         self._group_occ = group_occ or {}
         self._groups_all = group_all or {}
+        self._turns = {}
         self._key_tails = compute_key_tails(self._groups, self._groups_all)
         self._keep_col_cache = None
         self._quiet += 1
@@ -811,6 +923,21 @@ class ImagesTab(FindOriginalsMixin, TabService):
             return ""
         return self._rep_names.get(rel, "")
 
+    def _pin_own_boxes(self, assets_dir, data):
+        """PAD-1301: a Scenes node laid out over a picture kept at its own size keeps that
+        picture's box before a new pick takes its place (scene_share.pin_own_boxes)."""
+        was, kept = dict(data.get("image") or {}), set(data.get("image_keep_size") or ())
+        now, keep = self._assignments, self._keep_size
+        changed = [r for r in set(was) | set(now)
+                   if was.get(r) != now.get(r) or (r in kept) != (r in keep)]
+        if not changed:
+            return
+        try:
+            from ...plugins.stern import scene_share
+            scene_share.pin_own_boxes(assets_dir, changed, was, kept)
+        except Exception:                            # noqa: BLE001 - the save goes on
+            pass
+
     def _save_staged_changes(self):
         """The image sections of the sidecar (every other tab's sections are
         re-read from the file and written back untouched, so one tab's save
@@ -824,6 +951,7 @@ class ImagesTab(FindOriginalsMixin, TabService):
         if self._live(assets_dir):
             hist += history_log.diff_assignments(
                 "image", data.get("image"), self._assignments)
+            self._pin_own_boxes(assets_dir, data)
             data["image"] = dict(self._assignments)
             data["image_keep_size"] = sorted(
                 r for r in self._keep_size if r in self._assignments)
@@ -1043,27 +1171,47 @@ class ImagesTab(FindOriginalsMixin, TabService):
             return True
         self._color_unlocked = value
         restored = []
+        from ...core import colour_profile as cp, staged_changes
+        folder = self._assets_dir()
         if value:
+            # PAD-525: the switches they had when the box went off come back
+            back = 0
+            try:
+                if folder:
+                    data = staged_changes.load(folder)
+                    kept = cp.unlock_switches(data)
+                    staged_changes.save(folder, data)
+                    for r, v in kept.items():
+                        if (r in self._by_rel and not self._assignments.get(r)
+                                and not self._is_built(r) and r not in self._color):
+                            self._color[r] = v
+                            back += 1
+            except Exception:                           # noqa: BLE001
+                log.exception("images unlock: switches back")
             self.log("Replace Images: the game's own pictures are unlocked: "
                      "each one can have the individual files color profile "
-                     "baked in when you build.", "info")
+                     "baked in when you build%s." % (
+                         "; %d have their color switch back" % back
+                         if back else ""), "info")
         else:
             stock = [r for r in self._color if not self._assignments.get(r)
                      and not self._is_built(r)]
-            for r in stock:
-                del self._color[r]
-            # the game's own lines of text in Scenes are locked again too (PAD-438)
+            kept = {r: self._color.pop(r) for r in stock}
+            # the game's own lines of text in Scenes are locked again too (PAD-438); both
+            # keep their switches for the next tick (PAD-525)
             try:
-                from ...core import colour_profile as cp
-                if self._assets_dir():
-                    cp.drop_text_slots(self._assets_dir())
+                if folder:
+                    data = staged_changes.load(folder)
+                    cp.lock_switches(data, kept)
+                    staged_changes.save(folder, data)
             except Exception:                           # noqa: BLE001
-                log.exception("images unlock: text switches")
+                log.exception("images unlock: switches put aside")
             if not self._is_running():
                 restored = self._put_back_originals(
                     self._applied_replacement_rels(stock))
             self.log("Replace Images: the game's own pictures are locked "
-                     "again%s." % (
+                     "again (their color switches come back when it is "
+                     "ticked)%s." % (
                          "; %d corrected one(s) have their own colors back "
                          "in the project folder" % len(restored)
                          if restored else ""), "info")
@@ -1087,7 +1235,7 @@ class ImagesTab(FindOriginalsMixin, TabService):
             name = cp.file_profile(self._assets_dir() or "", "images",
                                    rel).label()
         except Exception:                               # noqa: BLE001
-            name = "colour profile"
+            name = "color profile"
         row = {"on": on, "own": rel in self._color, "all": self._color_all,
                "name": name, "stock": not self._assignments.get(rel)
                and not self._is_built(rel)}
@@ -1126,7 +1274,7 @@ class ImagesTab(FindOriginalsMixin, TabService):
                 try:
                     fn()
                 except Exception:                       # noqa: BLE001
-                    log.exception("images colour %s.%s", ns, name)
+                    log.exception("images color %s.%s", ns, name)
 
     @rpc
     def set_color(self, rel, value):
@@ -1196,6 +1344,27 @@ class ImagesTab(FindOriginalsMixin, TabService):
             if on is not None and (on or scope == "all"):
                 out[rel] = on
         return out
+
+    # ---- Save with color profile (PAD-604) -----------------------------
+    _cs_kind = "images"
+    _cs_noun = ("picture", "pictures")
+
+    def _cs_project(self):
+        return self._assets_dir()
+
+    def _cs_profiled(self):
+        return self.color_targets("profiled")
+
+    def _cs_source(self, rel):
+        """The picture *rel*'s profile goes on: the Replacement pane's
+        (a pick, or the uncorrected copy of one an earlier build put in),
+        else the game's own (its snapshot where a build changed it)."""
+        if rel not in self._by_rel:
+            return None
+        if self._profile_side(rel) == "rep":
+            src = self._rep_pane_path(rel)
+            return src if isinstance(src, str) else None
+        return self._orig_pane_path(rel)[0]
 
     def put_color_switches(self, switches):
         """PAD-439: pictures' own switches set at once (``True`` /
@@ -1853,7 +2022,7 @@ class ImagesTab(FindOriginalsMixin, TabService):
     @staticmethod
     def _empty_preview():
         return {"rel": None, "group": None, "hdr": "Original",
-                "hdr_main": "Original", "hdr_note": "", "orig": "",
+                "hdr_main": "Original", "hdr_note": "", "scenes": "", "orig": "",
                 "rep": "", "rep_name": "", "empty": "", "keep": None,
                 "color": None, "has_pick": False, "clearable": False,
                 "ver": 0}
@@ -1908,6 +2077,7 @@ class ImagesTab(FindOriginalsMixin, TabService):
             note = ("shared by %d scenes (replacing it changes all of them)"
                     % n_occ)
         hdr = hdr_main + (("  ·  " + note) if note else "")
+        scenes = self._scene_note(rel) if slot else ""
         shown_rep = self._rep_pane_path(rel)
         empty = (self._rep_pane_empty_text(
             rel, "(no replacement assigned — double-click the row to pick "
@@ -1915,7 +2085,7 @@ class ImagesTab(FindOriginalsMixin, TabService):
         self._preview_ver += 1
         self.set(preview={
             "rel": rel, "group": None, "hdr": hdr, "hdr_main": hdr_main,
-            "hdr_note": note, "orig": opath or "",
+            "hdr_note": note, "scenes": scenes, "orig": opath or "",
             "rep": shown_rep or "",
             "rep_name": os.path.basename(shown_rep) if shown_rep else "",
             "empty": empty, "keep": self._keep_row(rel),
@@ -1925,6 +2095,50 @@ class ImagesTab(FindOriginalsMixin, TabService):
             if slot else False,
             "ver": self._preview_ver})
         self.publish_look()
+
+    def _scene_note(self, rel):
+        """PAD-534 (DragonRR): which scene(s) the picture is in, and how the game turns it
+        there ("In scene unnamed_instance_0 · 34856963, where the game draws it turned 48° clockwise").
+        The turns are worked out off the loop the first time a picture is shown."""
+        homes = [g for g in self._groups_of(rel) if g[0].startswith("rad::")]
+        if not homes:
+            return ""
+        key = (self._scan_dir, rel)
+        turns = self._turns.get(key)
+        if turns is None and key not in self._turns_busy:
+            self._turns_busy.add(key)
+            path, cards = self._scan_dir, [g[0][5:] for g in homes]
+            scan_id = self._scan_id
+
+            def _work():
+                try:
+                    got = scene_turns(path, rel, cards)
+                except Exception:                        # noqa: BLE001
+                    log.exception("scene turns %s", rel)
+                    got = {}
+                self.ctx.loop.post(_landed, got)
+
+            def _landed(got):
+                self._turns_busy.discard(key)
+                if self._scan_id == scan_id:    # a rescan may have new scene trees
+                    self._turns[key] = got
+                if self._current_rel == rel and self._scan_dir == key[0]:
+                    self._render_preview(rel)
+            threading.Thread(target=_work, daemon=True, name="images-turns").start()
+        turns = turns or {}
+
+        def _name(g):
+            words = self._group_tags.get(g[0]) or g[1]
+            how = "; ".join(turn_words(*t) for t in turns.get(g[0][5:], ()))
+            return (words, how)
+        named = [_name(g) for g in homes]
+        if len(named) == 1:
+            words, how = named[0]
+            return "In scene %s%s" % (
+                words, ", where the game draws it %s" % how if how else "")
+        shown = ", ".join("%s (%s)" % (w, h) if h else w for w, h in named[:4])
+        more = " and %d more" % (len(named) - 4) if len(named) > 4 else ""
+        return "In %d scenes: %s%s" % (len(named), shown, more)
 
     def _keep_row(self, rel):
         """Tk _image_refresh_keep_row: ``{on, text}`` or None (hidden)."""
@@ -1949,8 +2163,11 @@ class ImagesTab(FindOriginalsMixin, TabService):
         if new == orig:
             text = "Same size as the original (%d×%d)." % orig
         elif keep:
-            text = ("Kept at %d×%d (the original is %d×%d): the scene grows "
-                    "to fit it." % (new + orig))
+            # PAD-865: the build fits it into the original's place (radium_grow.keep_boxes);
+            # a Shape's fill the same, in the Shape's box (PAD-857)
+            text = ("Kept at %d×%d (the original is %d×%d): it shows in the original's place "
+                    "and size, fitted and centered, with more detail where the scene zooms "
+                    "in on it. Make it bigger or smaller on the Scenes tab." % (new + orig))
         else:
             text = ("Your picture is %d×%d, the original %d×%d: it will be "
                     "squeezed to fit." % (new + orig))
@@ -2234,6 +2451,103 @@ class ImagesTab(FindOriginalsMixin, TabService):
             return 0
         return self._clear_replacement_picks(targets, reselect=False)
 
+    @rpc
+    def clear_same(self):
+        """More menu: "Clear replacements identical to the original…"
+        (PAD-1016, DoomWalrus666).  Each pick (or picture a build already put
+        in) is compared with the game's own picture off the loop, pixel for
+        pixel, and the same ones are cleared together."""
+        if self._is_running() or self._same_cancel is not None:
+            return False
+        pairs = []
+        for rel in self._replacement_targets():
+            rep = self._rep_pane_path(rel)
+            orig = self._orig_pane_path(rel)[0]
+            if not (rep and orig):
+                continue
+            pairs.append((rel, rep, orig, bool(self._color_state(rel))))
+        if not pairs:
+            compat.messagebox.showinfo(
+                SAME_TITLE, "Nothing is picked on this tab, so there is "
+                "nothing to compare.")
+            return False
+        stop = threading.Event()
+        self._same_cancel = stop
+        self.set(same={"text": "Comparing %d replacement%s with the "
+                               "originals…" % (len(pairs),
+                                               "" if len(pairs) == 1 else "s"),
+                       "pct": 0})
+        scan_dir = self._scan_dir
+
+        def run():
+            same = []
+            for i, (rel, rep, orig, col) in enumerate(pairs):
+                if stop.is_set():
+                    break
+                try:
+                    if same_picture(rep, orig):
+                        same.append((rel, col))
+                except Exception:                        # noqa: BLE001
+                    log.exception("compare %s", rel)
+                self.ctx.loop.post(self._same_progress, stop, i + 1,
+                                   len(pairs))
+            self.ctx.loop.post(self._same_done, stop, scan_dir, len(pairs),
+                               same)
+
+        threading.Thread(target=run, daemon=True,
+                         name="images-same").start()
+        return True
+
+    def _same_progress(self, stop, done, total):
+        if self._same_cancel is not stop or stop.is_set():
+            return
+        self.set(same={"text": "Comparing replacements with the originals: "
+                               "%d of %d" % (done, total),
+                       "pct": int(100 * done / total) if total else 100})
+
+    @rpc
+    def clear_same_cancel(self):
+        stop = self._same_cancel
+        if stop is None:
+            return False
+        stop.set()
+        return True
+
+    def _same_done(self, stop, scan_dir, total, same):
+        if self._same_cancel is stop:
+            self._same_cancel = None
+        self.set(same=None)
+        self._update_clear_all()
+        if stop.is_set() or scan_dir != self._scan_dir:
+            return 0
+        # still picked as compared (a pick changed meanwhile is left alone)
+        live = set(self._replacement_targets())
+        targets = [rel for rel, _col in same if rel in live]
+        if not targets:
+            compat.messagebox.showinfo(
+                SAME_TITLE, "None of the %d replacement%s on this tab is the "
+                "same picture as the original it replaces."
+                % (total, "" if total == 1 else "s"))
+            return 0
+        n = len(targets)
+        question = ("%d of the %d replacement%s on this tab %s the same "
+                    "picture as the original, pixel for pixel. Clear %s?"
+                    % (n, total, "" if total == 1 else "s",
+                       "is" if n == 1 else "are", "it" if n == 1 else "them"))
+        # cleared whatever "Correct its colors" says (DoomWalrus666 asked):
+        # the slot gets the game's own picture back, uncorrected, as shipped
+        k = sum(1 for rel, col in same if col and rel in live)
+        if k:
+            who = (("It has" if n == 1 else "All of them have") if k == n
+                   else "%d of them %s" % (k, "has" if k == 1 else "have"))
+            question += ("\n\n%s “Correct its colors for the machine” on: "
+                         "clearing puts the game's own picture back as it "
+                         "shipped, without that correction." % who)
+        if not compat.messagebox.askyesno(
+                SAME_TITLE, self._clear_confirm_text(targets, question)):
+            return 0
+        return self._clear_replacement_picks(targets, reselect=False)
+
     def _update_clear_all(self):
         live = (not self._is_running()
                 and bool(self._replacement_targets()))
@@ -2498,6 +2812,10 @@ class ImagesTab(FindOriginalsMixin, TabService):
             else:
                 items.append({"label": "No replacements in this selection",
                               "disabled": True})
+            if self._per_file_colour():
+                items.append({"sep": True})
+                items.append({"label": self._cs_menu_label(len(rows)),
+                              "act": "csave"})
             return items
         if iid.startswith(GROUP_IID):
             key = iid[len(GROUP_IID):]
@@ -2538,6 +2856,8 @@ class ImagesTab(FindOriginalsMixin, TabService):
                               "act": "fonts"})
             items.append({"label": "Show scene contents…", "act": "scenes"})
         items.append({"sep": True})
+        if self._per_file_colour():
+            items.append({"label": self._cs_menu_label(1), "act": "csave"})
         items.append({"label": "Open in default app", "act": "open_orig"})
         if self._open_target(iid, "rep"):
             items.append({"label": "Open replacement in default app",
@@ -2553,6 +2873,10 @@ class ImagesTab(FindOriginalsMixin, TabService):
         """Run a menu entry from :meth:`menu`."""
         if action == "choose":
             return self.choose(iid)
+        if action == "csave":
+            rows = [r for r in (sel or []) if r in self._by_rel]
+            return self.colour_save(rows if iid in rows and len(rows) >= 2
+                                    else [iid])
         if action in ("color_on", "color_off", "color_box"):
             return self.set_color(iid, {"color_on": True, "color_off": False,
                                         "color_box": None}[action])
@@ -2828,6 +3152,16 @@ class ImagesTab(FindOriginalsMixin, TabService):
         self.window._relink_hint_for = None
         if getattr(self, "_visible", False):
             self._scan_image_slots_async()
+
+    def forget_reset(self, assets_dir, kinds):
+        """PAD-569 Reset…: forget the picks (and color switches) it resets, so a later save
+        of this tab cannot write them back over the sidecar the reset just cleared."""
+        if "images" in kinds:
+            self._assignments = {}
+            self._keep_size = set()
+        if "colours" in kinds:
+            self._color = {}
+            self._color_unlocked = False
 
     def refresh_after_revert(self):
         # Also run after Emulate's Start wrote the picks over the folder's

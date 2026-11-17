@@ -75,7 +75,7 @@ TIPS = {
                       "becomes Cancel while it runs.",
     "rebuild": "Re-read the scenes from the card image on the Extract "
                "tab, so an improved preview reaches this project folder. Your scene edits are "
-               "kept: this is not a reset (Reset, under the preview, is)."
+               "kept: this is not a reset (Revert, under the preview, is)."
                "\n\nTakes a few seconds and rewrites only the layout file — "
                "your images, glyph slices and font imports are left alone "
                "(a full re-extract would overwrite them).",
@@ -292,8 +292,61 @@ def glyph_atlas_rel(assets, rel):
     return None
 
 
-class TextScenesService(ModeLayoutMixin, TreeEditMixin):
+from .testcard_tags import TestTagMixin
+
+class TextScenesService(TestTagMixin, ModeLayoutMixin, TreeEditMixin):
     ns = "text_scenes"
+    _tc_kind = "scene"            # PAD-1279: a scene's TEST tick puts its resting frame on the test card
+
+    def _tc_project(self):
+        return self.assets_dir
+
+    def _tc_label(self, rel):
+        return (self._scenes.get(rel) or {}).get("label") or os.path.basename(str(rel).rstrip("/\\"))
+
+    def _tc_made(self, rel, item):
+        """A ticked scene: its resting frame as a picture, kept for the build (which draws
+        it again if the project is still the open one)."""
+        from . import testcard_core as tc
+        dst = tc.scene_png_path(self.assets_dir, rel)
+        self.render_resting_frame(rel, dst)
+        item.path = dst
+        tc.shared().save()
+
+    def render_resting_frame(self, d, dst):
+        """Scene *d* of the open project at its resting frame - the frame the Scenes
+        preview opens on, where everything that slides or fades in has come to rest - with
+        the project's edits and its whole-screen color profile, as the machine shows it
+        (not the PC's screen simulation), on black whatever the preview's background is (the
+        machine has nothing behind a scene), written to *dst* as a PNG."""
+        from ..core import colour_profile as cp
+        from ..plugins.stern import scene_render, fontrender as fr
+        assets = self.assets_dir
+        view = cp.machine_view(assets, True, False)
+        card, stock = self._tree_card(d)
+        if stock is not None:
+            man, _notes = self._tree_edited(card, stock)
+            img = scene_render.render_tree(
+                assets, man, self._tree_default(card), fonts=fr.load_fonts(assets),
+                background="Black", colors=self._pending_colors(card),
+                text_edits=self._pending_texts(card, None), pictures=self._tree_pictures(),
+                sizes=self._tree_sizes(), view=view, as_made=self._as_made(), cache={})
+        else:
+            card, layout = scene_render.layout_for_scene_dir(self._layouts, d)
+            if layout is None:
+                raise RuntimeError("the scene does not draw")
+            img = self._render_layout(
+                layout, fonts=fr.load_fonts(assets), frame=0, background="Black",
+                colors=self._pending_colors(card), group=None,
+                layout_edits=self._pending_layouts(card),
+                text_edits=self._pending_texts(card, layout), view=view)
+        if img is None:
+            raise RuntimeError("the scene does not draw")
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        tmp = dst + ".part.png"
+        img.save(tmp, "PNG")
+        os.replace(tmp, dst)
+        return dst
 
     def __init__(self, tab):
         self.tab = tab
@@ -327,6 +380,7 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
         self._bulk = None
         self._vbulk = None            # "Export all videos…" running (PAD-365)
         self._rebuild = None
+        self._fill_read = None               # PAD-539: the Filled-in panel's re-read
         self._tmp = None
         self._raise_n = 0
         self._auto_tried = None
@@ -359,8 +413,10 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
                  can_video=False, bulk_video=False, export_msg="",
                  rebuild_msg="", layout_dialog=None, tips=TIPS,
                  tree=False, tree_view=None, tree_layers=None, tree_busy=False,
-                 tree_loading=False, tree_img_rev=0, preparing=None, tree_live=None,
-                 card_note="", pic_note="", tree_play=None, mode_layout=None)
+                 tree_loading=False, tree_img_rev=0, tree_see={}, preparing=None,
+                 tree_live=None, fills_reading=False,
+                 card_note="", pic_note="", tree_play=None, mode_layout=None,
+                 resize_from=self._tree_resize_from())
 
     def is_open(self):
         return self._alive
@@ -499,6 +555,7 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
     # data
     # ------------------------------------------------------------------
     def reload(self, preselect=None, focus_text=None):
+        self._tc_publish()           # PAD-1279: the TEST column for this project
         from ..plugins.stern import scene_render
         try:
             self._scenes = collect_scenes(self.assets_dir)
@@ -614,14 +671,26 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
         return scene_eval.MANIFEST_VERSION
 
     def _scene_states(self):
-        """``{scene dir: "edited" | "written"}`` (DragonRR: colour the list by what is not
-        written to a card yet and what is)."""
+        """``{scene dir: "edited" | "all" | "written"}`` (DragonRR: colour the list by what is
+        not written to a card yet and what is).  A color profile on one of its pictures or lines
+        counts as a change too (PAD-524); either not written yet makes the scene not written,
+        *all* where the only change is the profile applied to all of them."""
         try:
             from ..plugins.stern import scene_edit
-            return {card.replace("\\", "/").rsplit("/", 1)[0]: st
-                    for card, st in scene_edit.scene_states(self.assets_dir).items()}
+            out = {card.replace("\\", "/").rsplit("/", 1)[0]: st
+                   for card, st in scene_edit.scene_states(self.assets_dir).items()}
         except Exception:                            # noqa: BLE001
             return {}
+        # the one not written that says most: edited, then all (a scene whose font color
+        # change went to all its lines alike, PAD-528), then written
+        rank = {"edited": 3, "all": 2, "written": 1}
+        try:
+            for d, st in scene_edit.scene_colour_states(self.assets_dir).items():
+                if rank.get(st, 0) > rank.get(out.get(d), 0):
+                    out[d] = st
+        except Exception:                            # noqa: BLE001
+            log.exception("scene color states")
+        return out
 
     def _restate_list(self):
         """The list's colours again (after an edit, a Reset, a Write), rows unchanged."""
@@ -630,6 +699,7 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
         new = [dict(r, state=states.get(r["d"], "")) for r in rows]
         if new != rows:
             self.set(scenes=new)
+        self._edit_list_sync()                   # PAD-540: the list of edits, if open
 
     def _sorted_dirs(self):
         key = _SORT_KEYS.get(self._sort_col, _SORT_KEYS["#0"])
@@ -875,9 +945,12 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
         if d != self._sel:
             self._focus_want = None
             self._drop_live_edit()
+        else:
+            self.set(item=None, thumb="")             # picked again: nothing in it picked
         self._tree_unselect()
         self._sel = d
         self._on_select()
+        self._edit_list_sync()                   # its edits go to the top (PAD-540)
         if not self._find_stepping and self._find_at and self._find_at[0] != d:
             # another scene picked by hand: Next goes to its first line (PAD-468)
             self._find_at = None
@@ -914,7 +987,9 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
                        % len(sc["images"]), "open": True, "items": [
                            {"id": "img::" + rel,
                             "text": os.path.basename(rel),
-                            "info": "double-click: show on Images tab"}
+                            "info": "double-click: show on Images tab",
+                            # PAD-567: the row's own small picture
+                            "thumb": self._item_thumb(rel)}
                            for _off, rel in sc["images"]]})
         fonts = [{"id": "font::" + table, "text": "%s (%dpx)"
                   % (name or table, px),
@@ -968,7 +1043,12 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
                             "text": os.path.basename(rel),
                             "info": "double-click: show on Video tab"}
                            for rel in sc["videos"]]})
-        item = None
+        # PAD-567: the list drawn again for the same scene (the Text tab's scan, a recolour)
+        # keeps the row that was picked
+        was = self.store.get(self.ns, "contents") or {}
+        item = self.store.get(self.ns, "item") if was.get("path") == sel else None
+        if item not in {it["id"] for g in groups for it in g["items"]}:
+            item = None
         if self._focus_want:
             scene, line = self._focus_want
             if scene == sel:
@@ -981,19 +1061,24 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
                 self._focus_want = None
         self.set(sel=sel, detail=sel, contents={"path": sel,
                                                 "groups": groups},
-                 item=item, thumb="")
+                 item=item, thumb=self._item_thumb(item[5:])
+                 if item and item.startswith("img::") else "")
         self._render_preview(sel)
+
+    def _item_thumb(self, rel):
+        """The picture file at *rel* under the project, "" when it is not there."""
+        path = os.path.join(self.assets_dir, *rel.split("/"))
+        return path if os.path.isfile(path) else ""
 
     @rpc
     def select_item(self, iid):
         """A contents row was picked: an image shows as a thumbnail."""
-        thumb = ""
-        if iid and iid.startswith("img::"):
-            rel = iid[5:]
-            path = os.path.join(self.assets_dir, *rel.split("/"))
-            if os.path.isfile(path):
-                thumb = path
+        thumb = self._item_thumb(iid[5:]) if iid and iid.startswith("img::") else ""
         self.set(item=iid, thumb=thumb)
+        # PAD-567 (DragonRR: "when any of the items in the list is selected it does
+        # nothing"): in the scene editor the row picks its layer on the preview, which is
+        # drawn on top while it is picked
+        tree = bool(iid) and bool(self.store.get(self.ns, "tree")) and self._tman is not None
         if iid and iid.startswith("txt::") and self._item_text(iid) is not None:
             # a line picked by hand: Previous / Next go on from it (PAD-468)
             hits = self._find_hits()
@@ -1001,6 +1086,14 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
             if hit in hits:
                 self._find_at = hit
                 self.set(find={"pos": hits.index(hit) + 1, "n": len(hits)})
+            if tree:
+                self._find_stepping = True
+                try:
+                    self._find_layer(self._sel, int(iid[5:]))
+                finally:
+                    self._find_stepping = False
+        elif tree:
+            self._tree_pick_item(iid)
         return True
 
     # ------------------------------------------------------------------
@@ -1146,15 +1239,15 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
         src = stock.get(text)
         if card is None or src is None:
             compat.messagebox.showinfo(
-                "Text colour",
-                "This line's colour isn't in the recorded scene layout, so "
+                "Text color",
+                "This line's color isn't in the recorded scene layout, so "
                 "there is nothing to change it from.\n\nRun \"Rebuild "
                 "previews…\" (or re-extract with Images enabled) and try "
                 "again.")
             return None
         return {"text": text, "start": text_colors.to_hex(
             picked.get(text, src)), "stock": text_colors.to_hex(src),
-            "title": "Colour for \"%s\"" % text[:40]}
+            "title": "Color for \"%s\"" % text[:40]}
 
     @rpc
     def set_color(self, text, hex_color=None):
@@ -1174,7 +1267,7 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
         try:
             text_colors.set_color(self.assets_dir, card, text, src, new)
         except OSError as e:
-            compat.messagebox.showerror("Text colour", str(e))
+            compat.messagebox.showerror("Text color", str(e))
             return False
         self._folder_state_written()
         self._on_select()
@@ -1939,6 +2032,7 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
                         from ..plugins.stern import scene_edit
                         man, _n = scene_edit.apply_manifest(
                             tman, scene_edit.to_apply(self.assets_dir, tcard, tman))
+                        scene_edit.mark_own_of(man, self.assets_dir, tcard)
                         img = scene_render.render_tree(
                             self.assets_dir, man, fonts=self._fonts, background=bg,
                             colors=self._pending_colors(tcard),
@@ -2093,6 +2187,7 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
                         man, _notes = scene_edit.apply_manifest(
                             j["stock"], scene_edit.to_apply(self.assets_dir, j["card"],
                                                             j["stock"]))
+                        scene_edit.mark_own_of(man, self.assets_dir, j["card"])
                         tj = {"man": man, "pins": j["pins"],
                               "frames": self._tree_frame_count(man),
                               "fps": self._tree_fps(man), "bg": bg,
@@ -2251,6 +2346,57 @@ class TextScenesService(ModeLayoutMixin, TreeEditMixin):
         threading.Thread(target=work, daemon=True,
                          name="scene-rebuild").start()
         return True
+
+    @rpc
+    def read_program(self):
+        """The Filled-in panel's Re-read from card (PAD-539): read the game program off the card
+        this project came from for the boxes it names, so the marks are the proven ones
+        (PAD-513) instead of word guesses.  The Text tab does it by itself when it opens with
+        the card at hand; this is for a project whose card was not there then."""
+        if self._fill_read is not None:
+            return False
+        card = self.card_image_path()
+        if card and os.path.isfile(card):
+            card = self._project_card(card, False)
+            if not card:
+                return False
+        else:
+            card = None                      # the card the extract recorded, if still there
+        assets = self.assets_dir
+        state = self._fill_read = {}
+        self.set(fills_reading=True, rebuild_msg="Reading the game program off the card…")
+
+        def work():
+            from ..plugins.stern import engine
+            msgs = []
+            try:
+                engine.refresh_program_text_flags(
+                    assets, log=lambda m, lvl="info": msgs.append(m), card=card)
+                ok, err = engine.program_node_paths(assets) is not None, None
+            except Exception as e:                   # noqa: BLE001
+                ok, err = False, e
+            self.ctx.loop.post(self._read_program_done, state, ok, err, msgs)
+
+        threading.Thread(target=work, daemon=True, name="scene-program-read").start()
+        return True
+
+    def _read_program_done(self, state, ok, err, msgs):
+        if state is not self._fill_read:
+            return
+        self._fill_read = None
+        self.set(fills_reading=False)
+        if ok:
+            self.set(rebuild_msg="Read the card: the boxes the game fills in are marked for sure.")
+            if self._alive:
+                self._tree_refresh()
+            return
+        self.set(rebuild_msg="")
+        why = msgs[-1] if msgs else str(err or "")
+        compat.messagebox.showwarning(
+            "Re-read from card",
+            "The card could not say which boxes the game fills in, so the marks stay guesses. "
+            "Set the Extract tab's Input to the card this project was extracted from, then try "
+            "again." + ("\n\n" + why if why else ""))
 
     def _project_card(self, card, quiet):
         """PAD-421: the card to re-read, or ``""`` to stop.  A scene re-read has to come off

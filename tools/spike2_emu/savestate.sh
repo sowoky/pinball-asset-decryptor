@@ -71,11 +71,81 @@ cp -f "/proc/$PID/root/dump/boot.id" "$DDIR/boot.id" 2>/dev/null || true
 # The restore SOURCE is decided here (the one place that knows the mapping):
 #   @PTY@ / @CARD@ placeholders, else a real host path.
 DUMP_EXT=()
+# host_path <major:minor> <root field>: where a guest mount's fs, at that
+# subpath, sits HERE - the host mount of that fs whose own root holds the
+# path (the LONGEST such root, so a subdir bind on the host resolves
+# exactly). Empty when this side has no mount of that fs.
+host_path() {
+    awk -v mm="$1" -v fr="$2" '
+        $3 == mm {
+            r = $4; if (r == "/") r = ""
+            if (fr == r || index(fr, r "/") == 1) {
+                if (!found || length(r) > best) {
+                    best = length(r); found = 1
+                    rest = substr(fr, length(r) + 1)
+                    if (rest == "/") rest = ""
+                    p = ($5 == "/" ? "" : $5) rest
+                    if (p == "") p = "/"
+                }
+            }
+        }
+        END { if (found) print p }' /proc/self/mountinfo
+}
+# The guest's root mount, for telling its own binds from the host's (below).
+GUEST_ROOT_MM=$(awk '$5 == "/" {print $3; exit}' "/proc/$PID/mountinfo")
+GUEST_ROOT_FR=$(awk '$5 == "/" {print $4; exit}' "/proc/$PID/mountinfo")
+# ...and where that root is on this side: the path run_game.sh mounted
+# everything under before the pivot (an overlay's lowerdir names it).
+GUEST_ROOT_HOST=$(host_path "$GUEST_ROOT_MM" "$GUEST_ROOT_FR")
+[ "$GUEST_ROOT_FR" = / ] && GUEST_ROOT_FR=
+# lower_host <path> <overlay mount id>: one overlay lowerdir as a HOST path.
+# run_game.sh mounted the overlay before the pivot, so a layer under the
+# guest's root was named by its pre-pivot path ($R/games/...) - which, on a
+# card, is the card's bind inside the guest's namespace, a path nothing
+# outside it can open. Such a layer is resolved through the guest mount
+# that held it then (the deepest one mounted before the overlay) to where
+# that mount's fs sits here. Any other layer (the staged override set) is
+# already a host path.
+lower_host() {
+    local L=$1 id=$2 gp hit mm fr gmp hp
+    case "$L" in
+    "$GUEST_ROOT_HOST"|"$GUEST_ROOT_HOST"/*) ;;
+    *) printf '%s\n' "$L"; return 0 ;;
+    esac
+    gp=${L#"$GUEST_ROOT_HOST"}; [ -n "$gp" ] || gp=/
+    hit=$(awk -v gp="$gp" -v id="$id" '
+        $1 + 0 < id + 0 {
+            m = ($5 == "/" ? "" : $5)
+            if (gp == $5 || index(gp, m "/") == 1)
+                if (!found || length(m) > best) {
+                    best = length(m); found = 1; out = $3 " " $4 " " $5
+                }
+        }
+        END { if (found) print out }' "/proc/$PID/mountinfo")
+    [ -n "$hit" ] || return 1
+    read -r mm fr gmp <<<"$hit"
+    hp=$(host_path "$mm" "$fr")
+    [ -n "$hp" ] || return 1
+    [ "$gmp" = / ] && gmp=
+    printf '%s\n' "${hp%/}${gp#"$gmp"}"
+}
 while IFS= read -r line; do
     mp=$(awk '{print $5}' <<<"$line")
     fstype=$(awk '{for(i=7;i<=NF;i++) if($i=="-"){print $(i+1); exit}}' <<<"$line")
     base=${mp##*/}
     key="ext_$(echo "${mp#/}" | tr '/.' '__')"
+    # ★ PAD-835: A CONTAINER'S /dev IS A tmpfs. run_game.sh binds the host's
+    # /dev/null, /dev/tty... over the guest's device files, and on WSL those
+    # come from devtmpfs - the case below. In the Mac's emulator box (Docker,
+    # colima) /dev is a tmpfs the engine filled with nodes, so the same binds
+    # read "tmpfs" here and were skipped as a fresh tmpfs, and criu died at
+    # "./dev/tty doesn't have a proper root mount". A bind of ONE device
+    # (a root field that is not "/", a guest path under /dev) is the
+    # devtmpfs case whatever the host's /dev is; /dev/shm, a fresh tmpfs of
+    # the guest's own, has root "/" and stays internal.
+    if [ "$fstype" = tmpfs ] && [ "$(awk '{print $4}' <<<"$line")" != / ]; then
+        case "$mp" in /dev/*) fstype=devtmpfs ;; esac
+    fi
     case "$fstype" in
     devtmpfs)
         if [ "$base" = null ] || [ "$base" = zero ] || \
@@ -116,6 +186,68 @@ while IFS= read -r line; do
         else
             echo "card $key $mp @CARD@" >> "$DDIR/restore.env"
         fi
+        DUMP_EXT+=(--external "mnt[$mp]:$key")
+        ;;
+    overlay)
+        # PAD-559, the other half of your edits: a NEW file (a mode's own
+        # clip, PAD-444) has no card file to bind over, so run_game.sh lays
+        # the set's directory over the card's as a read-only overlay. criu
+        # dumps that happily and then cannot mount it back ("Unable to mount
+        # overlay ... No such file or directory"): it replays the lowerdir
+        # paths, and one of them only ever meant something inside the dead
+        # guest's namespace. Record the layers as host paths instead;
+        # restorestate builds the same overlay here and binds it in. The
+        # slot root itself (the rootfs overlay) stays criu's own business.
+        majmin=$(awk '{print $3}' <<<"$line")
+        [ "$majmin" = "$GUEST_ROOT_MM" ] && continue
+        mid=$(awk '{print $1}' <<<"$line")
+        lowers=$(awk '{for(i=7;i<=NF;i++) if($i=="-"){print $(i+3); exit}}' <<<"$line" \
+                 | tr ',' '\n' | sed -n 's/^lowerdir=//p' | head -1)
+        hl=""
+        IFS=: read -ra parts <<<"$lowers"
+        for l in "${parts[@]}"; do
+            h=$(lower_host "$l" "$mid") || h=""
+            if [ -z "$h" ]; then
+                echo "[save] REFUSED: the overlay on $mp has a layer this side"
+                echo "[save] cannot find ($l), so a save of it could never be loaded."
+                exit 1
+            fi
+            hl="${hl:+$hl:}$h"
+        done
+        echo "ovl $key $mp $hl" >> "$DDIR/restore.env"
+        DUMP_EXT+=(--external "mnt[$mp]:$key")
+        ;;
+    proc|sysfs|tmpfs|mqueue|cgroup*|binfmt_misc|\
+    debugfs|tracefs|securityfs|configfs|pstore|bpf|nsfs|autofs|hugetlbfs)
+        ;;
+    *)
+        # ★ PAD-559: A FILE OF THE HOST'S OWN DISK BOUND INTO THE GUEST - the
+        # app's "your edits" set (PAD-103). run_game.sh binds every edited
+        # card file from the staged set ($PAD_SLOTDIR/override, ext4) over
+        # the card's copy, and criu cannot place a mount whose root lies
+        # outside the checkpoint: "112:./games/james_bond_le/<file> doesn't
+        # have a proper root mount". So EVERY save of a run with edits
+        # failed - a Bond LE owner testing his own modes, 2026-10-13. Same
+        # recipe as the card: the guest line's major:minor names the fs, our
+        # own mountinfo says where that fs sits here, and its root field
+        # (the file's path inside that fs) completes the host path. The
+        # rootfs and its self-binds never get here: they are the overlay.
+        majmin=$(awk '{print $3}' <<<"$line")
+        fsroot=$(awk '{print $4}' <<<"$line")
+        # A rootfs that is a plain directory (no slot overlay) is ext4 too:
+        # it and its self-binds (/games, /data, /dump) are inside the
+        # checkpoint's root, and criu's to recreate.
+        case "$majmin" in "$GUEST_ROOT_MM")
+            case "$fsroot/" in "$GUEST_ROOT_FR"/*|"$GUEST_ROOT_FR") continue ;; esac ;;
+        esac
+        src=$(host_path "$majmin" "$fsroot")
+        if [ -z "$src" ]; then
+            echo "[save] REFUSED: $mp is mounted into the game from a"
+            echo "[save] filesystem this side cannot see ($fstype $majmin $fsroot),"
+            echo "[save] so a save of it could never be loaded."
+            exit 1
+        fi
+        echo "bind $key $mp $src" >> "$DDIR/restore.env"
         DUMP_EXT+=(--external "mnt[$mp]:$key")
         ;;
     esac
@@ -243,15 +375,88 @@ done < <(for fd in /proc/$PID/fd/*; do
 # switch ring. The honest cost: the game is visibly frozen and the audio
 # underruns for the stash + journal beat on top of the dump's own freeze.
 echo "[save] externals:${DUMP_EXT[*]+ ${DUMP_EXT[*]}}${TTY_EXT[*]+ ${TTY_EXT[*]}}"
+# ★ PAD-559, round 2: THE FREEZE IS TIME THE GAME MUST NOT SEE. A stopped
+# process's clocks run on, and the game's dispatch loop waits on an absolute
+# 10 s deadline (exit 5, "GAME EXIT DISPATCH TIMEOUT", PAD-200). A save that
+# held the game longer than that - the same Bond LE owner's SECOND save, 13 s
+# deep into a game with the GL journal to write - woke it past the deadline
+# and it ended itself seconds later. Pause solved this long ago (PAD-204):
+# the frozen time goes into the switch block's paused_ms BEFORE the SIGCONT,
+# and hwshim takes it off every clock the game reads and adds it to every
+# deadline it waits on. So the save credits its freeze the same way.
+#
+# The freeze starts when criu SEIZES the task, not when criu starts, and
+# credit_freeze takes that moment from criu's own log (its timestamps count
+# from its start). Like padglhost's it errs SHORT - whole ms, less one - so
+# the game's clock can step forward a hair at the thaw but never backwards.
+T_CRIU0=$(date +%s%3N)
+# ...and the same moment on the MONOTONIC clock, read AFTER the wall one so
+# the seize it dates comes out a hair late - the load's credit below then
+# errs short too. Monotonic, because a load can come hours later and the
+# wall clock may have been stepped since.
+MONO0=$(python3 -c 'import time; print(int(time.monotonic() * 1000))' 2>/dev/null)
+GSW="/proc/$PID/root/dump/padsw"
+SWPY=$(dirname "$0")
+credit_freeze() {
+    local off now ms
+    off=$(awk 'match($0, /^\( *[0-9]+\.[0-9]+\)/) && /[Ss]eiz/ {
+                   s = substr($0, 2, RLENGTH - 2); gsub(/ /, "", s)
+                   printf "%d\n", s * 1000; exit }' "$DDIR/dump.log" 2>/dev/null)
+    [ -n "$off" ] || { echo "[save] NOTE: criu's log does not say when it froze the game; no clock credit"; return 0; }
+    now=$(date +%s%3N)
+    ms=$(( now - T_CRIU0 - off - 1 ))
+    [ "$ms" -gt 0 ] || return 0
+    python3 - "$GSW" "$ms" "$SWPY" <<'PYEOF'
+import struct, sys
+path, ms = sys.argv[1], int(sys.argv[2])
+sys.path.insert(0, sys.argv[3])
+import padsw
+with open(path, "r+b") as f:
+    head = f.read(padsw.SIZE)
+    if len(head) < padsw.SIZE or struct.unpack_from("<I", head, padsw.OFF_MAGIC)[0] != padsw.MAGIC:
+        print("[save] NOTE: no switch block to credit the freeze to (%d ms)" % ms)
+        sys.exit(0)
+    total = struct.unpack_from("<I", head, padsw.OFF_PAUSED_MS)[0] + ms
+    f.seek(padsw.OFF_PAUSED_MS)
+    f.write(struct.pack("<I", total & 0xffffffff))
+print("[save] the game was frozen %.1f s; its clock skips that, as for Pause" % (ms / 1000.0))
+PYEOF
+}
 "$CRIU" dump -t "$PID" -D "$DDIR" -v4 -o dump.log --leave-stopped \
     ${DUMP_EXT[@]+"${DUMP_EXT[@]}"} ${TTY_EXT[@]+"${TTY_EXT[@]}"}
 RC=$?
 if [ "$RC" != 0 ] || grep -aq 'Dumping FAILED' "$DDIR/dump.log"; then
     echo "[save] FAILED (exit $RC):"
     grep -aE 'Error' "$DDIR/dump.log" | tail -12 | sed 's/^/    /'
-    # A failed dump must not leave the game frozen on screen.
+    # AND THE REASON AGAIN AS THE LAST TAGGED LINE (PAD-559). The window's
+    # status bar shows the last tagged line that says something, and the
+    # indented criu lines above are not tagged - so a failed save showed
+    # "[save] FAILED (exit 1):" and nothing after the colon. criu's first
+    # Error is the cause; "Dumping FAILED" is only its echo.
+    why=$(grep -a 'Error' "$DDIR/dump.log" | grep -av 'Dumping FAILED' | head -1 \
+          | sed 's/^([^)]*) *//; s/^Error ([^)]*): *//')
+    echo "[save] could not save: ${why:-criu stopped without saying why (exit $RC) - see $DDIR/dump.log}"
+    # A failed dump must not leave the game frozen on screen - nor wake it
+    # past its watchdog, if criu had already seized it.
+    credit_freeze
     kill -CONT "$PID" 2>/dev/null
     exit 1
+fi
+
+# --- WHEN THE GAME'S CLOCK STOPPED, for the load (PAD-559 round 3) --------
+# A restored game wakes in a time namespace criu sets to the moment it read
+# the clock during this dump - AFTER the seize, by however long the dump
+# took - and a dump over 10 s made a slot whose every load tripped the game's
+# dispatch watchdog (the Bond LE owner's "loaded the state, started the
+# emulator and crashed", twice). restorestate.sh credits the time the
+# restored game perceives since the seize to paused_ms, and this is the
+# moment it counts from: the seize, on the monotonic clock, with the boot it
+# belongs to (for a criu that restores without a time namespace).
+SEIZE_OFF=$(awk 'match($0, /^\( *[0-9]+\.[0-9]+\)/) && /[Ss]eiz/ {
+                     s = substr($0, 2, RLENGTH - 2); gsub(/ /, "", s)
+                     printf "%d\n", s * 1000; exit }' "$DDIR/dump.log" 2>/dev/null)
+if [ -n "$MONO0" ] && [ -n "$SEIZE_OFF" ]; then
+    echo "frozen_at $(( MONO0 + SEIZE_OFF )) $(cat /proc/sys/kernel/random/boot_id)" >> "$DDIR/restore.env"
 fi
 
 # --- the rig's shared rings (guest frozen: freeze-exact) ------------------
@@ -332,7 +537,13 @@ fi
 if [ "${PAD_SAVE_STOP:-0}" = 1 ]; then
     kill -9 "$PID" 2>/dev/null
     echo "[save] guest ended (PAD_SAVE_STOP=1)"
+elif [ "$(od -An -tu4 -j1084 -N4 "$GSW" 2>/dev/null | tr -d ' ')" = 1 ]; then
+    # Pause was pressed during the save: the game is the user's to resume,
+    # and padglhost credits the frozen time from its own press. No credit
+    # here - the two would overlap and step the game's clock backwards.
+    echo "[save] the game was paused during the save; it stays paused"
 else
+    credit_freeze
     kill -CONT "$PID" 2>/dev/null
     for _ in 1 2 3 4 5; do
         st=$(awk '{print $3}' "/proc/$PID/stat" 2>/dev/null)

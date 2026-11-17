@@ -7,7 +7,8 @@ installer ``.img`` (see :mod:`.aaiw`).  Neither is encrypted.
 import os
 import zipfile
 
-from ...core.checksums import (generate_checksums, md5_file, read_checksums)
+from ...core.checksums import (generate_checksums, md5_file,
+                               note_extract_files, read_checksums)
 from ...core.executor import CommandError, create_executor
 from ...core.pipeline_base import BasePipeline, PipelineError
 from ...core.tar_utils import format_size
@@ -60,7 +61,7 @@ class TblExtractPipeline(BasePipeline):
         self._log("Detecting game...", "info")
         if detect_game(self.zip_path) != "tbl":
             raise PipelineError("Detect",
-                f"{os.path.basename(self.zip_path)} is not a recognised "
+                f"{os.path.basename(self.zip_path)} is not a recognized "
                 f"Big Lebowski update zip.")
         self._log("Game detected: The Big Lebowski", "success")
         os.makedirs(self.output_dir, exist_ok=True)
@@ -189,7 +190,7 @@ class AaiwExtractPipeline(BasePipeline):
         self._log("Detecting game...", "info")
         if detect_game(self.img_path) != "aaiw":
             raise PipelineError("Detect",
-                f"{os.path.basename(self.img_path)} is not a recognised "
+                f"{os.path.basename(self.img_path)} is not a recognized "
                 f"AAIW installer image.")
         self._log("Game detected: Alice's Adventures in Wonderland", "success")
 
@@ -533,6 +534,7 @@ def _apply_delta_zip(assets_folder, delta_zip_path, delta_version,
     """
     dest_abs = os.path.abspath(assets_folder)
     overwritten = added = total = 0
+    wrote = []
     with zipfile.ZipFile(delta_zip_path) as zf:
         infos = zf.infolist()
         total = len(infos)
@@ -563,8 +565,12 @@ def _apply_delta_zip(assets_folder, delta_zip_path, delta_version,
                 dst.write(src.read())
             overwritten += existed
             added += not existed
+            wrote.append(rel)
             if progress_cb and (i % 25 == 0 or i == total - 1):
                 progress_cb(i + 1, total, rel)
+    # card content the pristine-base baseline does not list: the Replace
+    # tabs must keep listing a folder only the update brings (PAD-1193)
+    note_extract_files(assets_folder, wrote)
     return overwritten, added, total
 
 

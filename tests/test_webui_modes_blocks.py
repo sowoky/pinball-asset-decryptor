@@ -1,6 +1,6 @@
 """PAD-232: the web Modes tab's third way to make a mode, BLOCKS.
 
-A blocks mode is made from New ▸ Mode from blocks…, listed with a Blocks pill, opened in the
+A blocks mode is made from New mode ▸ Blocks, listed with a Blocks pill, opened in the
 block editor (its program, what is wrong with it, the C it makes and the card's shots, events
 and callouts for the boxes), saved whole by the page, and taken to C with Edit as C. The tab runs
 in-process (tests/webui_harness.py) against a scratch Godzilla Pro 1.15 project.
@@ -54,6 +54,16 @@ def test_a_blocks_mode_is_made_listed_opened_saved_and_taken_to_c(tmp_path, prev
             assert '"Moon ramp"' in f.read()
         # only the OPEN mode's blocks are saved
         assert w.call("modes.blocks_save", "someone_else", prog) is None
+
+        # Edit as C is ONE WAY (PAD-611): the question says so, and keeping the blocks is its default
+        w.answers.append("no")
+        assert w.call("modes.blocks_to_code") is False
+        q = w.asked[-1]
+        assert q["icon"] == "warning" and "one-way" in q["title"]
+        assert "can't turn it back into blocks" in q["message"] and "Duplicate first" in q["detail"]
+        assert q["default"] == "no" and [b["label"] for b in q["buttons"]] == ["Turn it into C", "Keep the blocks"]
+        assert w.state("modes")["code"]["blocks"] is not None
+        assert os.path.isfile(BM.blocks_path(str(proj), "ramp_frenzy"))
 
         # Edit as C: a code mode from now on, its blocks kept aside
         w.answers.append("yes")
@@ -241,3 +251,29 @@ def test_the_mechanism_blocks_are_offered_where_the_game_can_hold_them(tmp_path,
         with open(tmp_path / "le" / "modes" / "coils" / "coils.c", encoding="utf-8") as f:
             c = f.read()
         assert 'hold("bridge", (3000LL));' in c and "scoop_hold((5000LL), 1);" in c
+
+
+def test_light_the_mode_at_a_shot_offers_the_cards_inserts(tmp_path, preview_on):  # noqa: F811
+    """PAD-503: a mode of the owner's own lit at a shot with one more insert of the card's game (a villain's on Bond's
+    Right ramp). The page is handed the inserts; one the game does not have is named; the C holds the light's row."""
+    with web_app(tmp_path, mfr="stern") as w:
+        _project(w, tmp_path / "le", card="godzilla_le-1_16_0.raw")
+        w.call("modes.new_blocks_mode", "Lit")
+        b = w.state("modes")["code"]["blocks"]
+        assert "MASER READY" in b["choices"]["inserts"] and "SHOOT AGAIN (X2)" in b["choices"]["inserts"]
+        prog = b["program"]
+        lit = {"op": "light_mode", "shot": "Right ramp", "insert": "BLOFELD", "color": "#ffd000", "pattern": "blink"}
+        prog["scripts"].append({"hat": {"kind": "event", "event": "skill_shot", "when": "any"}, "do": [lit]})
+        got = w.call("modes.blocks_save", "lit", prog)
+        assert got["problems"] == ["Script %d lights the insert BLOFELD, which this card's game does not have."
+                                   % len(prog["scripts"])]
+        lit["insert"] = "MASER READY"
+        assert w.call("modes.blocks_save", "lit", prog)["problems"] == []
+        with open(tmp_path / "le" / "modes" / "lit" / "lit.c", encoding="utf-8") as f:
+            assert '"MASER READY", 0xffd000u, PM_LAMP_BLINK, 500u, "", 0x000000u },   /* Right ramp */' in f.read()
+        # PAD-521: several inserts (a chase across them) and one more held solid, as the game's own look
+        lit.update(insert="MASER READY,SHOOT AGAIN (X2)", pattern="chase", solid="MASER READY", solid_color="#ffffff")
+        assert w.call("modes.blocks_save", "lit", prog)["problems"] == []
+        with open(tmp_path / "le" / "modes" / "lit" / "lit.c", encoding="utf-8") as f:
+            assert ('"MASER READY,SHOOT AGAIN (X2)", 0xffd000u, PM_LAMP_CHASE, 150u, "MASER READY", 0xffffffu }'
+                    in f.read())

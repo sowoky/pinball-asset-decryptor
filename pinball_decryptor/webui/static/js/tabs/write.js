@@ -7,6 +7,7 @@
 import { html, useState, useEffect, PageHead, Card, Button, Field, Select, Seg, Check, Chip, Note, Table, Empty,
          Icon, InfoBadge, tip, call, cx } from "../core/ui.js";
 import { useNs } from "../core/store.js";
+import { openDialog } from "../core/dialogs.js";
 import { FlashDialog, DiagDialog, InfoDialog, flashDialogHosted } from "./write_dialogs.js";
 
 export const css = true;
@@ -218,7 +219,35 @@ function Destination({ s }) {
         label=${s.text_grow_label} title=${s.text_grow_tip} disabled=${s.running} />` : null}
     ${s.card_size_cap && !direct ? html`<${CardSize} s=${s} />` : null}
     ${s.card_fit_cap && !direct ? html`<${CardFit} s=${s} />` : null}
+    ${s.editions_cap && !direct ? html`<${Editions} s=${s} />` : null}
+    ${s.picture_cap && !direct ? html`<${Picture} s=${s} />` : null}
   <//>`;
+}
+
+// PAD-495: the editions this card is one of (EDITION in the operator menu,
+// the setting a Multi-boot card of the editions boots by).  The names, a
+// button to change them, and a note: where the setting lands, or in red why
+// this game cannot have it.
+function Editions({ s }) {
+  return html`<div class="stack wr-build">
+    <span class="lbl" ...${tip(s.editions_tip)}>${s.editions_label}</span>
+    <div class="row">
+      <span class="small grow wr-editions">${s.editions_text}</span>
+      <${Button} onClick=${() => call("write.edit_editions")} disabled=${s.running}>Name the editions...<//>
+    </div>
+    ${s.editions_note ? html`<span class=${cx("small", s.editions_note_kind === "err" ? "err-ink" : "muted")}>${s.editions_note}</span>` : null}
+  </div>`;
+}
+
+// PAD-537: BRIGHTNESS, CONTRAST and SATURATION in the game's operator menu,
+// applied live.  The tick, and a note: where the rows land and how many fit
+// beside Music Mode and Edition, or, in red, why this game cannot have them.
+function Picture({ s }) {
+  return html`<div class="stack wr-build">
+    <${Check} checked=${s.picture_on} wrap label=${s.picture_label} title=${s.picture_tip}
+      disabled=${s.running} onChange=${(v) => call("write.set_picture", v)} />
+    ${s.picture_note ? html`<span class=${cx("small", s.picture_note_kind === "err" ? "err-ink" : "muted")}>${s.picture_note}</span>` : null}
+  </div>`;
 }
 
 // Stern Spike 2: the SD card class the build is for (the games partition
@@ -265,7 +294,8 @@ export default function WriteTab() {
       ${count ? html`<${Chip} kind="acc">${count} ${plural(count, "change", "changes")} for the next build<//>` : null}
       <${Button} kind="ghost" onClick=${() => call("write.export_csv")} title=${s.export_tip}>Export CSV<//>
       ${s.revert_cap ? html`<${Button} kind="danger" disabled=${!s.revert_enabled}
-        onClick=${() => call("write.revert_all")}>Revert all changes…<//>` : null}
+        title="The whole project back as it was extracted: opens Reset… with everything ticked"
+        onClick=${() => openDialog("reset", { all: true })}>Revert all changes…<//>` : null}
     <//>
     <div class="wr-body"><div class="wr-cols">
       <div class="wr-left">

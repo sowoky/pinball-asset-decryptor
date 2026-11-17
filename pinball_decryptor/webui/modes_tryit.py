@@ -97,7 +97,7 @@ class TryItMixin:
                    "container cannot see the modes yet. Your modes are saved in the "
                    "project."),
     }
-    TRYIT_CANCELLED = "Try it was cancelled; nothing was started."
+    TRYIT_CANCELLED = "Try it was canceled; nothing was started."
     TRYIT_NOT_UP = "the emulator did not come up; the Emulate tab's log says why."
 
     START_TIP = ("Start the mode open on the left in the running game, without its starting "
@@ -105,9 +105,6 @@ class TryItMixin:
     END_TIP = "End whichever of this project's modes is running."
     CODE_TIP = ("A mode written in C, for what the form cannot do: a copy of the Mode SDK's "
                 "template in this project's modes folder. Try it builds it in with the others.")
-    CUT_TIP = ("Cut the code-mode examples' clip, picture, music and calls from your own copy "
-               "of the Godzilla films, with the film cutter. Pick the folder that holds the "
-               "films.")
     LEAVE_OUT_TIP = ("Build this Try it without the modes' own sounds: the game's own calls "
                      "play, and the sound bank is not grown (the slow part of a build). A card "
                      "Written from the project still carries them.")
@@ -501,7 +498,7 @@ class TryItMixin:
                                  "tab's now: stop it there if you do not want it.")
             else:
                 self._tryit_cancel = True
-                self._tryit_note("cancelling…")
+                self._tryit_note("canceling…")
             return False
         self._save_if_edited()
         project = self.project()
@@ -522,6 +519,14 @@ class TryItMixin:
         if why:
             # the card cannot run a mode (no card, no port, still being read): said at once,
             # before the Emulate tab or the rig is asked anything
+            self._tryit_set("failed", why)
+            self._tryit_note(why)
+            return False
+        try:                                    # PAD-1030: a mode the build would refuse, said before anything runs
+            why = " ".join(MT.code_mode_problems(project))
+        except MT.TryItError as e:
+            why = str(e)
+        if why:
             self._tryit_set("failed", why)
             self._tryit_note(why)
             return False
@@ -638,6 +643,9 @@ class TryItMixin:
                 "pick a card image in the Emulate tab first (%s)."
                 % ("a %s card" % prof.label if prof is not None
                    else "the card this project was made from"))
+        from ..plugins.stern import spike3 as _S3
+        if _S3.is_spike3_card(card):
+            return self._tryit_prepare_s3(project, card)      # PAD-1272
         found_modes, broken = MP.list_modes(project) if project else ([], [])
         try:
             with_assets = MT.code_modes_with_assets(project) if project else []
@@ -724,6 +732,69 @@ class TryItMixin:
             return self._tryit_cancelled_refuse()
         self._tryit_set("starting")
         return MT.run_env(ts)
+
+    def _tryit_prepare_s3(self, project, card):
+        """PAD-1272: Try it on a Stern Spike 3 card. The set is what a Write puts in the
+        card's /games/pad/padmode (spike3_modes.plan, from this card's own game program):
+        the 64-bit runtime (with the project's code modes compiled in, PAD-1295), preloaded into the game by s3run.sh (PAD_S3_MODE_SO), and the
+        port and mode files in the rig's /dump (PAD_S3_MODE_FILES), where it looks after the
+        card's own folder. PAD-1296: the modes' own sounds, and PAD-1284: the scenes their
+        screens and clips rewrite (and a clip's new file), go into the rig slot's /games for
+        the run (s3run.sh games.patch)."""
+        from ..plugins.stern import mode_write as MW
+        from ..plugins.stern import spike3_card, spike3_modes as S3M
+        from ..plugins.stern.ext4 import Ext4Reader
+        say = lambda m, *_a, **_k: self._say("Try it: " + m)
+        why = MW.card_refusal(project)
+        if why:
+            return self._tryit_refuse(why)
+        self._tryit_set("building")
+        work = os.path.join(self._tryit_base, "spike3")
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            vol = spike3_card.open_games(card)
+        except Exception as e:                              # noqa: BLE001 - no key, unreadable
+            return self._tryit_refuse("the Spike 3 card could not be opened: %s" % e)
+        # the design's "leave out own sounds" (PAD-1296: a Spike 3 card carries them too)
+        sound_ok = (False, "left out of this run") if self.get("leave_out") else (True, "")
+        files = os.path.join(work, "files")
+        own = shown = 0
+        try:
+            reader = Ext4Reader(vol, 0, vol.size)
+            mplan = S3M.plan(project, reader, work, log=say, real_card=False, sound_ok=sound_ok)
+            if mplan is not None and not self._tryit_cancelled():
+                # PAD-1296: the modes' own sounds go into the rig slot's image.bin (s3run.sh)
+                own = S3M.stage_try_it_sounds(reader, mplan, files)
+                shown = S3M.stage_try_it_scenes(mplan, files)        # PAD-1284
+        except (MW.ModeWriteError, MP.ModeProjectError, OSError, ValueError, RuntimeError) as e:
+            return self._tryit_refuse(str(e))
+        finally:
+            vol.close()
+        if mplan is None:
+            return self._tryit_refuse("none of the project's modes can run on this card; "
+                                      "the log says why.")
+        if self._tryit_cancelled():
+            return self._tryit_cancelled_refuse()
+        os.makedirs(files, exist_ok=True)
+        from ..plugins.stern.spike3_music import PROGRAM_NAME as _S3_PROGRAM
+        for name, src, _mode in mplan.files():
+            if name not in ("mode.so", _S3_PROGRAM):     # PAD-1324: the program goes in games.patch
+                shutil.copyfile(src, os.path.join(files, name))
+        self._tryit_live = None            # no hot reload on the Spike 3 rig: Try it again
+        note = ("%d mode(s) ready (%s). Start a game, then play the starting shots."
+                % (len(mplan.names), ", ".join(mplan.names)))
+        # PAD-1295: the code modes are compiled into this run's mode.so for the card's 64-bit ARM
+        note += self._tryit_code_note([(s, None) for s, _c in (getattr(mplan.result, "code", None) or ())])
+        if own:
+            note += " Their own sounds play from the card's sound container in this run."
+        if shown:
+            note += " Their screens and clips show from the card's scenes in this run."
+        if getattr(mplan, "program", ""):                   # PAD-1324: the music modes
+            note += (" MUSIC MODE is in the operator menu in this run (Adjustments > Machine Settings > "
+                     "Audio Content).")
+        self._tryit_note(note)
+        self._tryit_set("starting")
+        return ["PAD_S3_MODE_SO=%s" % mplan.payload["so"], "PAD_S3_MODE_FILES=%s" % files]
 
     @staticmethod
     def _tryit_sound_note(names):
@@ -931,7 +1002,8 @@ class TryItMixin:
         if not live or live.get("project") != project or slug not in live["slots"]:
             return None
         slot = live["slots"][slug]
-        waits = MT.asset_signature(spec) != live["signatures"].get(slug)
+        sig = MT.asset_signature(spec)
+        waits = sig != live["signatures"].get(slug)
         sounds = live.setdefault("sounds", {})
         if MT.sound_signature(spec) != sounds.get(slug, MT.sound_signature(spec)):
             sounds[slug] = MT.sound_signature(spec)
@@ -943,8 +1015,17 @@ class TryItMixin:
                                   own_sound_ms=own.get("ms") or None)
         except MP.ModeProjectError:
             return None
+        # PAD-493: the game has the screen Try it built, and only that one, until the next Try it
+        text = MT.keep_built_screen(text, self._tryit_built(live, slot))
+        said = live.setdefault("assets_said", {})
         if text == self._tryit_game_has(live, slug, slot):
+            if waits and said.get(slug) != sig:
+                said[slug] = sig
+                self._tryit_note("%s: a change to its screen or clip reaches the game at the next "
+                                 "Try it." % spec.name)
             return None
+        if waits:
+            said[slug] = sig
         folder = os.path.join(live["stage"], "push")
         os.makedirs(folder, exist_ok=True)
         path = os.path.join(folder, MA.mode_file_name(slot))
@@ -961,11 +1042,16 @@ class TryItMixin:
         self._in_background(cmd, pushed)
         return cmd
 
-    @staticmethod
-    def _tryit_game_has(live, slug, slot):
+    @classmethod
+    def _tryit_game_has(cls, live, slug, slot):
         text = live.get("texts", {}).get(slug)
         if text is not None:
             return text
+        return cls._tryit_built(live, slot)
+
+    @staticmethod
+    def _tryit_built(live, slot):
+        """The mode file Try it installed in ``slot``, as its build wrote it (None if gone)."""
         try:
             with open(os.path.join(live["stage"], MA.mode_file_name(slot)),
                       encoding="utf-8", newline="") as f:

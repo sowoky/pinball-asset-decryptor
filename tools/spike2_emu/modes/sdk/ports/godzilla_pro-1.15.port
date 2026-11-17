@@ -145,6 +145,11 @@ site stock_battle_running 0x000d2040 0xe92d4070 0xe30d6ed8
 # v[22]: an active mode with (kind & 0x21) == 1 (every multiball)
 site stock_multiball_running 0x000d2218 0xe92d40f8 0xe30d6ed8
 data stock_mode_manager       0x0079d954
+# PAD-733 (David's Premium, v32: every mode of ours waited from 208 s into a ball to its drain, KUMONGA's picks refused):
+# Tesla Strike (rule 23, started by the powerlines, over when its lit arrows are made or the ball ends) runs beside the
+# game's own battles and multiballs, so it is not "one of the game's modes running" for ours (the rule lines below name
+# it; MODE_SDK.md "The game's own modes")
+text stock_any_beside        Tesla Strike
 
 # ---- events (item 147): measured with event_probe.c, one marked game (MODE_SDK.md, Events) -----
 # The bus's dispatch, hooked to count ids; each id below fired in exactly the marked windows
@@ -188,10 +193,13 @@ value roster_vec_at         8
 value roster_record_size    12
 value roster_id_at          4
 value roster_qualified_at   83
-# the start of a picked mode waits this long (mode_file.c): the selection screen fades and plays its intro clip,
-# gone by +2.4 s; with 3000 the mode started 3001 ms after the pick (item 146 run4). With no wait no start screen
-# was seen (run2, run3: it came while the selector was closing); at +3.3 s it showed on Premium 1.16 (run5)
-value roster_start_after_ms 3000
+# PAD-733 (David: the scene transition "the same as what the normal modes do"): a picked mode starts as the
+# selection screen's close ends - filmed at 0.25x on Premium/LE 1.16, Pro 1.16 and the Heisei 1.99D card alike: the
+# fade is gone by 0.44 s, the map zooms into the frame and holds, and 2.0 s after the pick the close's display effect
+# (Premium/LE 1.16's 132) gives way and a battle of the game's is in its intro. The runtime starts the mode the tick it does
+# (pm_roster_closing); this is only the most it waits (it was the start itself, 3000: the city's HUD, then the mode's)
+# (this build's card is archival and was not run; its selector is the 1.16 builds' scene and code)
+value roster_start_after_ms 2500
 # the selection screen's slot table (.data, 32-byte records: the art node name at +20, the progress node at +24, a u16
 # callout id at +28 = 1888 1918 1894 1910 0 0 0; its code plays nothing for 0). A claimed slot is made silent, and its id
 # put back on release (pm_roster_callout, mode file `roster_callout`; item 146 fix-1)
@@ -207,6 +215,93 @@ value roster_city_bit        1
 value roster_city_index_at   20
 value roster_city_vec_at     44
 value roster_city_record_size 16
+# PAD-706: a pick COUNTS AS THE BATTLE IT REPLACED (MODE_SDK.md "A monster in the roster"). The sites located by
+# port_tool.py from Premium/LE 1.16 (strict) off this build's own program (md5 0bd1ee6e); battle_clock checked as the
+# call the cmode start makes right after the manager's "started" (0x11b45c), as on 1.16. CBattle::stop here (0x7e1c8,
+# as on Pro 1.16) reads the same offsets (+0x64 wins, +8 flags & 0x10, the battle rule at 0x79d8e0) and the city pick's
+# restart is the same code (0x195358 on: ids 12-15, the START's load at 0x195398); the start's city write is the cities
+# rule's +0x38 vector here too (0x7e318, 0x79dae8). Desk-read: this card is archival and is not booted here.
+site battle_stop       0x0007e1c8 0xe92d4038 0xe2515000
+site battle_started    0x000d246c 0xe351001a 0xe92d4008
+site battle_clock      0x0023e924 0xe92d4010 0xe1a04000
+site roster_cursor     0x0018d268 0xe92d4038 0xe1a05000
+# the city pick's restart of the city's lost tier-1 battle (0x195288: `ldr r3,[r0]` after its pop, the same
+# shape as Premium/LE's 0x199038)
+site roster_resume     0x00195398 0xe5903000 0xe5933020
+value roster_cursor_at       16
+# PAD-707: new monsters on the selection screen (pm_roster_more) - the screen's own sounds, read from its switch
+# handler (0x18d3a8): the left flipper button moves the cursor back with 271, the right on with 272; a pick plays 236
+# (then show 177); the screen's timer is 13 s.
+value roster_left_sound     271
+value roster_right_sound    272
+value roster_pick_sound     236
+value roster_select_ms      13000
+# The screen's handler (r0 = the screen, r1 = the switch: 137 the left flipper button, 139 the right) moves the
+# cursor only while the screen's clock (83) runs and the busy one (23) does not, and not when the other flipper is
+# down too (both pick); each move first gives the clock 3 more (bump), then the next open slot (next 0x18d2d0), the
+# sound, the cursor's word (+roster_cursor_at) and its landing (roster_cursor, the callout). Opening (open) starts
+# the cursor on the last slot played; the pick (pick: Action, both flippers or the clock) plays 236 and starts the
+# battle of the slot under the cursor. A slot's state (state, RuleBattle): 0 open, 2 won in this city, else locked.
+# PAD-1078: the PLAYER LANGUAGE SELECT - RuleCities' switch method (r0 RuleCities, r1 the switch) flips the player
+# up between English and Japanese at each release of a flipper BUTTON, the cabinet inputs 137 (left) / 139 (right);
+# the co-op pick keeps them from it while it has the flippers (coop.cfg's left / button)
+site language_keys       0x0013c3b8 0xe92d40f8 0xe1a04001
+value language_keys_left   137
+value language_keys_right  139
+site roster_screen_keys   0x0018d3a8 0xe92d4070 0xe1a05000
+site roster_screen_open   0x0018d53c 0xe92d4038 0xe1a04000
+site roster_screen_pick   0x0018cfc0 0xe3a01000 0xe92d4010
+site roster_screen_bump   0x0018d22c 0xe92d4038 0xe1a05000
+site roster_slot_state    0x00121bac 0xe3510006 0xda000001
+site roster_timer_on      0x00390eb0 0xe92d4008 0xe30b3ff4
+site roster_switch_held   0x0045fde8 0xe59f1000 0xeaffffe2
+value roster_screen_left   137
+value roster_screen_right  139
+value roster_screen_timer  83
+value roster_screen_busy   23
+value roster_screen_bump_by 3
+# the screen's scene, the path to its places' nodes, and each slot's node names (battle_select.py's)
+text roster_screen_scene  cac32730af42b9d26d26c4bb6e667b07da53113e
+text roster_screen_path   SelectOverlay_Textbox.CharacterSelect_Instance.
+text roster_tile_0        Ebirah
+text roster_tile_1        Titan
+text roster_tile_2        Gigan
+text roster_tile_3        Megalon
+text roster_tile_4        Ghidorah
+text roster_tile_5        MegalonGigan
+text roster_tile_6        GhidorahGigan
+# each place's state box (its lock, its claw, its city), under the overlay: hidden where a new monster won it
+text roster_box_path      SelectOverlay_Textbox.
+text roster_box_0         T1_1_Artbox
+text roster_box_1         T1_2_Artbox
+text roster_box_2         T1_3_Artbox
+text roster_box_3         T1_4_Artbox
+text roster_box_4         T2_1_Artbox
+text roster_box_5         T2_2_Artbox
+text roster_box_6         T2_3_Artbox
+value battle_stopped_at      0x13
+value battle_reason_at       0x17
+value battle_starts_at       0x3c
+value battle_clock_at        0x54
+value battle_wins_at         0x64
+value battle_flags_at        8
+value battle_no_city_flag    0x10
+value battle_total_at        0xf0
+value roster_city_battle_vec_at 56
+# PAD-707: a tier-1 battle's last hit (0x7fe00, 0x8f3a8, 0x9ba18, 0xa4704): beaten(rule), once the rule's
+# guard says it is built, then the cities rule's "beaten here" byte for the player (+0x44 vector, 4 a city) = 1,
+# before the victory show and CBattle::stop. A pick a mode won does the same (the city is finished: the next city
+# screen travels on).
+site battle_beaten       0x0011f318 0xe92d47f0 0xe1a06000
+data battle_beaten_rule       0x0079fa38
+data battle_beaten_guard      0x0079fb98
+value roster_city_beaten_vec_at 68
+# PAD-733: the city screen's "TO REMATCH %s" (numbered line 3750 of the game's text table, read off this build's
+# program: 3748 STAY IN:, 3749 TRAVEL TO:), the held battle's name; it names a new monster lost in the city instead
+value roster_rematch_line  3750
+value battle_beaten_slots   0x0f
+# the slots whose battle stops itself, not through CBattle::stop: 5, Megalon & Gigan multiball
+value battle_own_stop_slots  0x20
 
 # ---- display priority (item 154 display; MODE_SDK.md "Display priority") --------------------------------------
 # Read off this build: the same 152 effects and 111 layered displays (flags, priorities) as Premium 1.16, run there.
@@ -289,7 +384,7 @@ lamp 296          0              FIGHTER RIGHT 2  # lamp 109, I/O group 6 index 
 lamp 297          0              FIGHTER RIGHT 3  # lamp 110, I/O group 6 index 11, at 215,566
 lamp 298          0x8000000      MASER  # lamp 111, I/O group 6 index 62, at 51,417
 lamp 299          0              MASER READY  # lamp 112, I/O group 6 index 63, at 67,425
-lamp 300,301,302  0x800000000    LEFT SPINNER  # lamp 113, I/O group 6 index 56, at 55,373
+lamp 300,301,302  0x800000200    LEFT SPINNER  # PAD-658: + the Left spinner shot (0x200); lamp 113, I/O group 6 index 56, at 55,373
 lamp 303          0              TANK 1  # lamp 114, I/O group 6 index 55, at 69,391
 lamp 304          0              ADV RAMPAGE  # lamp 115, I/O group 6 index 54, at 77,405
 lamp 305          0              RODAN  # lamp 116, I/O group 6 index 41, at 178,421
@@ -298,10 +393,10 @@ lamp 307          0              ANGUIRUS  # lamp 118, I/O group 6 index 47, at 
 lamp 308,309,310  0              TOP SAUCER  # lamp 119, I/O group 6 index 28, at 209,410
 lamp 311,312,313  0              BOTTOM SAUCER  # lamp 120, I/O group 6 index 17, at 215,436
 lamp 314          0              SAUCER  # lamp 121, I/O group 6 index 8, at 225,450
-lamp 315          0              ATTACK MECHA  # lamp 122, I/O group 6 index 23, at 200,381
+lamp 315          0x20000        ATTACK MECHA  # PAD-669: + the shield ramp spinner shot (0x20000), the insert the game's Ebirah battle names for it; lamp 122, I/O group 6 index 23, at 200,381
 lamp 316          0              TANK 6  # lamp 123, I/O group 6 index 22, at 227,394
 lamp 317          0x2000000000   SELECT CITY  # lamp 124, I/O group 6 index 21, at 236,380
-lamp 318,319,320  0x4000000000   MECHA LANE  # lamp 125, I/O group 6 index 24, at 282,393
+lamp 318,319,320  0x14000000000  MECHA LANE  # PAD-658: + the Mecha exit bottom shot (0x10000000000); lamp 125, I/O group 6 index 24, at 282,393
 lamp 321,322,323  0x40           POP BUMPER  # lamp 126, I/O group 6 index 42, at 251,413
 lamp 324,325,326  0x80000000     SHIELD LEFT  # lamp 127, I/O group 6 index 31, at 188,308
 lamp 327,328,329  0x200000000    SHIELD RIGHT  # lamp 128, I/O group 6 index 34, at 223,335
@@ -326,7 +421,7 @@ lamp 351          0x80000        MAGNA GRAB  # lamp 146, I/O group 7 index 44, a
 lamp 352          0              TANK 3  # lamp 147, I/O group 7 index 43, at 95,276
 lamp 353          0              ATTACK BRIDGE  # lamp 148, I/O group 7 index 42, at 102,292
 lamp 354,355,356  0xc00000       BUILDING  # lamp 149, I/O group 7 index 76, at 123,202
-lamp 357,358,359  0x1800         TOP SPINNER  # lamp 150, I/O group 7 index 67, at 165,207
+lamp 357,358,359  0x3800         TOP SPINNER  # PAD-658: + the Top spinner shot (0x2000); lamp 150, I/O group 7 index 67, at 165,207
 lamp 360          0x10000000     POWERLINE LEFT  # lamp 151, I/O group 7 index 79, at 104,219
 lamp 361          0              LITE DESTRUCTION JACKPOT  # lamp 152, I/O group 7 index 71, at 124,220
 lamp 362          0x20000000     POWERLINE CENTER  # lamp 153, I/O group 7 index 70, at 144,216
@@ -374,8 +469,34 @@ value stock_slot_shot   41
 value stock_slot_active 14
 value stock_slot_lit    25
 value stock_field       0x18
-rule 12 0x006266d0 Battle vs Ebirah
-rule 4  0x00630100 Tank attack multiball
+# PAD-699: the game's own modes a counts-as / instead-of row may name (game_mode_blocks.stock_rule_lines,
+# from the game program): `rule <id> <the vtable pointer its object carries> <name>`
+rule 1   0x00629ba0 Godzilla Multiball
+rule 2   0x0062caf8 Mechagodzilla Multiball
+rule 3   0x006295e0 Bridge Attack Multiball
+rule 4   0x00630100 Tank Attack Multiball
+rule 5   0x0062f470 Saucer Attack Multiball
+rule 6   0x006286b0 Battle vs Megalon and Gigan Multiball
+rule 7   0x0062ebb8 Planet X Multiball
+rule 8   0x0062dda0 Monster Zero Victory Multiball
+rule 9   0x00631080 Terror of Mechagodzilla
+rule 10  0x0062ae58 King of the Monsters Multiball
+rule 11  0x0062d078 Monster Island Madness
+rule 12  0x006266d0 Battle vs Ebirah
+rule 13  0x00628f60 Battle vs Titanosaurus
+rule 14  0x00627418 Battle vs Gigan
+rule 15  0x00627fc0 Battle vs Megalon
+rule 16  0x00627970 Battle vs King Ghidorah
+rule 17  0x00626e58 Battle vs Ghidorah and Gigan
+rule 18  0x0062fba0 Super Train
+rule 19  0x0062e7b0 O2 Destroyer
+rule 20  0x0062ad58 King of the Monsters
+rule 21  0x0062a888 Jet Fighter Attack
+rule 22  0x0062edd0 Planet X Hurry Up
+rule 23  0x006307c0 Tesla Strike
+rule 24  0x0062d708 Monster Rampage
+rule 25  0x0062a438 Hedorah
+rule 26  0x0062dcc8 Monster Zero
 # ---- item 161: the game's own rules REWRITTEN in C (pad_stock.h; MODE_SDK.md "Rewriting a stock rule's shot logic") ----
 # addresses are item 158's Pro 1.15 twins where it read them ("158") and the LE address minus the
 # unit's offset where it did not (ebirah unit -0x17d0, tank unit -0x2838, cmode base -0x17c8: "delta",
@@ -498,6 +619,31 @@ switch 59   0x4000000000000000 Right flipper button
 # the Action button's RGB light (lamp 97, I/O group 5 index 5/4/7, on the cabinet front), tied to its shot:
 # a mode that lights its shots lights the button
 lamp 282,283,284  0x1000000000000000 ACTION BUTTON  # lamp 97, I/O group 5 index 5, the cabinet front
+# ---- cabinet: cablamp <light ids R,G,B | one> <u> <name> - the expression lights, read by lamp_map.py ----
+# 0 blade pixel(s), 23 speaker light(s), placed on the cabinet drawing (PAD-1040)
+cablamp 516,517,518  41  SPEAKER 1  # lamp 237, I/O group 9 index 1, at 95,28, speaker L
+cablamp 519,520,521  125 SPEAKER 2  # lamp 238, I/O group 9 index 4, at 116,34, speaker L
+cablamp 522,523,524  208 SPEAKER 3  # lamp 239, I/O group 9 index 7, at 131,49, speaker L
+cablamp 525,526,527  291 SPEAKER 4  # lamp 240, I/O group 9 index 10, at 137,70, speaker L
+cablamp 528,529,530  375 SPEAKER 5  # lamp 241, I/O group 9 index 13, at 131,91, speaker L
+cablamp 531,532,533  458 SPEAKER 6  # lamp 242, I/O group 9 index 16, at 116,106, speaker L
+cablamp 534,535,536  541 SPEAKER 7  # lamp 243, I/O group 9 index 19, at 95,112, speaker L
+cablamp 537,538,539  625 SPEAKER 8  # lamp 244, I/O group 9 index 22, at 74,106, speaker L
+cablamp 540,541,542  708 SPEAKER 9  # lamp 245, I/O group 9 index 25, at 59,91, speaker L
+cablamp 543,544,545  791 SPEAKER 10  # lamp 246, I/O group 9 index 28, at 53,70, speaker L
+cablamp 546,547,548  875 SPEAKER 11  # lamp 247, I/O group 9 index 31, at 59,49, speaker L
+cablamp 549,550,551  958 SPEAKER 12  # lamp 248, I/O group 9 index 34, at 74,34, speaker L
+cablamp 552,553,554  45  SPEAKER 13  # lamp 249, I/O group 9 index 37, at 205,28, speaker R
+cablamp 555,556,557  136 SPEAKER 14  # lamp 250, I/O group 9 index 40, at 228,35, speaker R
+cablamp 558,559,560  227 SPEAKER 15  # lamp 251, I/O group 9 index 43, at 243,53, speaker R
+cablamp 561,562,563  318 SPEAKER 16  # lamp 252, I/O group 9 index 46, at 247,76, speaker R
+cablamp 564,565,566  409 SPEAKER 17  # lamp 253, I/O group 9 index 49, at 237,98, speaker R
+cablamp 567,568,569  500 SPEAKER 18  # lamp 254, I/O group 9 index 52, at 217,110, speaker R
+cablamp 570,571,572  590 SPEAKER 19  # lamp 255, I/O group 9 index 55, at 193,110, speaker R
+cablamp 573,574,575  681 SPEAKER 20  # lamp 256, I/O group 9 index 58, at 173,98, speaker R
+cablamp 576,577,578  772 SPEAKER 21  # lamp 257, I/O group 9 index 61, at 163,76, speaker R
+cablamp 579,580,581  863 SPEAKER 22  # lamp 258, I/O group 9 index 64, at 167,53, speaker R
+cablamp 582,583,584  954 SPEAKER 23  # lamp 259, I/O group 9 index 67, at 182,35, speaker R
 
 # The battle rule's shot handler, RuleBattle::v[25] (vtable 0x631ea8 + 8 + 100; shot mask in r2:r3): a lit
 # ramp counts toward a battle (0x100000 Left ramp, 0x200000 Right ramp), a lit scoop (hi 0x20) opens the
@@ -634,3 +780,53 @@ text held_coils            magnet
 site scoop_handler         0x0007cd94 0xe30b3a5a 0xe2401002
 data scoop_slot            0x00744728
 value scoop_event          2
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+data  game_flags          0x007a939c
+value game_flags_at       4
+data  game_flag_count     0x005eabe0
+value challenge_on_flag   18
+value challenge_flag_0  40
+text  challenge_name_0  King of the Monsters
+value challenge_name_msg_0  3275
+value challenge_flag_1  41
+text  challenge_name_1  King of the Monsters Time Attack
+value challenge_name_msg_1  3276
+site  challenge_balls     0x00460bd0 0xe92d4030 0xe1a05000
+site  challenge_extra_ball 0x001fb5c8 0xe30b3450 0xe340307a
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x0039a630 0xe30b2a5a 0xe340207a
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x0039648c 0xe92d4010 0xe30a4b48
+value ball_launch_flag       12
+value ball_launch_wait_flag  13
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x001f9a48 0xe92d4ff0 0xe24dd0bc
+
+# PAD-710: the game's own mode framework (mode_framework.py, from this build's program): what one of its
+# modes writes as it starts and stops, so a mode of ours in one's place counts as it
+site  mode_player            0x00460ba0 0xe3083170 0xe3403070
+value mode_slot_stop         11
+value mode_stopped_at        0x13
+value mode_reason_at         0x17
+value mode_starts_at         0x3c
+site  mode_started           0x000d246c 0xe351001a 0xe92d4008
+data  mode_manager           0x0079d954
+value mode_id_at             4
+
+# PAD-710: the challenges that are one of the game's own modes: a mode taking the challenge counts as it
+value challenge_place_0        20
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x005a38dc 0xe5d13000 0xe3530008
+site coil_off              0x0059f9c8 0xe3510008 0xe1a02001
+data sw_struct             0x007a958c
+data coil_count            0x007e4578
+data coil_table            0x007bcc98

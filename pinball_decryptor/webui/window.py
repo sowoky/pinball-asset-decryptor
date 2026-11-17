@@ -23,11 +23,14 @@ import collections
 import itertools
 import logging
 import os
+import sys
+import threading
 import time
 
 from .. import __version__
 from ..core import session_log
 from . import compat
+from .i18n import LANGUAGES as _LANGUAGES, language as _language
 from .rpc import RpcError, rpc
 from .tabs import load_tab_classes
 
@@ -42,7 +45,8 @@ MULTIBOOT_PHASES = ("Media", "Copy", "Inject", "Verify")
 #: Which chip row a tab owns (Tk's PHASE_ROW_BY_TAB): None = no run row.
 PHASE_ROW_BY_KEY = {
     "Extract": "extract", "Compare": "extract", "Mod Pack": "extract",
-    "Write": "write", "Modes": "write",
+    "Write": "write", "Modes": "write", "Attract": "write", "Expression Lights": "write", "Play Options": "write",
+    "Service Menu": "write",
     "Emulate": "emulate", "Emulate JJP": "emulate",
     "Emulate Spike1": "emulate", "Emulate BoF": "emulate",
     "Emulate DP": "emulate",
@@ -52,8 +56,13 @@ PHASE_ROW_BY_KEY = {
     "Multi-boot": "multiboot",
     "Replace Audio": None, "Replace Video": None,
     "Replace Images": None, "Replace Text": None, "Scenes": None,
-    "Partition Explorer": None, "Default Settings": None,
+    "Partition Explorer": None, "Default Settings": None, "Test Card": None,
 }
+
+def _testcard_available(mfr):
+    from .testcard_core import available
+    return available(mfr)
+
 
 def _system_theme():
     """No saved theme: follow the OS, as the Tk window did."""
@@ -64,7 +73,7 @@ def _system_theme():
         return "dark"
 
 
-_EMULATE_KINDS = {"copy": (0, None), "boot": (1, 55),
+_EMULATE_KINDS = {"copy": (0, None), "boot": (1, 55), "nodes": (2, 60),
                   "techalerts": (2, 80), "run": (4, 100)}
 
 
@@ -83,6 +92,11 @@ class WebWindow:
         self._timer = None
         self._log = collections.defaultdict(
             lambda: collections.deque(maxlen=LOG_KEEP))
+        # id -> entry per manufacturer, so an in-place progress line finds
+        # its entry without a walk of the 5,000-line deque (PAD-797).  Kept
+        # in step with the deque by _store_line, which is the one place a
+        # line enters it (an eviction drops the evicted id).
+        self._log_index = collections.defaultdict(dict)
         self._log_ids = itertools.count(1)
         self._log_line_run = 0
         self._keyed = {}                    # (run, key) -> line id
@@ -121,7 +135,9 @@ class WebWindow:
             run_mode=None, footer=self._footer_idle("extract"),
             prereqs=[], banners=[], toasts=[], title="",
             theme=self.cb.get("initial_theme") or _system_theme(),
-            zoom=1.0, back_enabled=True)
+            zoom=1.0, back_enabled=True,
+            lang=_language(self.cb.get("initial_language")),
+            languages=[list(x) for x in _LANGUAGES])
 
     # ------------------------------------------------------------------
     # attribute delegation to the tab services
@@ -172,6 +188,22 @@ class WebWindow:
     #: The window itself tells every service about a tab change (Tk's
     #: _on_tab_changed); services need not wrap select_tab.
     fans_tab_changes = True
+
+    @rpc
+    def drop_arm(self, names):
+        """Files from the desktop were dropped on something that opens a
+        picker (PAD-838): their full paths, from the window's drop handler,
+        answer the picker the page's click on it opens next.  False, after
+        saying why, when the paths never came (a browser has no window
+        handler)."""
+        paths = self.ctx.drops.take(names or [])
+        if not paths:
+            compat.messagebox.showinfo(
+                "Drop", "This window could not tell where the dropped file "
+                "is. Use Browse… or Choose… to pick it instead.")
+            return False
+        self.ctx.dialogs.arm_drop(paths)
+        return True
 
     @rpc
     def select_tab(self, ns):
@@ -279,6 +311,17 @@ class WebWindow:
         return True
 
     @rpc
+    def set_language(self, code):
+        """The gear menu's Language (PAD-458): the page translates itself
+        (static/js/core/i18n.js); the app keeps the choice in settings."""
+        code = _language(code)
+        self.ctx.store.set("shell", lang=code)
+        fn = self.cb.get("on_language_change")
+        if fn is not None:
+            fn(code)
+        return True
+
+    @rpc
     def open_link(self, url):
         from ..core import desktop
         try:
@@ -353,6 +396,91 @@ class WebWindow:
 
     def refresh_rail(self):
         self.ctx.store.set("shell", tabs=self._rail())
+        self.refresh_spike3_key()
+
+    # -- PAD-1090: the user's own Spike 3 OTP key, which every Spike 3 tab
+    # needs (static/js/core/locks.js "spike3key"; webui/spike3_key.py) ------
+    def _spike3_card(self):
+        for name in ("extract_input_var", "emulate_card_var"):
+            try:
+                path = (getattr(self, name).get() or "").strip().strip('"')
+            except Exception:                           # noqa: BLE001
+                path = ""
+            if path and os.path.isfile(path):
+                return path
+        return ""
+
+    def refresh_spike3_key(self):
+        """shell.spike3_key: True when the user's OTP key is on file."""
+        from . import spike3_key
+        try:
+            have = bool(spike3_key.find_keyfile(self._spike3_card() or None))
+        except Exception:                               # noqa: BLE001
+            have = False
+        self.ctx.store.set("shell", spike3_key=have)
+        return have
+
+    @rpc
+    def spike3_paste_key(self, text):
+        """The key gate's field: the key pasted as text (64 hex characters,
+        or OTP_KEY.TXT's contents), checked against the selected card, kept.
+        The key itself never reaches the log."""
+        text = (text or "").strip()
+        if not text:
+            return False
+        return self._spike3_take_key(text)
+
+    @rpc
+    def spike3_load_key(self):
+        """The key gate's "Choose a key file": OTP_KEY.TXT, or the raw
+        32-byte key, which cannot be pasted."""
+        if not self._spike3_card():
+            return self._spike3_take_key(None)
+        key = self.ask_open("spike3_otp_key", "Select your OTP key "
+                            "(OTP_KEY.TXT or the 32-byte key file)",
+                            [("Key files", "*.txt *.bin"), ("All files", "*.*")])
+        if isinstance(key, (list, tuple)):
+            key = key[0] if key else ""
+        if not key:
+            return False
+        return self._spike3_take_key(key)
+
+    def _spike3_take_key(self, key):
+        """Verify *key* (text or a file path) against the selected card and
+        keep it (webui/spike3_key.save_key), off the UI thread."""
+        card = self._spike3_card()
+        if not card:
+            self.toast("Select your Spike 3 card first (the Select card tab): "
+                       "PAD checks the key against it before keeping it.", "warn")
+            return False
+        self.ctx.store.set("shell", spike3_key_busy=True, spike3_key_status=
+                           "Checking the key against your card…")
+
+        def work():
+            from . import spike3_key
+            try:
+                ok, msg, _path = spike3_key.save_key(key, card)
+            except Exception as exc:                    # noqa: BLE001
+                ok = False
+                err = str(exc)
+                if isinstance(key, str) and len(key) > 8 and key[:16] in err:
+                    err = type(exc).__name__     # never echo a pasted key
+                msg = "Could not use that key: %s" % err
+
+            def done():
+                self.ctx.store.set("shell", spike3_key_busy=False,
+                                   spike3_key_status=msg)
+                self.append_log("[spike3] " + msg, "success" if ok else "warn")
+                if ok:
+                    self.refresh_spike3_key()
+                    self.refresh_rail()
+                    ext = self._by_ns.get("extract")
+                    if ext is not None and ext.get("spike3_unlock"):
+                        ext._spike3_unlocked(msg)
+            self.ctx.loop.post(done)
+
+        threading.Thread(target=work, daemon=True, name="spike3-key").start()
+        return True
 
     def set_tab_badge(self, ns, badge):
         svc = self._by_ns.get(ns)
@@ -377,6 +505,9 @@ class WebWindow:
     _tab_visible = tab_visible
 
     def _gate(self, mfr):
+        # every tab that runs a game: the Visual Pinball tab follows them
+        VPX_EMULATORS = ("emulate", "emulate_spike1", "emulate_jjp", "emulate_ap",
+                         "emulate_bof", "emulate_dp", "emulate_spooky", "emulate_pb")
         caps = mfr.capabilities
         g = lambda name: bool(getattr(caps, name, False))   # noqa: E731
         gates = {
@@ -386,8 +517,10 @@ class WebWindow:
             "Replace Video": g("replace_video"),
             "Replace Images": g("replace_image"),
             "Replace Text": g("replace_text"),
-            "Scenes": g("replace_image"),
-            "Color Profile": g("replace_image") or g("replace_video"),
+            # not for a display of shades of one color (Stern SAM's DMD)
+            "Scenes": g("replace_image") and not g("dmd_shades"),
+            "Color Profile": ((g("replace_image") or g("replace_video"))
+                              and not g("dmd_shades")),
             "Write": g("write"),
             "Mod Pack": g("modpack"),
             "Partition Explorer": g("partition_explorer"),
@@ -404,13 +537,41 @@ class WebWindow:
             "Emulate Spooky": g("emulate_spooky"),
             "Emulate PB": g("emulate_pb"),
             "Multi-boot": g("multiboot"),
+            # PAD-1279: a test card is made from a Stern Spike 2 card's boot and system
+            "Test Card": _testcard_available(mfr),
             "Modes": self.modes_preview_on(mfr),
+            # PAD-782: the attract mode editor rides the mode runtime (Stern Spike 2)
+            "Attract": g("modes"),
+            # PAD-1204: the play options ride it too, and keep Insider Connected
+            "Play Options": g("modes"),
+            # PAD-1382: the service menu with the app's rows in it (Stern Spike 2, the mode runtime's)
+            "Service Menu": g("modes"),
+            # PAD-1040: the expression light shows ride it too, and are no part of the mode maker
+            "Expression Lights": g("modes"),
+            # PAD-802: Visual Pinball on the Spike 2 emulator (a preview until
+            # PAD-1136); PAD-943 (David): on every manufacturer the app emulates
+            # (not Spike 3: its rig has no Visual Pinball bridge - PAD-1090)
+            "Visual Pinball": (any(g(c) for c in VPX_EMULATORS) and self.vpx_preview_on()
+                               and getattr(mfr, "_era", None) != "spike3"),
         }
         return gates
 
+    @staticmethod
+    def vpx_preview_on():
+        """The Visual Pinball tab's switch (core/preview.py "vpx", in
+        preview.RELEASED since PAD-1136, so on with no code); Visual Pinball and
+        the kit's controller are Windows only."""
+        if sys.platform != "win32":
+            return False
+        from ..core import preview
+        return preview.enabled("vpx")
+
     def modes_preview_on(self, mfr=None):
+        """The Modes tab: Stern Spike 2's mode maker (``modes``) or the JJP custom-modes
+        editor (``jjp_modes``, PAD-1350), behind the same preview switch."""
         mfr = mfr if mfr is not None else self.current_mfr
-        if mfr is None or not getattr(mfr.capabilities, "modes", False):
+        if mfr is None or not (getattr(mfr.capabilities, "modes", False)
+                               or getattr(mfr.capabilities, "jjp_modes", False)):
             return False
         from ..core import preview
         return preview.enabled("modes")
@@ -498,8 +659,19 @@ class WebWindow:
     # log
     # ------------------------------------------------------------------
     def _store_line(self, mfr_key, entry):
-        self._log[mfr_key].append(entry)
+        lines = self._log[mfr_key]
+        index = self._log_index[mfr_key]
+        if lines.maxlen is not None and len(lines) >= lines.maxlen:
+            # the deque is about to evict its oldest line
+            index.pop(lines[0].get("id"), None)
+        lines.append(entry)
+        index[entry.get("id")] = entry
         self.ctx.bus.publish("log", mfr=mfr_key, line=entry)
+
+    def _clear_log(self, mfr_key):
+        """Forget a manufacturer's lines (the deque AND its id index)."""
+        self._log.pop(mfr_key, None)
+        self._log_index.pop(mfr_key, None)
 
     def append_log(self, text, level="info"):
         text = session_log.clean_line(str(text))
@@ -533,11 +705,10 @@ class WebWindow:
                      "text": text, "level": level or "info"}
             self._store_line(mkey, entry)
             return
-        for entry in self._log[mkey]:
-            if entry["id"] == lid:
-                entry["text"] = text
-                entry["level"] = level or "info"
-                break
+        entry = self._log_index[mkey].get(lid)
+        if entry is not None:
+            entry["text"] = text
+            entry["level"] = level or "info"
         self.ctx.bus.publish("log_update", mfr=mkey, id=lid, text=text,
                              level=level or "info")
 
@@ -638,9 +809,24 @@ class WebWindow:
     def set_status(self, text):
         self._set_footer(status=str(text))
 
+    def set_task(self, busy, status=None):
+        """A background step that is not a run (Transfer mods' comparisons
+        and copy): the footer shows it working, with its own elapsed clock,
+        but there is no Cancel and the tabs stay as they are.  A real run
+        owns the footer, so this leaves it alone while one is going."""
+        if self._running:
+            return
+        if busy:
+            self._set_footer(task=True, busy=True, pct=None,
+                             started=time.time(),
+                             status=str(status or "Working…"))
+        else:
+            self._set_footer(task=False, busy=False, pct=None, started=None,
+                             status=str(status or "Ready"))
+
     def set_cancelling(self):
         self.ctx.store.set("shell", cancelling=True)
-        self.set_status("Cancelling...")
+        self.set_status("Canceling...")
 
     def set_running(self, running, mode="extract"):
         self._running = bool(running)
@@ -651,13 +837,13 @@ class WebWindow:
             self.ctx.store.set("shell", running=True, run_mode=mode,
                                cancelling=False, back_enabled=False)
             self._set_footer(status="Starting…", busy=True, pct=None,
-                             started=self._start_time)
+                             started=self._start_time, task=False)
         else:
             self._start_time = None
             self._borrowed_row = None
             self.ctx.store.set("shell", running=False, run_mode=None,
                                cancelling=False, back_enabled=True)
-            self._set_footer(busy=False, started=None)
+            self._set_footer(busy=False, started=None, task=False)
             self._show_row_for_tab()
         for svc in self.tabs:
             try:
@@ -705,6 +891,9 @@ class WebWindow:
             index, value = _EMULATE_KINDS[kind]
             if kind == "copy":
                 value = int((pct or 0) * 0.4)
+            elif pct is not None:
+                # PAD-744: how far through the boot, from status.sh's boot_pct
+                value = max(value, min(99, int(pct)))
             self._phase_index["emulate"] = index
             self._set_footer(mode="emulate",
                              phases=list(self._phases["emulate"]),
@@ -828,6 +1017,10 @@ class WebWindow:
     def stop_all_preview_playback(self):
         self._fan("stop_all_preview_playback")
 
+    def audio_scanned(self, folder):
+        """PAD-1068: the Audio tab's scan of *folder* is in (tabs that list its sounds read them again)."""
+        self._fan("on_audio_scanned", folder)
+
     def emulate_shutdown(self):
         self._fan("emulate_shutdown")
 
@@ -836,6 +1029,10 @@ class WebWindow:
 
     def clear_replace_assignments(self, assets_dir):
         self._fan("clear_replace_assignments", assets_dir)
+
+    def forget_reset(self, assets_dir, kinds):
+        """PAD-569 Reset…: every tab forgets what it holds of the kinds reset."""
+        self._fan("forget_reset", assets_dir, kinds)
 
     def begin_revert_view(self):
         self._fan("begin_revert_view")

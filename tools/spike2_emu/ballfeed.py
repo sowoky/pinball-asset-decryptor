@@ -59,6 +59,9 @@ padsw.set_source('b')   # who the [sw] log says moved a switch; see padsw.h.
 #: feeder without an emulator. The rig never sets either.
 LED_PATH = os.environ.get("PAD_LED_FILE",
                           os.path.join(padpath.dump() or "", "padled"))
+#: PAD-775: present while a Visual Pinball table's own trough owns the balls
+#: (vpx/padcontroller.py writes it on Run, removes it on Stop).
+OFF_PATH = os.path.join(os.path.dirname(LED_PATH), "ballfeed.off")
 
 
 def _num(name, default):
@@ -243,6 +246,15 @@ def read_led():
     return d if coilmap.has_magic(d) else None
 
 
+def list_stamp(game):
+    """The switch list's mtime, or None - what tells the feeder the list was replaced."""
+    path = gameinfo.table("switch_list.txt", game)
+    try:
+        return os.path.getmtime(path) if path else None
+    except OSError:
+        return None
+
+
 class Feeder:
     """Resolution, decisions and the writes - kept apart on purpose.
 
@@ -255,6 +267,7 @@ class Feeder:
     def __init__(self, game=None, dry=False):
         self.dry = dry
         self.game = gameinfo.active(game)
+        self.list_stamp = list_stamp(self.game)
         rows = trough.load_list(gameinfo.table("switch_list.txt", self.game)
                                 or "")
         positions, how = trough.find(rows)
@@ -266,15 +279,19 @@ class Feeder:
         self.eject_coil = coilmap.eject_address(coils)
         self.plunge_coil = coilmap.address(coils, coilmap.AUTO_PLUNGER)
         # item 167: a title with a van (TMNT LE/Premium) - see ballmodel.VAN_STACK
-        self.van = ballmodel.Van.from_names({(r.get("name") or "").upper().strip(): r["id"] for r in rows})
+        by_name = {(r.get("name") or "").upper().strip(): r["id"] for r in rows}
+        self.van = ballmodel.Van.from_names(by_name)
         self.van_lower = coilmap.address(coils, ballmodel.VAN_COIL_LOWER) if self.van else None
         self.van_upper = coilmap.address(coils, ballmodel.VAN_COIL_UPPER) if self.van else None
         if self.van_lower is None or self.van_upper is None:
             self.van = None
         # PAD-248: drop target banks (ballmodel.DROP_BANKS); PAD_DROP_TARGET=0 off
         self.drops = [] if _num("PAD_DROP_TARGET", 1) == 0 else ballmodel.DropBank.from_names(
-            {(r.get("name") or "").upper().strip(): r["id"] for r in rows},
-            lambda n: coilmap.address(coils, n))
+            by_name, lambda n: coilmap.address(coils, n))
+        # PAD-654: a lock the game fills through a diverter (D&D LE's dragon) - see ballmodel.HOLDS
+        self.hold = ballmodel.Hold.from_names(by_name, lambda n: coilmap.address(coils, n))
+        #: when the hold's feed coil (the diverter) last fired
+        self.feed_at = None
         #: how many of the van's balls went in during attract: those roll home when the van lets them
         #: out, whoever has walked up since
         self.van_attract = 0
@@ -290,7 +307,7 @@ class Feeder:
         #: balls queued on the ramp BEHIND the trough's last switch (PAD_BALL_EXTRA): an eject from a
         #: full trough takes one of these and the trough still reads full; a ball home to a full
         #: trough joins them
-        self.extra_max = _num("PAD_BALL_EXTRA", 0)
+        self.extra_max = _num("PAD_BALL_EXTRA", self.hold.balls if self.hold else 0)
         self.extra = self.extra_max
         #: balls like that, let out and on their way home (release times)
         self.homebound = []
@@ -368,6 +385,10 @@ class Feeder:
             out.append("van: locks %s, enter %d, LOWER LOCK node %d index %d, UPPER LOCK node %d index %d"
                        % ((",".join(str(i) for i in self.van.stack), self.van.enter)
                           + self.van_lower + self.van_upper))
+        if self.hold:
+            out.append("hold: %s, release node %d index %d, feed node %d index %d"
+                       % ((", ".join("%s=%d" % (n, i) for n, i in zip(self.hold.names, self.hold.stack)),)
+                          + self.hold.release + self.hold.feed))
         for t in self.drops:
             out.append("drop bank: %s (made when %s), %sRESET node %d index %d"
                        % (", ".join("%s=%d" % (n, i) for n, i in zip(t.names, t.switches)),
@@ -445,6 +466,9 @@ class Feeder:
                 say(shape)
 
         fed = False
+        # read every poll so the counter stays seeded
+        if self.hold and self.fired(d, self.hold.feed):
+            self.feed_at = now
         if self.fired(d, self.eject_coil):
             if now - self.last_feed < MIN_GAP_S:
                 say("eject %.0f ms after the last one - refused as a retry "
@@ -482,9 +506,16 @@ class Feeder:
                         and now - self.home_at >= ballmodel.VAN_ATTRACT_QUIET_S:
                     self.van_game = False
                     say("van: an auto plunge from a full, quiet trough - attract again")
-                vplan = (self.van.plan_load(m[padsw.OFF_MRG:padsw.OFF_MRG + padsw.MAX_ID])
-                         if self.van and not self.van_game else None)
-                if vplan and self.run_plan(m, vplan, "van:"):
+                mrg = m[padsw.OFF_MRG:padsw.OFF_MRG + padsw.MAX_ID]
+                # PAD-654: the diverter fired with this ball's eject - it is the hold's, in attract or a game
+                hplan = (self.hold.plan_load(mrg)
+                         if self.hold and self.feed_at is not None
+                         and now - self.feed_at <= ballmodel.HOLD_FEED_S else None)
+                vplan = self.van.plan_load(mrg) if self.van and not self.van_game else None
+                if hplan and self.run_plan(m, hplan, "hold:"):
+                    say("the launched ball went into the hold (%d there now)"
+                        % self.hold.count(m[padsw.OFF_MRG:padsw.OFF_MRG + padsw.MAX_ID]))
+                elif vplan and self.run_plan(m, vplan, "van:"):
                     self.van_attract += 1
                     say("the launched ball went into the van (%d there now)"
                         % self.van.count(m[padsw.OFF_MRG:padsw.OFF_MRG + padsw.MAX_ID]))
@@ -501,6 +532,12 @@ class Feeder:
                     say("the van holds its %d resting ball(s): %d installed, %d in the trough"
                         % (self.van.count(m[padsw.OFF_MRG:padsw.OFF_MRG + padsw.MAX_ID]),
                            len(self.trough.positions) + ballmodel.VAN_STOCK, len(self.trough.positions)))
+        if self.hold and self.fired(d, self.hold.release):
+            if self.run_plan(m, self.hold.plan_release(m[padsw.OFF_MRG:padsw.OFF_MRG + padsw.MAX_ID]),
+                             "hold release:"):
+                # a ball on the playfield like any launched one: a person drains it, the way home takes it
+                # back when nobody is playing (the ball search a short trough brings on is the release)
+                self.pending.append((now, claim))
         if self.van:
             mrg = m[padsw.OFF_MRG:padsw.OFF_MRG + padsw.MAX_ID]
             n = self.trough.count(mrg)
@@ -518,7 +555,9 @@ class Feeder:
                     # an attract ball: nobody plays a ball in attract, so it rolls home even if
                     # somebody pressed Start while it was in the van
                     self.van_attract -= 1
-                    self.homebound.append(now)
+                    cplan = self.van.plan_catch(m[padsw.OFF_MRG:padsw.OFF_MRG + padsw.MAX_ID])
+                    if not (cplan and self.run_plan(m, cplan, "van, the glider:")):
+                        self.homebound.append(now)
                 else:
                     # a game's ball: an ordinary launched ball from here on (a person drains it,
                     # the way home takes it if the room empties)
@@ -537,6 +576,12 @@ class Feeder:
         self._van_home(m, now)
         self._way_home(m, now, claim)
         return fed
+
+    def held(self, mrg):
+        """Balls a lock holds (the van, a hold): neither home nor in play."""
+        van = (self.van.count(mrg) + (1 if self.van.catch is not None and mrg[self.van.catch] else 0)
+               if self.van else 0)
+        return van + (self.hold.count(mrg) if self.hold else 0)
 
     @staticmethod
     def _u32(m, off):
@@ -589,7 +634,7 @@ class Feeder:
             return
         mrg = m[padsw.OFF_MRG:padsw.OFF_MRG + padsw.MAX_ID]
         lane_made = self.lane is not None and bool(padsw.merged(m, self.lane))
-        dplan = ballmodel.plan_drain(self.trough, mrg, self.lane, lane_made, self.van.count(mrg))
+        dplan = ballmodel.plan_drain(self.trough, mrg, self.lane, lane_made, self.held(mrg))
         if dplan.refused and self.trough.full(mrg) and self.extra < self.extra_max:
             self.extra += 1
             self.homebound.pop(0)
@@ -647,7 +692,7 @@ class Feeder:
         lane_made = (self.lane is not None
                      and bool(padsw.merged(m, self.lane)))
         dplan = ballmodel.plan_drain(self.trough, mrg, self.lane, lane_made,
-                                     self.van.count(mrg) if self.van else 0)
+                                     self.held(mrg))
         if dplan.refused and self.trough.full(mrg) and self.extra < self.extra_max:
             self.extra += 1                         # home, behind the trough's last switch
             say("way home: the ball stopped behind the full trough (%d there)" % self.extra)
@@ -721,6 +766,8 @@ def main():
         % (HZ, FLIGHT_S * 1000, MIN_GAP_S * 1000, ", DRY RUN" if dry else ""))
 
     period, gone_since, ever = 1.0 / max(1.0, HZ), None, False
+    looked = time.monotonic()
+    off_said = False
     # PAD-484: THE GAME'S CLOCK, not the wall's. Every time this models - the
     # lane flight, the retry gap, the way home, the room's minute - is a time
     # on the machine, so with the game running k times the wall's they all
@@ -752,6 +799,32 @@ def main():
             ever = True
             say("padled block is up - watching")
         gone_since = None
+        # PAD-775: A TABLE OWNS THE BALLS. While a Visual Pinball table is
+        # attached (vpx/padcontroller.py) its own trough answers the eject,
+        # and two feeders on one trough is a ball served twice. The
+        # controller puts dump/ballfeed.off beside padled for as long as it
+        # runs and removes it on Stop; this feeder stands aside, polling, and
+        # carries on when it is gone.
+        if os.path.exists(OFF_PATH):
+            if not off_said:
+                off_said = True
+                say("standing aside: %s says a table's trough owns the balls" % OFF_PATH)
+            time.sleep(0.5)
+            continue
+        if off_said:
+            off_said = False
+            say("%s gone - answering the trough again" % OFF_PATH)
+        # PAD-619: A LIST READ OUT OF THE BINARY IS REPLACED BY THE RUN'S OWN DUMP a minute in (mktables), and on a
+        # build whose static numbering is not the game's (Aerosmith 1.16: 93 of 93 ids moved) the feeder had latched
+        # the binary's trough ids at boot - "the trough is empty", no ball ever served on the title's first run
+        if time.monotonic() - looked > 2.0:
+            looked = time.monotonic()
+            if list_stamp(f.game) != f.list_stamp:
+                fed, f = f.fed, Feeder(dry=dry)
+                f.fed = fed
+                say("switch list replaced - resolved again:")
+                for line in f.describe():
+                    say(line)
         if f.poll(m, d, gclock.now()) and once:
             break
         time.sleep(period / min(4.0, max(1.0, padsw.speed(m))))

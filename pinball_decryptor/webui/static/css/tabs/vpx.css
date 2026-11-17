@@ -1,0 +1,110 @@
+/* Visual Pinball (PAD-802): the kit's setup, the tables it patches, Play.
+   PAD-927: laid out for one screen - a two-line strip (setup marks, windows)
+   over the tables, one per line under labelled columns (PAD-940). */
+/* the cards keep their whole height and the page scrolls: a .card may shrink
+   in the page's column (min-height: 0), and the list then ran out under the
+   Tables card's border in a short window (PAD-940) */
+.vpx-page > .card { flex: 0 0 auto; }
+.vpx-status { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; min-height: 24px; }
+.vpx-prog { flex: 1; max-width: 320px; }
+.vpx-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
+.vpx-row + .vpx-row { border-top: 1px solid var(--line); }
+.vpx-row > .chip { flex: none; width: 74px; justify-content: center; }
+.vpx-what { flex: 1; min-width: 0; }
+.vpx-val { overflow-wrap: anywhere; }
+.vpx-acts { display: flex; gap: 6px; flex: none; }
+/* the strip: Setup and Windows, one line each */
+.vpx-top { margin-bottom: 12px; }
+.vpx-top > .hd { padding: 4px 16px; min-height: 0; }
+.vpx-strip { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.vpx-strip-row { display: flex; align-items: center; gap: 10px; min-height: 38px; flex-wrap: wrap; }
+.vpx-strip-row + .vpx-strip-row { border-top: 1px solid var(--line); }
+.vpx-strip-row .h2 { width: 76px; flex: none; }
+.vpx-marks { display: flex; flex-wrap: wrap; gap: 6px; }
+.vpx-now { min-width: 0; }
+.vpx-top.shut > .bd { display: none; }
+/* the tables: folder and buttons in the head, rows in two columns */
+.vpx-tables > .hd { padding: 8px 16px; }
+.vpx-dir { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* PAD-940: one table per line, the same columns on every line under a head
+   row (Patch and Play a fixed-width column each, so every button lines up) */
+.vpx-table { display: grid; align-items: center; column-gap: 14px; padding: 3px 4px; min-height: 36px;
+  grid-template-columns: 40px minmax(0, 3fr) minmax(0, 1.7fr) minmax(0, 1.1fr) 92px 56px minmax(0, 2fr) 104px 74px 128px 76px;
+  border-bottom: 1px solid var(--line); }
+.vpx-table > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.vpx-table:not(.vpx-head):hover { background: var(--panel-2); }
+.vpx-head { min-height: 26px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; font-size: 11px; }
+.vpx-table > .vpx-patch, .vpx-table > .vpx-play, .vpx-table > .vpx-cover { overflow: visible; }
+/* PAD-942: the table's picture at the head of its row (40 px tall: a
+   playfield is a narrow upright strip at that size, the hover shows it large);
+   an empty outline where there is none yet */
+.vpx-table > .vpx-pic { display: flex; align-items: center; justify-content: center; overflow: visible; }
+.vpx-table:not(.vpx-head) > .vpx-pic { height: 48px; }
+.vpx-pic-img { display: block; max-width: 40px; max-height: 48px; width: auto; height: auto; border-radius: 3px;
+  cursor: zoom-in; box-shadow: 0 0 0 1px var(--line-2); }
+.vpx-nopic { display: block; width: 19px; height: 40px; border: 1px dashed var(--line-2); border-radius: 3px; opacity: .7; }
+.vpx-pics-busy { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.vpx-table.unpatched > .vpx-name { color: var(--ink-3); font-weight: 500; }
+/* PAD-961: From links to the author's download page */
+.vpx-from a { color: var(--accent); text-decoration: none; }
+.vpx-from a:hover { text-decoration: underline; }
+.vpx-stale { grid-column: 2 / -1; padding: 0 0 4px; white-space: normal; }
+/* PAD-964: what the card costs the disk, under the card's name; the cache's room and the copy box on the Card images row */
+.vpx-space { display: block; font-size: 11px; line-height: 1.2; }
+.vpx-cache { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 4px; }
+.vpx-cache > .chk { margin: 0; }
+/* PAD-941: the card for table authors, above the tables (David: visibility) */
+.vpx-authors { margin-bottom: 12px; }
+.vpx-authors > .hd { padding: 8px 16px; flex-wrap: wrap; }
+.vpx-authors-sub { min-width: 0; white-space: normal; flex: 1 1 400px; }
+.vpx-authors-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.vpx-authors-note { margin-top: 8px; overflow-wrap: anywhere; }
+/* narrower windows drop the author (still in the name's tip); From stays:
+   it is where an unpatched table is downloaded from */
+@media (max-width: 1400px) {
+  .vpx-table { grid-template-columns: 40px minmax(0, 3fr) minmax(0, 1fr) 92px 56px minmax(0, 2fr) 104px 74px 128px 76px; }
+  .vpx-table > .vpx-by { display: none; }
+}
+/* PAD-941: the checklist sheet, in the app's own tables */
+.vpx-sheet h3 { margin: 10px 0 4px; font-size: 15px; display: flex; gap: 10px; align-items: baseline; }
+.vpx-sheet-sum { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.vpx-sheet-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+.vpx-sheet-table th { text-align: left; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; font-size: 11px;
+  color: var(--ink-3); padding: 4px 8px; border-bottom: 1px solid var(--line-2); white-space: nowrap; }
+.vpx-sheet-table td { padding: 3px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.vpx-sheet-table tr.miss > td { background: color-mix(in srgb, var(--warn) 9%, transparent); }
+.vpx-sheet-table tr:hover > td { background: var(--panel-2); }
+.vpx-sheet-table td.vpx-wrap { white-space: normal; overflow-wrap: anywhere; }
+.vpx-sheet-list { margin: 0; padding-left: 20px; font-size: 13px; }
+
+/* PAD-943: the other platforms' tables */
+.vpx-cat { margin-top: 12px; }
+.vpx-cat > .hd { padding: 8px 16px; flex-wrap: wrap; }
+.vpx-cat-sub { min-width: 0; white-space: normal; flex: 1 1 400px; }
+.vpx-cat-plat { padding: 6px 0 4px; border-top: 1px solid var(--line); }
+.vpx-cat-plat:first-child { border-top: 0; padding-top: 0; }
+.vpx-cat-head { padding: 2px 4px 4px; }
+.vpx-cat-row { display: grid; align-items: center; column-gap: 14px; padding: 2px 4px; min-height: 28px;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 3fr) minmax(0, 2fr) minmax(0, 1fr) 200px; }
+.vpx-cat-row > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.vpx-cat-row > .vpx-cat-kind { overflow: visible; }
+.vpx-cat-row:hover { background: var(--panel-2); }
+.vpx-cat-row.none > .vpx-cat-name { white-space: normal; }
+.vpx-cat-name a { color: var(--accent); text-decoration: none; }
+.vpx-cat-name a:hover { text-decoration: underline; }
+
+/* PAD-943: what is still being read: a bar the shape of the text to come */
+.vpx-skel { display: inline-block; height: 12px; border-radius: 4px; vertical-align: middle;
+  background: linear-gradient(90deg, var(--panel-2) 25%, var(--line) 50%, var(--panel-2) 75%);
+  background-size: 200% 100%; animation: vpx-shimmer 1.3s linear infinite; }
+.vpx-skel-cov { width: 46px; height: 22px; border-radius: 6px; }
+.vpx-skel-row:hover { background: none; }
+.vpx-authors-busy { display: inline-flex; align-items: center; gap: 6px; }
+@keyframes vpx-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.vpx-cat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.vpx-cat-needs { padding: 0 4px 6px; color: var(--ink-2); }
+
+/* PAD-1304: the Cabinet row and the backglass-lights picker */
+.vpx-dof { display: inline-flex; align-items: center; gap: 4px; }
+.vpx-gi-btn { margin-left: 4px; }
+.vpx-bulb-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 4px 12px; max-height: 50vh; overflow: auto; }

@@ -258,6 +258,9 @@ def test_a_second_build_patches_the_set_it_finds(card, tmp_path, monkeypatch):
     second = engine.read_override_manifest(str(out))
     assert second["parent"] == first["generation"]
     assert second["generation"] != first["generation"]
+    # PAD-938: the set says how its image.bin was built, so the next Start reuses it
+    from pinball_decryptor.plugins.stern.image_compact import IMAGE_REV
+    assert first["image_rev"] == second["image_rev"] == IMAGE_REV
 
 
 def test_an_edit_taken_back_gets_the_card_bytes_back(card, tmp_path,
@@ -683,6 +686,47 @@ def test_a_rebuilt_program_that_is_bypassed_runs_as_it_is(
     assert any("own program" in m for _l, m in lines)
 
 
+def test_edits_that_bring_a_sound_bank_keep_their_program(
+        card, built, tmp_path, validator_at_bypass):
+    """PAD-867: a set with an image.bin of its own runs the program that
+    bank was built with, not the picked card's (no sound after boot)."""
+    built.program = _program(count_nop=True, bypass=True) + b"CAVE" * 8
+    card.state["writes"].append(
+        (_disk(built.stock, "/turtles_pro/image.bin", 4), b"N"))
+    lines, log = _logged()
+    out = tmp_path / "ovr"
+    engine.write_overrides(str(card.img), str(tmp_path / "a"), str(out),
+                           log=log, run_card=str(built.img))
+    assert (out / "turtles_pro" / "game").read_bytes() \
+        == _program(bypass=True)
+    assert (out / "turtles_pro" / "image.bin").exists()
+    assert not [m for lvl, m in lines if lvl == "warning"]
+    assert any("sound bank of their own" in m for _l, m in lines)
+
+
+def test_a_grown_sound_bank_keeps_its_program(card, built, tmp_path,
+                                              validator_at_bypass):
+    """The reporter's set: image.bin outgrew its slot and is rebuilt whole
+    (a grow job), never an in-place write."""
+    built.program = _program(count_nop=True, bypass=True) + b"CAVE" * 8
+    reader = built.stock
+    by_file = {"/turtles_pro/game": (reader.node("/turtles_pro/game"),
+                                     [(BYPASS_AT, BYPASS)])}
+    plan = {"jobs": [("turtles_pro/image.bin", "grown.bin")]}
+    lines, log = _logged()
+    assert engine._carry_run_card_program(
+        reader, reader.node("/turtles_pro/game"), by_file, plan,
+        str(card.img), str(built.img), log) == 0
+    assert "/turtles_pro/game" in by_file
+    assert any("sound bank of their own" in m for _l, m in lines)
+    # the same set without the bank: PAD-200's card's own program
+    plan["jobs"] = []
+    engine._carry_run_card_program(
+        reader, reader.node("/turtles_pro/game"), by_file, plan,
+        str(card.img), str(built.img), log)
+    assert "/turtles_pro/game" not in by_file
+
+
 def test_a_program_a_previous_set_carried_leaves_it(
         card, built, tmp_path, validator_at_bypass):
     out = tmp_path / "ovr"
@@ -836,6 +880,27 @@ def test_a_set_prepared_for_another_card_to_run_on_is_rebuilt(tmp_path):
         man, str(img), str(assets), "1 2.0", run_card=str(built)) == ""
     assert "run on a different card" in emulate_core.overrides_reason(
         man, str(img), str(assets), "1 2.0", run_card=str(other))
+
+
+def test_a_set_whose_image_bin_an_earlier_version_built_is_rebuilt(tmp_path):
+    """PAD-938: an image.bin built before the song sequence tables moved with their
+    offsets crashed Led Zeppelin at its first song, and a set is otherwise reused for as
+    long as the edits stay as they were - so a set holding one is built again, once."""
+    from pinball_decryptor.plugins.stern.image_compact import IMAGE_REV
+    img = tmp_path / "card.raw"
+    img.write_bytes(b"x" * 32)
+    assets = tmp_path / "lz"
+    assets.mkdir()
+    man = _manifest(img, assets)
+    man["files"] = [{"path": "led_zeppelin_le/image.bin"}]
+    assert "earlier version" in emulate_core.overrides_reason(
+        man, str(img), str(assets), "1 2.0")
+    man["image_rev"] = IMAGE_REV
+    assert emulate_core.overrides_reason(man, str(img), str(assets), "1 2.0") == ""
+    # a set without an image.bin (pictures, videos) has nothing to build again
+    man = _manifest(img, assets)
+    man["files"] = [{"path": "led_zeppelin_le/assets/lcd/x.png"}]
+    assert emulate_core.overrides_reason(man, str(img), str(assets), "1 2.0") == ""
 
 
 def test_the_fingerprint_moves_for_any_edit(tmp_path):
@@ -1399,9 +1464,12 @@ def test_watch_clears_the_last_runs_edits_before_every_run():
     body = (RIG / "watch.sh").read_text(encoding="utf-8", errors="replace")
     clear = body.index('rm -f "$ROOT/dump/vidoverride"')
     assert clear < body.index('bash "$RIG/run_game.sh" > "$LOG" 2>&1 &')
-    # Not inside the boot selector's if/else: every run clears it.
+    # Not inside the boot selector's if/else: every run clears it - at the
+    # top level of launch_game (PAD-738), which the start and Restart game
+    # both call.
     line = body[body.rindex("\n", 0, clear) + 1:clear]
-    assert line == ""
+    assert line == "    "
+    assert body.rindex("\nlaunch_game() {", 0, clear) > body.rindex("\n}\n", 0, clear)
 
 
 def test_a_clip_only_the_set_has_is_served_from_it(vidhost):

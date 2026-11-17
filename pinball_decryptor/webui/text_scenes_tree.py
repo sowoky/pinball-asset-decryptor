@@ -29,6 +29,10 @@ _TREE_DISPLAY = (1360, 768)          # the canvas image is drawn full size: it i
 _ORDER = ("up", "down", "front", "back")
 _DROP = ("before", "after", "into")
 _GROUP_KINDS = ("Sprite", "StreamingFlipbook")
+_HIDE_WARNED = "scenes_hide_warned"  # settings.json: the first hide in the game has warned (PAD-535)
+_RESIZE_FROM = "scenes_resize_from"  # settings.json: what stays put when a size is set (PAD-557)
+#: Resize from: its top-left corner (X, Y) stays where it is, or its middle does
+RESIZE_FROM = ("corner", "middle")
 
 
 #: a sprite state that is on its way in or out (tree_show tries these last)
@@ -62,26 +66,33 @@ class TreeEditMixin:
         self._tlit = {}              # what is drawn without a peek (the game's + the eyes')
         self._tparents = {}
         self._tman = None
+        self._tbaked = {}             # (assets, card) -> (stock manifest, nodes it never draws)
         self._tonce = []             # notes for the next picture only (tree_show)
         self._ttoken = 0
         self._tdefault = {}          # card -> the stock scene's resting frame (costly to find)
         self._tcache = {}            # pictures read for the renders, kept while unchanged
+        self._tsee = {}              # picture rel -> (picture, where a click goes through it)
         self._tlock = threading.Lock()
         self._tjob = None            # the newest render asked for (the worker takes it)
         self._trunning = False       # the render worker is up
         self._trev = 0               # bumped by every edit: the page knows when an image is new
         self._tshown_card = None     # the scene whose picture the canvas shows
         self._tplay = None           # the playback being drawn: {"cancel": bool, ...}
+        self._ttry = {}              # PAD-1338: card -> {node: words the preview shows in a box
+                                     # the game fills ("Show it with"); never written to the card}
         self._tlive = {}             # card -> (push result, "HH:MM:SS") handed to a running game
         self._tlive_job = None
         self._tlive_lock = threading.Lock()
         self._thist = {}             # (project, card) -> undo / redo lists of (ops, eyes) steps
+        self._tbatches = []          # changes made to several scenes at once (PAD-528)
+        self._telist = False         # the list of edits is open (PAD-540)
 
     def _tree_reset(self):
         self._trees = None
         self._filled_memo = None
         self._tdefault = {}
         self._tcache = {}
+        self._tsee = {}
         self._tshown_card = None
 
     def _load_trees(self):
@@ -175,10 +186,23 @@ class TreeEditMixin:
             lines, _w = text_colour.line_ops(self.assets_dir, card, edited, ops,
                                              bake=self._look_sw()["files"])
         except Exception:                            # noqa: BLE001
-            log.exception("scene text colours")
+            log.exception("scene text colors")
             lines = []
         if lines:
             edited, _n = scene_edit.apply_manifest(edited, lines)
+        # PAD-507: the score panel's lines as the machine shows them (their scene colour times
+        # the one the game program paints, or the colour the project picks for them)
+        try:
+            from ..plugins.stern import score_colours
+            game = score_colours.preview_ops(self.assets_dir, edited,
+                                             bake=self._look_sw()["files"])
+        except Exception:                            # noqa: BLE001
+            log.exception("score panel colors")
+            game = []
+        if game:
+            edited, _n = scene_edit.apply_manifest(edited, game)
+        # PAD-981: a layout made over a kept picture at its own size draws it so
+        scene_edit.mark_own_of(edited, self.assets_dir, card)
         return edited, notes
 
     def _tree_default(self, card):
@@ -242,6 +266,7 @@ class TreeEditMixin:
                                      force=force, through=through, unveil=unveil,
                                      hidden=gone)
         self._fit_kept(draws, worlds)
+        draws = _with_tries(draws, self._ttry.get(card))
         # what the eyes show: a layer the eye turned on is on, even though the plain draw has
         # it off (DragonRR, PAD-280: the eyes stayed crossed); a peek is only while selected
         mine = self._tree_force_set(card) if peek is not None else force
@@ -295,8 +320,30 @@ class TreeEditMixin:
         return out
 
     def _tree_hidden(self, card):
-        """The nodes hidden in the game (Write leaves them out; their row's card mark)."""
-        return {op.get("node") for op in self._tree_ops(card) if op["op"] == "visible"}
+        """The nodes hidden in the game (Write leaves them out; their row's red stop sign): a
+        hide edit, or a node the card itself has hidden (_tree_baked) that is not put back."""
+        off, back = set(), set()
+        for op in self._tree_ops(card):
+            if op["op"] == "visible":
+                (back if op.get("on") else off).add(op.get("node"))
+        return off | (self._tree_baked(card) - back)
+
+    def _tree_baked(self, card):
+        """The nodes the card's own scene never draws (PAD-535, DragonRR): a hide an earlier
+        Write put on the card ("visible" sets its keyframes to never shown) that is part of the
+        scene once the project is extracted from that card.  No stock scene has one (0 of
+        2,777 nodes on Godzilla LE 1.16), so it is known by that alone."""
+        man = (self._load_trees() or {}).get(card)
+        if man is None:
+            return set()
+        key = (self.assets_dir, card)
+        got = self._tbaked.get(key)
+        if got is None or got[0] is not man:
+            got = (man, {n["id"] for n, _p, _d in _walk_man(man)
+                         if not n.get("added") and n.get("kf")
+                         and all(not v for _f, v in n["kf"])})
+            self._tbaked[key] = got
+        return got[1]
 
     def _tree_view_hidden(self, card):
         """The nodes hidden in the preview with their eye (the card is not changed).  As in
@@ -610,6 +657,7 @@ class TreeEditMixin:
         fps = float((man.get("stage") or [0, 0, 30])[2] or 30)
         state = self._tplay = {"cancel": False}
         job = {"man": man, "pins": pins, "frames": frames, "bg": self._bg,
+               "tries": dict(self._ttry.get(card) or {}),
                "unveil": set(self._tree_hidden(card)),
                "hidden": set(self._tree_view_hidden(card)),
                "text_edits": self._pending_texts(card, None), "colors": self._pending_colors(card),
@@ -644,6 +692,7 @@ class TreeEditMixin:
                     return
                 draws = scene_eval.draw_list(job["man"], f, pins=job["pins"], play=True,
                                              unveil=job["unveil"], hidden=job["hidden"])
+                draws = _with_tries(draws, job.get("tries"))
                 if prev is None or not scene_eval._same(draws, prev):
                     prev = draws
                     scaled = [dict(d, m=scene_eval.compose(shrink, d["m"])) for d in draws]
@@ -755,10 +804,11 @@ class TreeEditMixin:
                     self._trunning = False
                     return
             img, paths = self._tree_draw(job)
+            see = self._tree_see(job) if img is not None else {}
             with self._tlock:
                 newer = self._tjob is not None
             if not newer:
-                self.ctx.loop.post(self._tree_show, job, img, paths)
+                self.ctx.loop.post(self._tree_show, job, img, paths, see)
 
     def _tree_draw(self, job):
         from ..plugins.stern import scene_render
@@ -793,7 +843,30 @@ class TreeEditMixin:
             return None, {}
         return parts["full"], paths
 
-    def _tree_show(self, job, img, paths):
+    def _tree_see(self, job):
+        """PAD-512: ``{picture rel: scene_render.see_through}`` for each picture the render
+        drew that can be clicked through somewhere: the page's click test goes on to what is
+        under it there.  Read from the pictures the render has just loaded."""
+        from ..plugins.stern import scene_render
+        out = {}
+        for d in job["draws"]:
+            rel = d.get("image")
+            if d["kind"] not in ("bitmap", "flip") or not rel or rel in out:
+                continue
+            try:
+                img = scene_render._picture(job["assets"], rel, job["cache"],
+                                            job.get("pictures"), job.get("sizes"))
+                got = self._tsee.get(rel)
+                if got is None or got[0] is not img:
+                    got = self._tsee[rel] = (img, scene_render.see_through(img))
+            except Exception:                        # noqa: BLE001
+                log.exception("scene tree see-through")
+                continue
+            if got[1] is not None:
+                out[rel] = got[1]
+        return out
+
+    def _tree_show(self, job, img, paths, see=None):
         if job["token"] != self._ttoken or not self._alive:
             return
         full = paths.get("full", "")
@@ -806,6 +879,7 @@ class TreeEditMixin:
                       "over": paths["over"]}
         self.set(frames=[full] if full else [], tree_layers=layers, tree_busy=False,
                  tree_loading=False, tree_img_rev=job["rev"], can_save=img is not None,
+                 tree_see=see or {},
                  # PAD-365: a scene that moves exports as a video
                  can_video=img is not None and self._tree_frame_count(job["man"]) > 1,
                  canvas_msg="" if full else "nothing could be drawn")
@@ -825,12 +899,17 @@ class TreeEditMixin:
         w, h = int(man["stage"][0]), int(man["stage"][1])
         hits = []
         filled = self._tree_filled(card, man)
+        painted = self._tree_painted(man)
         for d in self._tdraws:
             if d["mul"][3] <= 0.01 or d["kind"] not in ("bitmap", "text", "flip"):
                 continue
             hits.append({"id": d["node"], "name": d["path"][-1], "kind": d["kind"],
                          "path": " › ".join(d["path"]),
+                         # PAD-512: the picture, for its clear parts (tree_see)
+                         "img": d.get("image") if d["kind"] != "text" else None,
                          "filled": d["node"] in filled,
+                         # PAD-515: a line the game paints gets an outline of its own
+                         "painted": d["node"] in painted,
                          "pts": [[round(x, 1), round(y, 1)] for x, y in
                                  scene_eval.outline(d)]})
         rest = self._tree_default(card)
@@ -843,6 +922,12 @@ class TreeEditMixin:
             opts = [{"value": "", "label": "As it rests"}]
             opts += [{"value": str(f), "label": "%s (%d)" % (n, f)}
                      for n, f in sorted(labels, key=lambda x: x[1])]
+            # PAD-531: a layer's Show this look pins the frame it shows best at, maybe no label's
+            if nid in pins and not any(o["value"] == str(pins[nid]) for o in opts):
+                at = next((n for n, a, b in scene_eval.sections(labels, frames)
+                           if a <= pins[nid] <= b), None)
+                opts.append({"value": str(pins[nid]), "label": "%s (%d)" % (at, pins[nid])
+                             if at else "Frame %d" % pins[nid]})
             states.append({"node": nid, "name": path[-1], "path": " › ".join(path),
                            "value": str(pins[nid]) if nid in pins else "", "options": opts})
         ops = self._tree_ops(card)
@@ -852,8 +937,10 @@ class TreeEditMixin:
             edited_nodes.setdefault(key, []).append(scene_edit.describe(op))
         drawn = {d["node"] for d in self._tdraws}
         view = self._tree_view_hidden(card)
+        game_hidden, baked = self._tree_hidden(card), self._tree_baked(card)
         layers = []
         index = scene_edit._man_index(man)
+        looks = scene_eval.looks(man)
         have, memo = {}, {}
         # PAD-312: each picture's colour switch (the chosen-files profile baked into it)
         from ..core import colour_profile as _cp
@@ -896,9 +983,12 @@ class TreeEditMixin:
                            "shown": n["id"] in (self._tforce.get(card) or ()),
                            "added": bool(n.get("added")),
                            "filled": filled.get(n["id"]),
-                           "hidden": any(op["op"] == "visible" and op.get("node") == n["id"]
-                                         for op in ops),
+                           "painted": n["id"] in painted,
+                           "hidden": n["id"] in game_hidden,
+                           "baked": n["id"] in baked,
                            "view_off": n["id"] in view,
+                           # PAD-531: the look of a switchable part it is drawn in
+                           "look": _look_of(looks.get(n["id"])),
                            "edits": "; ".join(edited_nodes.get(n["id"], []))})
         sel = self._tsel if self._tsel in index else None
         self._tsel = sel
@@ -912,7 +1002,9 @@ class TreeEditMixin:
             "hits": hits, "layers": layers, "sel": sel, "sels": sels,
             "sel_boxes": [[round(b[0]), round(b[1]), round(b[2] - b[0]), round(b[3] - b[1])]
                           for b in map(self._tree_box, sels) if b] if multi else [],
-            "props": self._tree_props(card, man, sel, ops) if sel is not None else None,
+            "props": self._tree_anim_props(card, man, sel, ops,
+                                           self._tree_props(card, man, sel, ops))
+            if sel is not None else None,
             "edits": len(ops), "notes": list(notes), "rev": self._trev,
             # PAD-290: an eye hide is a card edit; the status line names every one
             "hidden_names": [l["name"] for l in layers if l["hidden"]],
@@ -925,6 +1017,10 @@ class TreeEditMixin:
             "can_undo": bool(ops or (self._tree_hist(card) or {}).get("undo")),
             "can_redo": bool((self._tree_hist(card) or {}).get("redo")),
             "all_edits": scene_edit.count(self.assets_dir),
+            # PAD-539: the Filled-in marks are guesses until the card is read for the boxes
+            # the game names; and a project off a written card can't go back to stock
+            "fills_proven": self._tree_fills_proven(card, man),
+            "base_note": self._tree_base_note(card),
             "built": _built_state(scene_edit.built_ops(self.assets_dir, card), ops)})
 
     def _tree_props(self, card, man, nid, ops):
@@ -950,11 +1046,17 @@ class TreeEditMixin:
                 "x": round(box[0]) if box else None, "y": round(box[1]) if box else None,
                 "w": round(box[2] - box[0]) if box else None,
                 "h": round(box[3] - box[1]) if box else None,
+                # PAD-1211: the box as it is (x, y, w, h), not rounded: what a drag snaps by and
+                # what X and Y move from, so a part at 485.7 lands on the line, not 0.3 off it
+                "box": [round(box[0], 3), round(box[1], 3), round(box[2] - box[0], 3),
+                        round(box[3] - box[1], 3)] if box else None,
                 "scale": round(scale * 100), "scale_y": round(scale_y * 100),
                 "rotate": round(rotate, 2),
+                "game_turn": self._tree_game_turn(nid, rotate),
                 "tint": "#%02x%02x%02x" % tuple(int(round(min(1, c) * 255)) for c in mul[:3]),
                 "alpha": round(mul[3] * 100),
-                "hidden": any(op["op"] == "visible" and op.get("node") == nid for op in ops),
+                "hidden": nid in self._tree_hidden(card),
+                "baked": nid in self._tree_baked(card),
                 "layer": sibs.index(n) + 1, "layers": len(sibs),
                 "drawn": nid in self._tworlds,
                 "peek": nid == self._tpeek and nid in self._tworlds and nid not in self._tlit,
@@ -964,7 +1066,73 @@ class TreeEditMixin:
                 "pic": self._tree_pic_props(nid), **self._tree_text_align_of(man, n),
                 "font": self._tree_font_of(man, n, ops),
                 "filled": self._tree_filled(card, man).get(nid),
-                "words": self._tree_words_of(card, man, n, ops)}
+                "try": self._tree_try_of(card, man, n),
+                "words": self._tree_words_of(card, man, n, ops),
+                "game_colors": self._tree_game_colors(man, nid),
+                "look": self._tree_look(card, man, nid)}
+
+    def _tree_look(self, card, man, nid):
+        """PAD-531 (DragonRR): the look of a switchable part layer *nid* is drawn in, for the
+        Selected panel: which part, which looks, and whether the preview shows one now."""
+        from ..plugins.stern import scene_eval
+        look = scene_eval.looks(man).get(nid)
+        if look is None:
+            return None
+        return dict(_look_of(look), part=look["part"], frame=look["frame"],
+                    pinned=(self._tpins.get(card) or {}).get(look["part"]),
+                    shown=nid in self._tlit)
+
+    def _tree_painted(self, man):
+        """The lines of scene manifest *man* the game program paints itself as it plays
+        (PAD-515, DragonRR: "it is extremely easy to forget this exists"): Godzilla's score
+        panel (PAD-507), ``{node id: "up" | "rest"}``."""
+        from ..plugins.stern import score_colours as sc
+        try:
+            return sc.panel_lines(man)
+        except Exception:                            # noqa: BLE001
+            log.exception("score panel lines")
+            return {}
+
+    def _tree_game_colors(self, man, nid):
+        """PAD-507 (DragonRR): a line of Godzilla's score panel, which the game program
+        paints itself: each colour the machine shows the panel in, the game's own, picked by
+        hand, or through the profile of a switched-on line of the panel.  ``None`` for any
+        other line."""
+        from ..plugins.stern import score_colours as sc
+        try:
+            group = sc.panel_lines(man).get(nid)
+            if group is None:
+                return None
+            picks = sc.picks(self.assets_dir)
+            profiled = sc.profiled(self.assets_dir)
+            want = sc.wanted(self.assets_dir)
+        except Exception:                            # noqa: BLE001
+            log.exception("score panel colors")
+            return None
+        return {"group": group, "roles": [
+            {"role": r, "label": label, "hex": sc._hex(want[r]), "game": sc._hex(sc.SHOWN[r]),
+             "picked": r in picks, "profiled": r not in picks and r in profiled,
+             "mine": r in sc.GROUPS[group]}
+            for r, label, _rgb in sc.ROLES]}
+
+    @rpc
+    def tree_game_color(self, role, hex_color=None):
+        """PAD-507: pick the colour the machine shows one kind of score panel line in
+        (*hex_color* ``None``: the game's own, or the profile's when a line of the panel has
+        it switched on).  The Write puts it in the game program, the lines white."""
+        from ..plugins.stern import score_colours as sc
+        rgb = sc._parse(hex_color) if hex_color else None
+        if hex_color and rgb is None:
+            return False
+        try:
+            sc.set_pick(self.assets_dir, role, rgb)
+        except (OSError, ValueError) as e:
+            log.warning("score color: %s", e)
+            return False
+        log.info("Scenes: the score panel's %s %s", sc.LABELS[role],
+                 "is %s" % sc._hex(rgb) if rgb else "has the game's own color")
+        self._tree_refresh()
+        return True
 
     def _tree_filled(self, card, man):
         """The text boxes of scene *card* the game fills in as it plays (PAD-485, DragonRR:
@@ -974,10 +1142,23 @@ class TreeEditMixin:
         the jackpot screen's GIGAN JACKPOT for the game's GIGAN JACKPOT!), or when a mode's
         code names it with this screen (``engine.program_mode_boxes``: the battle vs Gigan's
         Award_Textbox.Title_Instance, filled with its award line; the line itself is not
-        known, the mode is).  Memoised per scene until the text edits change."""
+        known, the mode is).  On a screen whose text boxes a mode's code names, the words only
+        count on those boxes, or for a line of a mode that names the screen: Tank Attack's
+        code names only the instruction line on its start screen, and its MULTIBALL title
+        read as filled with a MULTIBALL the game shows elsewhere (DragonRR, PAD-513).  A box
+        whose words are a placeholder (``R.is_placeholder``: a score, a count, LINE 1
+        INSTRUCTIONS) is filled too, with no line or mode to name.
+
+        All that is guessing, and kept only for a project whose card has not been read since:
+        with ``engine.program_node_paths`` a box is filled exactly when the game program
+        points at its path from the screen's root, as the game finds a box to write in it
+        (PAD-513, emulator-proven: every box the game wrote, and only boxes it can name).  The
+        words still find its line, and the screen's modes name when.  Memoised per scene until
+        the text edits change."""
         memo = getattr(self, "_filled_memo", None)
-        if memo is None or memo[0] != self.assets_dir:
-            memo = self._filled_memo = (self.assets_dir, {}, None)
+        key = self._filled_key()
+        if memo is None or memo[0] != key:
+            memo = self._filled_memo = (key, {}, None)
         if card in memo[1]:
             return memo[1][card]
         from . import text_rules as R
@@ -993,38 +1174,111 @@ class TreeEditMixin:
                             boxes.setdefault(key, {}).setdefault(p, [])
                             if R.mode_label(cls) not in boxes[key][p]:
                                 boxes[key][p].append(R.mode_label(cls))
-                index = (R.filled_index(rows), boxes)
+                screens = {}
+                for cls, keys in engine.program_mode_scenes(self.assets_dir).items():
+                    for key in keys:
+                        screens.setdefault(key, set()).add(R.mode_label(cls))
+                index = ((R.filled_index(rows), R.format_index(rows)), boxes, screens,
+                         engine.program_node_paths(self.assets_dir))
             except Exception:                        # noqa: BLE001
-                index = ({}, {})
-            self._filled_memo = (self.assets_dir, memo[1], index)
-        lines, boxes = index
+                index = (({}, {}), {}, {}, None)
+            self._filled_memo = (key, memo[1], index)
+        (lines, fills), boxes, screens, known = index
         d = card.replace("\\", "/").rsplit("/", 1)[0]
-        named = {}
+        named, own = {}, set()
         for key, per in boxes.items():
             if d.endswith("/" + key) or d == key:
                 named.update(per)
-        out = {}
-        parent, names = {}, {}
+        for key, labels in screens.items():
+            if d.endswith("/" + key) or d == key:
+                own |= labels
+        parent, names, texts = {}, {}, []
         for n, p, _depth in _walk_man(man):
             parent[n["id"]] = p["id"] if p else None
             names[n["id"]] = n.get("name") or ""
-            if _kind_of(man, n) != "Text" or n.get("added"):
-                continue
-            words = R.stand_in_words(_text_of(man, n, "Text"), True)
-            hit = lines.get(words) if words else None
-            if hit:
-                out[n["id"]] = {"line": hit[0][0], "modes": list(hit[0][1])}
-                continue
+            if _kind_of(man, n) == "Text" and not n.get("added"):
+                texts.append(n)
+        mode_named, paths = {}, {}
+        for n in texts:
             parts, cur = [], n["id"]
             while cur is not None:
                 parts.append(names[cur])
                 cur = parent.get(cur)
-            path = ".".join(reversed(parts))
-            labels = named.get(path) or named.get(names[n["id"]])
-            if labels:
+            paths[n["id"]] = ".".join(reversed(parts))
+            mode_named[n["id"]] = named.get(paths[n["id"]]) or named.get(names[n["id"]])
+        some_named = any(mode_named.values())
+        out = {}
+        if known is not None:
+            for n in texts:
+                if paths[n["id"]] not in known:
+                    continue
+                words = R.stand_in_words(_text_of(man, n, "Text"), True)
+                # the box the game is known to fill: its line outright, else one whose words
+                # with the fill-ins out are the box's (IMPOSTER BATTLE %d/%d, PAD-1256)
+                hits = (lines.get(words) or fills.get(words.upper())) if words else None
+                hits = sorted(hits or (), key=lambda h: not own & set(h[1]))
+                out[n["id"]] = ({"line": hits[0][0], "modes": list(hits[0][1])} if hits else
+                                {"line": None, "modes": list(mode_named[n["id"]] or sorted(own))})
+            memo[1][card] = out
+            return out
+        for n in texts:
+            words = R.stand_in_words(_text_of(man, n, "Text"), True)
+            hits = lines.get(words) if words else None
+            labels = mode_named[n["id"]]
+            if hits and some_named and not labels:
+                hits = [h for h in hits if own & set(h[1])]
+            if hits:
+                out[n["id"]] = {"line": hits[0][0], "modes": list(hits[0][1])}
+            elif labels:
                 out[n["id"]] = {"line": None, "modes": list(labels)}
+            elif R.is_placeholder(_text_of(man, n, "Text")):
+                out[n["id"]] = {"line": None, "modes": []}
         memo[1][card] = out
         return out
+
+    def _filled_key(self):
+        """The Filled-in marks' memo key: the project, and the stamp of the game program's
+        reading, so a re-read (here or the Text tab's own) shows at once (PAD-539)."""
+        from ..core import text_manifest
+        try:
+            stamp = os.stat(os.path.join(self.assets_dir or "", text_manifest.RELDIR,
+                                         "program_modes.json")).st_mtime_ns
+        except OSError:
+            stamp = None
+        return (self.assets_dir, stamp)
+
+    def _tree_fills_proven(self, card, man):
+        """Are the Filled-in marks the proven ones (PAD-539)?  Without the program's node paths
+        (a project whose card has not been read for them since) they are the old word guesses:
+        a box the game does write can say "Not this one"."""
+        self._tree_filled(card, man)
+        memo = getattr(self, "_filled_memo", None)
+        return bool(memo and memo[2] and memo[2][3] is not None)
+
+    def _tree_base_note(self, card):
+        """PAD-539 (DragonRR): the project came off a card a Write (PAD's or another) changed, so
+        As shipped and Reset go back to that card, not to stock.  From the project's lineage,
+        or, with none, from layers the card has hidden (PAD-535: no stock scene has one)."""
+        from ..core import lineage
+        try:
+            came = lineage.extracted_from(self.assets_dir)
+        except Exception:                            # noqa: BLE001
+            came = None
+        if came is None and self._tree_baked(card):
+            came = {"kind": "hidden"}
+        return lineage.extracted_from_note(came)
+
+    def _tree_base_line(self, card=None):
+        """The As shipped questions' word on a project off a written card (PAD-539), or ""."""
+        note = self._tree_base_note(card) if card else None
+        if note is None:
+            from ..core import lineage
+            try:
+                note = lineage.extracted_from_note(lineage.extracted_from(self.assets_dir))
+            except Exception:                        # noqa: BLE001
+                note = None
+        return ("\n\n%s %s %s" % (note["lines"][0], note["lines"][1], note["lines"][2])
+                if note else "")
 
     def _tree_words_of(self, card, man, n, ops):
         """A line of text's words for the Words box (DragonRR, PAD-468): ``{"text": the words
@@ -1044,8 +1298,69 @@ class TreeEditMixin:
         if not orig.strip() or orig not in ((self._scenes.get(d) or {}).get("texts") or ()):
             return None
         rep = dict((self._load_text_changes() or {}).get(card) or ()).get(orig)
-        return {"text": rep or orig, "game": orig, "edited": bool(rep),
-                "limit": text_rules.row_budget({"path": card, "original": orig})}
+        out = {"text": rep or orig, "game": orig, "edited": bool(rep),
+               "limit": text_rules.row_budget({"path": card, "original": orig})}
+        if self._game_writes(card, man, n):
+            out["locked"] = True                # PAD-513: the game writes it, see below
+            from . import game_filled           # PAD-1261: what to change instead
+            out["note"] = game_filled.locked_note(orig, assets_dir=self.assets_dir,
+                                                   short=True)
+        return out
+
+    def _tree_try_of(self, card, man, n):
+        """PAD-1338 (DragonRR): for a box the game fills, the Selected panel's "Show it with":
+        ``{"words": what the preview draws in it now ("" = its own stand-in), "options": lines
+        of the game program it might write there (:func:`.game_filled.try_lines`)}``; None
+        for anything else."""
+        if _kind_of(man, n) != "Text" or n.get("added"):
+            return None
+        if n["id"] not in self._tree_filled(card, man):
+            return None
+        from . import game_filled
+        names = {m["id"]: m.get("name") or "" for m, _p, _d in _walk_man(man)}
+        parts, cur, hops = [], n["id"], 0
+        while cur is not None and hops < 256:
+            parts.append(names.get(cur, ""))
+            cur, hops = self._tparents.get(cur), hops + 1
+        stand_in = _text_of(man, n, "Text") or ""
+        return {"words": (self._ttry.get(card) or {}).get(n["id"], ""),
+                "options": game_filled.try_lines_for(self.assets_dir, stand_in,
+                                                     ".".join(reversed(parts)))}
+
+    @rpc
+    def tree_try_words(self, node, words=None):
+        """PAD-1338: draw box *node* (one the game fills) in the preview with *words*, the way
+        the machine might show it, or with its own stand-in again for None/"".  The preview
+        only: nothing is written, no undo step, and other boxes with the same stand-in keep
+        theirs."""
+        card, _stock = self._tree_card()
+        if card is None or self._tman is None:
+            return False
+        nid = int(node)
+        n = (scene_edit_index(self._tman).get(nid) or (None,))[0]
+        if n is None or _kind_of(self._tman, n) != "Text":
+            return False
+        words = " ".join((words or "").split())
+        mine = self._ttry.setdefault(card, {})
+        if words == mine.get(nid, ""):
+            return False
+        if words:
+            mine[nid] = words
+        else:
+            mine.pop(nid, None)
+        self._trev += 1
+        if self._sel:
+            self._render_tree_preview(self._sel)
+        return True
+
+    def _game_writes(self, card, man, n):
+        """PAD-513 (DragonRR): does the game write line *n*'s box itself as it plays?  Only by
+        the proven rule (the game program names the box's path, :mod:`.game_filled`): then
+        new words for it would never show, and the Words box does not take them."""
+        from . import game_filled
+        if not game_filled.known_paths(self.assets_dir):
+            return False
+        return n["id"] in self._tree_filled(card, man)
 
     @rpc
     def tree_words(self, node, words=None):
@@ -1077,6 +1392,11 @@ class TreeEditMixin:
             return True
         from ..core import text_manifest
         orig = text_manifest.escape_cell(_text_of(self._tman, n, "Text") or "")
+        if words is not None and words != orig and self._game_writes(card, self._tman, n):
+            from . import game_filled
+            log.info("Scenes: %s keeps its words - %s", n.get("name") or "the line",
+                     game_filled.locked_note(orig, assets_dir=self.assets_dir))
+            return False
         done = self.tab.set_scene_words(self.assets_dir, card, orig, words)
         if done is None:
             compat.messagebox.showinfo(
@@ -1131,11 +1451,32 @@ class TreeEditMixin:
         return {"w": w, "h": h, "sx": round(math.hypot(a, b) * 100, 1),
                 "sy": round(math.hypot(c, dd) * 100, 1)}
 
+    def _tree_game_turn(self, nid, rotate):
+        """PAD-534 (DragonRR): ``{deg, mirrored}`` the game itself turns node *nid*'s picture
+        or line by as it draws it (Turn counts only the user's own turn on top), or None when
+        it draws it upright.  Planet X's bridge pointer is a south-pointing picture drawn
+        turned 48 degrees, and the Images tab shows the picture's file, unturned."""
+        from ..plugins.stern import scene_eval
+        for d in self._tdraws:
+            if d["node"] == nid and d["kind"] in ("bitmap", "flip", "text", "video"):
+                deg, mirrored = scene_eval.turn_of(d["m"])
+                deg = round((deg + rotate if mirrored else deg - rotate) % 360, 1)
+                deg = deg - 360 if deg > 180 else deg
+                if abs(deg) < 0.5 and not mirrored:
+                    return None
+                return {"deg": deg, "mirrored": mirrored}
+        return None
+
     def _fit_kept(self, draws, worlds):
         """A pick that keeps its own size is written at that size (the Write regrows the
-        picture's record and every sprite that names it, PAD-154), so the box it draws on the
-        glass is the pick's size, not the stock one.  Only a Bitmap drawn by its own node: a
-        Shape's fill is stretched to the shape's rect whatever its size."""
+        picture's record and every sprite that names it, PAD-154), so its draw is the pick's
+        size; one the Write grows shows in the original's place and size, fitted and centred
+        (PAD-865, radium_grow.keep_boxes), so its draw is scaled into the stock box: what is
+        picked and measured on the glass is the picture where it shows.  Only a Bitmap drawn
+        by its own node: a Shape's fill is fitted into the shape's rect as it is drawn.  A
+        node laid out over the picture at its own size before that fit keeps it so (PAD-981,
+        ``own``)."""
+        from ..plugins.stern import radium_grow, scene_eval, scene_render
         picks = self._tree_pictures()
         sizes = self._tree_sizes()
         for d in draws:
@@ -1145,8 +1486,13 @@ class TreeEditMixin:
                 continue
             size = _kept_size(picks.get(d["image"]) or {}, self.assets_dir, d["image"],
                               sizes.get(d["image"]))
-            if size is not None:
-                d["w"], d["h"] = size
+            if size is None:
+                continue
+            box = scene_render._kept_box(d, size, sizes.get(d["image"]))
+            if box:
+                d["m"] = scene_eval.compose(d["m"], radium_grow.fit_box(size[0], size[1], *box))
+                d.pop("own_box", None)           # fitted here, not again when drawn (PAD-1301)
+            d["w"], d["h"] = size
 
     def _tree_unselect(self):
         """Nothing selected: a scene opens, and the Scenes tab comes forward, with no layer
@@ -1369,6 +1715,61 @@ class TreeEditMixin:
             self._tree_publish(card, self._tman, self._tree_frame(card, _man))
         return True
 
+    def _tree_item_nodes(self, iid):
+        """PAD-567 (DragonRR): the layers a Contents row (``img::``, ``font::``, ``vid::``)
+        stands for, in drawing order.  A picture is the layers that draw it themselves, else
+        the groups holding them; a font the lines of text drawn in it; a video the video
+        layers that play it (any video layer when none names it)."""
+        man = self._tman
+        if man is None or not iid or "::" not in iid:
+            return []
+        what, key = iid.split("::", 1)
+        objs = man["objects"]
+        walk = [n for n, _p, _d in _walk_man(man)]
+
+        def own(n, kind):
+            return [o for o in ((objs.get(str(oid)) or {}) for _s, oid in n["comps"])
+                    if o.get("kind") == kind]
+
+        if what == "img":
+            rel = key[len("images/"):] if key.startswith("images/") else key
+
+            def draws(n):
+                for _s, oid in n["comps"]:
+                    o = objs.get(str(oid)) or {}
+                    k = o.get("kind")
+                    if (k == "Bitmap" and o.get("image") == rel
+                            or k == "Shape" and o.get("fill") is not None
+                            and (objs.get(str(o["fill"])) or {}).get("image") == rel
+                            or k == "StreamingFlipbook"
+                            and any(fr and fr.get("image") == rel for fr in o.get("seq") or ())):
+                        return True
+                return False
+            out = [n["id"] for n in walk if draws(n)]
+            if not out:
+                memo = {}
+                out = [n["id"] for n in walk if rel in _pics_of(man, n, memo)]
+            return out
+        if what == "font":
+            return [n["id"] for n in walk if any(o.get("font") == key for o in own(n, "Text"))]
+        if what == "vid":
+            stem = os.path.splitext(os.path.basename(key))[0].lower()
+            vids = [n for n in walk if own(n, "Video")]
+            named = [n["id"] for n in vids
+                     if any(stem in (c.lower() for c in o.get("clips") or ())
+                            for o in own(n, "Video"))]
+            return named or [n["id"] for n in vids]
+        return []
+
+    def _tree_pick_item(self, iid):
+        """PAD-567: a Contents row picked in the scene editor picks its layer; the same row
+        again goes on to the next layer that uses it (a picture drawn several times)."""
+        nodes = self._tree_item_nodes(iid)
+        if not nodes:
+            return False
+        at = nodes.index(self._tsel) + 1 if self._tsel in nodes else 0
+        return self.tree_select(nodes[at % len(nodes)])
+
     def _tree_select_more(self, card, node, how):
         sels = self._tree_sels()
         if how == "add":
@@ -1442,12 +1843,23 @@ class TreeEditMixin:
         nodes = self._tree_nodes(nodes)
         before = set(self._tree_view_hidden(card))
         self._tree_view_follow(card, nodes, on)
+        baked = self._tree_baked(card)
         if on:
             for node in nodes:
                 scene_edit.drop(self.assets_dir, card, node, "visible")
-            self._tree_refresh()
+            # one the card itself has hidden comes back by an edit of its own (PAD-535)
+            back = [{"op": "visible", "node": n, "on": True} for n in nodes if n in baked]
+            if not (back and self._tree_add_group(back)):
+                self._tree_refresh()
             return True
-        hidden = {op.get("node") for op in self._tree_ops(card) if op["op"] == "visible"}
+        if any(n in baked for n in nodes):
+            for node in nodes:
+                if node in baked:
+                    scene_edit.drop(self.assets_dir, card, node, "visible")
+            if all(n in baked for n in nodes):
+                self._tree_refresh()
+                return True
+        hidden = self._tree_hidden(card)
         if all(n in hidden for n in nodes):
             self._tree_eyes_moved(card)                   # its eye shut; nothing new to add
             return True
@@ -1456,6 +1868,46 @@ class TreeEditMixin:
             return True
         self._tree_view_hidden(card).difference_update(set(nodes) - before)
         return False
+
+    @rpc
+    def tree_game_mark(self, nodes, on):
+        """The mark at a Layers row's end (PAD-535, DragonRR): a green tick in the game, a red
+        stop sign hidden in it.  A click puts *nodes* (the row, or every selected row) back in
+        the game or hides them there; the first hide warns, until "Don't ask again"."""
+        nodes = self._tree_nodes(nodes)
+        if not nodes:
+            return False
+        if not on and not self._tree_hide_warned(nodes):
+            return False
+        return self.tree_visible_many(nodes, on)
+
+    def _tree_hide_warned(self, nodes):
+        """True to go on hiding *nodes* in the game: asked once, or never again."""
+        app = getattr(self.ctx, "app", None)
+        settings = getattr(app, "_settings", None)
+        if isinstance(settings, dict) and settings.get(_HIDE_WARNED):
+            return True
+        byid = {n["id"]: n for n, _p, _d in _walk_man(self._tman)} if self._tman else {}
+        what = ('"%s"' % byid[nodes[0]]["name"] if len(nodes) == 1 and nodes[0] in byid
+                else "these %d layers" % len(nodes))
+        answer = self.ctx.dialogs.message(
+            "warning", "Hide in the game",
+            "Hide %s in the game?" % what,
+            [{"id": "yes", "label": "Hide in the game", "style": "primary"},
+             {"id": "always", "label": "Hide, and don't ask again"},
+             {"id": "cancel", "label": "Cancel"}],
+            default="yes",
+            detail="Write leaves it out of the card, so the machine never draws it, and the "
+                   "preview hides it too. Nothing is lost: it stays in the scene (the game's "
+                   "code still looks for it), its row gets a red stop sign, and a click on "
+                   "that puts it back. Undo (Ctrl+Z) takes it back too.")
+        if answer == "always" and isinstance(settings, dict):
+            settings[_HIDE_WARNED] = True
+            try:
+                app._save_settings()
+            except Exception:                           # noqa: BLE001
+                pass
+        return answer in ("yes", "always")
 
     @rpc
     def tree_delete(self, nodes):
@@ -1483,7 +1935,7 @@ class TreeEditMixin:
                          "game still looks for them): %s." % ", ".join(
                              byid[n]["name"] for n in own[:6])
                          + (" and %d more" % (len(own) - 6) if len(own) > 6 else "")
-                         + " Click the card mark at the end of a row to put one back.")
+                         + " Click the red stop sign at the end of its row to put one back.")
         lines.append("Undo (Ctrl+Z) takes it back.")
         if not compat.messagebox.askyesno("Delete layer" if len(nodes) == 1 else "Delete layers",
                                           "Delete %s?\n\n%s" % (what, "\n\n".join(lines))):
@@ -1534,9 +1986,11 @@ class TreeEditMixin:
                                "dy": round(ly, 3)})
 
     @rpc
-    def tree_scale(self, node, factor, factor_y=None):
-        """Resize by *factor* (and, when given, the height by *factor_y*) about the middle of
-        what the node draws."""
+    def tree_scale(self, node, factor, factor_y=None, at=None):
+        """Resize by *factor* (and, when given, the height by *factor_y*) about *at*, a point
+        on the glass (a corner drag: the corner across from the one dragged), else about what
+        Resize from says (DragonRR, PAD-557): the top-left corner of what the node draws, so
+        its X and Y stay put, or its middle."""
         from ..plugins.stern import scene_eval
         node = int(node)
         factor = float(factor)
@@ -1546,16 +2000,48 @@ class TreeEditMixin:
         box = self._tree_box(node)
         world = (self._tworlds.get(node) or (None, scene_eval.IDENTITY))[1]
         px = py = 0.0
-        if box is not None:
+        if at is not None:
+            gx, gy = float(at[0]), float(at[1])
+        elif box is not None and self._tree_resize_from() == "corner":
+            gx, gy = box[0], box[1]
+        elif box is not None:
+            gx, gy = (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
+        else:
+            gx = gy = None
+        if gx is not None:
             inv = scene_eval.invert(world)
             if inv is not None:
-                px, py = scene_eval.apply(inv, (box[0] + box[2]) / 2.0,
-                                          (box[1] + box[3]) / 2.0)
+                px, py = scene_eval.apply(inv, gx, gy)
         op = {"op": "scale", "node": node, "s": round(factor, 6),
               "px": round(px, 3), "py": round(py, 3)}
         if abs(fy - factor) > 1e-6:
             op["sy"] = round(fy, 6)
         return self._tree_add(op)
+
+    def _tree_resize_from(self):
+        """Resize from, as last picked (settings.json): "corner" (the default) or "middle"."""
+        app = getattr(getattr(self, "ctx", None), "app", None)
+        settings = getattr(app, "_settings", None)
+        got = settings.get(_RESIZE_FROM) if isinstance(settings, dict) else None
+        return got if got in RESIZE_FROM else RESIZE_FROM[0]
+
+    @rpc
+    def tree_resize_from(self, where):
+        """Resize from (DragonRR, PAD-557: "by default retain xy coord when scaling but
+        include a button to toggle to center"): what stays put when Size %, Width %,
+        Height %, W px / H px or a corner drag resizes a layer.  Kept for next time."""
+        if where not in RESIZE_FROM:
+            return False
+        app = getattr(self.ctx, "app", None)
+        settings = getattr(app, "_settings", None)
+        if isinstance(settings, dict) and settings.get(_RESIZE_FROM) != where:
+            settings[_RESIZE_FROM] = where
+            try:
+                app._save_settings()
+            except Exception:                           # noqa: BLE001
+                pass
+        self.set(resize_from=where)
+        return True
 
     def _tree_pivot(self, node):
         """The middle of what *node* draws now, in the node's own units (0, 0 if nothing)."""
@@ -1799,7 +2285,317 @@ class TreeEditMixin:
                            "is": any(op["op"] == "shadow" and op.get("id") == n["id"]
                                      for op in ops)},
                 "edited": any(op.get("node") == n["id"] and op["op"] in self._FONT_OPS
-                              for op in ops)}
+                              for op in ops),
+                # PAD-514: its own colour, if it has one
+                "colour": self._tree_colour_of(man, n, o, ops)}
+
+    def _tree_colour_of(self, man, n, o, ops):
+        """PAD-514 (DragonRR): a line's colour as the Font bar shows it: ``own`` when it has
+        one of its own (``pick`` and ``bright`` as set, ``hex`` drawn), else the colour it is
+        drawn in now (its first step's); ``art`` for a font whose letters carry their own
+        colours; ``saved``, the colours kept with Save a copy."""
+        from ..plugins.stern import text_colour, text_colors
+        mine = text_colour.own_colours(ops).get(n["id"])
+        try:
+            font = text_colour.fonts_by_key(self.assets_dir).get(o.get("font") or "")
+            art = bool(font is not None and text_colour.font_pictures(self.assets_dir, font))
+        except Exception:                            # noqa: BLE001
+            art = False
+        if mine:
+            pick = text_colors.parse_hex(mine.get("pick")) or text_colors.from_floats(
+                mine["rgb"])
+            return {"own": True, "pick": text_colors.to_hex(pick),
+                    "bright": int(round(float(mine.get("bright", 100)))),
+                    "hex": text_colors.to_hex(text_colors.from_floats(mine["rgb"])),
+                    "art": art, "saved": self._text_colours_saved()}
+        steps = n.get("col") or [[1, [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]]]
+        m = steps[0][1]
+        rgba = [1.0, 1.0, 1.0] if o.get("styled") else list(o.get("rgba") or (1, 1, 1))[:3]
+        now = text_colors.to_hex(text_colors.from_floats([rgba[i] * m[i] for i in range(3)]))
+        return {"own": False, "pick": now, "bright": 100, "hex": now, "art": art,
+                "saved": self._text_colours_saved()}
+
+    #: the browse key a text colour's Save a copy and Load share, so its list follows them
+    _COLOUR_KEY = "text_colour"
+
+    def _text_colour_folders(self):
+        """The saved text colours' folders: the one Save a copy / Load last used, and PAD's
+        own Text colors folder (beside the saved color profiles')."""
+        from ..core import config
+        out = []
+        try:
+            last = self.window.last_browse_dir(self._COLOUR_KEY)
+        except Exception:                            # noqa: BLE001
+            last = ""
+        for d in (last, os.path.join(os.path.dirname(config.SETTINGS_FILE), "Text colors")):
+            if d and d not in out:
+                out.append(d)
+        return out
+
+    def _text_colours_saved(self):
+        from ..plugins.stern import text_colour
+        try:
+            got = text_colour.saved_colours(self._text_colour_folders())
+        except Exception:                            # noqa: BLE001
+            log.exception("saved text colors")
+            got = []
+        return [{"name": name, "path": path, "pick": pick, "bright": bright}
+                for name, path, pick, bright in got[:self._COLOURS_SHOWN]]
+
+    #: the most saved colours the Font bar lists
+    _COLOURS_SHOWN = 40
+
+    @rpc
+    def tree_text_colour(self, node, hex_color=None, bright=100):
+        """PAD-514 (DragonRR: "a facility to directly control text colour"): a line of text's
+        own colour, *hex_color* at *bright* % (100 as picked, below darker;
+        :func:`text_colour.shade`).  It is drawn in exactly that colour, here and on the
+        machine, and the colour profile no longer changes it.  *hex_color* ``None``: its own
+        colours back, and the profile if it has one switched on."""
+        from ..plugins.stern import scene_edit, text_colour, text_colors
+        card, _man = self._tree_card()
+        if card is None:
+            return False
+        node = int(node)
+        had = text_colour.own_colours(self._tree_ops(card)).get(node)
+        if hex_color in (None, ""):
+            if had is None:
+                return False
+            scene_edit.drop(self.assets_dir, card, node, "text_colour")
+            self._tree_refresh()
+            return True
+        pick = text_colors.parse_hex(hex_color)
+        try:
+            b = int(round(min(100.0, max(0.0, float(bright)))))
+        except (TypeError, ValueError):
+            return False
+        if pick is None:
+            return False
+        rgb = text_colour.shade([c / 255.0 for c in pick], b)
+        op = {"op": "text_colour", "node": node, "rgb": rgb,
+              "pick": text_colors.to_hex(pick), "bright": b}
+        if had is not None and had.get("pick") == op["pick"] and had.get("bright") == b:
+            return False
+        scene_edit.drop(self.assets_dir, card, node, "text_colour")
+        return self._tree_add(op)
+
+    @rpc
+    def tree_text_colour_all(self, node):
+        """PAD-528 (DragonRR: "I was relying on being able to apply no change to all images
+        and text. Please make sure that this can also be done with font colour changes"):
+        line *node*'s own colour, or Default (none), for every line of text that is not
+        locked, in every scene: the lines Apply to all lines of text reaches (PAD-471), less
+        the score panel lines the game paints (PAD-507).  After an "Are you sure?"; one Undo
+        puts every scene back."""
+        from ..plugins.stern import scene_edit, score_colours as sc, text_colour
+        card, _man = self._tree_card()
+        if card is None:
+            return False
+        node = int(node)
+        mine = text_colour.own_colours(self._tree_ops(card)).get(node)
+        trees = self._load_trees()
+        try:
+            lines = text_colour.every_line(self.assets_dir, trees=trees)
+        except Exception:                            # noqa: BLE001
+            log.exception("every line of text")
+            lines = {}
+        panels = {}
+        targets = {}
+        for rel in lines:
+            c, _h, n = rel.rpartition("#")
+            if c not in panels:
+                try:
+                    panels[c] = set(sc.panel_lines(trees.get(c) or {}))
+                except Exception:                    # noqa: BLE001
+                    panels[c] = set()
+            if int(n) not in panels[c]:
+                targets.setdefault(c, set()).add(int(n))
+        n_all = sum(len(v) for v in targets.values())
+        if not n_all or set(targets) == {card} and targets[card] == {node}:
+            self.window.toast(
+                "There are no other lines of text to give it to: the game's own lines are "
+                "locked until Unlock extracted images and text is ticked (under Advanced)."
+                if not self._tree_lines_unlocked() else
+                "There are no other lines of text to give it to.", "info")
+            return False
+        edits = scene_edit.load(self.assets_dir)
+
+        def same(had):
+            if mine is None:
+                return had is None
+            return had is not None and (had.get("pick"), had.get("bright")) == (
+                mine.get("pick"), mine.get("bright"))
+        change = {}
+        for c, nodes in targets.items():
+            had = text_colour.own_colours(edits.get(c) or [])
+            todo = sorted(n for n in nodes if not same(had.get(n)))
+            if todo:
+                change[c] = todo
+        what = ("this line's color, %s%s" % (
+            mine.get("pick"), "" if mine.get("bright", 100) == 100
+            else " at %d%% brightness" % mine["bright"])) if mine else "Default"
+        if not change:
+            self.window.toast("All %d lines of text that are not locked already have %s."
+                              % (n_all, what), "info")
+            return False
+        n_change = sum(len(v) for v in change.values())
+        msg = ("Are you sure?\n\nEvery line of text that is not locked (each one added in "
+               "Scenes, and the game's own lines while they are unlocked), all %d of them, "
+               % n_all)
+        msg += ("gets %s, in place of the color each has now. A line with a color of its own "
+                "is drawn in exactly that color, and the color profile no longer changes it."
+                % what) if mine else (
+                "goes back to Default: each one's own color is taken off, so the game's color "
+                "comes back, and the color profile on the lines that have one.")
+        msg += " %d of them change, in %d scene%s." % (
+            n_change, len(change), "" if len(change) == 1 else "s")
+        msg += ("\n\nThe score panel lines are left as they are: the game paints their "
+                "colors as it plays.\n\nUndo in Scenes puts them all back.")
+        if not compat.messagebox.askyesno("Apply to all lines of text", msg):
+            return False
+        edits = scene_edit.load(self.assets_dir)      # read again after the question
+        after = {}
+        for c, nodes in change.items():
+            ops = [op for op in edits.get(c) or ()
+                   if not (op.get("op") == "text_colour" and op.get("node") in nodes)]
+            if mine is not None:
+                ops += [dict(mine, node=n) for n in nodes]
+            after[c] = ops
+        return self._tree_batch(after, "Font text color %s applied to all %d lines of text "
+                                       "(%d changed)." % (what, n_all, n_change))
+
+    def _tree_lines_unlocked(self):
+        from ..core import colour_profile as cp, staged_changes
+        try:
+            return bool(staged_changes.peek(self.assets_dir).get(cp.STOCK_IMAGES_KEY))
+        except Exception:                            # noqa: BLE001
+            return False
+
+    # -- one Undo step over several scenes (PAD-528) ----------------------------
+    # A change made to many scenes at once is a step on each scene's own list, noted
+    # together, so Undo (or Redo) on any of them takes every scene that is still as the
+    # change left it back (or forward) with it.
+    _BATCHES_KEPT = 8
+
+    def _tree_batch(self, after, note=None):
+        """Put the op lists *after* (``{card: ops}``) in one save, one step on each scene."""
+        from ..plugins.stern import scene_edit
+        for c in after:
+            self._tree_track(c)
+        edits = scene_edit.load(self.assets_dir)
+        before = {c: list(edits.get(c) or ()) for c in after}
+        edits.update({c: [dict(op) for op in ops] for c, ops in after.items()})
+        try:
+            scene_edit.save(self.assets_dir, edits)
+        except OSError as e:
+            compat.messagebox.showerror("Scene edit", str(e))
+            return False
+        for c in after:
+            self._tree_track(c)
+        self._tbatches.append({"dir": self.assets_dir,
+                               "cards": {c: (before[c], self._tree_ops(c)) for c in after}})
+        del self._tbatches[:-self._BATCHES_KEPT]
+        if note:
+            self.window.append_log(note, "info")
+        self._tree_refresh()
+        return True
+
+    def _tree_batch_step(self, card, redo):
+        """Undo (*redo*: Redo) the change to several scenes whose step *card*'s comes next;
+        ``None`` when its next step is its own."""
+        from ..plugins.stern import scene_edit
+        h = self._tree_hist(card)
+        stack = (h or {}).get("redo" if redo else "undo")
+        if not stack:
+            return None
+        for b in reversed(self._tbatches):
+            pair = b["cards"].get(card) if b["dir"] == self.assets_dir else None
+            if pair is None:
+                continue
+            frm, to = (pair[0], pair[1]) if redo else (pair[1], pair[0])
+            if h["now"] != frm or stack[-1][0] != to:
+                return None
+            edits = scene_edit.load(self.assets_dir)
+            for c, (b_ops, a_ops) in b["cards"].items():
+                ch = self._tree_hist(c)
+                frm, to = (b_ops, a_ops) if redo else (a_ops, b_ops)
+                st = (ch or {}).get("redo" if redo else "undo")
+                if not st or ch["now"] != frm or st[-1][0] != to:
+                    continue                          # changed since: left as it is
+                st.pop()
+                ch["undo" if redo else "redo"].append((ch["now"], ch["eyes"]))
+                edits[c] = [dict(op) for op in to]
+                ch["now"] = list(to)
+            try:
+                scene_edit.save(self.assets_dir, edits)
+            except OSError as e:
+                compat.messagebox.showerror("Scene edit", str(e))
+                return False
+            self._tree_refresh()
+            return True
+        return None
+
+    @rpc
+    def tree_text_colour_save(self, hex_color, bright=100):
+        """Save a copy (PAD-514, DragonRR: "save and load text colours as you have done in
+        profiles"): the colour on show kept as a file of its own, listed under Saved colors
+        from then on."""
+        from ..plugins.stern import text_colour, text_colors
+        pick = text_colors.parse_hex(hex_color)
+        if pick is None:
+            return False
+        folders = self._text_colour_folders()
+        start = folders[0] if folders else None
+        if start and not os.path.isdir(start):
+            try:
+                os.makedirs(start, exist_ok=True)
+            except OSError:
+                start = None
+        path = self.window.ask_save(
+            self._COLOUR_KEY, "Save a copy of this text color",
+            initialfile="Text color %s.txt" % text_colors.to_hex(pick).lstrip("#"),
+            defaultextension=".txt", initialdir=start,
+            filetypes=[("Text color", "*.txt"), ("All files", "*.*")])
+        if not path:
+            return False
+        try:
+            text_colour.save_colour_file(path, text_colors.to_hex(pick), bright)
+        except (OSError, ValueError) as e:
+            self.window.toast("Could not save the color: %s" % e, "error")
+            return False
+        self.window.toast("Saved %s" % os.path.basename(path), "success")
+        self._tree_refresh()
+        return True
+
+    @rpc
+    def tree_text_colour_load(self, node):
+        """Load (PAD-514): a text colour kept with Save a copy, given to line *node*."""
+        folders = self._text_colour_folders()
+        path = self.window.ask_open(
+            self._COLOUR_KEY, "Load a text color",
+            filetypes=[("Text color", "*.txt"), ("All files", "*.*")],
+            initialdir=next((d for d in folders if os.path.isdir(d)), None))
+        if not path:
+            return False
+        return self._text_colour_from(node, path)
+
+    @rpc
+    def tree_text_colour_use(self, node, path):
+        """The Saved colors list (PAD-514): the colour kept in *path* given to line *node*."""
+        known = {os.path.normcase(os.path.abspath(c["path"]))
+                 for c in self._text_colours_saved()}
+        if not path or os.path.normcase(os.path.abspath(path)) not in known:
+            return False
+        return self._text_colour_from(node, path)
+
+    def _text_colour_from(self, node, path):
+        from ..plugins.stern import text_colour
+        got = text_colour.read_colour_file(path)
+        if got is None:
+            self.window.toast("%s holds no text color" % os.path.basename(path), "error")
+            return False
+        self.tree_text_colour(node, got[0], got[1])
+        return True
 
     @staticmethod
     def _tree_text_slant_width(nid, ops):
@@ -2214,8 +3010,12 @@ class TreeEditMixin:
         node = int(node)
         shut = node in self._tree_view_hidden(card)
         self._tree_view_follow(card, [node], on)
-        if on:
+        baked = node in self._tree_baked(card)
+        if on or baked:
             scene_edit.drop(self.assets_dir, card, node, "visible")
+        if on and baked:                                  # the card hid it (PAD-535)
+            return self._tree_add({"op": "visible", "node": node, "on": True}) or True
+        if on or baked:
             self._tree_refresh()
             return True
         if self._tree_add({"op": "visible", "node": node, "on": False}):
@@ -2245,30 +3045,35 @@ class TreeEditMixin:
         if not self.assets_dir or not self._colour_unlock()["offered"]:
             return False
         on = bool(on)
-        if not on:
-            # the game's own lines of text are locked again with its pictures (PAD-438)
-            _cp.drop_text_slots(self.assets_dir)
         images = self._images_here()
         if images is not None:
             try:
                 images.set_color_unlocked(on)
             except Exception:                            # noqa: BLE001
-                log.exception("scene colour unlock")
+                log.exception("scene color unlock")
         data = staged_changes.load(self.assets_dir)
         if bool(data.get(_cp.STOCK_IMAGES_KEY)) != on:
             # the Images tab has not scanned this folder: its own record is the file.  As
-            # there, a game picture's switch lives only while the box is ticked, so neither
-            # way keeps one: ticking never wakes a switch left from an old pick (PAD-345)
+            # there, a game picture's switch counts only while the box is ticked: unticking
+            # puts the switches aside with the game's own lines' (PAD-438), and ticking
+            # brings back those, never one left from an old pick (PAD-345, PAD-525)
             picks = data.get("image") or {}
             built = _cp.built_image_rels(self.assets_dir, data)
             slots = data.get(_cp.IMAGE_SLOTS_KEY) or {}
             stock = [r for r in slots if not picks.get(r) and r not in built]
+            back = {}
             if on:
                 data[_cp.STOCK_IMAGES_KEY] = True
+                back = _cp.unlock_switches(data)
             else:
                 data.pop(_cp.STOCK_IMAGES_KEY, None)
+                _cp.lock_switches(data, {r: slots[r] for r in stock})
             # a built picture's switch is the user's own: the box never touches it
             slots = {r: v for r, v in slots.items() if picks.get(r) or r in built}
+            for r, v in back.items():
+                if (not picks.get(r) and r not in built
+                        and os.path.isfile(os.path.join(self.assets_dir, *r.split("/")))):
+                    slots.setdefault(r, v)
             if slots:
                 data[_cp.IMAGE_SLOTS_KEY] = slots
             else:
@@ -2410,7 +3215,7 @@ class TreeEditMixin:
                 try:
                     fn()
                 except Exception:                        # noqa: BLE001
-                    log.exception("scene text colour %s.%s", ns, name)
+                    log.exception("scene text color %s.%s", ns, name)
 
     def _picture_color(self, rel, on):
         """One picture's colour switch (*rel* under images/), recorded where the Images tab
@@ -2422,7 +3227,7 @@ class TreeEditMixin:
             try:
                 done = bool(here.set_color(rel, bool(on)))
             except Exception:                            # noqa: BLE001
-                log.exception("scene colour switch")
+                log.exception("scene color switch")
         if not done:
             # the Images tab has not scanned this folder: its own record is the file
             from ..core import colour_profile as _cp
@@ -2452,6 +3257,8 @@ class TreeEditMixin:
         """PAD-471: lines' colour switches moved from the Colors tab (Apply to all lines of
         text, or its Undo).  The tab tells this scene to draw again itself; a running game is
         handed it, as a palette click does."""
+        if getattr(self, "_alive", False):
+            self._restate_list()                     # PAD-524: a profile is a change too
         if getattr(self, "_alive", False) and self._sel:
             self._live_kick()
 
@@ -2460,6 +3267,7 @@ class TreeEditMixin:
         (the preview shows a switched-on file the way the Write bakes it)."""
         if getattr(self, "_alive", False):
             self._publish_look()                     # a profile's name or its count moved
+            self._restate_list()                     # PAD-524: a profile is a change too
         if not getattr(self, "_alive", False) or not self._sel:
             return
         self._trev += 1
@@ -2550,6 +3358,96 @@ class TreeEditMixin:
         self._tree_refresh()
         return True
 
+    # -- the list of edits (DragonRR, PAD-540) ------------------------------
+    # The "N edits, not written yet" line opens it in place of the scene list: every scene's
+    # edits, the selected scene's first.  Clicking one goes to its scene and selects what it
+    # changed; Reset takes that one edit back, on its own scene, as one undo step there.
+    @rpc
+    def edit_list(self, on=True):
+        self._telist = bool(on)
+        self._edit_list_sync()
+        return True
+
+    def _edit_list_sync(self):
+        if not self._telist:
+            if self.store.get(self.ns, "edit_list") is not None:
+                self.set(edit_list=None)
+            return
+        from ..plugins.stern import scene_edit
+        trees = self._load_trees()
+        here, _m = self._tree_card()
+        dirs = {d.replace("\\", "/").rstrip("/"): d for d in (self._scenes or {})}
+        groups = []
+        for card, ops in scene_edit.load(self.assets_dir).items():
+            names = scene_edit.names_of(trees[card]) if card in trees else {}
+            for op in ops:
+                if op["op"] in scene_edit._MAKES and op.get("id") is not None:
+                    names[op["id"]] = (op.get("name") or ('"%s"' % op["text"] if op.get("text")
+                                       else "drop shadow"))
+            rows = []
+            for i, op in enumerate(ops):
+                node = op.get("node", op.get("id"))
+                rows.append({"i": i, "node": node, "sig": _op_sig(op),
+                             "name": names.get(node) or "layer %s" % node,
+                             "what": scene_edit.describe(op), "group": op.get("group")})
+            d = dirs.get(scene_edit.scene_dir(card))
+            groups.append({"card": card, "d": d, "label": self._scene_label(card),
+                           "here": card == here, "edits": rows})
+        groups.sort(key=lambda g: (not g["here"], g["label"].lower()))
+        self.set(edit_list=groups)
+
+    def _edit_list_go(self, card):
+        """Go to *card*'s scene (selected already, or picked in the list); False when this
+        project has no such scene."""
+        from ..plugins.stern import scene_edit
+        d = {k.replace("\\", "/").rstrip("/"): k for k in (self._scenes or {})}.get(
+            scene_edit.scene_dir(card))
+        if d is None:
+            return False
+        if d != self._sel and not self.select(d):
+            return False
+        return self._tree_card()[0] == card
+
+    @rpc
+    def edit_list_pick(self, card, index):
+        """Go to the scene of the edit at *index* of *card*'s list and select what it changed."""
+        from ..plugins.stern import scene_edit
+        ops = scene_edit.ops_for(self.assets_dir, card)
+        index = int(index)
+        if not 0 <= index < len(ops) or not self._edit_list_go(card):
+            return False
+        node = ops[index].get("node", ops[index].get("id"))
+        if node is None or self._tman is None or int(node) not in scene_edit._man_index(self._tman):
+            return True                               # (a node the scene no longer has)
+        return self.tree_select(int(node))
+
+    @rpc
+    def edit_list_reset(self, card, index, sig):
+        """Take back the one edit at *index* of *card*'s list (*sig*: the edit the page saw,
+        so a list that has changed since never drops another), on its own scene: Undo there
+        puts it back."""
+        from ..plugins.stern import scene_edit
+        ops = scene_edit.ops_for(self.assets_dir, card)
+        index = int(index)
+        if not 0 <= index < len(ops) or _op_sig(ops[index]) != sig:
+            self._edit_list_sync()
+            return False
+        if not self._edit_list_go(card):
+            return False
+        self._tree_track(card)
+        was = self._tree_hidden(card)
+        try:
+            scene_edit.set_ops(self.assets_dir, card, scene_edit.without(ops, index))
+        except OSError as e:
+            compat.messagebox.showerror("Scene edit", str(e))
+            return False
+        # a hide taken back takes its preview eye with it, as an undone hide does (PAD-407)
+        now = self._tree_hidden(card)
+        self._tree_view_follow(card, was - now, True)
+        self._tree_view_follow(card, now - was, False)
+        self._tree_refresh()
+        return True
+
     @rpc
     def tree_remove(self, node):
         """An ADDED node is removed; the game's own is hidden (its code finds it by name)."""
@@ -2580,6 +3478,9 @@ class TreeEditMixin:
         if card is None:
             return False
         h = self._tree_hist(card)
+        done = self._tree_batch_step(card, False)         # several scenes at once (PAD-528)
+        if done is not None:
+            return done
         # a step from before the app was started has no eyes noted (they follow its hides)
         was = h["undo"].pop() if h["undo"] else (scene_edit.undone(h["now"]), None)
         if was[0] == h["now"] and was[1] in (None, h["eyes"]):
@@ -2596,6 +3497,9 @@ class TreeEditMixin:
         h = self._tree_hist(card)
         if not h["redo"]:
             return False
+        done = self._tree_batch_step(card, True)
+        if done is not None:
+            return done
         h["undo"].append((h["now"], h["eyes"]))
         return self._tree_put(card, h, h["redo"].pop())
 
@@ -2660,7 +3564,8 @@ class TreeEditMixin:
         if not compat.messagebox.askyesno(
                 "Scene edits", "Put EVERY scene back the way the game shipped it? That drops "
                 "all %d edit(s) in %d scene(s): moves, resizes, tints, layer changes and added "
-                "pictures and text." % (n, len(edits))):
+                "pictures and text. Color profiles and replaced pictures stay (Reset… in the "
+                "project menu puts those back).%s" % (n, len(edits), self._tree_base_line())):
             return False
         scene_edit.clear(self.assets_dir)
         self._tree_view_reset()
@@ -2740,15 +3645,19 @@ class TreeEditMixin:
             defaultextension=".zip")
         if not path:
             return None
+        counts = {}
         try:
-            n, pics, texts = scene_share.export_all(self.assets_dir, path, cards, trees)
+            n, pics, texts = scene_share.export_all(self.assets_dir, path, cards, trees,
+                                                    counts=counts)
         except (scene_edit.SceneEditError, OSError) as e:
             compat.messagebox.showerror("Save scenes", str(e))
             return None
+        colour = _colour_words(counts)
         self._set_caption("Saved the edits of %d scene%s, %d replaced picture%s with their "
-                          "color profiles and %d text edit%s to %s"
+                          "color profiles%s and %d text edit%s to %s"
                           % (n, "" if n == 1 else "s", pics, "" if pics == 1 else "s",
-                             texts, "" if texts == 1 else "s", os.path.basename(path)))
+                             ", " + colour if colour else "", texts,
+                             "" if texts == 1 else "s", os.path.basename(path)))
         return path
 
     def _text_rows_here(self):
@@ -2782,17 +3691,31 @@ class TreeEditMixin:
         images = self._flush_images()
         pics, gone, more = [], [], False
         tfits, tmissing, tlong, thave = [], [], 0, []
-        kept, saved_to, reset_n, shown = 0, None, 0, 0
+        kept, saved_to, reset_n, shown, elsewhere = 0, None, 0, 0, 0
+        colours, moved, shown_k, differs, tpairs, skip_scenes = {}, {}, {}, {}, [], set()
+        colours_missing, ontop, replaced_out = [], {}, {}
         try:
             scenes = scene_edit.read_share(path)
             # PAD-385: a picture named otherwise here (a project of another card) is found by
             # the scene nodes that draw it
             extras = scene_share.localise(self.assets_dir, scene_share.read_extras(path),
-                                          self._load_trees())
+                                          self._load_trees(), moved=moved)
             got, missing = scene_edit.match_cards(scenes, self._load_trees().keys())
             mine = scene_edit.load(self.assets_dir)
+            # PAD-552 (DragonRR, computer B): a file saved from the project of a card built
+            # with my edits carries only what was changed since; where my scene with my edits
+            # looks as it did there, its edits go after mine instead of replacing them
+            states = scene_edit.read_states(path)
+            sfind = scene_edit.card_finder(states.keys())
+            trees = self._load_trees()
+            for c in got:
+                if mine.get(c) and c in trees and sfind(c) in states:
+                    rest = scene_edit.on_top_of(trees[c], mine[c], got[c], states[sfind(c)])
+                    if rest is not None:
+                        ontop[c] = rest
             # PAD-402: a scene of mine the file would leave as it is, is no conflict
-            over = {c: (mine[c], got[c]) for c in got if mine.get(c) and mine[c] != got[c]}
+            over = {c: (mine[c], got[c]) for c in got
+                    if mine.get(c) and mine[c] != got[c] and c not in ontop}
             more = scene_share.has_extras(extras)
             # PAD-387: the Text tab's edits it carries, on this card's lines, when they fit
             text_tab, rows = (self._text_rows_here() if extras["text"] else (None, []))
@@ -2817,12 +3740,12 @@ class TreeEditMixin:
             clash = scene_share.clashes(self.assets_dir, extras)
             items = scene_share.conflict_items(self.assets_dir, over, extras, clash, tclash,
                                                self._scene_label)
-            skip_scenes, overlay = set(), True
+            skip_scenes, overlay, files_profile = set(), True, True
             if items:
                 n = len(items)
                 answer = self.window.ask_conflicts(
                     "Load scene edits", "%s changes %d thing%s you edited yourself. Tick the "
-                    "ones the file's should replace, or answer for all of them. Reset my "
+                    "ones the file's should replace, or answer for all of them. Revert my "
                     "scenes puts every scene back as the game shipped it first; otherwise "
                     "nothing else of yours changes. No file on this PC is deleted or "
                     "overwritten: the "
@@ -2832,7 +3755,7 @@ class TreeEditMixin:
                     backup_label="Save my scenes, pictures and text to a backup file before "
                                  "replacing any",
                     buttons=[{"id": "cancel", "label": "Cancel"},
-                             {"id": "reset", "label": "Reset my scenes, then load"},
+                             {"id": "reset", "label": "Revert my scenes, then load"},
                              {"id": "skip", "label": "Skip conflicts"},
                              {"id": "replace", "label": "Replace all"},
                              {"id": "pick", "label": "Replace ticked only",
@@ -2851,41 +3774,87 @@ class TreeEditMixin:
                 if reset:
                     reset_n = len(mine)
                     scene_edit.clear(self.assets_dir)
+                    ontop = {}
                 skip_scenes = {c for c in over if "scene:" + c not in take}
                 for c in skip_scenes:
                     got.pop(c, None)
                 drop = {rel for rel in clash["pictures"] if "picture:" + rel not in take}
                 # the colour switch of a picture a kept scene adds stays mine too
-                adds = {op.get("image") for c in skip_scenes for op in over[c][1]
-                        if op.get("op") == "add_picture"}
+                adds = {rel for c in skip_scenes
+                        for rel, _c in scene_edit.picture_rels(over[c][1])}
                 extras = dict(extras, pictures={r: p for r, p in extras["pictures"].items()
                                                 if r not in drop},
                               added={r: a for r, a in extras["added"].items() if r not in adds})
                 overlay = not clash["overlay"] or "overlay" in take
+                # PAD-502: the individual files profile, and the game pictures whose other
+                # look here (one row for them all) stays mine unless ticked
+                files_profile = not clash["files_profile"] or "files_profile" in take
+                if "colored" not in take:
+                    extras = dict(extras, colored={r: p for r, p in extras["colored"].items()
+                                                   if r not in set(clash["colored"])})
                 gone_text = {id(r) for i, (r, _new) in enumerate(tclash)
                              if "text:%d" % i not in take}
                 tfits = [(r, new) for r, new in tfits if id(r) not in gone_text]
                 more = scene_share.has_extras(extras) and (
-                    bool(extras["pictures"] or extras["added"] or extras.get("lines"))
-                    or overlay)
+                    bool(extras["pictures"] or extras["added"] or extras.get("lines")
+                         or extras["colored"]) or overlay)
             renamed = {}
             if got:
                 got, missing = scene_edit.import_edits(self.assets_dir, path,
                                                        self._load_trees().keys(),
                                                        renamed=renamed, skip=skip_scenes)
+                # PAD-552: the file's edits made on top of mine go after mine (an added
+                # picture of the file copied in under another name keeps that name)
+                if ontop:
+                    edits = scene_edit.load(self.assets_dir)
+                    for c, rest in ontop.items():
+                        for op in rest:
+                            if op.get("op") == "add_picture" and op.get("image") in renamed:
+                                op["image"] = renamed[op["image"]]
+                            for im in (op.get("images") or ()) if op.get("op") == "anim" \
+                                    else ():
+                                if isinstance(im, dict) and im.get("image") in renamed:
+                                    im["image"] = renamed[im["image"]]
+                        edits[c] = list(mine[c]) + rest
+                    scene_edit.save(self.assets_dir, edits)
                 # PAD-403: a scene here that already shows the file's edits (the card was
                 # built with them) gets only the ones it does not
-                states = scene_edit.read_states(path)
                 find = scene_edit.card_finder(states.keys())
                 trees = self._load_trees()
-                shown = sum(1 for k in scene_edit.note_shown(
+                # PAD-552: a scene here that starts out otherwise than where the file was saved,
+                # and what of it does (the load report). PAD-1320 (DragonRR, round 2): unless
+                # it already shows a version of the file's edits (a card built with the file
+                # before it was changed): then it gets only what it lacks
+                fixed, edits = {}, None
+                for c in got:
+                    if (c in trees and c not in ontop and find(c) in states
+                            and scene_edit.starts_elsewhere(
+                            trees[c], got[c], states[find(c)])):
+                        ops = scene_edit.rebased(trees[c], got[c], states[find(c)])
+                        if ops:
+                            edits = scene_edit.load(self.assets_dir) if edits is None else edits
+                            edits[c] = ops
+                            fixed[c] = scene_edit.states_of(trees[c], ops)
+                            continue
+                        differs[c] = scene_edit.start_differences(trees[c], got[c],
+                                                                  states[find(c)])
+                if fixed:
+                    scene_edit.save(self.assets_dir, edits)
+                elsewhere = len(differs)
+                shown_k = scene_edit.note_shown(
                     self.assets_dir, {c: trees[c] for c in got if c in trees},
-                    states={c: states[find(c)] for c in got if find(c) in states}).values()
-                    if k)
+                    states=dict({c: states[find(c)] for c in got
+                                 if find(c) in states and c not in ontop}, **fixed))
+                shown = sum(1 for c, k in shown_k.items() if k or c in fixed)
             if more:
                 pics, gone = scene_share.import_extras(self.assets_dir, path, extras,
                                                        renamed=renamed, overlay=overlay,
-                                                       cards_here=self._load_trees().keys())
+                                                       cards_here=self._load_trees().keys(),
+                                                       files_profile=files_profile,
+                                                       counts=colours,
+                                                       missing_colored=colours_missing,
+                                                       replaced_too=bool(ontop),
+                                                       replaced_out=replaced_out)
             if tfits:
                 if text_tab is not None:
                     text_tab._set_replacements(
@@ -2908,6 +3877,8 @@ class TreeEditMixin:
             words = words[:-1] + " and %d replaced picture%s with %s color profile%s." % (
                 len(pics), "" if len(pics) == 1 else "s",
                 "its" if len(pics) == 1 else "their", "" if len(pics) == 1 else "s")
+        if _colour_words(colours):
+            words = words[:-1] + " and %s." % _colour_words(colours)
         if tfits:
             words = words[:-1] + " and %d text edit%s." % (len(tfits),
                                                            "" if len(tfits) == 1 else "s")
@@ -2944,13 +3915,59 @@ class TreeEditMixin:
                       % (len(gone), "" if len(gone) == 1 else "s",
                          "is" if len(gone) == 1 else "are",
                          "was" if len(gone) == 1 else "were"))
+        lost = colours.get("colored_missing") or 0
+        if lost:
+            words += (" The color profile%s of %d game picture%s not in this project %s left "
+                      "out." % ("" if lost == 1 else "s", lost, "" if lost == 1 else "s",
+                                "was" if lost == 1 else "were"))
+        if ontop:
+            words += (" %d scene%s here %s your own edits the file's were made on top of (the "
+                      "card it was saved from was built with them), so its edits were added "
+                      "after your own edits instead of replacing them."
+                      % (len(ontop), "" if len(ontop) == 1 else "s",
+                         "has" if len(ontop) == 1 else "have"))
+        if elsewhere:
+            words += (" %d scene%s here %s not start out the way %s did in the project the "
+                      "file was saved from, so %s edits can land in other places: that "
+                      "project is of another card, or of a card built with other changes. "
+                      "For the same look, extract this project from the same card."
+                      % (elsewhere, "" if elsewhere == 1 else "s",
+                         "does" if elsewhere == 1 else "do", "it" if elsewhere == 1 else "they",
+                         "its" if elsewhere == 1 else "their"))
         if missing:
             words += (" %d scene%s in the file %s not on this card and %s left out."
                       % (len(missing), "" if len(missing) == 1 else "s",
                          "is" if len(missing) == 1 else "are",
                          "was" if len(missing) == 1 else "were"))
+        # PAD-552: every scene, picture and text edit the load could not put in place as it was,
+        # by name, in a report beside the project's logs
+        find_here = scene_edit.card_finder(self._load_trees().keys())
+        srows = []
+        for card, ops in sorted(scenes.items()):
+            here = find_here(card)
+            status = ("not on this card, left out" if here is None
+                      else "kept your own" if here in skip_scenes
+                      else ("added after your own %d edit%s: your scene with them looks as it "
+                            "did where the file was saved" % (
+                                len(mine.get(here) or ()),
+                                "" if len(mine.get(here) or ()) == 1 else "s"))
+                      if here in ontop
+                      else "starts out otherwise here" if here in differs else "loaded")
+            srows.append({"label": self._scene_label(card), "card": card, "ops": len(ops),
+                         "status": status, "shown": shown_k.get(here) or 0,
+                         "differs": differs.get(here) or []})
+        report = scene_share.write_load_report(self.assets_dir, path, {
+            "scenes": srows, "pictures_missing": gone,
+            "colored_missing": colours_missing, "moved": moved,
+            "replaced_given": replaced_out.get("given") or [],
+            "replaced_kept": replaced_out.get("kept") or [],
+            "text_missing": tmissing, "text_have": thave,
+            "text_long": [(r, new) for r, new in tpairs
+                          if R.row_len(r, new) > R.row_budget(r)]})
+        if report and (missing or gone or tmissing or tlong or lost or elsewhere):
+            words += " What was left out or lands elsewhere, by name: %s" % report
         self._set_caption(words)
-        if missing or gone or tmissing or tlong:
+        if missing or gone or tmissing or tlong or lost or elsewhere:
             compat.messagebox.showinfo("Load scene edits", words)
         return sorted(got)
 
@@ -2989,7 +4006,9 @@ class TreeEditMixin:
             return False
         if not compat.messagebox.askyesno(
                 "Scene edits", "Put this scene back the way the game shipped it? Every move, "
-                "resize, tint, layer change and added picture or text in it is dropped."):
+                "resize, tint, layer change and added picture or text in it is dropped. Its color "
+                "profiles and replaced pictures stay (Reset… in the project menu puts those "
+                "back).%s" % self._tree_base_line(card)):
             return False
         scene_edit.clear(self.assets_dir, card)
         self._tree_view_reset(card)
@@ -3039,18 +4058,7 @@ class TreeEditMixin:
             compat.messagebox.showerror("Add picture", "That file isn't a picture PAD can "
                                         "read (%s)." % e)
             return False
-        if img.size[0] > 2048 or img.size[1] > 2048:
-            img.thumbnail((2048, 2048))
-        stem = "".join(c if c.isalnum() or c in "-_" else "_"
-                       for c in os.path.splitext(os.path.basename(src))[0])[:40] or "picture"
-        rel_dir = os.path.join("scene_textures", "added")
-        out_dir = os.path.join(self.assets_dir, "images", rel_dir)
-        os.makedirs(out_dir, exist_ok=True)
-        i = 1
-        while os.path.exists(os.path.join(out_dir, "%s_%d.png" % (stem, i))):
-            i += 1
-        name = "%s_%d.png" % (stem, i)
-        img.save(os.path.join(out_dir, name))
+        stem, name = self._save_added_png(src, img)
         ops = self._tree_ops(card)
         nid = scene_edit.new_id(self._tman, ops)
         w, h = img.size
@@ -3060,6 +4068,141 @@ class TreeEditMixin:
             "op": "add_picture", "parent": parent, "index": 1 << 20, "id": nid,
             "name": "PAD_%s" % stem, "image": "scene_textures/added/" + name,
             "w": w, "h": h, "x": x, "y": y})
+
+    def _save_added_png(self, src, img):
+        """Keep picture *img* (opened from *src*) in the project's added pictures:
+        ``(stem, file name)`` under ``images/scene_textures/added``."""
+        if img.size[0] > 2048 or img.size[1] > 2048:
+            img.thumbnail((2048, 2048))
+        stem = "".join(c if c.isalnum() or c in "-_" else "_"
+                       for c in os.path.splitext(os.path.basename(src))[0])[:40] or "picture"
+        out_dir = os.path.join(self.assets_dir, "images", "scene_textures", "added")
+        os.makedirs(out_dir, exist_ok=True)
+        i = 1
+        while os.path.exists(os.path.join(out_dir, "%s_%d.png" % (stem, i))):
+            i += 1
+        name = "%s_%d.png" % (stem, i)
+        img.save(os.path.join(out_dir, name))
+        return stem, name
+
+    # -- an added picture animated (DragonRR, PAD-1278) ------------------------------------
+    #: what the Animation box sets; the rest of an ``anim`` op is made here
+    ANIM_KEYS = ("follow", "start", "end", "fade_in", "fade_out", "pulse", "period", "every")
+
+    def _tree_anim_of(self, ops, node):
+        """The ``anim`` op in force for added picture *node* ({} for none)."""
+        for op in reversed(ops or ()):
+            if op.get("op") == "anim" and op.get("node") == node:
+                return op
+        return {}
+
+    def _tree_anim_props(self, card, man, nid, ops, props):
+        """*props* of the selected layer, with ``anim`` for an added picture: its animation
+        now and the game's layers it can show and fade like (``follow_choices``)."""
+        if not props or not props.get("added") or props.get("kind") != "Bitmap":
+            return props
+        stock = self._tree_card()[1] or man
+        choices = []
+
+        def walk(kids, path):
+            for n in kids:
+                kinds = [(stock["objects"].get(str(oid)) or {}).get("kind")
+                         for _s, oid in n["comps"]]
+                here = path + [n["name"]]
+                if "Text" in kinds or "Bitmap" in kinds:
+                    words = ""
+                    for _s, oid in n["comps"]:
+                        o = stock["objects"].get(str(oid)) or {}
+                        if o.get("kind") == "Text":
+                            words = str(o.get("text") or "")[:30]
+                    choices.append({"id": n["id"], "name": " / ".join(here[-2:]),
+                                    "words": words})
+                for _s, oid in n["comps"]:
+                    o = stock["objects"].get(str(oid)) or {}
+                    if o.get("kids"):
+                        walk(o["kids"], here)
+
+        walk(stock["root"]["kids"], [])
+        op = self._tree_anim_of(ops, nid)
+        anim = {k: op.get(k) for k in self.ANIM_KEYS if op.get(k) is not None}
+        anim["images"] = [im.get("image") for im in op.get("images") or ()]
+        anim["fps"] = float((man.get("stage") or [0, 0, 30])[2] or 30)
+        return dict(props, anim=anim, follow_choices=choices[:400])
+
+    @rpc
+    def tree_anim(self, node, spec=None):
+        """Set added picture *node*'s animation: *spec* holds :attr:`ANIM_KEYS` (a missing or
+        empty one is off); its loop pictures are kept.  ``{}`` takes the animation off."""
+        from ..plugins.stern import scene_edit
+        card, stock = self._tree_card()
+        if card is None:
+            return False
+        node = int(node)
+        ops = self._tree_ops(card)
+        if not any(o.get("op") == "add_picture" and o.get("id") == node for o in ops):
+            return False
+        spec = dict(spec or {})
+        op = {"op": "anim", "node": node}
+        for k in self.ANIM_KEYS:
+            v = spec.get(k)
+            if v in (None, "", False):
+                continue
+            try:
+                op[k] = float(v) if k == "pulse" else int(float(v))
+            except (TypeError, ValueError):
+                continue
+        if "pulse" in op:
+            op["pulse"] = max(0.0, min(1.0, op["pulse"]))
+        imgs = spec.get("images", self._tree_anim_of(ops, node).get("images"))
+        if imgs:
+            op["images"] = [im for im in imgs if isinstance(im, dict) and im.get("image")]
+            if not op.get("every"):
+                op["every"] = 6
+        if op.get("follow") is not None:
+            tr = scene_edit.follow_track(stock, op["follow"])
+            if tr is None:
+                compat.messagebox.showinfo(
+                    "Animation", "That layer never shows in this scene as it plays, so there "
+                    "is nothing to follow.")
+                return False
+            op["track"] = tr
+        return self._tree_add(op)
+
+    @rpc
+    def tree_anim_picture(self, node, drop=None):
+        """Add a picture to added picture *node*'s loop (shown in turn after its own), or
+        with *drop* (an index) take one out."""
+        card, _man = self._tree_card()
+        if card is None:
+            return False
+        node = int(node)
+        cur = self._tree_anim_of(self._tree_ops(card), node)
+        spec = {k: cur.get(k) for k in self.ANIM_KEYS}
+        imgs = [dict(im) for im in cur.get("images") or ()]
+        if drop not in (None, ""):
+            i = int(drop)
+            if not 0 <= i < len(imgs):
+                return False
+            del imgs[i]
+        else:
+            src = self.window.ask_open("scene_add_picture",
+                                       "Add a picture shown in turn",
+                                       filetypes=[("Pictures", "*.png *.jpg *.jpeg *.webp"),
+                                                  ("All files", "*.*")])
+            if not src:
+                return False
+            try:
+                from PIL import Image
+                img = Image.open(src).convert("RGBA")
+            except Exception as e:                       # noqa: BLE001
+                compat.messagebox.showerror("Add picture", "That file isn't a picture PAD "
+                                            "can read (%s)." % e)
+                return False
+            _stem, name = self._save_added_png(src, img)
+            imgs.append({"image": "scene_textures/added/" + name,
+                         "w": img.size[0], "h": img.size[1]})
+        spec["images"] = imgs
+        return self.tree_anim(node, spec)
 
     @rpc
     def tree_add_text(self, text, like=None):
@@ -3100,6 +4243,19 @@ def _built_state(built, ops):
     if built is None:
         return "none"
     return "same" if built == ops else "changed"
+
+
+def _colour_words(counts):
+    """``the color profiles of 3 game pictures and 2 lines of text`` (PAD-502), or ``""``
+    when *counts* (``{"colored", "lines"}``) has neither."""
+    parts = []
+    n = counts.get("colored") or 0
+    if n:
+        parts.append("%d game picture%s" % (n, "" if n == 1 else "s"))
+    n = counts.get("lines") or 0
+    if n:
+        parts.append("%d line%s of text" % (n, "" if n == 1 else "s"))
+    return "the color profiles of " + " and ".join(parts) if parts else ""
 
 
 def _file_size(path):
@@ -3161,10 +4317,14 @@ def _text_switch(assets_dir, card, man, n, ops, data, fonts, picks, settings, un
     images/, which every other line in it shares), ``"scenes"`` drawing from them and
     ``"font_on"`` when the Images tab has the profile on all of them (every line in the font
     corrected, this one too)."""
-    from ..plugins.stern import text_colour
+    from ..plugins.stern import text_colour, text_colors
     sw = text_colour.line_switch(assets_dir, card, man, n, ops, data, fonts)
     if sw is None:
         return None
+    mine = text_colour.own_colours(ops).get(n["id"])
+    if mine:
+        # PAD-514: a colour of its own (the Font bar's), which the profile does not change
+        sw = dict(sw, own_colour=text_colors.to_hex(text_colors.from_floats(mine["rgb"])))
     if sw.get("art"):
         rels = sw.get("font_pictures") or []
         sw = dict(sw, font_pictures=["images/" + r for r in rels],
@@ -3188,6 +4348,11 @@ def _kept_size(pick, assets_dir, rel, stock=None):
     if pick.get("keep") or scene_render.own_size(size, stock):
         return size
     return None
+
+
+def _op_sig(op):
+    """An edit as the list of edits shows it, to know it again (PAD-540)."""
+    return json.dumps(op, sort_keys=True)
 
 
 def _walk_man(man):
@@ -3253,6 +4418,15 @@ def _added_text_op(ops, node):
                  and op.get("id") is not None and int(op["id"]) == int(node)), None)
 
 
+def _look_of(look):
+    """The Layers row's word for :func:`scene_eval.looks`'s *look*: ``{"part_name", "looks",
+    "short"}``, or None for a layer drawn in every look (or in no switchable part)."""
+    if look is None:
+        return None
+    return {"part_name": look["part_name"], "looks": list(look["looks"]),
+            "short": " / ".join(look["short"])}
+
+
 def _kind_of(man, n):
     kinds = [(man["objects"].get(str(oid)) or {}).get("kind") for _s, oid in n["comps"]]
     kinds = [k for k in kinds if k]
@@ -3267,3 +4441,17 @@ def _font_label(key):
     return name
 
 
+
+
+def scene_edit_index(man):
+    from ..plugins.stern import scene_edit
+    return scene_edit._man_index(man)
+
+
+def _with_tries(draws, tries):
+    """*draws* with the words of each box in *tries* (``{node: words}``, PAD-1338's "Show it
+    with") put in as ``shown``, the words the renderer draws in place of the card's own."""
+    if not tries:
+        return draws
+    return [dict(d, shown=tries[d["node"]]) if d.get("kind") == "text" and d.get("node") in tries
+            else d for d in draws]

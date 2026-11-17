@@ -15,6 +15,7 @@ methods on a bare instance, where the method reads nothing but a variable.
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import time
 from types import SimpleNamespace
@@ -533,15 +534,17 @@ def test_the_rig_carries_the_machine_row_to_the_game():
     assert scans >= 2 and len(applied) == scans
     assert re.search(r"bits\[k\] = idle\[k\];.*?cab_dip_apply\(bits\);\s*"
                      r"have = 1;", shim, re.S)
-    # The board and the stored country are set on a loaded chip and on a
-    # blank one, after the identity seed and before any probe's poke.
+    # The board, its model (PAD-519) and the stored country are set on a
+    # loaded chip and on a blank one, after the identity seed and before any
+    # probe's poke.
     assert len(re.findall(r"nv_ident_seed\(\);\s*nv_factory_hz_apply\(\);\s*"
+                          r"nv_model_apply\(\);\s*"
                           r"nv_country_apply\(\);\s*nv_poke_apply\(\);",
                           shim)) == 2
     box = (_RIG / "docker" / "padbox.sh").read_text(encoding="utf-8")
     forwarded = box.split("for v in PAD_GAME", 1)[1].split("; do", 1)[0]
     for name in ("PAD_CAB_DIP", "PAD_COUNTRY", "PAD_MAINS_HZ",
-                 "PAD_FACTORY_HZ"):
+                 "PAD_FACTORY_HZ", "PAD_MODEL"):
         assert name in forwarded, name
 
 
@@ -841,16 +844,159 @@ def test_savestates_off_is_the_ordinary_launch(monkeypatch, tmp_path):
     assert "PAD_CARD=/mnt/c/x.raw" in cmd
 
 
-def test_other_platforms_keep_their_launch(monkeypatch, tmp_path):
-    """The pivot boot is a WSL arrangement; macOS's container and a Linux
-    desktop keep the launch they had."""
-    for platform in ("linux", "darwin"):
-        monkeypatch.setattr(emulate_core.sys, "platform", platform)
-        monkeypatch.setenv("PAD_EMU_DIR", str(tmp_path))
-        _home(monkeypatch, "/home/somebody")
-        cmd = emulate_core.watch_cmd(30, [])
-        assert "wsl.exe" not in cmd, (platform, cmd)
-        assert "PAD_PIVOT=1" not in cmd, (platform, cmd)
+def test_a_linux_desktop_keeps_its_launch(monkeypatch, tmp_path):
+    """A Linux desktop has no passwordless root for the pivot boot, so it
+    keeps the launch it had."""
+    monkeypatch.setattr(emulate_core.sys, "platform", "linux")
+    monkeypatch.setenv("PAD_EMU_DIR", str(tmp_path))
+    _home(monkeypatch, "/home/somebody")
+    cmd = emulate_core.watch_cmd(30, [])
+    assert "wsl.exe" not in cmd, cmd
+    assert "PAD_PIVOT=1" not in cmd, cmd
+
+
+def _linux_root(monkeypatch, tmp_path, head):
+    """A Linux desktop whose root route is *head* (PAD-871)."""
+    monkeypatch.setattr(emulate_core.sys, "platform", "linux")
+    monkeypatch.setenv("PAD_EMU_DIR", str(tmp_path))
+    monkeypatch.setattr(emulate_core, "_LINUX_ROOT", [head, True])
+    monkeypatch.setattr(emulate_core._rig, "linux_host_env", lambda: [])
+    monkeypatch.setenv("HOME", "/home/somebody")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.delenv("PAD_HOME", raising=False)
+
+
+def test_a_linux_desktop_with_password_free_sudo_boots_checkpointable(
+        monkeypatch, tmp_path):
+    """★ PAD-871: save states on a Linux desktop and in the Docker image.
+    The same root boot Windows asks `wsl -u root` for, through `sudo -n -k`;
+    sudo's env_reset clears the session, so the display and the audio
+    server's runtime dir are handed back by name, the rig's home is the
+    user's, and the playfield is told to reach root the same way."""
+    _linux_root(monkeypatch, tmp_path, ["sudo", "-n", "-k"])
+    cmd = emulate_core.watch_cmd(30, ["PAD_CARD=/cards/x.raw"])
+    assert cmd[:4] == ["sudo", "-n", "-k", "env"], cmd
+    for want in ("PAD_PIVOT=1", "PAD_STATE_SUDO=1", "HOME=/home/somebody",
+                 "PAD_HOME=/home/somebody", "DISPLAY=:0",
+                 "XDG_RUNTIME_DIR=/run/user/1000", "PAD_CARD=/cards/x.raw"):
+        assert want in cmd, (want, cmd)
+    assert cmd[-3] == "bash" and cmd[-2].endswith("watch.sh") \
+        and cmd[-1] == "30", cmd
+    # the opt-out is the ordinary user launch
+    assert "sudo" not in emulate_core.watch_cmd(30, [], savestates=False)
+    # a root guest needs a root Stop, Restart, Load and slot list ...
+    for cmd in (emulate_core.kill_cmd(), emulate_core.restart_cmd(),
+                emulate_core.load_cmd("slot1"),
+                emulate_core.rig_cmd_root("slots.sh", "list")):
+        assert cmd[:3] == ["sudo", "-n", "-k"], cmd
+    assert "PAD_RESTORE_KILL=1" in emulate_core.load_cmd("slot1")
+    # ... but not a root status poll: a user's status.sh counts an
+    # unreadable (root) run as rig 0's, and sudo every poll fills the
+    # system log
+    assert emulate_core.status_cmd()[0] != "sudo"
+    # ... except off rig 0, where a user's poll counts no root run at all
+    monkeypatch.setenv("PAD_SLOT", "2")
+    assert emulate_core.status_cmd()[:3] == ["sudo", "-n", "-k"]
+    assert emulate_core.savestates_possible()
+
+
+def test_try_it_knows_a_linux_launch_is_root(monkeypatch, tmp_path):
+    """The Modes tab's Try it installs as root when Start is root; on a
+    Linux desktop that now follows the same probe as the launch."""
+    tab = SimpleNamespace()
+    as_root = emulate_web.EmulateTab.launch_as_root
+    monkeypatch.setattr(emulate_web, "no_rig", lambda: False)
+    _linux_root(monkeypatch, tmp_path, ["sudo", "-n", "-k"])
+    assert as_root(tab) is True
+    monkeypatch.setattr(emulate_core, "_LINUX_ROOT", [None, True])
+    assert as_root(tab) is False
+
+
+def test_a_linux_app_running_as_root_needs_no_sudo(monkeypatch, tmp_path):
+    _linux_root(monkeypatch, tmp_path, [])
+    cmd = emulate_core.watch_cmd(30, [])
+    assert cmd[0] == "env" and "PAD_PIVOT=1" in cmd, cmd
+    assert "PAD_STATE_SUDO=1" not in cmd and "sudo" not in cmd, cmd
+
+
+def test_the_linux_root_probe(monkeypatch):
+    """Only a sudo that asks no password counts, cached credentials ignored
+    (-k): they would lapse under a run whose Stop then could not reach it."""
+    monkeypatch.setattr(emulate_core.sys, "platform", "linux")
+    monkeypatch.setattr(emulate_core.os, "geteuid", lambda: 1000,
+                        raising=False)
+    seen = []
+
+    def run(rc):
+        def fake(argv, **kw):
+            seen.append(argv)
+            if rc is None:
+                raise FileNotFoundError("sudo")
+            return SimpleNamespace(returncode=rc)
+        return fake
+    for rc, want in ((0, ["sudo", "-n", "-k"]), (1, None), (None, None)):
+        monkeypatch.setattr(emulate_core, "_LINUX_ROOT", [None, False])
+        monkeypatch.setattr(emulate_core.subprocess, "run", run(rc))
+        assert emulate_core.linux_root_head() == want, rc
+    assert seen[0] == ["sudo", "-n", "-k", "env", "true"]
+    monkeypatch.setattr(emulate_core, "_LINUX_ROOT", [None, False])
+    monkeypatch.setattr(emulate_core.os, "geteuid", lambda: 0, raising=False)
+    assert emulate_core.linux_root_head() == []
+    for plat in ("win32", "darwin"):
+        monkeypatch.setattr(emulate_core, "_LINUX_ROOT", [None, False])
+        monkeypatch.setattr(emulate_core.sys, "platform", plat)
+        assert emulate_core.linux_root_head() is None
+
+
+def test_a_linux_desktop_with_root_is_told_what_save_states_need(
+        monkeypatch, tmp_path):
+    """The Save states packages are named off WSL too once that machine's
+    Start asks for the boot they serve."""
+    _linux_root(monkeypatch, tmp_path, ["sudo", "-n", "-k"])
+    facts = _facts(busybox="0", iswsl="0", wslconf="1")
+    assert ("busybox-static", emulate_core._SETUP_OPTIONAL[0][2]) in \
+        setup_extras(facts)
+
+
+def test_watch_sh_asks_whether_criu_may_work_off_wsl():
+    """PAD-871: the Docker image's default container gives criu nothing, so
+    a native root boot checks for a seccomp filter and runs `criu check`
+    before it offers save states - the Mac box's two questions - and then
+    freezes and thaws a test program for real."""
+    watch = _rig_text("watch.sh")
+    at = watch.index("PAD-871: AND OFF WSL")
+    block = watch[at:watch.index("\nfi\n", at)]
+    assert '! pad_is_wsl && [ "$(id -u)" = 0 ]' in block
+    assert "Seccomp:" in block and '"$(pad_criu)" check' in block
+    # `criu check` passed in a container missing CAP_SYS_TIME whose thaw
+    # then failed, so a test program is frozen and thawed for real
+    assert "pad_criu_roundtrip" in block
+    assert block.count("unset PAD_PIVOT") == 3
+    probe = _rig_text("padpath.sh")
+    probe = probe[probe.index("pad_criu_roundtrip() {"):]
+    probe = probe[:probe.index("\n}\n")]
+    for step in (" dump -t ", " restore -D ", "--pidfile", "rm -rf",
+                 "exec $_fd>&-"):
+        assert step in probe, step
+
+
+def test_macos_asks_its_box_for_the_checkpointable_boot(monkeypatch,
+                                                        tmp_path):
+    """★ PAD-835: save states on a Mac. The launch is still padbox.sh, with
+    PAD_PIVOT=1 set for IT (padbox.sh turns that into a root, privileged
+    box) - and the opt-out is the plain launch, as on Windows."""
+    monkeypatch.setattr(emulate_core.sys, "platform", "darwin")
+    monkeypatch.setenv("PAD_EMU_DIR", str(tmp_path))
+    cmd = emulate_core.watch_cmd(30, ["PAD_CARD=/Users/a/x.raw"])
+    assert any(c.endswith("padbox.sh") for c in cmd), cmd
+    box = next(i for i, c in enumerate(cmd) if c.endswith("padbox.sh"))
+    assert "PAD_PIVOT=1" in cmd[:box], cmd
+    assert "PAD_CARD=/Users/a/x.raw" in cmd[:box], cmd
+    assert cmd[box + 1:] == ["watch.sh", "30"], cmd
+    assert "-u" not in cmd and "wsl.exe" not in cmd, cmd
+    plain = emulate_core.watch_cmd(30, [], savestates=False)
+    assert "PAD_PIVOT=1" not in plain, plain
 
 
 def test_launch_from_slot_loads_as_root_with_the_desktop_home(monkeypatch,
@@ -881,6 +1027,26 @@ def test_stop_kills_as_root_on_windows(monkeypatch, tmp_path):
     _home(monkeypatch, None)
     cmd = emulate_core.kill_cmd()
     assert cmd[:2] == ["wsl.exe", "-e"], cmd
+
+
+def test_status_polls_as_root_on_windows(monkeypatch, tmp_path):
+    """PAD-496: a rig tells its processes from another rig's by their
+    /proc/<pid>/environ, which only root can read for a root run - and every
+    run is root's.  Polled as the desktop user, rig 0 counted a session's
+    game on rig 1 as its own and the app offered only Stop."""
+    monkeypatch.setattr(emulate_core.sys, "platform", "win32")
+    monkeypatch.setenv("PAD_EMU_DIR", str(tmp_path))
+    monkeypatch.setenv("PAD_SLOT", "2")
+    _home(monkeypatch, "/home/somebody")
+    cmd = emulate_core.status_cmd()
+    assert cmd[:3] == ["wsl.exe", "-u", "root"]
+    assert "HOME=/home/somebody" in cmd
+    assert "PAD_SLOT=2" in cmd
+    assert cmd[-1].endswith("/status.sh")
+    _home(monkeypatch, None)
+    cmd = emulate_core.status_cmd()
+    assert cmd[:2] == ["wsl.exe", "-e"], cmd
+    assert cmd[-1].endswith("/status.sh")
 
 
 def test_the_container_entry_point_ships_with_the_rig():
@@ -970,6 +1136,73 @@ def test_pad_docker_overrides_and_a_wrong_one_is_not_ignored(tmp_path,
     assert emulate_core.docker_cli() == str(tool)
     monkeypatch.setenv("PAD_DOCKER", str(tmp_path / "nope"))
     assert emulate_core.docker_cli() is None
+
+
+def test_docker_cli_detects_podman_when_docker_absent(monkeypatch):
+    """When docker is not installed, docker_cli detects podman."""
+    def fake_which(name, dirs=None):
+        return "/opt/podman/bin/podman" if name == "podman" else None
+    monkeypatch.setattr(emulate_core, "which_tool", fake_which)
+    assert emulate_core.docker_cli() == "/opt/podman/bin/podman"
+
+
+def test_docker_cli_prefers_running_engine_when_both_present(monkeypatch):
+    """When both docker and podman exist, docker_cli prefers whichever is running."""
+    def fake_which(name, dirs=None):
+        if name == "docker":
+            return "/usr/local/bin/docker"
+        if name == "podman":
+            return "/opt/podman/bin/podman"
+        return None
+    monkeypatch.setattr(emulate_core, "which_tool", fake_which)
+    monkeypatch.setattr(emulate_core, "_BOTH_PICK", {})
+
+    def run_docker_up(cmd, **kwargs):
+        rc = 0 if cmd[0] == "/usr/local/bin/docker" else 1
+        return subprocess.CompletedProcess(cmd, rc)
+    monkeypatch.setattr(emulate_core.subprocess, "run", run_docker_up)
+    assert emulate_core.docker_cli() == "/usr/local/bin/docker"
+
+    def run_podman_up(cmd, **kwargs):
+        rc = 0 if cmd[0] == "/opt/podman/bin/podman" else 1
+        return subprocess.CompletedProcess(cmd, rc)
+    monkeypatch.setattr(emulate_core.subprocess, "run", run_podman_up)
+    # The answered pick is kept a while: no probe per docker call.
+    assert emulate_core.docker_cli() == "/usr/local/bin/docker"
+    emulate_core._BOTH_PICK.clear()
+    assert emulate_core.docker_cli() == "/opt/podman/bin/podman"
+    probes = []
+
+    def run_counted(cmd, **kwargs):
+        probes.append(cmd[0])
+        return run_podman_up(cmd, **kwargs)
+    monkeypatch.setattr(emulate_core.subprocess, "run", run_counted)
+    for _ in range(5):
+        assert emulate_core.docker_cli() == "/opt/podman/bin/podman"
+    assert probes == []
+
+    # Neither answering is not kept: starting one is seen on the next ask.
+    emulate_core._BOTH_PICK.clear()
+    monkeypatch.setattr(emulate_core.subprocess, "run",
+                        lambda cmd, **k: subprocess.CompletedProcess(cmd, 1))
+    assert emulate_core.docker_cli() == "/usr/local/bin/docker"
+    monkeypatch.setattr(emulate_core.subprocess, "run", run_podman_up)
+    assert emulate_core.docker_cli() == "/opt/podman/bin/podman"
+
+
+def test_docker_engine_detects_podman(monkeypatch):
+    """docker_engine recognises Podman Desktop or podman CLI."""
+    monkeypatch.setattr(emulate_core.os.path, "isdir",
+                        lambda p: p == "/Applications/Podman Desktop.app")
+    assert emulate_core.docker_engine() == (
+        "Podman Desktop", "app", "/Applications/Podman Desktop.app")
+
+    monkeypatch.setattr(emulate_core.os.path, "isdir", lambda p: False)
+    def fake_which(name, dirs=None):
+        return "/opt/podman/bin/podman" if name == "podman" else None
+    monkeypatch.setattr(emulate_core, "which_tool", fake_which)
+    assert emulate_core.docker_engine() == (
+        "Podman", "cli", "/opt/podman/bin/podman")
 
 
 def test_a_client_with_no_engine_is_not_a_missing_docker(monkeypatch):
@@ -2438,13 +2671,18 @@ def test_a_playfield_that_stops_leaves_something_to_read():
     # RUN launched: the one PAD opens has no process on that side to find,
     # and the app reports its own failures.
     assert body.count("PF_LAUNCHED=1") == 2, "one per launch, and only there"
-    assert '[ "${PF_LAUNCHED:-0}" = 1 ] && ! pf_up' in body
-    assert body.index('[ "${PF_LAUNCHED:-0}" = 1 ]') > body.index("PF_LAUNCHED=1"), (
+    check_at = body.index('if [ "${PF_LAUNCHED:-0}" = 1 ]; then')
+    assert check_at > body.index("PF_LAUNCHED=1"), (
         "the check has to come after the launch it is about")
+    check = body[check_at:]
+    # PAD-629: asked at once, and again by a watcher until the window says
+    # it is up; either way a stopped window is reported by pf_said_why.
+    assert check.index("if ! pf_up; then") < check.index("pf_said_why")
+    assert "^pfweb: window up" in check
     # An empty log is a different fault from a traceback - the interpreter
     # never ran the script at all - and is worth its own sentence.
-    check = body[body.index('[ "${PF_LAUNCHED:-0}" = 1 ]'):]
-    assert '-s "$PFLOG"' in check and "never ran it" in check
+    why = body[body.index("pf_said_why() {"):check_at]
+    assert '-s "$PFLOG"' in why and "never ran it" in why
 
 
 # ----------------------------------------------------------------------
@@ -2633,6 +2871,23 @@ def test_the_rig_is_handed_pads_own_python_on_windows(monkeypatch, tmp_path):
     assert cmd[-1] == "120", cmd
 
 
+def test_a_run_started_here_has_no_time_limit(monkeypatch, tmp_path):
+    """PAD-585: the emulator does not stop itself after so many minutes.
+
+    The tab hands watch.sh 0, and watch.sh reads 0 as no wall-clock cap at
+    all - both launches, the checkpointable one and the plain one."""
+    assert emulate_web.EmulateTab.BACKSTOP_MIN == 0
+    _home(monkeypatch, "/home/somebody")
+    cmd = emulate_core.watch_cmd(emulate_web.EmulateTab.BACKSTOP_MIN, [])
+    assert cmd[-2:] == [cmd[-2], "0"] and cmd[-2].endswith("watch.sh"), cmd
+    cmd = _cmd_on(monkeypatch, "linux", tmp_path, "watch.sh",
+                  emulate_web.EmulateTab.BACKSTOP_MIN)
+    assert cmd[-1] == "0", cmd
+    watch = _rig_text("watch.sh")
+    assert '[ "$MINS" != 0 ] && END=' in watch
+    assert 'if [ "$END" != 0 ] && [ "$(date +%s)" -ge "$END" ]' in watch
+
+
 def test_nothing_of_the_sort_off_windows(monkeypatch, tmp_path):
     """There is no interop boundary to hand a Windows .exe across, and the
     container forwards its own variables - so this must not appear at all."""
@@ -2650,6 +2905,11 @@ def test_no_interpreter_to_name_leaves_the_rig_as_it_was(monkeypatch,
     absent variable is the rig's own search, unchanged."""
     monkeypatch.setattr(emulate_core, "windows_python",
                         lambda console=False: None)
+    # a rig whose board guess is already the app's (PAD-803 names PAD_BOARD
+    # only otherwise; a CI runner's tmp_path is not under a Windows profile)
+    monkeypatch.setattr(emulate_core, "_board_env", lambda: [])
+    # and no vhdx drive to name (PAD-816 names it where the registry has one)
+    monkeypatch.setattr(emulate_core, "_host_drive_env", lambda: [])
     cmd = _cmd_on(monkeypatch, "win32", tmp_path, "setupcheck.sh")
     assert not any(c.startswith("PAD_WINPYTHON") for c in cmd), cmd
     assert "env" not in cmd, cmd
@@ -2937,3 +3197,25 @@ def test_the_card_functions_are_the_plugins(tmp_path):
     from pinball_decryptor.plugins.stern import cards
     assert emulate_core.override_base_card is cards.override_base_card
     assert emulate_core._title_label is cards._title_label
+
+
+def test_no_systemd_to_turn_on_is_never_promised():
+    """PAD-1132: the app's own PAD-Runtime has no systemd, by design.  Its
+    check says wslconf=0 (PID 1 is WSL's init) and hassystemd=0; the notice
+    on screen for another reason must not promise "turns systemd on", the
+    consent list must not hold that step, and a machine with nothing else
+    to fix gets no button sentence at all (not an IndexError)."""
+    facts = _facts(wslconf="0", hassystemd="0", user="root")
+    assert not emulate_core.wsl_can_turn_systemd_on(facts)
+    assert not any("systemd" in s for s in emulate_core.setup_fix_steps(facts))
+    text = setup_notice(facts, can_fix=True)
+    assert "systemd on in /etc/wsl.conf" not in text
+    assert "stay BLACK" in text, "the warning it is on screen for"
+
+
+def test_an_older_rig_without_hassystemd_still_offers_it():
+    """Absent accuses nobody: a rig that predates the fact keeps the old
+    behaviour."""
+    facts = _facts(wslconf="0", user="root")
+    facts.pop("hassystemd", None)
+    assert emulate_core.wsl_can_turn_systemd_on(facts)

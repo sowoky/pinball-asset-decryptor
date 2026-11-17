@@ -27,7 +27,8 @@ import threading
 from unicorn import (UC_ARCH_ARM, UC_HOOK_BLOCK, UC_HOOK_CODE,
                      UC_HOOK_MEM_FETCH_UNMAPPED, UC_HOOK_MEM_READ,
                      UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE_UNMAPPED,
-                     UC_MODE_ARM, UC_PROT_ALL, Uc, UcError)
+                     UC_MODE_ARM, UC_PROT_EXEC, UC_PROT_READ,
+                     UcError)
 from unicorn.arm_const import (UC_ARM_REG_C1_C0_2, UC_ARM_REG_FPEXC,
                                UC_ARM_REG_LR, UC_ARM_REG_PC, UC_ARM_REG_R0,
                                UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3,
@@ -37,7 +38,9 @@ from unicorn.arm_const import (UC_ARM_REG_C1_C0_2, UC_ARM_REG_FPEXC,
                                UC_ARM_REG_SP)
 
 from . import rbtree as RB
+from .window import WindowUc
 from .elf import parse_elf
+from .netbridge import BoardFirmwareError  # noqa: F401  (the engine's)
 
 # r0..r12 as an explicit ordered list (don't assume the unicorn const ids are
 # contiguous).  Index 9 = r9, etc.
@@ -67,6 +70,8 @@ def _rotimm(w):
 
 
 PAGE = 0x1000
+#: How much heap is mapped at a time as alloc() hands it out (PAD-777).
+HEAP_STEP = 16 << 20
 
 
 def _algn(x, a=PAGE):
@@ -158,6 +163,60 @@ MAX_IMAGE_BYTES = (1 << 31) - 1
 def emitted_length(length):
     """True decoded sample count for a sound of header ``length`` (see BLOCK)."""
     return max(0, int(length) - BLOCK)
+
+
+# MULTI-BAND RECORDS (PAD-637).  A record whose codec obj says N bands (+0x1c)
+# and a frame of stride = N * chan words (+0x1a) holds N variants of one sound,
+# interleaved frame by frame: frame i is variant 1's sample i (one word mono,
+# the u0/u1 pair stereo), variant 2's sample i, ... variant N's.  The game plays one variant per voice -- the band
+# number at voice+0x20, 1-based, chosen from a table of game-state tests when
+# the voice starts (0x1d5f50 on Led Zeppelin Pro 1.22) and switched live through
+# voice+0x21, which the codec crossfades into.  Mono band k reads word
+# ``k - 1 + N * i`` with keystream index ``seed + k - 1 + N * cursor``: an
+# ordinary mono sound is the N = 1 case at band 0, which is why it reads one word
+# below its body (delta = -1).  The voice setup gives these records codec
+# functions of their own (locate.find_band_codecs).  Led Zeppelin LE/Pro 1.22
+# carry ten mono ones (N = 12 or 24: a sound stepped through twelve pitches, the
+# 24 ones in left / right pairs), Foo Fighters LE/Pro 1.04 one stereo song in two
+# mixes (N = 2); no other build derived on this machine has any.  Read as one
+# plain sound they came out as stationary noise.  Extract writes a record as its
+# variants one after another, in band order; Write encodes each variant into its
+# own lane.
+
+def bands_of(p):
+    """How many variants record *p* interleaves (1 for a plain sound): its
+    frame is ``stride`` words, ``chan`` words per variant."""
+    chan = int(p.get("chan", 1))
+    if chan not in (1, 2):
+        return 1
+    st = int(p.get("stride", chan) or chan)
+    if st <= chan or st % chan:
+        return 1
+    n = st // chan
+    raw = p.get("_rawobj")
+    if raw and len(raw) > 0x1c and raw[0x1c] != n:
+        return 1                 # bands not stride / chan: a layout not seen
+    return n
+
+
+def band_params(p, band):
+    """*p* narrowed to its variant *band* (1-based): a mono sound of the same
+    length whose decode / keystream recovery drives the codec with that band."""
+    return dict(p, band=int(band))
+
+
+def frame_bytes(p):
+    """Bytes one sample frame of record *p* takes in the bank: 2 mono, 4
+    stereo, ``2 * stride`` for a multi-band record (all its variants)."""
+    if bands_of(p) > 1:
+        return 2 * int(p["stride"])
+    return 4 if int(p.get("chan", 1)) == 2 else 2
+
+
+def emitted_total(p):
+    """Samples a record decodes to: every variant's emitted run, back to back."""
+    return emitted_length(p.get("length", 0)) * (
+        1 if "band" in p else bands_of(p))
 
 
 def _md_record_count(eng, dst):
@@ -364,17 +423,42 @@ def firmware_build_supported(game_real_path):
 
 def audio_decode_supported(game_real_path):
     """True if this firmware's audio can be decoded: either the validated build
-    (above) or a *different* single-path build whose codec addresses locate
-    generically (see :mod:`.locate`).  Dual-path codecs (no resolvable
-    ``PROV``/``QMUL``) return False, so the engine skips audio gracefully."""
+    (above) or a *different* build whose codec addresses locate generically
+    (see :mod:`.locate`).  A game program they don't locate in (one no build
+    in the library is like: a program changed outside PAD, a build the
+    locator has never met) returns False, so the engine skips audio
+    gracefully; :func:`audio_decode_missing` says what wasn't found."""
+    return not audio_decode_missing(game_real_path)
+
+
+def audio_decode_missing(game_real_path):
+    """What keeps this firmware's audio from decoding: ``[]`` when it decodes,
+    else the names :func:`.locate.missing` gives (``["unreadable: <why>"]``
+    when the file can't be read)."""
     try:
         raw = open(game_real_path, "rb").read()
-    except Exception:
-        return False
+    except Exception as e:
+        return ["unreadable: %s" % e]
     if _build_supported_raw(raw):
-        return True
+        return []
     from . import locate
-    return locate.locate_all(raw=raw) is not None
+    return locate.missing(raw=raw)
+
+
+def board_bus(game_real_path):
+    """The bus addresses of a board-keyed program (``BUS_XCHG``, ``BUS_SEED``,
+    ``BUS_SEEDS``; see :mod:`.netbridge`), or None for a program that carries
+    its own key.  The engine uses it to copy the board's program off the card
+    beside ``game_real``, where :class:`Spike2Emu` looks for it."""
+    try:
+        raw = open(game_real_path, "rb").read()
+        st = _static_analysis(raw, parse_elf(raw)[0])
+    except Exception:
+        return None
+    a = st.addrs or {}
+    if not a.get("BUS_XCHG"):
+        return None
+    return {k: a[k] for k in ("BUS_XCHG", "BUS_SEED", "BUS_SEEDS")}
 
 
 class _Static:
@@ -487,6 +571,9 @@ def _raw_read_hook(mu, fn, begin, end):
 #: per-instruction code hook it used before the narrow derive (a comparison
 #: switch: both give the same rows, the narrow one 2-17x sooner).
 DERIVE_HOOKS_ENV = "PAD_DERIVE_HOOKS"
+#: ``PAD_BOOT_HOOKS=global`` boots a generic build under the per-instruction
+#: code hook it used before PAD-609 (a comparison switch: the same machine state).
+BOOT_HOOKS_ENV = "PAD_BOOT_HOOKS"
 #: appended to a narrow derive's failure (see :meth:`Spike2Emu.derive_params`)
 NARROW_DERIVE_HINT = ("(Sound derive ran under narrow hooks; %s=global runs "
                       "the older, slower derive.)" % DERIVE_HOOKS_ENV)
@@ -514,6 +601,20 @@ class _ExtraHooks(dict):
             self.watch(addr)
 
 
+def plt_branches(plt_entry, generic, handlers):
+    """The PLT thunk entries :meth:`Spike2Emu._plt_branch` sends through their GOT
+    slots: every one on a generic build; on the validated build all but those its
+    own :attr:`Spike2Emu.PLT` handlers emulate whole. PAD-645: branching through
+    the GOT after such a handler ran the import a second time (operator new on
+    its own pointer), and TMNT Pro 1.58's derive stopped at 7 of its 2053
+    sounds (since 6c5c0c15)."""
+    out = dict(plt_entry)
+    if not generic:
+        for a in handlers:
+            out.pop(a, None)
+    return out
+
+
 class Spike2Emu:
     # memory layout (no region overlaps; see module docstring)
     STK = 0x20000000; STKSZ = 0x00400000
@@ -524,7 +625,11 @@ class Spike2Emu:
     ACC_VA = 0x19000000                             # decode scratch (fixed; see setup_decode)
     BB = 0x50000000                                 # body buffer (grown lazily)
 
-    def __init__(self, game_real_path, image_path):
+    def __init__(self, game_real_path, image_path, card_copy=False):
+        # PAD-777: *card_copy* for an emulator that will write the card (the
+        # Write's integrity check lays the re-encoded sounds over it): its window
+        # is a copy-on-write view from the start, as every emulator's was
+        self._card_copy = bool(card_copy)
         raw = open(game_real_path, "rb").read()
         self._gr_path = game_real_path   # re-read on demand for SFX-name mining
         segs, relocs = parse_elf(raw)
@@ -532,24 +637,29 @@ class Spike2Emu:
         # Firmware addresses: the validated (TMNT) build uses the hardcoded
         # module constants; any other build's codec lives elsewhere, so locate
         # every address generically (see :mod:`.locate`).  ``audio_supported``
-        # is False for dual-path / unlocatable builds (engine skips audio).
+        # is False for a build that doesn't locate (engine skips audio).
         st = _static_analysis(raw, segs)
         self._generic = st.generic
         self.audio_supported = st.audio_supported
         self._set_addrs(copy.deepcopy(st.addrs) if st.addrs is not None else None)
-        mu = Uc(UC_ARCH_ARM, UC_MODE_ARM)
+        # PAD-777: the card windows are read-only views that take writes in pages
+        # of their own (spike2.window), so mapping image.bin commits nothing
+        mu = WindowUc(UC_ARCH_ARM, UC_MODE_ARM)
         self.mu = mu
         # every LDREX/STREX, so the global hook can emulate them inline, and
         # the ELF PLT thunk entries -> their GOT slots (see _static_analysis)
         self._atomic_pcs = set(st.atomic_pcs)
-        self._plt_entry = dict(st.plt_entry)
+        self._plt_entry = plt_branches(st.plt_entry, st.generic, self.PLT)
         for vaddr, off, filesz, memsz in segs:
             b = vaddr & ~0xfff
             e = _algn(vaddr + memsz)
             mu.mem_map(b, e - b)
             mu.mem_write(vaddr, raw[off:off + filesz])
         mu.mem_map(self.STK, self.STKSZ)
-        mu.mem_map(self.HEAP, self.HEAPSZ)
+        # PAD-777: the heap is mapped as alloc() hands it out (HEAP_STEP at a
+        # time), not 512 MB up front: Unicorn commits a region's whole size
+        self._heap_mapped = self.HEAP
+        self._map_heap(self.HEAP + 0x100000 + HEAP_STEP)
         mu.mem_map(self.IMPORT & ~0xfff, 0x4000)
         mu.mem_map(self.LAND & ~0xfff, PAGE)
         self.heap = self.HEAP + 0x100000
@@ -589,6 +699,13 @@ class Spike2Emu:
         # can bail early instead of burning the whole instruction cap.
         self._watchdog = None
         self._hooks()
+        # PAD-674: a board-keyed program gets the CPU board's answers from the
+        # board's own program, copied off the card beside game_real
+        self.board = None
+        if self.BUS:
+            from . import netbridge
+            self.board = netbridge.beside(game_real_path)
+            self.extra[self.BUS["xchg"]] = self._at_bus
 
         # decode scratch (set up lazily by setup_decode)
         self.BBSZ = 0
@@ -617,6 +734,9 @@ class Spike2Emu:
         self.MASTERDIR_MALLOC = MASTERDIR_MALLOC
         self.BANDLOOP = BANDLOOP; self.BANDOBJ = BANDOBJ
         self.CHAIN_STUBS = CHAIN_STUBS; self.LENGTH_XOR = LENGTH_XOR
+        # PAD-674: a board-keyed program's bus exchange, slot setter and the
+        # four slot seeds (see netbridge.py); None on a program with its own key
+        self.BUS = None
         self.OBJREG = 7
         self.FIND_BL = None
         # Where the record count is provably live (see locate._find_internal_pcs).
@@ -629,6 +749,9 @@ class Spike2Emu:
         # Optional: None here just means that module locates them itself from
         # the ELF, and a build where they can't be found still decodes audio.
         self.MASTERDIR_CRYPTO = None
+        # Multi-band records' render functions (locate.find_band_codecs);
+        # None: they decode through the slot the scale resolves to.
+        self.BAND_RENDER = None
         if addrs:
             for k in ("BOOT_LO", "BOOT_HI", "VF2_VA", "REG_BASE", "PROV",
                       "DISPATCH", "QMUL_TABLE", "CAT0_REGISTER", "RBTREE_HDR",
@@ -638,6 +761,10 @@ class Spike2Emu:
             self.MASTERDIR_COUNT = addrs.get("MASTERDIR_COUNT")
             self.COUNTREG = addrs.get("COUNTREG")
             self.MASTERDIR_CRYPTO = addrs.get("MASTERDIR_CRYPTO")
+            self.BAND_RENDER = addrs.get("BAND_RENDER")
+            if addrs.get("BUS_XCHG"):
+                self.BUS = dict(xchg=addrs["BUS_XCHG"], seed=addrs["BUS_SEED"],
+                                seeds=tuple(addrs["BUS_SEEDS"]))
             self.OBJREG = addrs["OBJREG"]
             # generic derive skips the template lookup (find-skip) instead of
             # stubbing the chain helpers, and takes the length from the raw obj.
@@ -656,10 +783,14 @@ class Spike2Emu:
         to 54.5 ms by record 3000, and 18.8 min for the full derive -- against a
         flat 11.0 ms/record and ~1.5 min mapping the window in one piece.
 
-        ``ACCESS_COPY`` makes it a private copy-on-write view, so a guest write
-        to the card lands in a private page and never reaches image.bin -- the
-        same isolation the copying path gave, without the copy.  Pages only
-        materialise when touched (peak RSS 81 MB on the Deadpool derive).
+        PAD-777: a READ-ONLY view, which commits nothing, until something writes
+        the card (the game never does; the Write's integrity check does): then
+        the whole window becomes a private copy-on-write view, so a write never
+        reaches image.bin (:class:`.window.WindowUc`).  The copy-on-write view
+        every emulator used to map committed image.bin's whole size on Windows
+        (1.3 GB of Iron Maiden's 1.9 GB emulator), and three bank encoders side
+        by side ran a user's PC out of memory.  Pages only materialise when
+        touched (peak RSS 81 MB on the Deadpool derive).
 
         Best effort: any build/platform where this doesn't take keeps the paging
         path, which is still correct, just slower on big catalogs."""
@@ -667,20 +798,10 @@ class Spike2Emu:
         if span <= 0 or DESC_BASE + span > 0x1_0000_0000:
             return                            # would leave the 32-bit guest space
         try:
-            import ctypes
-            self._cardf = mmap.mmap(self._imgf.fileno(), 0, access=mmap.ACCESS_COPY)
-            self._cardbuf = (ctypes.c_char * span).from_buffer(self._cardf)
-            self.mu.mem_map_ptr(DESC_BASE, span, UC_PROT_ALL,
-                                ctypes.addressof(self._cardbuf))
+            self.mu.map_window(DESC_BASE, span, self._imgf, UC_PROT_READ | UC_PROT_EXEC,
+                               copy=self._card_copy)
         except Exception as e:
             self.log.append(("card_map_ptr", str(e)))
-            self._cardbuf = None
-            if self._cardf is not None:
-                try:
-                    self._cardf.close()
-                except Exception:
-                    pass
-                self._cardf = None
             return
         self._card_lo, self._card_hi = DESC_BASE, DESC_BASE + span
 
@@ -781,6 +902,14 @@ class Spike2Emu:
         h = self.PLT.get(addr)
         if h:
             h(self)
+            if addr in self._plt_entry:
+                # PAD-609: on an older build the validated build's stub address can
+                # be one of this build's own PLT thunks (Deadpool's __fxstat64 sits
+                # at TMNT 1.58's munmap).  Under the global hook the thunk branch
+                # runs AFTER the handler and wins; this hook is added after the
+                # branch's, so it would have the last word and skip the import.
+                # Branching again here gives the global hook's run exactly.
+                self._plt_branch(mu, addr, size, ud)
 
     def _on_extra(self, mu, addr, size, ud):
         fn = self.extra.get(addr)
@@ -1110,7 +1239,23 @@ class Spike2Emu:
     def alloc(self, n):
         p = self.heap
         self.heap = p + _algn(max(16, n), 16) + 64
+        if self.heap > self._heap_mapped:
+            self._map_heap(self.heap)
         return p
+
+    def _map_heap(self, top):
+        """Map the heap up to *top* (in HEAP_STEP pieces, never past the HEAP
+        window: a boot that asks for more, as Led Zeppelin 1.21's does, runs on
+        into pages mapped on demand as it always has)."""
+        end = min(self.HEAP + self.HEAPSZ, _algn(top, HEAP_STEP))
+        if end <= self._heap_mapped:
+            return
+        try:
+            self.mu.mem_map(self._heap_mapped, end - self._heap_mapped)
+        except UcError:
+            # a page the guest already faulted in there: page by page
+            self._ensure_range(self._heap_mapped, end - self._heap_mapped)
+        self._heap_mapped = end
 
     def add_hook(self, addr, fn):
         self.extra[addr] = fn
@@ -1141,6 +1286,12 @@ class Spike2Emu:
             return
         self._ensure_range(DESC_BASE + off, n)
         self.mu.mem_write(DESC_BASE + off, bytes(data))
+
+    def patch_cards(self, patches):
+        """:meth:`patch_card` for every ``{off: data}`` of *patches*, in order (the
+        first makes the card window a copy-on-write view of its own: PAD-777)."""
+        for off in sorted(patches):
+            self.patch_card(off, patches[off])
 
     def add_read_hook(self, fn, begin, end):
         """A ``UC_HOOK_MEM_READ`` hook over ``[begin, end]`` calling
@@ -1231,8 +1382,59 @@ class Spike2Emu:
         except UcError as e:
             return ("err", (str(e), hex(mu.reg_read(UC_ARM_REG_PC)), self.faults[-6:]))
 
+    def narrow_boot(self):
+        """Whether :meth:`boot` runs under narrow hooks (PAD-609): on every
+        generic build unless :data:`BOOT_HOOKS_ENV` says ``global``, as
+        :meth:`narrow_derive` does for the derive."""
+        return bool(self._generic) and os.environ.get(BOOT_HOOKS_ENV, "") != "global"
+
     def boot(self):
-        """Build the keystream + rt tables, init the registry, register cat 0."""
+        """Build the keystream + rt tables, init the registry, register cat 0.
+
+        A generic build boots under narrow hooks (:meth:`narrow_boot`): the
+        global hook made the boot a Python call on each of its ~870,000 guest
+        instructions, 0.65 s a boot on Godzilla, and a Write with modes' sound
+        banks boots 57 emulators.  The boot acts only at the import sentinels
+        and the PLT table, so the narrow hooks leave every mapped byte and
+        register as the global hook does (tests/test_pad609_build_speed.py),
+        in a fraction of the time.  The hooks are as they were afterwards."""
+        if not self.narrow_boot():
+            return self._boot()
+        state = self._narrow_derive_begin(())
+        try:
+            return self._boot()
+        finally:
+            self._narrow_derive_end(state)
+
+    def _at_bus(self, eng):
+        """The game's bus exchange ``(frame, reply, len) -> ok`` answered by the
+        board (:mod:`.netbridge`): a ``0d 05 <op> <word>`` frame gets the
+        board's 4-byte answer written to the reply buffer; anything else is
+        refused, as the rig's hwshim refuses it."""
+        mu = self.mu
+        frame = bytes(mu.mem_read(mu.reg_read(UC_ARM_REG_R0), 8))
+        if frame[0] != 0x0d or frame[1] != 5:
+            self._ret(0)
+            return
+        rep = self.board.ask(frame[2], struct.unpack_from("<I", frame, 3)[0])
+        out = mu.reg_read(UC_ARM_REG_R1)
+        if rep is not None and out:
+            mu.mem_write(out, struct.pack("<I", rep))
+        self._ret(1)
+
+    def _seed_board(self):
+        """What the game does before its sound init on a board-keyed program:
+        set each of the board's four slots and seed its own reply mask for
+        the slot with the same constant, through the game's slot setter."""
+        for slot, seed in enumerate(self.BUS["seeds"]):
+            st = self.call(self.BUS["seed"], (slot << 4, seed), limit=2_000_000)
+            if st[0] != "ok":
+                raise RuntimeError("Spike 2 boot: the bus slot %d seed failed: %r" % (slot, st))
+
+    def _boot(self):
+        """:meth:`boot` itself, under whichever hooks are in place."""
+        if self.board is not None:
+            self._seed_board()
         if not self._build_keystream():
             raise RuntimeError("Spike 2 boot: keystream/rt build failed")
         if self._generic:
@@ -1406,7 +1608,7 @@ class Spike2Emu:
                 "Spike 2 params: registration did not reach band-build "
                 "(cap=%r). The engine could not map this firmware build's audio "
                 "codec -- most likely a newer game update than this version of "
-                "the app recognises." % ({k: v for k, v in cap.items()
+                "the app recognizes." % ({k: v for k, v in cap.items()
                                           if k != "state"},))
         nrec = cap["nrec"]
         self._ensure_range(cap["mddst"], nrec * 24)
@@ -1680,10 +1882,11 @@ class Spike2Emu:
         obj[0x1d] = p["scale"]
         return bytes(obj)
 
-    def _voice(self, chan):
+    def _voice(self, chan, band=0):
         v = bytearray(0x40)
         struct.pack_into("<I", v, 0x00, self.OBJ_VA)   # obj pointer
         struct.pack_into("<I", v, 0x30, VOL[chan])     # volume
+        v[0x20] = band & 0xff                          # multi-band variant
         return bytes(v)
 
     def codec_fns(self, scale, chan):
@@ -1704,10 +1907,27 @@ class Spike2Emu:
         validated build keeps the dispatch render/decode fn (bit-exact path).
         ``codec_fns`` alone is wrong here: it predates the slot-parity fix and
         returns the noise slot on flipped builds."""
+        if p.get("band"):
+            fn = self._band_entry(p)
+            if fn is not None:
+                return fn
         if self._generic:
             return self._resolve_entry(p)
         render_fn, decode_fn = self.codec_fns(p["scale"], p["chan"])
         return render_fn if p["chan"] == 2 else decode_fn
+
+    def _band_entry(self, p):
+        """The render function the game's voice setup picks for a multi-band
+        record's scale and channel count (``BAND_RENDER``), or None."""
+        if self.BAND_RENDER is None:
+            return None
+        addr = (self.DISPATCH + self.BAND_RENDER + 0x40 * int(p["scale"])
+                + (4 if int(p["chan"]) == 1 else 0))
+        try:
+            fn = _u32(bytes(self.mu.mem_read(addr, 4)))
+        except UcError:
+            return None
+        return fn if fn and self._backing_off(fn) is not None else None
 
     def decode(self, p, max_secs=None, cancel=None, progress=None):
         """Decode one sound to ``(L, R, stereo)`` int64 arrays (mono consumers
@@ -1715,8 +1935,18 @@ class Spike2Emu:
 
         ``progress`` (if given) is called ``(cur, nmax)`` once per decoded block
         (samples-so-far / total) so a caller can surface live per-sound progress
-        for the long music tracks; it's cheap, so the caller throttles."""
-        if self._generic:
+        for the long music tracks; it's cheap, so the caller throttles.
+
+        A multi-band record decodes to its variants one after another (see
+        :func:`bands_of`); ``max_secs`` caps the whole run."""
+        nb = 1 if "band" in p else bands_of(p)
+        if nb > 1:
+            return self._decode_bands(p, nb, max_secs, cancel, progress)
+        if p.get("band"):
+            entry = self.recover_entry(p)
+            if entry is None:
+                return None
+        elif self._generic:
             entry = self._resolve_entry(p)
             if entry is None:
                 return None
@@ -1725,6 +1955,42 @@ class Spike2Emu:
             entry = render_fn if p["chan"] == 2 else decode_fn
         return self._decode_with_entry(p, entry, max_secs=max_secs, cancel=cancel,
                                        progress=progress)
+
+    def _decode_bands(self, p, nb, max_secs, cancel, progress):
+        """A multi-band record's variants decoded in band order and joined:
+        each is cut to its emitted run, so variant k starts at sample
+        ``(k - 1) * emitted_length(length)`` of the result."""
+        import numpy as np
+        n = emitted_length(p["length"])
+        total = n * nb
+        want = total if max_secs is None else min(total, int(44100 * max_secs))
+        stereo = int(p["chan"]) == 2
+        Ls, Rs = [], []
+        got = 0
+        for k in range(1, nb + 1):
+            if got >= want:
+                break
+            secs = min(n, want - got) / 44100.0 + (BLOCK + 1) / 44100.0
+            prog = None
+            if progress is not None:
+                def prog(cur, _nmax, _base=got):
+                    progress(_base + min(cur, n), total)
+            res = self.decode(band_params(p, k), max_secs=secs, cancel=cancel,
+                              progress=prog)
+            if res is None:
+                return None
+            take = min(n, want - got)
+            for out, ch in ((Ls, res[0]), (Rs, res[1])):
+                a = np.asarray(ch, np.int64)[:take]
+                if len(a) < take:
+                    a = np.concatenate([a, np.zeros(take - len(a), np.int64)])
+                out.append(a)
+            got += take
+        if not Ls:
+            return None
+        L = np.concatenate(Ls)
+        R = np.concatenate(Rs) if stereo else L.copy()
+        return L, R, stereo
 
     @staticmethod
     def _specflat(x):
@@ -1766,6 +2032,16 @@ class Spike2Emu:
     # which is still inside the firmware image and is where Venom really keeps
     # scale 0's stereo codec, so the row index is deliberately not clamped at 0.
     _PROBE_ROWS = (0, -1)
+
+    # Jurassic Park LE 1.13 (PAD-674, a board-keyed build) packs its table at
+    # HALF the stride: 8 entries (0x20 bytes) a scale, so scale S's codecs
+    # are at DISPATCH + S * 0x20, stereo on the even sub-slots and mono on the
+    # odd ones.  Mapped by decoding a mono and a stereo sound of scales 6, 18,
+    # 19, 22 and 31 through every entry of the table: each one's audio entries
+    # were exactly there (row S/2, sub-slots 0-7 for an even scale, 8-15 for
+    # an odd one), and rows S and S-1 read as noise.  Probed after the rows
+    # above, so every build that resolved before resolves the same.
+    _HALF_STRIDE = 0x20
 
     # The WRONG codec for a sound (a mono codec fed a stereo body, or vice
     # versa) decodes to near-white noise at roughly a third of full scale --
@@ -1903,6 +2179,9 @@ class Spike2Emu:
         key = (p["scale"], p["chan"])
         if key in self._slot_cache:
             return self._slot_cache[key]
+        if "band" not in p and bands_of(p) > 1:
+            # scored whole, the interleave reads as noise on every slot
+            p = band_params(p, 1)
         cands = self._slot_candidates(p)
         where = {fnv: place for fnv, place in cands}
         order = [fnv for fnv, _place in cands]
@@ -1945,22 +2224,26 @@ class Spike2Emu:
         no matter which one gets there first.  This list used to lead with the
         place that won for the last scale of the same channel count, which made
         the answer depend on a worker's history: see :meth:`_resolve_entry` for
-        the extract that decoded 29 sounds differently because of it."""
+        the extract that decoded 29 sounds differently because of it.
+
+        Last come the half-stride places (:data:`_HALF_STRIDE`), as
+        ``("half", sub_slot)``."""
         scale = p["scale"]
         places = []
         for d in self._PROBE_ROWS:
             for s in self._PROBE_SLOTS:
-                places.append((d, s))
+                places.append(((d, s), self.DISPATCH + (scale + d) * 0x40 + s * 4))
+        for s in self._PROBE_SLOTS:
+            places.append((("half", s), self.DISPATCH + scale * self._HALF_STRIDE + s * 4))
         out, seen = [], set()
-        for d, s in places:
-            addr = self.DISPATCH + (scale + d) * 0x40 + s * 4
+        for place, addr in places:
             try:
                 fnv = _u32(bytes(self.mu.mem_read(addr, 4)))
             except UcError:
                 continue          # a row off the end of the mapped table
             if fnv and fnv not in seen and self._backing_off(fnv) is not None:
                 seen.add(fnv)
-                out.append((fnv, (d, s)))
+                out.append((fnv, place))
         return out
 
     def _backing_off(self, va):
@@ -1976,11 +2259,20 @@ class Spike2Emu:
         """Decode one sound by driving codec ``entry``; see :meth:`decode`."""
         import numpy as np
         self.setup_decode()
+        if getattr(self, "_capture_owners", None):
+            # PAD-609: a recovery's per-sample capture hooks off for the decode
+            from .codec import drop_captures
+            drop_captures(self)
         mu = self.mu
         chan = p["chan"]; stereo = (chan == 2); length = p["length"]
         Rmul, Roff = (4, 800) if stereo else (2, 400)
+        band = int(p.get("band", 0))
+        if band:
+            # one variant of a multi-band record: its frames are stride words
+            st = int(p["stride"])
+            Rmul, Roff = 2 * st, 400 * st
         OBJ = self._build_obj(p)
-        VOICE = self._voice(chan)
+        VOICE = self._voice(chan, band)
         vol = VOL[chan]
         bo = p["body_off"]; bodysz = Rmul * length
         span = _algn(min(bodysz + 0x4000, 0x10000000))
@@ -2036,21 +2328,16 @@ class Spike2Emu:
 
     def close(self):
         # Tear the card window down first and in order: unicorn is pointing
-        # straight at the COW view, and the ctypes buffer holds an exported
-        # pointer that makes mmap.close() raise until it is dropped.
+        # straight at the view, and its exported pointer makes the view's
+        # close raise until it is dropped.
         if self._card_hi > self._card_lo:
             try:
-                self.mu.mem_unmap(self._card_lo, self._card_hi - self._card_lo)
+                self.mu.unmap_window(self._card_lo)
             except Exception:
                 pass
             self._card_lo = self._card_hi = 0
         self._cardbuf = None
-        if self._cardf is not None:
-            try:
-                self._cardf.close()
-            except Exception:
-                pass
-            self._cardf = None
+        self._cardf = None
         try:
             self.mm.close()
         except Exception:

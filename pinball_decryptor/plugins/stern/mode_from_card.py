@@ -39,21 +39,27 @@ class CardModesError(MP.ModeProjectError):
     pass
 
 
-def read_padmode(image):
+def read_padmode(image, parts=None, open_disk=None):
     """``{name: bytes}``: every file of ``/usr/local/padmode`` on the card image ``image``, or
     ``{}`` when no partition of it has that folder (a card with no modes). Raises
-    :class:`CardModesError` when ``image`` is not a card image the app can read."""
+    :class:`CardModesError` when ``image`` is not a card image the app can read. PAD-553: a
+    card read straight off the SD card gives its ``parts`` and ``open_disk`` (the extract's)."""
     from .ext4 import S_IFDIR, S_IFMT, S_IFREG, Ext4Reader
     from .formats import linux_partitions
     from . import mode_write as MW
     name = os.path.basename(str(image))
-    try:
-        parts = linux_partitions(image)
-    except (OSError, ValueError) as e:
-        raise CardModesError("%s could not be read as a card image (%s)" % (name, e)) from None
+    if parts is None and open_disk is None:
+        s3 = _read_spike3_padmode(image)
+        if s3 is not None:
+            return s3
+    if parts is None:
+        try:
+            parts = linux_partitions(image)
+        except (OSError, ValueError) as e:
+            raise CardModesError("%s could not be read as a card image (%s)" % (name, e)) from None
     if not parts:
         raise CardModesError("%s is not a card image: it has no Linux partitions" % name)
-    with open(image, "rb") as f:
+    with (open_disk() if open_disk else open(image, "rb")) as f:
         for off, size in parts:
             try:
                 reader = Ext4Reader(f, off, size)
@@ -71,6 +77,42 @@ def read_padmode(image):
                     out[entry] = bytes(reader.read_file_bytes(inode))
             return out
     return {}
+
+
+def _read_spike3_padmode(image):
+    """PAD-1289: a Spike 3 card keeps its modes in ``/games/pad/padmode`` (spike3_modes.MODE_DIR)
+    inside its encrypted games volume, which ``linux_partitions`` never opens: ``{name: bytes}``
+    read through the card's own key (``{}`` when that folder is not there), or None when
+    ``image`` is not a Spike 3 card. Raises :class:`CardModesError` when no key opens it."""
+    from .ext4 import S_IFDIR, S_IFMT, S_IFREG, Ext4Reader
+    from . import mode_write as MW, spike3, spike3_card, spike3_modes
+    try:
+        if not spike3.is_spike3_card(str(image)):
+            return None
+    except (OSError, ValueError):
+        return None
+    name = os.path.basename(str(image))
+    try:
+        vol = spike3_card.open_games(str(image))
+    except spike3_card.Spike3KeyError as e:
+        raise CardModesError("%s is a Spike 3 card its modes cannot be read from: %s" % (name, e)) from None
+    except (OSError, ValueError) as e:
+        raise CardModesError("%s could not be read as a Spike 3 card (%s)" % (name, e)) from None
+    try:
+        reader = Ext4Reader(vol, 0, vol.size)
+        node = MW.lookup(reader, spike3_modes.MODE_DIR)
+        if node is None or (node["mode"] & S_IFMT) != S_IFDIR:
+            return {}
+        out = {}
+        for entry, child, _t in reader._iter_dir(node):
+            if entry in (".", ".."):
+                continue
+            inode = reader.read_inode(child)
+            if (inode["mode"] & S_IFMT) == S_IFREG:
+                out[entry] = bytes(reader.read_file_bytes(inode))
+        return out
+    finally:
+        vol.close()
 
 
 def bundle_about(data):
@@ -123,9 +165,11 @@ def recover_spec(text, p):
         names = _mask_names(p, int(trig[0], 16))
         if names:
             spec.start_shot = names[0]
+            spec.start_or = names[1:1 + MP.START_OR_MAX]          # PAD-518: their hits count together
             spec.start_count = int(trig[1]) if len(trig) > 1 else 1
-            if len(names) > 1:
-                lost.append("it started on any of %s; it starts on %s now" % (", ".join(names), names[0]))
+            if len(names) > 1 + MP.START_OR_MAX:
+                kept = names[:1 + MP.START_OR_MAX]
+                lost.append("it started on any of %s; it starts on %s now" % (", ".join(names), ", ".join(kept)))
     except (IndexError, ValueError):
         lost.append("what starts it")
     for key, attr in (("seconds", "seconds"), ("award", "award")):
@@ -182,32 +226,11 @@ def recover(files, project):
         slugs.append(slug)
         if lost:
             notes.append("%s: %s did not come back" % (spec.name, lost))
-    from . import code_modes as CM
-    codes = sorted(n[:-len(".assets")] for n in files if n.endswith(".assets"))
-    known = {e["slug"]: e["name"] for e in CM.EXAMPLES}
-    examples, lost = [], []
-    for slug in codes:
-        if slug in known and slug not in taken:
-            try:
-                CM.add_example(project, known[slug])
-            except (CM.CodeModeError, OSError):
-                lost.append(slug.upper())
-                continue
-            taken.add(slug)
-            slugs.append(slug)
-            examples.append(known[slug])
-        else:
-            lost.append(slug.upper())
-    if examples:
-        notes.append("%s %s the app's own example%s: %s C came back as the app ships it (any edit "
-                     "made to it is not on the card), and Cut from films makes %s clips and sounds"
-                     % (", ".join(examples), "is" if len(examples) == 1 else "are",
-                        "" if len(examples) == 1 else "s", "its" if len(examples) == 1 else "their",
-                        "its" if len(examples) == 1 else "their"))
+    lost = sorted(n[:-len(".assets")].upper() for n in files if n.endswith(".assets"))
     if lost:
-        notes.append("%s %s a code mode: %s C is not on the card, so it cannot be loaded from it"
-                     % (", ".join(lost), "is" if len(lost) == 1 else "are",
-                        "its" if len(lost) == 1 else "their"))
+        notes.append(("%s is a code mode: its C is not on the card, so it cannot be loaded from it" if len(lost) == 1
+                      else "%s are code modes: their C is not on the card, so they cannot be loaded from it")
+                     % ", ".join(lost))
     return slugs, notes
 
 

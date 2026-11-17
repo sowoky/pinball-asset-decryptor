@@ -28,18 +28,30 @@ const P = {
   compare: "M4.5 4h4A1.5 1.5 0 0 1 10 5.5v13A1.5 1.5 0 0 1 8.5 20h-4A1.5 1.5 0 0 1 3 18.5v-13A1.5 1.5 0 0 1 4.5 4zM15.5 4h4A1.5 1.5 0 0 1 21 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-4a1.5 1.5 0 0 1-1.5-1.5v-13A1.5 1.5 0 0 1 15.5 4zM10 12h4",
   emulate: "M6 4l14 8-14 8z",
   play: "M6 4l14 8-14 8z",
+  // PAD-802: the Visual Pinball tab, a playfield with its flippers and a ball
+  playfield: "M7 2h10l2 20H5zM8.5 17.5l2.5 1.5M15.5 17.5l-2.5 1.5M12 8a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2z",
   pause: "M7 5h3v14H7zM14 5h3v14h-3z",
+  // PAD-701: the Audio players' previous / next row
+  prev: "M18 5L9 12l9 7zM6 5v14",
+  next: "M6 5l9 7-9 7zM18 5v14",
   // PAD-446: a slot's random clips
+  clock: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7v5l3 2",
   shuffle: "M3 7h3c3.5 0 4.5 2.5 6 5s2.5 5 6 5h3M3 17h3c1.6 0 2.6-.6 3.4-1.6M14.6 8.6C15.4 7.6 16.4 7 18 7h3M18 4l3 3-3 3M18 14l3 3-3 3",
   stop: "M7 6h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1z",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-3.5-3.5",
   folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+  // PAD-754: the animal shelter donations chip and window
+  paw: "M6.5 10.5a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6zM12 7.6a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6zM17.5 10.5a2.3 2.3 0 1 0 0-4.6 2.3 2.3 0 0 0 0 4.6zM12 11.5c-2.7 0-4.1 2-5.1 3.5-.9 1.3-1.9 2-1.9 3.4A2.8 2.8 0 0 0 7.8 21c1.4 0 2.8-.9 4.2-.9s2.8.9 4.2.9a2.8 2.8 0 0 0 2.8-2.6c0-1.4-1-2.1-1.9-3.4-1-1.5-2.4-3.5-5.1-3.5z",
+  // Discord's own logo (Simple Icons, the one pad-triage's thread button
+  // uses): a filled shape, which .sx-discord-btn fills (PAD-815)
+  discord: "M20.317 4.37a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.865-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.74 19.74 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.1 13.1 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 0 1 .078-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.009c.12.1.246.198.373.292a.077.077 0 0 1-.006.127 12.3 12.3 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.84 19.84 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z",
   file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5",
   info: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 11v5M12 8h.01",
   warn: "M12 3l10 18H2zM12 10v4M12 18h.01",
   error: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9 9l6 6M15 9l-6 6",
   question: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01",
   check: "M5 12l5 5L20 7",
+  ban: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM5.6 5.6l12.8 12.8",
   x: "M6 6l12 12M18 6L6 18",
   down: "M6 9l6 6 6-6",
   up: "M6 15l6-6 6 6",
@@ -52,7 +64,11 @@ const P = {
   refresh: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
   help: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01",
   gear: "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
+  // PAD-515: a line the game paints as it plays
+  brush: "M19.2 3.4a1.9 1.9 0 0 1 2.7 2.7L12.6 15.4 10 12.8zM8.6 14.2c-2 0-3.6 1.6-3.6 3.6 0 1.3-.9 2.1-2.4 2.5 1.4.9 2.8 1.3 4.4 1.3 2.6 0 4.4-1.9 4.4-4.4z",
   home: "M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10",
+  // PAD-458: the top bar's language button
+  globe: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3.6 9h16.8M3.6 15h16.8M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3z",
   log: "M4 6h16M4 10h16M4 14h10M4 18h7",
   external: "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
   copy: "M9 9h10v10H9zM5 15V5h10",
@@ -60,10 +76,13 @@ const P = {
   zoomin: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-3.5-3.5M11 8v6M8 11h6",
   zoomout: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-3.5-3.5M8 11h6",
   fit: "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5",
+  // PAD-1191: leave a video's full screen (the corners turned in)
+  unfit: "M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5",
   sd: "M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM10 3v4M13 3v4",
   disk: "M4 5h16v14H4zM4 15h16M8 18h.01",
   upload: "M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",
   download: "M12 4v12M7 11l5 5 5-5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",
+  print: "M7 9V3h10v6M7 17H4a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-3M7 14h10v7H7z",
   undo: "M9 14L4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3",
   redo: "M15 14l5-5-5-5M20 9H9a5 5 0 0 0 0 10h3",
   lock: "M6 11h12v9H6zM8 11V7a4 4 0 0 1 8 0v4",
@@ -77,6 +96,7 @@ const P = {
   blocks: "M4 4h6v2.5a1.5 1.5 0 0 0 3 0V4h7v7h-2.5a1.5 1.5 0 0 0 0 3H20v6H4v-6h2.5a1.5 1.5 0 0 0 0-3H4z",
   list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
   wave: "M2 12h2l2-6 3 12 3-9 2 6 2-3h6",
+  music: "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
   image: "M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15.5 8.5h.01",
   film: "M4 4h16v16H4zM8 4v16M16 4v16M4 8h4M4 12h4M4 16h4M16 8h4M16 12h4M16 16h4",
   save: "M5 3h11l3 3v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM7 3v5h8V3M7 21v-7h10v7",
@@ -84,6 +104,8 @@ const P = {
   // PAD-370: the board and its paint dots apart, so a colored palette can be filled in
   palette: ["M12 3a9 9 0 0 0 0 18c1.1 0 1.8-.8 1.8-1.8 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4c0-4.4-4-8-9-8z",
     "M7.5 11.5h.01M10 7.5h.01M14.5 7.5h.01M17 11h.01"],
+  // PAD-1040: the cabinet's two blades, lit
+  lights: "M7 3v18M17 3v18M3 6l2 1.5M3 18l2-1.5M21 6l-2 1.5M21 18l-2-1.5M12 9v6",
   scenes: "M12 3l9 4.5-9 4.5-9-4.5zM3 12l9 4.5 9-4.5M3 16.5L12 21l9-4.5",
   more: "M5 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2zM12 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2zM19 11a1 1 0 1 0 0 2 1 1 0 0 0 0-2z",
   eye: "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
@@ -118,6 +140,9 @@ function tipBox(text, rich) {
   tipEl.textContent = "";
   let spec = null;
   try { spec = rich ? JSON.parse(rich) : null; } catch (e) { spec = null; }
+  // PAD-942: tip({image, w, h}) shows a picture under the words (a table's
+  // playfield); its size is on the element, so the box is laid out before it loads
+  tipEl.className = "tip" + (spec && spec.image ? " tip-pic" : "");
   if (spec) {
     // a heading, then one line each; a [key, what] line puts the key in its own column
     const add = (cls, txt) => {
@@ -130,6 +155,36 @@ function tipBox(text, rich) {
     if (spec.head) add("tip-h", spec.head);
     for (const ln of spec.lines || []) {
       if (ln == null || ln === "") continue;
+      // PAD-1005: {sec} a section's own small heading, {li} a bulleted line, {bar: [{v, label,
+      // kind}], of} a bar of parts against a whole (the machine's memory: what each part takes)
+      if (ln && typeof ln === "object" && ln.sec != null) { add("tip-sec", ln.sec); continue; }
+      if (ln && typeof ln === "object" && ln.li != null) { add("tip-li", ln.li); continue; }
+      if (ln && typeof ln === "object" && Array.isArray(ln.bar)) {
+        const bar = add("tip-bar");
+        const whole = Math.max(ln.of || 0, ln.bar.reduce((t, p) => t + (p.v || 0), 0)) || 1;
+        for (const p of ln.bar) {
+          const seg = document.createElement("span");
+          seg.className = "tip-seg " + (p.kind || "");
+          seg.style.width = (100 * (p.v || 0) / whole).toFixed(2) + "%";
+          bar.appendChild(seg);
+        }
+        if (ln.of && ln.of < whole) {                       // the limit, inside an overfull bar
+          const mark = document.createElement("span");
+          mark.className = "tip-cap";
+          mark.style.left = (100 * ln.of / whole).toFixed(2) + "%";
+          bar.appendChild(mark);
+        }
+        const key = add("tip-keys");
+        for (const p of ln.bar) {
+          if (!p.label) continue;
+          const k = document.createElement("span");
+          const sw = document.createElement("i");
+          sw.className = "tip-seg " + (p.kind || "");
+          k.append(sw, p.label);
+          key.appendChild(k);
+        }
+        continue;
+      }
       if (typeof ln === "object" && !Array.isArray(ln)) {
         // PAD-369 (DragonRR): a file's color profile, in one color of its own in every tooltip
         const row = add("tip-l tip-cp");
@@ -146,6 +201,14 @@ function tipBox(text, rich) {
       const v = document.createElement("span");
       v.textContent = ln[1];
       row.append(k, v);
+    }
+    if (spec.image) {
+      const img = document.createElement("img");
+      img.className = "tip-img";
+      img.alt = "";
+      if (spec.w && spec.h) { img.width = spec.w; img.height = spec.h; }
+      img.src = spec.image;
+      tipEl.appendChild(img);
     }
   } else {
     tipEl.textContent = text;
@@ -237,7 +300,9 @@ export function tip(text) {
   if (typeof text === "object") {
     rich = JSON.stringify(text);
     text = [text.head, ...(text.lines || []).map((l) => (Array.isArray(l) ? l.join(": ")
-      : l && typeof l === "object" ? "Color profile: " + l.profile : l))]
+      : l && typeof l === "object" ? (l.sec != null ? l.sec : l.li != null ? "• " + l.li
+        : Array.isArray(l.bar) ? l.bar.map((p) => p.label).filter(Boolean).join(", ")
+        : "Color profile: " + l.profile) : l))]
       .filter(Boolean).join("\n");
   }
   return {
@@ -260,11 +325,14 @@ export function InfoBadge({ text, label = "i", onClick }) {
 }
 
 // --------------------------------------------------------------- controls
+// drop: it opens a file / folder picker, so files from the desktop dropped on
+// it answer that picker (see armDrop below, PAD-838).
 export function Button({ kind = "", size = "", icon, iconRight, onClick, disabled, title,
-                         children, busy, type = "button", cls = "", label, autoFocus }) {
+                         children, busy, type = "button", cls = "", label, autoFocus, drop }) {
   const ref = useRef(null);
   useEffect(() => { if (autoFocus && ref.current) ref.current.focus(); }, []);
   return html`<button type=${type} ref=${ref} class=${cx("btn", kind, size, !children && icon && "icon", cls)}
+    data-drop=${drop ? "" : undefined}
     disabled=${!!disabled} onClick=${onClick} aria-label=${label || (typeof title === "string" && !children ? title : undefined)}
     ...${tip(title)}>
     ${busy ? html`<span class="spin"></span>` : icon ? html`<${Icon} name=${icon} />` : null}
@@ -314,11 +382,12 @@ export function Field({ ns, k, value, onChange, onCommit, placeholder, mono, sm,
 export function PathField({ ns, k, value, onBrowse, browseLabel = "Browse…", placeholder,
                             history, readOnly, disabled, onCommit, title, extra, bad }) {
   const listId = history && history.length ? `hist-${ns}-${k}` : undefined;
-  return html`<div class="row" style="gap:8px">
+  // a file dropped on the path or its Browse… answers Browse…'s picker (PAD-838)
+  return html`<div class="row" style="gap:8px" data-drop=${onBrowse && !disabled ? "" : undefined}>
     <${Field} ns=${ns} k=${k} value=${value} mono readOnly=${readOnly} disabled=${disabled}
       placeholder=${placeholder} cls="grow" list=${listId} onCommit=${onCommit} title=${title} bad=${bad} />
     ${listId ? html`<datalist id=${listId}>${history.map((p) => html`<option value=${p} />`)}</datalist>` : null}
-    ${onBrowse ? html`<${Button} onClick=${onBrowse} disabled=${disabled}>${browseLabel}<//>` : null}
+    ${onBrowse ? html`<${Button} onClick=${onBrowse} disabled=${disabled} drop>${browseLabel}<//>` : null}
     ${extra}
   </div>`;
 }
@@ -417,6 +486,65 @@ export function PageHead({ title, sub, children }) {
     ${children ? html`<div class="actions">${children}</div>` : null}</div>`;
 }
 
+// ------------------------------------------------- files from the desktop
+// PAD-838.  A page never learns where a dropped file lives; the app window's
+// own drop handler does, and keeps the paths for "ui.drop_arm", which makes
+// the next file / folder picker answer with them instead of showing.  So a
+// drop on anything marked data-drop (a Button with drop, a PathField) arms,
+// then clicks it: its picker takes the files, through every check a picked
+// file gets.  A Table's onFileDrop does the same for a row.
+const hasFiles = (e) => !!e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files");
+export async function armDrop(e) {
+  const names = [...e.dataTransfer.files].map((f) => f.name);
+  return names.length ? !!(await call("ui.drop_arm", names)) : false;
+}
+// A path box answers for the Browse… beside it (PAD-838: the New project
+// window's Stock image box took nothing): the nearest row around the box
+// that holds exactly one data-drop button is the target.
+const fieldRow = (t) => {
+  let el = t.closest(".field");
+  for (let i = 0; el && i < 3; i++, el = el.parentElement) {
+    const btns = el.querySelectorAll("button[data-drop]");
+    if (btns.length === 1) return el;
+    if (btns.length > 1) return null;
+  }
+  return null;
+};
+const dropTarget = (e) => {
+  const t = e.target && e.target.closest ? e.target : null;
+  if (!t) return null;
+  const el = t.closest("[data-drop]") || fieldRow(t);
+  if (!el) return null;
+  const btn = el.matches("button") ? el : el.querySelector("button[data-drop]");
+  return btn && !btn.disabled ? el : null;
+};
+let dropLit = null;
+const lightDrop = (el) => {
+  if (dropLit === el) return;
+  if (dropLit) dropLit.classList.remove("drop-on");
+  dropLit = el;
+  if (el) el.classList.add("drop-on");
+};
+window.addEventListener("dragover", (e) => {
+  if (!hasFiles(e) || e.defaultPrevented) { lightDrop(null); return; }
+  const el = dropTarget(e);
+  lightDrop(el);
+  if (el) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }
+});
+window.addEventListener("dragleave", (e) => { if (!e.relatedTarget) lightDrop(null); });
+window.addEventListener("dragend", () => lightDrop(null));
+// capture: the app window's own drop handler on the document cancels every
+// drop before it would bubble here (a row's drop is its own, see Table)
+window.addEventListener("drop", async (e) => {
+  lightDrop(null);
+  if (!hasFiles(e)) return;
+  const el = dropTarget(e);
+  if (!el) return;
+  e.preventDefault();
+  const btn = el.matches("button") ? el : el.querySelector("button[data-drop]");
+  if (await armDrop(e)) btn.click();
+}, true);
+
 // ----------------------------------------------------------------- table
 // columns: [{key, label, width: "120px" | "minmax(0,1fr)", num, render(row), sort, title}]
 // A virtual list: only the rows in view are in the DOM, so 3 000 rows scroll
@@ -424,13 +552,18 @@ export function PageHead({ title, sub, children }) {
 // resizable: drag a header's right edge; widths = {key: px} saved widths;
 // onResize(widths) gets every column's px after a drag (Tk saved the dragged
 // widths under column_widths).  The last column always takes what is left.
+// onFileDrop(row, i): files from the desktop dropped on a row, once armed (see
+// armDrop): open the row's picker and they answer it.  The row lights while
+// they are over it; fileDropOk(row, i) says which rows take them.
 export function Table({ columns, rows, rowKey = (r, i) => i, selected, onSelect, onActivate,
                         rowClass, sort, onSort, empty, rowHeight = 34, cls = "", style,
-                        onContext, header = true, multi, resizable, widths, onResize }) {
+                        onContext, header = true, multi, resizable, widths, onResize,
+                        onFileDrop, fileDropOk }) {
   const scroller = useRef(null);
   const headRef = useRef(null);
   const [view, setView] = useState({ top: 0, h: 600 });
   const [live, setLive] = useState(null);
+  const [dropOn, setDropOn] = useState(null);     // the row files are dragged over
   const wmap = live || widths || null;
   const template = columns.map((c, i) => (i === columns.length - 1 ? (c.width && !/px$/.test(c.width) ? c.width : "minmax(0,1fr)")
     : wmap && wmap[c.key] ? Math.max(36, wmap[c.key]) + "px" : (c.width || "minmax(0,1fr)"))).join(" ");
@@ -481,14 +614,34 @@ export function Table({ columns, rows, rowKey = (r, i) => i, selected, onSelect,
     if (y < el.scrollTop) el.scrollTop = y;
     else if (y + rowHeight > el.scrollTop + el.clientHeight - rowHeight) el.scrollTop = y - el.clientHeight + rowHeight * 2;
   }, [selKey]);
+  // the row last clicked or stepped to: with several rows selected the arrows go on from it
+  // (PAD-508: they went back to the top row)
+  const atRef = useRef(null);
   const onKey = (e) => {
     if (!rows || !n || !onSelect) return;
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Enter") return;
     e.preventDefault();
-    let idx = rows.findIndex((r, i) => rowKey(r, i) === selKey);
+    const from = selected instanceof Set && selected.has(atRef.current) ? atRef.current : selKey;
+    let idx = rows.findIndex((r, i) => rowKey(r, i) === from);
     if (e.key === "Enter") { if (idx >= 0 && onActivate) onActivate(rows[idx], idx); return; }
     idx = e.key === "ArrowDown" ? Math.min(n - 1, idx + 1) : Math.max(0, idx - 1);
+    atRef.current = rowKey(rows[idx], idx);
     onSelect(rows[idx], idx, e);
+  };
+  const fileDrop = (r, i, id) => !onFileDrop || (fileDropOk && !fileDropOk(r, i)) ? {} : {
+    onDragOver: (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      if (dropOn !== id) setDropOn(id);
+    },
+    onDragLeave: (e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDropOn((d) => (d === id ? null : d)); },
+    onDrop: async (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      setDropOn(null);
+      if (await armDrop(e)) onFileDrop(r, i);
+    },
   };
   return html`<div class=${cx("tbl", cls)} style=${style}>
     <div class="scroller" ref=${scroller} onScroll=${onScroll} tabindex="0" onKeyDown=${onKey}>
@@ -501,11 +654,12 @@ export function Table({ columns, rows, rowKey = (r, i) => i, selected, onSelect,
         ${slice.map((i) => {
           const r = rows[i];
           const id = rowKey(r, i);
-          return html`<div key=${id} class=${cx("tr", (onSelect || onActivate) && "click", isSel(id) && "sel", rowClass && rowClass(r, i))}
+          return html`<div key=${id} class=${cx("tr", (onSelect || onActivate) && "click", isSel(id) && "sel", dropOn === id && "drop-on", rowClass && rowClass(r, i))}
             style=${`grid-template-columns:${template};position:absolute;left:0;right:0;top:${i * rowHeight}px;height:${rowHeight}px`}
-            onClick=${(e) => onSelect && onSelect(r, i, e)}
+            onClick=${(e) => { atRef.current = id; if (onSelect) onSelect(r, i, e); }}
             onDblClick=${() => onActivate && onActivate(r, i)}
-            onContextMenu=${onContext ? (e) => { e.preventDefault(); onContext(r, i, e); } : undefined}>
+            onContextMenu=${onContext ? (e) => { e.preventDefault(); onContext(r, i, e); } : undefined}
+            ...${fileDrop(r, i, id)}>
             ${columns.map((c) => html`<span class=${cx("c", c.num && "num", c.cls)} title=${c.titleOf ? c.titleOf(r) : undefined}>${c.render ? c.render(r, i) : r[c.key]}</span>`)}
           </div>`;
         })}
@@ -594,8 +748,58 @@ export function isTopScrim(el) {
   return all.length > 0 && all[all.length - 1] === el;
 }
 
-export function Modal({ title, icon, onClose, wide, xwide, children, footer, cls = "" }) {
+// PAD-1000: remember="<name>" lets the dialog be moved (drag its title bar) and resized (drag
+// its corner); where it was left and its size are kept under pad.modal.<name> for next time, and a
+// double-click on the title bar puts it back in the middle at its own size.
+const MODAL_MIN_W = 360, MODAL_MIN_H = 220;
+function loadGeom(name) {
+  try { const g = JSON.parse(localStorage.getItem("pad.modal." + name) || "null");
+    return g && g.w > 0 && g.h > 0 ? g : null; } catch (e) { return null; }
+}
+function saveGeom(name, g) {
+  try { if (g) localStorage.setItem("pad.modal." + name, JSON.stringify(g)); else localStorage.removeItem("pad.modal." + name); } catch (e) { /* private mode */ }
+}
+// the geometry kept on the page: no bigger than the page, and all of it on the page
+function fitGeom(g) {
+  const z = pageZoom(), vw = window.innerWidth / z, vh = window.innerHeight / z;
+  const w = Math.max(Math.min(MODAL_MIN_W, vw), Math.min(g.w, vw)), h = Math.max(Math.min(MODAL_MIN_H, vh), Math.min(g.h, vh));
+  return { x: Math.max(0, Math.min(g.x, vw - w)), y: Math.max(0, Math.min(g.y, vh - h)), w, h };
+}
+
+export function Modal({ title, icon, onClose, wide, xwide, children, footer, cls = "", remember }) {
   const scrimRef = useRef(null);
+  const boxRef = useRef(null);
+  const [geom, setGeom] = useState(() => (remember ? loadGeom(remember) : null));
+  const [, setVp] = useState(0);
+  useEffect(() => {
+    if (!remember) return undefined;
+    const onResize = () => setVp((n) => n + 1);       // re-fit to the page's new size
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [remember]);
+  // a drag of the title bar (move) or the corner grip (size), from where the dialog is now
+  const startDrag = (e, sizing) => {
+    if (e.button !== 0 || (!sizing && e.target.closest("button"))) return;
+    e.preventDefault();
+    const z = pageZoom(), r = boxRef.current.getBoundingClientRect();
+    const g0 = { x: r.left / z, y: r.top / z, w: r.width / z, h: r.height / z };
+    const x0 = e.clientX, y0 = e.clientY;
+    let cur = g0;
+    const move = (ev) => {
+      const dx = (ev.clientX - x0) / z, dy = (ev.clientY - y0) / z;
+      cur = fitGeom(sizing ? { ...g0, w: Math.max(MODAL_MIN_W, g0.w + dx), h: Math.max(MODAL_MIN_H, g0.h + dy) }
+        : { ...g0, x: g0.x + dx, y: g0.y + dy });
+      setGeom(cur);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up);
+      const out = { x: Math.round(cur.x), y: Math.round(cur.y), w: Math.round(cur.w), h: Math.round(cur.h) };
+      setGeom(out); saveGeom(remember, out);
+    };
+    window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
+  };
+  const reset = (e) => { if (e.target.closest("button")) return; setGeom(null); saveGeom(remember, null); };
+  const g = remember && geom ? fitGeom(geom) : null;
   useEffect(() => {
     // Escape closes an open menu first, not the dialog under it
     const onKey = (e) => {
@@ -606,11 +810,15 @@ export function Modal({ title, icon, onClose, wide, xwide, children, footer, cls
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
   return html`<div class="scrim" ref=${scrimRef} onMouseDown=${(e) => { if (e.target === e.currentTarget && onClose) onClose(); }}>
-    <div class=${cx("modal", wide && "wide", xwide && "xwide", cls)} role="dialog" aria-modal="true" aria-label=${title}>
-      <div class="hd">${icon ? html`<${Icon} name=${icon} cls="lg" />` : null}<span class="h2">${title}</span>
+    <div class=${cx("modal", wide && "wide", xwide && "xwide", remember && "movable", g && "placed", cls)} ref=${boxRef}
+      role="dialog" aria-modal="true" aria-label=${title}
+      style=${g ? `left:${g.x}px;top:${g.y}px;width:${g.w}px;height:${g.h}px` : null}>
+      <div class="hd" onMouseDown=${remember ? (e) => startDrag(e, false) : null}
+        onDblClick=${remember ? reset : null}>${icon ? html`<${Icon} name=${icon} cls="lg" />` : null}<span class="h2">${title}</span>
         ${onClose ? html`<${Button} kind="ghost" size="sm" icon="x" title="Close" onClick=${onClose} />` : null}</div>
       <div class="bd">${children}</div>
       ${footer ? html`<div class="ft">${footer}</div>` : null}
+      ${remember ? html`<span class="modal-grip" aria-hidden="true" onMouseDown=${(e) => startDrag(e, true)}></span>` : null}
     </div>
   </div>`;
 }

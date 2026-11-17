@@ -101,7 +101,9 @@ def test_the_shots_inserts_are_the_ones_in_front_of_them(key):
             assert shot == 1 << 60, name   # switch 34, the Action button's bit
             continue
         assert shot < (1 << 43), name
-    assert lamps["LEFT OUTLANE"][2] == 0x8 and lamps["TOP SPINNER"][2] == 0x1800
+    assert lamps["LEFT OUTLANE"][2] == 0x8 and lamps["TOP SPINNER"][2] == 0x3800   # PAD-658: + the Top spinner shot
+    assert lamps["ATTACK MECHA"][2] == 0x20000 == shots[[n for n in shots if n in ("Shield ramp spinner",
+                                                                       "Right spinner")][0]]   # PAD-669
 
 
 def test_the_app_reads_the_lamp_lines_and_an_old_port_has_none(tmp_path):
@@ -123,15 +125,16 @@ def test_a_lamp_line_is_read_as_the_runtime_reads_it():
 
 
 def test_the_port_stays_readable_by_the_runtime():
-    """The runtime reads up to PORT_MAX bytes of a port: the lamp lines must fit, and every line before them
-    must sit in the first 16 KB an older runtime read (its runtime then simply has no lamps)."""
+    """The runtime reads up to PORT_MAX bytes of a port: the lamp lines must fit. (The 16 KB an older runtime read
+    in one buffer no longer binds: the runtime reads a chunk at a time, and a port only ever ships beside the
+    runtime of the same build - PAD-706's battle lines took Godzilla LE 1.16's lamp lines past 16 KB, PAD-712.)"""
     src = (SDK / "pad_mode_runtime.c").read_text(encoding="utf-8")
     cap = int(re.search(r"#define PORT_MAX\s+(\d+)", src).group(1))
     for key, path in PORTS.items():
         b = path.read_bytes()
         assert len(b) < cap - 1, key
         first = b.find(b"\n# ---- named inserts")
-        assert 0 < first < 16383, key
+        assert 0 < first, key
 
 
 # ---- lamp_map.py against the programs -------------------------------------------------------------
@@ -174,6 +177,10 @@ RT_HARNESS = r"""
 #include <string.h>
 #include <stdarg.h>
 #include "pad_mode.h"
+
+typedef unsigned pm_addr;            /* PAD-1269: the 32-bit (Spike 2) build's address and register types */
+typedef unsigned pm_reg;
+@TYPES@
 
 static unsigned can;
 static const struct pm_mode *current;
@@ -310,7 +317,10 @@ def runtime(tmp_path_factory):
     end = src.index("/* ---- LAMPS END */")
     helpers = "\n".join(_function(src, r) for r in (
         r"static int str_eq\(", r"static int hexval\(", r"static uint64_t number\(", r"static void rest\("))
-    c = RT_HARNESS.replace("@HELPERS@", helpers).replace("@SECTION@", src[start:end])
+    # PAD-1282 / PAD-1283: the runtime's PM_PTR and lamp_group_fn, which the section uses but sit outside it
+    types = "\n".join(ln for ln in src.splitlines()
+                      if ln.startswith(("#define PM_PTR ", "typedef pm_addr (*lamp_group_fn)")))
+    c = RT_HARNESS.replace("@TYPES@", types).replace("@HELPERS@", helpers).replace("@SECTION@", src[start:end])
     d = tmp_path_factory.mktemp("lamps")
     (d / "rt.c").write_text(c)
     exe = d / "rt"
@@ -418,6 +428,44 @@ def test_only_the_owner_releases_and_a_mode_takes_over_with_a_line(runtime):
     assert re.findall(r"RELEASE (\d+)", out) == ["0", "0"]            # B held nothing; A no longer holds it
     assert _outs(out) == {346: 255, 348: 255}
     assert "B takes LEFT RAMP from A" in out
+
+
+def test_a_mode_letting_go_hands_the_insert_back_to_the_mode_it_took_it_from(runtime):
+    """PAD-601: one insert, two states: A's light on it, B's over it while B runs. B letting go gives A's back, as it
+    was (red, not the game's dark); A letting go then gives it to the game."""
+    out = _rt(runtime, "as", "A", "set", "ff0000", "0", "0", "LEFT RAMP", "tick", "1", "out", "346",
+              "as", "B", "set", "0000ff", "0", "0", "LEFT RAMP", "tick", "1", "out", "346", "out", "348",
+              "release_all", "tick", "1", "out", "346", "out", "348",
+              "as", "A", "release", "LEFT RAMP", "tick", "1", "out", "346")
+    assert re.findall(r"^OUT (\d+) (\d+)$", out, re.M) == [
+        ("346", "255"), ("346", "0"), ("348", "255"), ("346", "255"), ("348", "0"), ("346", "0")]
+    assert "B takes LEFT RAMP from A" in out and "lamps: LEFT RAMP back to A" in out
+    assert "1 insert(s) handed back, 0 to the game and 1 to the mode under it" in out
+    assert "1 insert(s) handed back to the game" in out                 # A's, after
+    assert re.findall(r"RELEASE (\d+)", out) == ["1", "1"]
+
+
+def test_a_mode_under_another_that_lets_go_does_not_come_back(runtime):
+    """A lets go while B is over it (its mode ended): B letting go then gives the insert to the game, not to A. A
+    lighting it again takes it back on top, and B's comes back when A lets go."""
+    out = _rt(runtime, "as", "A", "set", "ff0000", "0", "0", "LEFT RAMP", "as", "B", "set", "0000ff", "0", "0", "LEFT RAMP",
+              "as", "A", "release_all", "as", "B", "release_all", "tick", "1", "out", "346", "out", "348",
+              "as", "A", "set", "ff0000", "0", "0", "LEFT RAMP", "as", "B", "set", "0000ff", "0", "0", "LEFT RAMP",
+              "as", "A", "set", "ff0000", "0", "0", "LEFT RAMP", "tick", "1", "out", "346", "out", "348",
+              "release_all", "tick", "1", "out", "346", "out", "348")
+    assert re.findall(r"RELEASE (\d+)", out) == ["0", "1", "1"]       # A under B held nothing on top
+    assert re.findall(r"^OUT (\d+) (\d+)$", out, re.M) == [
+        ("346", "0"), ("348", "0"), ("346", "255"), ("348", "0"), ("346", "0"), ("348", "255")]
+    assert "back to A" not in out and "lamps: LEFT RAMP back to B" in out
+
+
+def test_the_light_under_comes_back_in_its_own_pattern_and_game_over_forgets_it(runtime):
+    out = _rt(runtime, "as", "A", "set", "00ff00", "1", "500", "LEFT RAMP", "as", "B", "set", "ff0000", "0", "0", "LEFT RAMP",
+              "release", "LEFT RAMP", "trace", "347", "60",
+              "as", "B", "set", "ff0000", "0", "0", "LEFT RAMP", "game_over", "tick", "1", "out", "346", "out", "347")
+    green = [int(x) for x in re.search(r"TRACE 347 (.*)", out).group(1).split()]
+    assert set(green) == {0, 255} and 20 <= green.count(255) <= 40      # A's blink again, half on
+    assert re.findall(r"^OUT (\d+) (\d+)$", out, re.M) == [("346", "0"), ("347", "0")]   # the game's, not A's
 
 
 def test_a_layer_the_game_took_back_is_replaced_and_game_over_hands_everything_back(runtime):

@@ -31,9 +31,167 @@ import sys
 import threading
 import time
 
+#: PAD-494: the most music modes a project may have (mode 1 is the sounds as they are), and how
+#: many the row menu offers before "Add a music mode…" ("need at least 4", the tester)
+_MODES_MAX = 8
+_MODES_SHOWN = 4
+#: PAD-565: the most files one sound plays in turn, its own one included (sound_modes.TURN_MAX)
+_TURNS_MAX = 16
+#: PAD-638: the Replacement pane holds file k in turn as pseudo mode _TURN_BASE + k
+#: (sound_modes.TURN_BASE), so the loudness box is that file's own
+_TURN_BASE = 100
+
+
+def _name_order(path):
+    """PAD-1084: files picked together go in by name, numbers by value ("Song 2" before "Song 10")."""
+    return [(0, int(t), "") if t.isdigit() else (1, 0, t)
+            for t in re.split(r"(\d+)", os.path.basename(path).lower()) if t]
+
+
+#: PAD-1005: the headers :func:`_memory_estimate` read for slots the scan had not, by (path, size,
+#: modified): the tab reads a slot's format lazily, and a Deadpool card's 8,252 are mostly unread
+_HEADERS = {}
+
+
+def _header_info(path):
+    from ...core import audio as _audio
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (path, st.st_size, st.st_mtime_ns)
+    if key not in _HEADERS:
+        if len(_HEADERS) > 50000:
+            _HEADERS.clear()
+        try:
+            _HEADERS[key] = _audio.detect_audio_info(path)
+        except Exception:                                   # noqa: BLE001
+            _HEADERS[key] = None
+    return _HEADERS[key]
+
+
+def _memory_estimate(project, slots, modes, mturns, turns, assign, juke, uses=None):
+    """PAD-1005: :func:`...plugins.stern.memory_budget.estimate` for an Audio tab's project:
+    *slots* ``[(rel, path, info)]``, *modes* ``{rel: {m: path}}``, *mturns* ``{rel: {m: [path,
+    ...]}}``, *turns* ``{rel: [path, ...]}``, *assign* ``{rel: path}`` the replacements that keep
+    their own length, *juke* the jukebox's songs. As the build plans it (``engine.
+    _plan_sound_banks``): with music modes' files every sound a bank can hold goes into one, each
+    at the slot's own channels, a file in turn cut to its slot's (or its mode file's) length, a
+    longer replacement whole with the game's own recording out of ``image.bin``; a jukebox song
+    stays in ``image.bin``; a game's own sound banks' sounds (``music_catNN_*``) count as those
+    banks (PAD-1005: Deadpool, Metallica, D&D)."""
+    from ...core import audio as _audio
+    from ...core import card_paths
+    from ...core import staged_originals
+    from ...plugins.stern import memory_budget as _MB
+
+    def dur(path):
+        try:
+            info = _audio.detect_audio_info(path)
+            if info is not None and info.duration:
+                return float(info.duration)
+            return float(_audio.probe_duration(path) or 0.0)
+        except Exception:                                   # noqa: BLE001
+            return 0.0
+    stock, chans, secs, vendor = 0, {}, {}, {}
+    for rel, path, info in slots:
+        orig = staged_originals.snapshot_path(project, rel)
+        if orig and os.path.isfile(orig):
+            info = _audio.detect_audio_info(orig) or info
+        if info is None:                                    # (a header the scan has not read yet)
+            info = _header_info(path)
+        if info is None:
+            continue
+        ch = int(info.channels or 1)
+        chans[rel], secs[rel] = ch, float(info.duration or 0.0)
+        # (a game's own sound bank's sounds come out as music_catNN_*: that bank's, not
+        # image.bin's; Deadpool Pro 1.16's add up to each image-scNN.bin's size)
+        where = card_paths.audio_container(rel) or "image.bin"
+        if where == "image.bin":
+            stock += _MB.pcm_bytes(info.duration, ch)
+        else:
+            vendor[where] = vendor.get(where, 0) + _MB.pcm_bytes(info.duration, ch)
+    banked, credit, grow = [], 0, 0
+    # (a slot no sound request plays, *uses* ``{rel: [(request, name)]}``: the build keeps its
+    # files in image.bin, and the game never plays them; Deadpool Pro 1.16's idx 2131)
+    unplayed = {}
+
+    def put(rel, name, nbytes):
+        if uses is not None and rel in uses and not uses[rel]:
+            unplayed[rel] = unplayed.get(rel, 0) + 1
+            return nbytes
+        banked.append((name, nbytes))
+        return 0
+    held = 0
+    for rel, by in sorted(modes.items()):
+        ch = chans.get(rel, 2)
+        own = {}
+        for m, f in sorted(by.items()):
+            if f not in own:                                # (one file in two modes: one record)
+                own[f] = dur(f)
+                held += put(rel, os.path.basename(f), _MB.pcm_bytes(own[f], ch))
+            d = own[f]
+            for t in (mturns.get(rel) or {}).get(m) or ():
+                held += put(rel, os.path.basename(t), _MB.pcm_bytes(min(dur(t), d), ch))
+    for rel, files in sorted(turns.items()):
+        ch, room = chans.get(rel, 1), secs.get(rel, 0.0)
+        for t in files:
+            held += put(rel, os.path.basename(t), _MB.pcm_bytes(min(dur(t), room), ch))
+    grow += held
+    music = bool(banked or held) and bool(modes or turns)
+    for rel, path in sorted(assign.items()):
+        if rel not in secs:
+            continue
+        d, ch = dur(path), chans[rel]
+        if d <= secs[rel] + 0.01:
+            continue
+        if music:                                           # (PAD-995: into a bank, whole)
+            banked.append((os.path.basename(path), _MB.pcm_bytes(d, ch)))
+            credit += _MB.pcm_bytes(secs[rel], ch)
+        else:
+            grow += _MB.pcm_bytes(d, ch) - _MB.pcm_bytes(secs[rel], ch)
+    for f in juke:
+        if f and os.path.isfile(f):
+            grow += _MB.pcm_bytes(dur(f), 2)
+    est = _MB.estimate(stock, banked, credit=credit, grow=grow, vendor=list(vendor.values()))
+    est["unplayed"] = [(os.path.basename(rel), n) for rel, n in sorted(unplayed.items())]
+    return est
+#: PAD-638: music mode m's own file k in turn is pseudo mode _MODE_TURN_BASE + m * 20 + k
+#: (sound_modes.mode_turn)
+_MODE_TURN_BASE = 1000
+#: PAD-641: the most sounds the flipper buttons play in attract (sound_modes.ATTRACT_MAX)
+_ATTRACT_MAX = 16
+#: PAD-641 round 2: the times between two of them the menu offers (sound_modes.ATTRACT_GAPS)
+_ATTRACT_GAPS = (0, 10, 30, 60, 120, 300)
+
+
+def _gap_words(s):
+    """A time between two flipper sounds in words: "30 seconds", "1 minute", "2 minutes"."""
+    s = int(s)
+    if s and s % 60 == 0:
+        return "1 minute" if s == 60 else "%d minutes" % (s // 60)
+    return "1 second" if s == 1 else "%d seconds" % s
+
+
+#: PAD-641: what the Attract flipper sounds button says it does
+_ATTRACT_TIP = ("Sounds the machine plays when a flipper button is pressed in attract mode (no game "
+                "being played), one after another, in place of the game's own sound there. Each "
+                "is played for at most the length of the game sound it rides on.")
+
+#: PAD-945: what the Sounds on shots button and window say they do
+_SHOT_TIP = ("Sounds the machine plays when a shot is hit while one of the game's modes runs: "
+             "pick the mode, the shot and the sound (one of the game's own, or a file of yours). "
+             "A shot can have a sound for each color its light shows (a mode whose lit shots "
+             "change color with each level, say): the color it was lit when it was hit picks the "
+             "sound. A sound plays whole, and a hit while the last one still plays adds no other. "
+             "Write puts them on the card.")
+#: PAD-945: the most of them (sound_modes.SHOT_MAX)
+_SHOT_MAX = 32
+
 from .. import compat
 from ..find_originals import FindOriginalsMixin
 from .base import TabService, rpc
+from ..testcard_tags import TestTagMixin
 
 #: The tail the count line wears while the change diff runs.
 _CHANGE_SCAN_NOTE = "  ·  still checking…"
@@ -45,9 +203,62 @@ _NO_PROJECT_NOTE = "(no project yet — extract into one on the Extract tab)"
 _TYPE_KEYS = {"Music": "music", "Sound FX": "sfx", "Callouts": "callouts",
               "Other": "other"}
 _CAT_DISP = {"music": "Music", "sfx": "Sound FX", "callouts": "Callouts"}
-_CAT_NAMES = (("music", "Music"), ("sfx", "Sound FX"),
+
+#: PAD-635: the Requests column's heading tip, and how many requests a cell's
+#: tip names before it says how many more there are
+_REQ_TIP = ("How many of the game code's sound requests play this sound. The "
+            "game's code asks for a sound by its request number, and each "
+            "request plays one or more sounds. None = no request plays it: "
+            "the game program never asks for it, so it is most likely a "
+            "leftover the game does not use. Click the heading to sort by it.")
+_REQ_TIP_MAX = 12
+
+
+def _uses_lines(uses):
+    """The Requests cell's tip: the requests that play a sound, by number and
+    Sound Test name."""
+    if not uses:
+        return ["No sound request in the game's code plays this sound: the "
+                "game program never asks for it, so it is most likely a "
+                "leftover the game does not use."]
+    lines = ["Played by %d of the game code's sound requests:" % len(uses)
+             if len(uses) > 1 else
+             "Played by one of the game code's sound requests:"]
+    lines += ["#%d%s" % (r, "  " + n if n else "")
+              for r, n in uses[:_REQ_TIP_MAX]]
+    if len(uses) > _REQ_TIP_MAX:
+        lines.append("and %d more" % (len(uses) - _REQ_TIP_MAX))
+    return lines
+
+
+def _variants_lines(n, duration):
+    """The Format cell's tip for a file of *n* variants of one sound (PAD-637)."""
+    each = (duration or 0.0) / n
+    return ["This sound comes in %d variants%s; the game plays one of them each "
+            "time, picked by what is happening in the game. The file holds them "
+            "one after another." % (n, ", %.2f s each" % each if each > 0 else ""),
+            "Edit this file and keep its length, and each variant gets its own "
+            "part back. Any other sound becomes every variant, cut to one "
+            "variant's length."]
+
+
+_CAT_NAMES =(("music", "Music"), ("sfx", "Sound FX"),
               ("callouts", "Callouts"), ("other", "Other"))
 _CHANGE_FILTER_VALUES = ("All", "Changed", "Unchanged")
+
+# callouts.csv's classification for each Type (PAD-1060)
+_TYPE_KINDS = {"callouts": "speech", "music": "music", "sfx": "non-speech",
+               "other": "non-speech"}
+
+
+def _type_kind(cat, kind):
+    """The callouts.csv classification a sound of Type *cat* gets, its row
+    holding *kind* now: kept unless it is one the Type classifier reads and
+    says otherwise ("error" and the like stay; '' is a new row)."""
+    want = _TYPE_KINDS.get(cat)
+    if want is None or kind not in ("", "speech", "music", "non-speech"):
+        return kind or "non-speech"
+    return want
 
 _AUDIO_FILETYPES = [("Audio files",
                      "*.wav *.ogg *.mp3 *.flac *.m4a *.aac *.opus "
@@ -55,24 +266,45 @@ _AUDIO_FILETYPES = [("Audio files",
                     ("All files", "*.*")]
 _FOLDER_MATCH_EXTS = (".wav", ".ogg", ".mp3", ".flac", ".m4a", ".aac",
                       ".opus", ".wma", ".aiff", ".aif")
+#: PAD-685: a jukebox song's intro video
+_VIDEO_FILETYPES = [("Video files", "*.mp4 *.mov *.m4v *.mkv *.avi *.webm *.wmv *.mpg *.mpeg"),
+                    ("All files", "*.*")]
+#: PAD-999: Add songs takes a song's audio and its intro video at once, named alike
+_JUKE_FILETYPES = [("Songs and their intro videos", _AUDIO_FILETYPES[0][1] + " " + _VIDEO_FILETYPES[0][1]),
+                   _AUDIO_FILETYPES[0], _VIDEO_FILETYPES[0], ("All files", "*.*")]
+#: PAD-1106: the Replacement pane's title and a row's Replacement cell for a song mode's record the
+#: jukebox plays songs in place of (its pool's song count)
+_JUKE_PANE = "Replacement (jukebox: 1 of %d songs at random)"
+_JUKE_CELL = "Jukebox: 1 of %d songs at random"
+_JUKE_TIP = ("A jukebox for the song modes: each time a song mode starts, the game plays one of these "
+             "songs, drawn at random, with its own intro video. A Common song comes up three times as "
+             "often as a Rare one, and a song never comes back within five song modes, so none plays "
+             "twice in a game. No setting, no choosing: every start throws the dice.")
 
 #: Click-header sort: (column id, heading, default descending).
 _SORT_CFG = (("#0", "Original Track", False), ("len", "Length", True),
              ("fmt", "Format", False), ("type", "Type", False),
              ("rep", "Replacement", False), ("loop", "Loop", True),
-             ("keep", "Full", True), ("lvl", "Level", True))
+             ("keep", "Full", True), ("lvl", "Level", True),
+             ("rq", "Requests", True), ("cm", "Comment", False))
 _SORT_DEFAULT_DESC = {c: d for c, _h, d in _SORT_CFG}
 
 # Keep in step with App._AUDIO_ADV_DEFAULTS (and the Tk dialog).
 ADV_DEFAULTS = {
     "head_mode": "encode", "leadout": "silence", "previews": False,
     "experiment_idxs": "", "slot_seed": False, "slot_seed_db": 65,
-    "blip_free_optin": False, "audio_grow": False,
     "loudness": "match", "loudness_db": 0,
 }
 LOUDNESS_CHOICES = (
     ("match", "Match the sound being replaced (default)"),
     ("full", "Normalize each replacement to full scale"),
+)
+#: the only Advanced settings a SAM or Spike 1 build reads (PAD-588); their
+#: "full" turns the match off and keeps the replacement's own level
+ADV_LOUDNESS_KEYS = ("loudness", "loudness_db")
+LOUDNESS_CHOICES_OWN = (
+    ("match", "Match the sound being replaced (default)"),
+    ("full", "Keep each replacement's own level"),
 )
 HEAD_CHOICES = (
     ("encode", "Re-encode from the first sample (default)"),
@@ -121,7 +353,15 @@ class _ProfileButton:
     pack_forget = pack
 
 
-class AudioTab(FindOriginalsMixin, TabService):
+class AudioTab(TestTagMixin, FindOriginalsMixin, TabService):
+    _tc_kind = "sound"                # PAD-1279: a TEST tick puts the row on the test card
+
+    def _tc_project(self):
+        return self._assets()
+
+    def _tc_file(self, rel):
+        return (self._by_rel.get(rel).abs_path if self._by_rel.get(rel) is not None else None)
+
     ns = "audio"
     key = "Replace Audio"
     label = "Audio"
@@ -130,7 +370,7 @@ class AudioTab(FindOriginalsMixin, TabService):
     exports = (
         "pending_audio_assignments", "audio_keep_full_rels",
         "audio_loop_basenames", "audio_trim_var", "_audio_grow_active",
-        "_audio_profile_btn",
+        "_audio_profile_btn", "reveal_audio_slot",
     )
     _orig_kind = "sound"
     _orig_label = "Replace Audio"
@@ -142,12 +382,27 @@ class AudioTab(FindOriginalsMixin, TabService):
         self.audio_search_var = self.var("search", "str", "")
         self.audio_type_var = self.var("type", "str", "All types")
         self.audio_change_filter_var = self.var("show", "str", "All")
+        # PAD-1105: leave out the sounds no sound request plays (Requests: None)
+        self.audio_hide_unused_var = self.var("hide_unused", "bool", False)
         self.audio_play_through_var = self.var("play_through", "bool", False)
         self.audio_play_subst_var = self.var("play_subst", "bool", False)
         self.audio_group_dups_var = self.var("group_dups", "bool", False)
+        # PAD-1209: the Play boxes come back as the last session left them
+        self.audio_play_through_var.set(
+            self._pref("audio_play_through", bool) is True)
+        self.audio_play_subst_var.set(
+            self._pref("audio_play_subst", bool) is True)
+        self.audio_play_through_var.trace_add(
+            "write", lambda *a: self._remember(
+                "audio_play_through", bool(self.audio_play_through_var.get())))
+        self.audio_play_subst_var.trace_add(
+            "write", lambda *a: self._remember(
+                "audio_play_subst", bool(self.audio_play_subst_var.get())))
         self.audio_search_var.trace_add("write",
                                         lambda *a: self._refresh_list())
         self.audio_change_filter_var.trace_add(
+            "write", lambda *a: self._refresh_list())
+        self.audio_hide_unused_var.trace_add(
             "write", lambda *a: self._refresh_list())
         self.audio_group_dups_var.trace_add("write",
                                             lambda *a: self._refresh_list())
@@ -155,11 +410,59 @@ class AudioTab(FindOriginalsMixin, TabService):
 
         self._slots = []
         self._by_rel = {}
+        self._comments = {}         # PAD-1069: rel -> the user's comment (callouts.csv)
+        self._comments_sig = None
+        self._reveal_rel = None     # a slot to show once the scan lands (reveal_audio_slot)
         self._assign = {}           # rel -> replacement path
         self._loop = {}             # rel -> bool (BOF)
         self._keep = {}             # rel -> bool (JJP)
         self._level = {}            # rel -> int dB (Stern)
+        self._uses = None           # rel -> [(request, name)] (PAD-635)
+        self._variants = {}         # rel -> variants its file holds (PAD-637)
         self._keep_whole = []       # ordered rels (Stern Spike 2 grow)
+        # PAD-494: a slot's files for the other MUSIC MODES ({rel: {mode: path}}),
+        # the modes' names, and the plugin's answer to which slots can have them
+        self._modes = {}
+        self._mode_names = []
+        self._sm_offer = None
+        # each mode file's own loudness ({rel: {mode: dB}}), whether the folder's
+        # record is from before they had one, and the mode file the Replacement
+        # pane is playing ((rel, mode), or None: the slot's own replacement)
+        self._mode_levels = {}
+        self._modes_legacy = False
+        self._rep_mode = None
+        # PAD-565: a slot's files the game plays IN TURN with its own ({rel: [path, ...]}, file 2
+        # first), kept in the same record as the music modes
+        self._turns = {}
+        # PAD-638: the slots of them whose files play AT RANDOM, not one after another
+        self._random = set()
+        # PAD-638: each file in turn's own loudness ({rel: {k: dB}}, k = 2..)
+        self._turn_levels = {}
+        # PAD-638: a music mode's own files in turn ({rel: {m: [path, ...]}}), the modes of them
+        # that play at random ({rel: {m, ...}}) and their loudness ({rel: {m: {k: dB}}})
+        self._mode_turns = {}
+        self._mode_random = {}
+        self._mode_turn_levels = {}
+        # PAD-641: the sounds the flipper buttons play in attract ([path, ...]), the same record
+        self._attract = []
+        self._attract_gap = 0            # PAD-641 round 2: seconds between two of them (0: any time)
+        # PAD-685: the jukebox's songs ([{"audio", "video", "weight", "pool"}]), its own sidecar key
+        self._juke = []
+        self._juke_pool = ""             # PAD-1007: the pool the Jukebox window shows (its first: "")
+        # PAD-1106: a jukebox song the Replacement pane drew for a song mode's record (its rel, or None),
+        # whether it was stopped or played to its end (the next Play draws again), and each pool's
+        # last draws (the next keeps clear of them, as the game's does)
+        self._juke_rep = None
+        self._juke_spent = False
+        self._juke_recent = {}
+        # PAD-945: the sounds on the shots of the game's modes ([{"mode", "mode_name",
+        # "switch", "switch_name", "file"}]), the same record; the sound the window adds next and
+        # the game's modes and shots it offers (read once per project)
+        self._shots = []
+        self._shot_pick = ""
+        self._shot_choices = None
+        # PAD-1005: the machine-memory estimate's generation (a newer one drops an older's answer)
+        self._mem_gen = 0
         self._cats = {}
         self._music_by_length = True
         self._sort = ("#0", False)
@@ -201,11 +504,12 @@ class AudioTab(FindOriginalsMixin, TabService):
                  ffmpeg_missing=False, ffmpeg_text=_FFMPEG_WARN,
                  col=None, level_cap=False, dups_cap=False, adv_cap=False,
                  trim_visible=True, trim_tip="", type_useful=False,
-                 level="0", level_enabled=False, can_clear=False,
+                 level="0", level_enabled=False, level_label="", level_all=True,
+                 can_clear=False,
                  running=False, profile_busy=False, adv_marker=False,
                  prefix="", sort={"key": "#0", "desc": False},
                  panes=dict(self._panes), dup_scanning=False,
-                 widths=self._saved_widths(), pex=False)
+                 widths=self._saved_widths(), pex=False, modes_share=False, attract=None, mem=None)
 
     # ------------------------------------------------------------------
     # small helpers
@@ -214,7 +518,8 @@ class AudioTab(FindOriginalsMixin, TabService):
     def _blank_pane(base, hint=""):
         return {"base": base, "name": "", "path": None, "dur": 0.0,
                 "limit": None, "grow_from": None, "gain": 0.0,
-                "hint": hint, "spec": None, "spec_state": "", "v": 0}
+                "hint": hint, "spec": None, "spec_state": "", "v": 0,
+                "rel": None}
 
     def _assets_var(self):
         return getattr(self.window, "write_assets_var", None)
@@ -255,6 +560,8 @@ class AudioTab(FindOriginalsMixin, TabService):
         fd = compat.filedialog
         if mode == "open":
             path = fd.askopenfilename(title=title, initialdir=start, **opts)
+        elif mode == "open_many":
+            path = fd.askopenfilenames(title=title, initialdir=start, **opts)
         elif mode == "folder":
             path = fd.askdirectory(title=title, initialdir=start)
         else:
@@ -266,6 +573,21 @@ class AudioTab(FindOriginalsMixin, TabService):
             if folder and os.path.isdir(folder):
                 self.window.remember_browse_dir(key, folder)
         return path
+
+    def _ask_audio_files(self, title):
+        """PAD-1084: one or more sound files from one picker, in name order (the picker's own
+        order is the order they were clicked in), or ``[]``."""
+        self._cancel_select_job()
+        self.stop_all_preview_playback()
+        got = self._ask_path("open_many", "audio_replacement", title, filetypes=_AUDIO_FILETYPES)
+        if isinstance(got, str):
+            got = [got] if got else []
+        out = []
+        for p in got or ():
+            p = os.path.normpath(p) if p else ""
+            if p and p not in out:
+                out.append(p)
+        return sorted(out, key=_name_order)
 
     # ------------------------------------------------------------------
     # manufacturer / show / running
@@ -280,6 +602,8 @@ class AudioTab(FindOriginalsMixin, TabService):
         self._loop = {}
         self._keep = {}
         self._level = {}
+        self._uses = None
+        self._rep_mode = None
         self._scan_dir = ""
         self._dup_groups = None
         self._dup_scan_dir = ""
@@ -295,11 +619,17 @@ class AudioTab(FindOriginalsMixin, TabService):
             col = "lvl"
         else:
             col = None
-        self.set(col=col,
+        # Spike 2's encoder reads every Advanced lever; SAM and Spike 1 only
+        # the loudness row (PAD-588), so they get that row alone
+        self._adv_full = (mfr.key == "stern"
+                          and getattr(mfr, "current_era", "spike2")
+                          == "spike2")
+        self.set(col=col, req_cap=False, req_note="",
                  level_cap=bool(getattr(caps, "audio_level_offset", False)),
                  dups_cap=getattr(mfr, "find_duplicate_sounds", None)
                  is not None,
-                 adv_cap=(mfr.key == "stern"), sel=[],
+                 adv_cap=(mfr.key == "stern"), adv_full=self._adv_full,
+                 sel=[],
                  pex=bool(getattr(caps, "partition_explorer", False)),
                  profile_busy=False)
         self._audio_profile_btn._state = "normal"
@@ -312,6 +642,7 @@ class AudioTab(FindOriginalsMixin, TabService):
     def on_show(self):
         self._refresh_ffmpeg_warning()
         self._default_assets_from_extract()
+        self._tc_publish()           # PAD-1279: the TEST column
         self._refresh_folder()
         self._maybe_rescan()
 
@@ -398,6 +729,17 @@ class AudioTab(FindOriginalsMixin, TabService):
             kept = {}
         staged_changes.save(assets_dir, kept)
 
+    def forget_reset(self, assets_dir, kinds):
+        """PAD-569 Reset…: forget the picks it resets, so a later save of this tab cannot
+        write them back over the sidecar the reset just cleared."""
+        if "sounds" in kinds:
+            self._assign = {}
+            self._loop = {}
+            self._keep = {}
+            self._level = {}
+            self._keep_whole = []
+            self._modes = {}
+
     def refresh_after_revert(self):
         self._changed = set()
         self._foreign = set()
@@ -468,9 +810,14 @@ class AudioTab(FindOriginalsMixin, TabService):
         mfr = self.mfr
         if getattr(mfr, "key", None) != "stern":
             return False
-        if getattr(mfr, "current_era", "spike2") != "spike2":
+        # PAD-1186: a Spike 3 Write plays each sound at its own length too
+        # (spike3_write.plan_sounds: shorter in place, longer grows the
+        # container), so a replacement is staged whole there as well
+        if getattr(mfr, "current_era", "spike2") not in ("spike2", "spike3"):
             return False
-        return bool(self._advanced.get("audio_grow"))
+        # Always on since PAD-843 (no Advanced checkbox any more); only the
+        # engine-level PAD_STERN_AUDIO_GROW=0 turns it off.
+        return os.environ.get("PAD_STERN_AUDIO_GROW") != "0"
 
     # ------------------------------------------------------------------
     # scanning
@@ -503,7 +850,12 @@ class AudioTab(FindOriginalsMixin, TabService):
             except Exception:                           # noqa: BLE001
                 exts = None
             try:
+                keep = mfr.slot_keep_dirs(assets_path) if mfr else ()
+            except Exception:                           # noqa: BLE001
+                keep = ()
+            try:
                 slots = scan_audio_slots(assets_path, roots=roots, exts=exts,
+                                         keep_dirs=keep,
                                          probe=False)
             except Exception:                           # noqa: BLE001
                 slots = []
@@ -513,10 +865,35 @@ class AudioTab(FindOriginalsMixin, TabService):
                     assets_path, [s.rel_path for s in slots])
             except Exception:                           # noqa: BLE001
                 cats = {}
+            # PAD-494: which slots can have files for other music modes (it
+            # may open the card image, so here and not on the UI thread)
+            try:
+                offer = (mfr.sound_modes_offer(
+                    assets_path, [s.rel_path for s in slots]) if mfr else None)
+            except Exception:                           # noqa: BLE001
+                offer = None
+            # PAD-635: which of the game's sound requests play each slot
+            try:
+                uses = (mfr.sound_request_uses(
+                    assets_path, [s.rel_path for s in slots]) if mfr else None)
+            except Exception:                           # noqa: BLE001
+                uses = None
+            # and why there is no map for a project that could have one
+            try:
+                req_why = ((mfr.sound_request_why(assets_path) or "")
+                           if mfr and uses is None else "")
+            except Exception:                           # noqa: BLE001
+                req_why = ""
+            # PAD-637: which slots' files are several variants of one sound
+            try:
+                variants = (mfr.sound_variant_counts(
+                    assets_path, [s.rel_path for s in slots]) if mfr else None)
+            except Exception:                           # noqa: BLE001
+                variants = None
             if self._scan_id != scan_id:
                 return
             self._post(self._populate_after_scan, slots, scan_id,
-                       assets_path, cats)
+                       assets_path, cats, offer, uses, variants, req_why)
 
         self._set_scanning(True)
         threading.Thread(target=_work, daemon=True,
@@ -553,22 +930,33 @@ class AudioTab(FindOriginalsMixin, TabService):
         self._scan_id += 1
         t0, self._scan_t0 = self._scan_t0, None
         if t0 is not None:
-            self.log("Audio scan cancelled after %.1f s."
+            self.log("Audio scan canceled after %.1f s."
                      % (time.monotonic() - t0), "info")
         self._scanning = False
         self._cancelled = True
         self.set(scanning=False, rows=[],
-                 empty="Scan cancelled — click Scan to try again.")
+                 empty="Scan canceled — click Scan to try again.")
         return True
 
-    def _populate_after_scan(self, slots, scan_id, scan_dir, cats=None):
+    def _populate_after_scan(self, slots, scan_id, scan_dir, cats=None,
+                             offer=None, uses=None, variants=None,
+                             req_why=""):
         from ...core import staged_changes
         if self._scan_id != scan_id:
             return
         self._set_scanning(False)
         self._cats = cats or {}
+        self._uses = uses if isinstance(uses, dict) else None
+        self._variants = variants if isinstance(variants, dict) else {}
+        if self._uses is None and self._sort[0] == "rq":
+            self._sort = ("#0", False)
+        self.set(req_cap=self._uses is not None, req_tip=_REQ_TIP,
+                 req_note=(req_why or "") if self._uses is None else "")
+        self._sm_offer = offer if isinstance(offer, dict) else None
         if scan_dir != self._scan_dir:
-            self.audio_type_var.set("All types")
+            # PAD-1209: the Type last picked, in any session
+            want = self._pref("audio_type", str)
+            self.audio_type_var.set(want if want in _TYPE_KEYS else "All types")
         self._refresh_type_filter()
         if scan_dir == self._scan_dir:
             old = self._by_rel
@@ -594,9 +982,21 @@ class AudioTab(FindOriginalsMixin, TabService):
             persisted_trim = bool(staged.get("audio_trim", False))
             self._restore_change_filter(staged)
             self.audio_group_dups_var.set(False)
+            self._load_modes(staged)
         else:
             self._assign = {rel: rep for rel, rep in self._assign.items()
                             if rel in self._by_rel}
+            self._modes = {rel: v for rel, v in self._modes.items()
+                           if rel in self._by_rel}
+            self._mode_levels = {rel: v for rel, v in self._mode_levels.items()
+                                 if rel in self._modes}
+            self._turns = {rel: v for rel, v in self._turns.items()
+                           if rel in self._by_rel}
+            self._random &= set(self._turns)
+            self._turn_levels = {rel: v for rel, v in self._turn_levels.items()
+                                 if rel in self._turns}
+            self._mode_turns = {rel: v for rel, v in self._mode_turns.items()
+                                if rel in self._modes}
         self._loop = {
             s.rel_path: (bool(saved_loops[s.rel_path])
                          if s.rel_path in saved_loops
@@ -620,6 +1020,13 @@ class AudioTab(FindOriginalsMixin, TabService):
                 continue
             if db:
                 self._level[rel] = max(min(db, 12), -12)
+        if self._modes_legacy:
+            # PAD-494: before mode files had a loudness of their own, a slot's
+            # offset reached them too; they start where those builds put them
+            self._modes_legacy = False
+            for rel, md in self._modes.items():
+                if self._level.get(rel):
+                    self._mode_levels[rel] = {m: self._level[rel] for m in md}
         keep_whole = (self._keep_whole if saved_keep_whole is None
                       else saved_keep_whole)
         self._keep_whole = [r for r in keep_whole if r in self._by_rel]
@@ -634,13 +1041,21 @@ class AudioTab(FindOriginalsMixin, TabService):
               and any(r not in self._by_rel
                       for _l, _d, rels in self._dup_groups for r in rels)):
             self._dup_groups = None
-        self.set(prefix=self._common_prefix())
+        self.set(prefix=self._common_prefix(),
+                 modes_share=(self._sm_offer is not None or bool(self._modes)
+                              or bool(self._turns) or bool(self._attract) or bool(self._shots)))
         if self.audio_group_dups_var.get():
             self._ensure_dup_groups(quiet=True)
         self._refresh_list()
-        self._select_first_row()
+        rel, self._reveal_rel = self._reveal_rel, None
+        if rel not in self._by_rel or not self._reveal_now(rel):
+            self._select_first_row()
         self._start_change_scan()
         self._probe_metadata_async(scan_id)
+        # PAD-1068: the Expression lights songs are this scan's; however long it took
+        announce = getattr(self.window, "audio_scanned", None)
+        if announce is not None:
+            announce(scan_dir)
 
     def _common_prefix(self):
         """The folder most slots share ("audio/" on a Stern extract), so the
@@ -655,6 +1070,34 @@ class AudioTab(FindOriginalsMixin, TabService):
         if not d or n * 2 < len(self._slots):
             return ""
         return d + "/"
+
+    def reveal_audio_slot(self, rel):
+        """PAD-592: MainWindow.reveal_audio_slot (the Video tab's clip sounds): show one slot on
+        this tab, clearing any filter that would hide it. A scan the tab makes on showing lands
+        on it."""
+        self.window.select_tab(self.ns)
+        if rel in self._by_rel and not self._scanning:
+            return self._reveal_now(rel)
+        self._reveal_rel = rel if self._scanning else None
+        return self._scanning
+
+    def _reveal_now(self, rel):
+        if rel not in (self._visible_rels or ()) or self.audio_group_dups_var.get():
+            self.audio_search_var.set("")
+            self.audio_type_var.set("All types")
+            self.audio_change_filter_var.set("All")
+            self.audio_hide_unused_var.set(False)
+            self.audio_group_dups_var.set(False)
+            self._refresh_list()
+        if rel not in (self._visible_rels or ()):
+            return False
+        self._sel = [rel]
+        self.set(sel=[rel])
+        self._cancel_select_job()
+        self._level_sync()
+        self._publish_cur()
+        self._load_track(rel)
+        return True
 
     def _select_first_row(self):
         if not self._visible_rels:
@@ -721,7 +1164,7 @@ class AudioTab(FindOriginalsMixin, TabService):
         i = self._row_index.get(rel)
         if i is not None:
             self.patch_item("rows", i, len=slot.duration_str(),
-                            fmt=slot.format_summary())
+                            **self._fmt_cells(slot))
 
     # ------------------------------------------------------------------
     # the on-disk change diff
@@ -915,15 +1358,22 @@ class AudioTab(FindOriginalsMixin, TabService):
                 "info")
 
     def _restore_change_filter(self, staged):
-        # a folder that doesn't say shows everything, whatever the last
-        # project was filtered to
+        # PAD-1209: Show and Hide unused are app-wide, remembered between
+        # sessions; a folder saved before that still says what it was
+        # filtered to until they are first picked
         self.audio_change_filter_var.set("All")
-        val = staged.get("audio_change_filter")
+        val = self._pref("audio_show", str)
+        if val not in _CHANGE_FILTER_VALUES:
+            val = staged.get("audio_change_filter")
         if val in _CHANGE_FILTER_VALUES:
             self.audio_change_filter_var.set(val)
         elif "audio_changed_only" in staged:
             self.audio_change_filter_var.set(
                 "Changed" if staged["audio_changed_only"] else "All")
+        hide = self._pref("audio_hide_unused", bool)
+        if hide is None:
+            hide = bool(staged.get("audio_hide_unused"))
+        self.audio_hide_unused_var.set(hide)
 
     def _save_staged_changes(self):
         """Persist this tab's part of the folder's sidecar (the Tk window's
@@ -950,8 +1400,17 @@ class AudioTab(FindOriginalsMixin, TabService):
                                 in self._level.items() if db}
         data["grow_keep_whole"] = [r for r in self._keep_whole
                                    if r in self._by_rel]
+        modes = self._modes_json()
+        if modes:
+            data["sound_modes"] = modes
+        else:
+            data.pop("sound_modes", None)
         data["audio_trim"] = bool(self.audio_trim_var.get())
         data["audio_change_filter"] = self.audio_change_filter_var.get()
+        if self.audio_hide_unused_var.get():
+            data["audio_hide_unused"] = True
+        else:
+            data.pop("audio_hide_unused", None)
         names = dict(data.get("replacement_names") or {})
         for rel, path in self._assign.items():
             if isinstance(path, str) and path.strip():
@@ -963,6 +1422,7 @@ class AudioTab(FindOriginalsMixin, TabService):
         cb = self.window.cb.get("on_folder_state_written")
         if cb is not None:
             cb(assets_dir)
+        self._memory_soon()
 
     # ------------------------------------------------------------------
     # the trim / pad lock and the Advanced marker
@@ -987,10 +1447,12 @@ class AudioTab(FindOriginalsMixin, TabService):
         return forces
 
     def _refresh_adv_marker(self):
-        d = dict(ADV_DEFAULTS)
+        keys = ADV_DEFAULTS if getattr(self, "_adv_full", True) \
+            else ADV_LOUDNESS_KEYS
+        d = {k: ADV_DEFAULTS[k] for k in keys}
         d.update({k: v for k, v in self._advanced.items()
-                  if k in ADV_DEFAULTS and v is not None})
-        self.set(adv_marker=d != ADV_DEFAULTS)
+                  if k in d and v is not None})
+        self.set(adv_marker=d != {k: ADV_DEFAULTS[k] for k in keys})
 
     # ------------------------------------------------------------------
     # the list
@@ -1007,7 +1469,8 @@ class AudioTab(FindOriginalsMixin, TabService):
         mode = self.audio_change_filter_var.get()
         if mode not in ("Changed", "Unchanged"):
             return None
-        touched = set(self._assign) | self._changed
+        # PAD-494: a slot with files for other music modes is a change too
+        touched = set(self._assign) | self._changed | set(self._modes) | set(self._turns)
         want = mode == "Changed"
         return lambda rel: (rel in touched) == want
 
@@ -1015,10 +1478,13 @@ class AudioTab(FindOriginalsMixin, TabService):
         from ...core import audio_categories as _ac
         cats = self._cats
         by_length = bool(self._music_by_length)
+        variants = self._variants
 
         def _cat_key(s):
             dur = s.duration or _ac.name_duration_seconds(
                 os.path.basename(s.rel_path)) or 0.0
+            # a file of variants plays one of them at a time (PAD-637)
+            dur /= variants.get(s.rel_path, 1)
             return _ac.effective_category(cats.get(s.rel_path, "other"), dur,
                                           by_length)
         return _cat_key
@@ -1026,6 +1492,15 @@ class AudioTab(FindOriginalsMixin, TabService):
     def _level_disp(self, rel):
         db = self._level.get(rel) or 0
         return "%+d dB" % db if db else ""
+
+    def _fmt_cells(self, s):
+        """The Format cell, and its tip when the file is several variants of one
+        sound one after another (PAD-637)."""
+        nv = self._variants.get(s.rel_path)
+        if not nv:
+            return {"fmt": s.format_summary()}
+        return {"fmt": "%s · %d variants" % (s.format_summary(), nv),
+                "fmt_tip": _variants_lines(nv, s.duration)}
 
     def _row(self, s, cat_disp, depth=0):
         rel = s.rel_path
@@ -1039,12 +1514,30 @@ class AudioTab(FindOriginalsMixin, TabService):
         elif is_changed:
             rep_disp, tag = self._changed_on_disk_cell(rel), "ondisk"
         else:
-            rep_disp, tag = "Choose…", ""
+            rep_disp, tag = self._juke_cell(rel) or "Choose…", ""
         row = {"k": rel, "len": s.duration_str(), "fmt": s.format_summary(),
                "type": cat_disp, "rep": rep_disp, "t": tag,
                "loop": bool(self._loop.get(rel)),
                "keep": bool(self._keep.get(rel)),
                "lvl": self._level_disp(rel)}
+        md = self._modes.get(rel)
+        if md:
+            row["md"] = sorted(md)
+            row["md_tip"] = self._modes_words(rel)
+        tn = self._turns.get(rel)
+        mtn = self._mode_turns.get(rel) or {}
+        if tn or mtn:
+            row["tn"] = (len(tn) + 1 if tn else 0) + sum(len(v) + 1 for v in mtn.values())
+            row["tn_tip"] = self._turns_words(rel)
+            if rel in self._random or self._mode_random.get(rel):
+                row["tr"] = True
+        if rel in self._comments:
+            row["cm"] = self._comments[rel]
+        uses = self._uses.get(rel) if self._uses else None
+        if uses is not None:
+            row["rq"] = len(uses)
+            row["rq_tip"] = _uses_lines(uses)
+        row.update(self._fmt_cells(s))
         if depth:
             row["d"] = depth
         return row
@@ -1054,15 +1547,22 @@ class AudioTab(FindOriginalsMixin, TabService):
         query = (self.audio_search_var.get() or "").strip().lower()
         type_key = _TYPE_KEYS.get(self.audio_type_var.get())
         change_ok = self._change_filter_pred()
+        # PAD-1105: a sound no request plays reads None; a blank cell (a music
+        # bank's song, or no request map at all) is not known to be unused
+        uses_map = self._uses if self.audio_hide_unused_var.get() else None
         _cat_key = self._cat_key_fn()
+        comments = self._load_comments()
 
         def _cat_disp(s):
             return _CAT_DISP.get(_cat_key(s), "Other")
 
         def _passes(s):
-            if query and query not in s.rel_path.lower():
+            if query and query not in s.rel_path.lower() and query not in (
+                    comments.get(s.rel_path) or "").lower():
                 return False
             if change_ok is not None and not change_ok(s.rel_path):
+                return False
+            if uses_map and uses_map.get(s.rel_path, None) == []:
                 return False
             if type_key is None:
                 return True
@@ -1090,8 +1590,16 @@ class AudioTab(FindOriginalsMixin, TabService):
                 return (1 if self._keep.get(s.rel_path) else 0,)
             if col == "lvl":
                 return (self._level.get(s.rel_path, 0),)
+            if col == "rq":
+                uses = self._uses.get(s.rel_path) if self._uses else None
+                return (-1 if uses is None else len(uses), s.rel_path.lower())
             if col == "type":
                 return (_cat_disp(s), s.rel_path.lower())
+            if col == "cm":
+                # the sounds with a comment first, A to Z
+                cm = comments.get(s.rel_path)
+                return (0 if cm else 1, (cm or "").lower(),
+                        s.rel_path.lower())
             return (s.rel_path.lower(),)
 
         rows, visible = [], []
@@ -1138,7 +1646,8 @@ class AudioTab(FindOriginalsMixin, TabService):
                 rows.append(self._row(s, _cat_disp(s)))
 
         total = len(self._slots)
-        changed_total = len(set(self._assign) | changed)
+        changed_total = len(set(self._assign) | changed | set(self._modes)
+                            | set(self._turns))
         shown_n = len(slots)
         if total == 0:
             status = ""
@@ -1149,7 +1658,8 @@ class AudioTab(FindOriginalsMixin, TabService):
                                                    extra)
             hint = ""
             if shown_n == 0:
-                hint = "Nothing matches the Search / Show / Type filters."
+                hint = ("Nothing matches the Search / Show / Type filters%s."
+                        % (" or Show unused" if uses_map else ""))
                 if not query and type_key == "callouts":
                     hint = ("No call-outs identified in this folder yet.\n"
                             "Tick \"Auto-name call-outs\" on the Extract tab "
@@ -1184,17 +1694,71 @@ class AudioTab(FindOriginalsMixin, TabService):
         sel = [r for r in self._sel if r in keep]
         if sel != self._sel:
             self._sel = sel
+        # PAD-1176: "Show comments" shows / hides the Comment column; until
+        # it is first ticked or unticked the column shows once a sound has one
+        shown = self._show_comments_pref()
+        if shown is None:
+            shown = bool(comments)
         self.set(rows=rows, empty=hint, sel=list(self._sel),
-                 sort={"key": col, "desc": desc},
-                 dup_scanning=self._dup_scanning)
+                 sort={"key": col, "desc": desc}, comments=shown,
+                 dup_scanning=self._dup_scanning, attract=self._attract_state(),
+                 jukebox=self._jukebox_state(), shots=self._shots_state())
         self._publish_status()
         self._update_clear_all()
         self._level_sync()
         self._publish_cur()
+        self._memory_soon()
+
+    # ------------------------------------------------------------------
+    # PAD-1005: the machine's memory, known before a Write
+    # ------------------------------------------------------------------
+    def _memory_soon(self):
+        """Estimate how much of the machine's memory the card's sounds will take
+        (:mod:`...plugins.stern.memory_budget`) off the UI thread, and show it beside the status
+        (``mem``: None where it does not apply). An owner found out only at Write time that his
+        songs at random did not fit, and asked what the limit was; it applies where a build puts
+        sounds into sound banks: a Spike 2 project with music modes' files or files in turn."""
+        self._mem_gen += 1
+        gen = self._mem_gen
+        offer = self._sm_offer
+        project = self._scan_dir
+        if (offer is None or offer.get("why") or not project or self._scanning
+                or not (any(self._modes.values()) or any(self._turns.values()))):
+            self.set(mem=None)
+            return
+        trim = bool(self.audio_trim_var.get())
+        keep = set(self._keep_whole)
+        slots = [(s.rel_path, s.abs_path, s.info) for s in self._slots]
+        modes = {rel: dict(v) for rel, v in self._modes.items() if v}
+        mturns = {rel: {m: list(f) for m, f in by.items()} for rel, by in self._mode_turns.items()}
+        turns = {rel: list(v) for rel, v in self._turns.items() if v}
+        assign = {rel: p for rel, p in self._assign.items()
+                  if isinstance(p, str) and p.strip() and (not trim or rel in keep)}
+        juke = [str(g.get("audio") or "") for g in self._juke]
+        uses = dict(self._uses) if isinstance(self._uses, dict) else None
+
+        def _work():
+            try:
+                got = _memory_estimate(project, slots, modes, mturns, turns, assign, juke,
+                                       uses=uses)
+            except Exception:                           # noqa: BLE001 - the chip is left off
+                got = None
+            self._post(self._memory_show, gen, got)
+        threading.Thread(target=_work, daemon=True, name="pad-audio-memory").start()
+
+    def _memory_show(self, gen, got):
+        if gen != self._mem_gen:
+            return
+        if not got:
+            self.set(mem=None)
+            return
+        from ...plugins.stern import memory_budget as _MB
+        text, kind, head, lines = _MB.words(got)
+        self.set(mem={"text": text, "kind": kind, "head": head, "lines": lines})
 
     def _idle_hint(self):
         if self._cancelled:
-            return "Scan cancelled — click Scan to try again."
+            return "Scan canceled — click Scan to try again."
         if not self._scan_dir:
             return "Set the project folder on the Extract tab, then click Scan."
         return "No .wav / .ogg audio found in this folder."
@@ -1213,10 +1777,21 @@ class AudioTab(FindOriginalsMixin, TabService):
     # ------------------------------------------------------------------
     @rpc
     def set_show(self, value):
-        """Show: All / Changed / Unchanged (persisted per folder)."""
+        """Show: All / Changed / Unchanged (remembered between sessions)."""
         if value not in _CHANGE_FILTER_VALUES:
             return False
         self.audio_change_filter_var.set(value)
+        self._remember("audio_show", value)
+        self._save_staged_changes()
+        return True
+
+    @rpc
+    def set_hide_unused(self, on):
+        """PAD-1105: leave out the sounds whose Requests read None (remembered
+        between sessions). PAD-1275: the tick reads "Show unused" now, so it
+        sends the opposite of what it shows."""
+        self.audio_hide_unused_var.set(bool(on))
+        self._remember("audio_hide_unused", bool(on))
         self._save_staged_changes()
         return True
 
@@ -1225,6 +1800,7 @@ class AudioTab(FindOriginalsMixin, TabService):
         if value != "All types" and value not in _TYPE_KEYS:
             return False
         self.audio_type_var.set(value)
+        self._remember("audio_type", value)
         self._refresh_list()
         return True
 
@@ -1254,6 +1830,52 @@ class AudioTab(FindOriginalsMixin, TabService):
             self._sort = (col, not cur[1])
         else:
             self._sort = (col, _SORT_DEFAULT_DESC[col])
+        self._refresh_list()
+        return True
+
+    # PAD-1176 / PAD-1209: toolbar choices kept app-wide in settings.json
+    _SHOW_COMMENTS_KEY = "audio_show_comments"
+
+    def _pref(self, key, kind):
+        """The value *key* was last set to (of type *kind*), this session
+        or an earlier one; None when it never was."""
+        app = self.app
+        s = getattr(app, "_settings", None) if app is not None else None
+        got = s.get(key) if isinstance(s, dict) else None
+        if not isinstance(got, kind):
+            got = getattr(self, "_prefs_local", {}).get(key)
+        return got if isinstance(got, kind) else None
+
+    def _remember(self, key, value):
+        """Keep *value* for *key* in settings.json (saved straight away, so
+        it is there next session whatever way the app is closed)."""
+        if not hasattr(self, "_prefs_local"):
+            self._prefs_local = {}
+        if self._prefs_local.get(key) == value and self._pref(
+                key, type(value)) == value:
+            return
+        self._prefs_local[key] = value
+        app = self.app
+        if app is not None and isinstance(getattr(app, "_settings", None), dict):
+            app._settings[key] = value
+            try:
+                app._save_settings()
+            except Exception:                              # noqa: BLE001
+                pass
+
+    def _show_comments_pref(self):
+        """True / False once "Show comments" was ticked or unticked; None
+        before (the Comment column then shows once a sound has a comment)."""
+        return self._pref(self._SHOW_COMMENTS_KEY, bool)
+
+    @rpc
+    def set_show_comments(self, on):
+        """PAD-1176: show or hide the Comment column, remembered between
+        sessions; hiding the column the list is sorted by sorts by name."""
+        on = bool(on)
+        self._remember(self._SHOW_COMMENTS_KEY, on)
+        if not on and self._sort and self._sort[0] == "cm":
+            self._sort = ("#0", False)
         self._refresh_list()
         return True
 
@@ -1404,10 +2026,13 @@ class AudioTab(FindOriginalsMixin, TabService):
         self.set(panes=dict(self._panes))
 
     def _pane_load(self, side, path, dur=0.0, limit_fn=None, autoplay=False,
-                   label=None, gain_db=0.0, base=None):
+                   label=None, gain_db=0.0, base=None, rel=None):
         """Load *path* into pane *side*: the page's player gets the file at
         once; its length (ffprobe), the trim / grow marks and the strip
-        picture come from a worker and land when ready."""
+        picture come from a worker and land when ready.  *rel* names the
+        row whose own sound this is (PAD-1074: that row's play button turns
+        into a stop button while it plays); a mode's file, a jukebox song or
+        a picked file leaves it None."""
         self._pane_ids[side] += 1
         lid = self._pane_ids[side]
         pane = self._panes[side]
@@ -1421,7 +2046,7 @@ class AudioTab(FindOriginalsMixin, TabService):
             "grow_from": None, "gain": float(gain_db or 0.0), "hint": "",
             "spec": None,
             "spec_state": "rendering" if have_ffmpeg else "noffmpeg",
-            "v": v}
+            "v": v, "rel": rel}
         self._pane_publish(side)
         if autoplay:
             self._publish("audio_play", pane=side, path=path, pos=0.0, v=v)
@@ -1525,7 +2150,8 @@ class AudioTab(FindOriginalsMixin, TabService):
         if opath and os.path.isfile(opath):
             self._pane_load("orig", opath,
                             slot.duration if not snap_used else 0.0,
-                            autoplay=(autoplay == "orig"), base=base)
+                            autoplay=(autoplay == "orig"), base=base,
+                            rel=rel)
         else:
             self._pane_clear("orig", base=base)
         self._load_rep_pane(rel, autoplay=(autoplay == "rep"))
@@ -1535,6 +2161,8 @@ class AudioTab(FindOriginalsMixin, TabService):
         rpath = self._assign.get(rel)
         if rpath and os.path.isfile(rpath):
             return True
+        if self._juke_songs_for(rel):
+            return True
         if staged_originals.snapshot_path(self._scan_dir, rel):
             slot = self._by_rel.get(rel)
             return bool(slot and slot.abs_path
@@ -1543,6 +2171,11 @@ class AudioTab(FindOriginalsMixin, TabService):
 
     def _load_rep_pane(self, rel, autoplay=False):
         from ...core import staged_originals
+        self._juke_rep = None
+        if self._rep_mode is not None:
+            # the slot's own replacement again: the loudness box is its own
+            self._rep_mode = None
+            self._level_sync()
         rpath = self._assign.get(rel) if rel else None
         if rpath and os.path.isfile(rpath):
             self._pane_load(
@@ -1551,7 +2184,7 @@ class AudioTab(FindOriginalsMixin, TabService):
                     self._compute_preview_limit(r, d),
                     self._preview_grow_from(r, d)),
                 autoplay=autoplay, gain_db=self._level.get(rel, 0),
-                base="Replacement")
+                base="Replacement", rel=rel)
             return
         if rel and staged_originals.snapshot_path(self._scan_dir, rel):
             slot = self._by_rel.get(rel)
@@ -1561,10 +2194,62 @@ class AudioTab(FindOriginalsMixin, TabService):
                     "rep", cur, slot.duration, autoplay=autoplay,
                     label=self._remembered_rep_name(rel) or None,
                     gain_db=self._level.get(rel, 0),
-                    base="Replacement (your file)")
+                    base="Replacement (your file)", rel=rel)
                 return
+        if self._juke_load(rel, autoplay):
+            return
         self._pane_clear("rep", self._rep_pane_empty_text(
             rel, "no replacement assigned"), base="Replacement")
+
+    # -- PAD-1106: a song mode's record plays a jukebox song in the pane ------
+    def _juke_pool_of(self, rel):
+        """The jukebox pool whose songs the game plays in place of *rel* (a song mode's record), or None."""
+        if rel is None:
+            return None
+        return ((self._sm_offer or {}).get("jukebox_slots") or {}).get(rel)
+
+    def _juke_songs_for(self, rel):
+        """The jukebox songs the game plays in place of *rel*: ``[(audio, weight)]`` of its pool whose file
+        is there, ``[]`` when it is no jukebox music or its pool has none."""
+        from ...plugins.stern import jukebox as _JB
+        pool = self._juke_pool_of(rel)
+        if pool is None:
+            return []
+        return [(g["audio"], g.get("weight")) for g in self._juke
+                if (g.get("pool") or _JB.DEFAULT_POOL) == pool and g.get("audio")
+                and os.path.isfile(g["audio"])]
+
+    def _juke_load(self, rel, autoplay=False):
+        """Draw one of *rel*'s pool's songs as the game draws them (by weight, none of the pool's last
+        few) into the Replacement pane; False when *rel* has none."""
+        from ...plugins.stern import jukebox as _JB
+        songs = self._juke_songs_for(rel)
+        if not songs:
+            return False
+        pool = self._juke_pool_of(rel)
+        recent = self._juke_recent.setdefault(pool, [])
+        path = _JB.draw(songs, recent[-min(5, len(songs) - 1):] if len(songs) > 1 else ())
+        recent.append(path)
+        del recent[:-5]
+        self._pane_load("rep", path, autoplay=autoplay,
+                        label=os.path.basename(path), base=_JUKE_PANE % len(songs),
+                        rel=rel)
+        self._juke_rep = rel
+        self._juke_spent = False
+        return True
+
+    def _juke_redraw(self):
+        """▶ on a pane holding a jukebox song that was stopped or played to its end: draw the next."""
+        rel = self._current_rel
+        if not (self._juke_spent and rel is not None and self._juke_rep == rel
+                and self._panes["rep"].get("rel") == rel):
+            return False
+        return self._juke_load(rel, autoplay=True)
+
+    def _juke_cell(self, rel):
+        """The Replacement cell of a song mode's record the jukebox plays songs for, or None."""
+        n = len(self._juke_songs_for(rel))
+        return (_JUKE_CELL % n) if n else None
 
     def _compute_preview_limit(self, rel, rep_dur):
         if rel is None:
@@ -1617,6 +2302,8 @@ class AudioTab(FindOriginalsMixin, TabService):
             return True
         if side == "orig" and self._play_intercept():
             return True
+        if side == "rep" and self._juke_redraw():
+            return True
         self._publish("audio_play", pane=side, path=pane["path"], pos=None,
                       v=pane["v"])
         return True
@@ -1630,6 +2317,8 @@ class AudioTab(FindOriginalsMixin, TabService):
         pane = self._panes["rep"]
         if not pane["path"]:
             return False
+        if self._juke_redraw():
+            return True
         self._publish("audio_play", pane="rep", path=pane["path"], pos=0.0,
                       v=pane["v"])
         return True
@@ -1649,14 +2338,44 @@ class AudioTab(FindOriginalsMixin, TabService):
         for it (its replacement with "Play replacements" ticked)."""
         if rel not in self._by_rel:
             return False
+        side = ("rep" if self.audio_play_subst_var.get()
+                and self._rep_available(rel) else "orig")
+        self._play_selected(rel, side)
+        return True
+
+    def _play_selected(self, rel, side):
+        """Select *rel* alone and play its *side* pane."""
         self._sel = [rel]
         self.set(sel=[rel])
         self._cancel_select_job()
         self._level_sync()
         self._publish_cur()
-        side = ("rep" if self.audio_play_subst_var.get()
-                and self._rep_available(rel) else "orig")
         self._load_track(rel, autoplay=side)
+
+    @rpc
+    def step(self, side, delta):
+        """PAD-701: a pane's ⏮ / ⏭: play the row before / after the one
+        loaded (or selected), in the list as the sort, search and filters
+        show it.  The Replacement pane's buttons play the replacement where
+        the row has one; the Original pane's play what ▶ on the row would."""
+        rels = self._visible_rels
+        if not rels:
+            return False
+        base = next((r for r in (self._current_rel, self._selected_rel())
+                     if r in rels), None)
+        if base is None:
+            nxt = rels[0] if delta > 0 else rels[-1]
+        else:
+            i = rels.index(base) + (1 if delta > 0 else -1)
+            if not 0 <= i < len(rels):
+                return False
+            nxt = rels[i]
+        if side == "rep" or self.audio_play_subst_var.get():
+            side = "rep" if self._rep_available(nxt) else "orig"
+        else:
+            side = "orig"
+        self._cancel_advance()
+        self._play_selected(nxt, side)
         return True
 
     @rpc
@@ -1673,8 +2392,11 @@ class AudioTab(FindOriginalsMixin, TabService):
 
     @rpc
     def stop(self):
-        """■: the page silenced both panes; drop a queued sequential step."""
+        """■: the page silenced both panes; drop a queued sequential step.
+        PAD-1106: a jukebox song in the Replacement pane is done with: its
+        next ▶ draws another."""
         self._cancel_advance()
+        self._juke_spent = self._juke_rep is not None
         return True
 
     def on_tab_changed(self, ns):
@@ -1691,6 +2413,8 @@ class AudioTab(FindOriginalsMixin, TabService):
         pane = self._panes.get(side)
         if pane is None or (path and pane["path"] != path):
             return False
+        if side == "rep" and self._juke_rep is not None:
+            self._juke_spent = True             # PAD-1106: played to its end, the next ▶ draws again
         if not self.audio_play_through_var.get():
             return False
         rel = self._current_rel
@@ -1706,12 +2430,7 @@ class AudioTab(FindOriginalsMixin, TabService):
 
         def _advance():
             self._advance_job = None
-            self._sel = [nxt]
-            self.set(sel=[nxt])
-            self._cancel_select_job()
-            self._level_sync()
-            self._publish_cur()
-            self._load_track(nxt, autoplay=side)
+            self._play_selected(nxt, side)
 
         self._cancel_advance()
         self._advance_job = self._after(120, _advance)
@@ -1765,11 +2484,29 @@ class AudioTab(FindOriginalsMixin, TabService):
         except ValueError:
             return None
 
+    def _pane_mode(self, rel):
+        """The music mode whose file the Replacement pane is playing for *rel*
+        (PAD-494), or None: the box is then the slot's own replacement's."""
+        if rel is not None and self._rep_mode and self._rep_mode[0] == rel:
+            return self._rep_mode[1]
+        return None
+
+    def _rep_gain(self, rel):
+        """The loudness offset of what the Replacement pane holds for *rel*."""
+        m = self._pane_mode(rel)
+        return self._mode_level(rel, m) if m else self._level.get(rel, 0)
+
     def _level_sync(self, reset=False):
         rel = self._selected_rel()
+        m = self._pane_mode(rel)
         if rel is not None or reset:
-            self.set(level=str(self._level.get(rel, 0) if rel else 0))
-        self.set(level_enabled=bool(self._slots))
+            self.set(level=str(self._rep_gain(rel) if rel else 0))
+        self.set(level_enabled=bool(self._slots),
+                 level_label=(("Mode %d sound %d's loudness:" % divmod(m - _MODE_TURN_BASE, 20))
+                              if m and m > _MODE_TURN_BASE
+                              else ("Sound %d's loudness:" % (m - _TURN_BASE)) if m and m > _TURN_BASE
+                              else ("Mode %d's loudness:" % m) if m else ""),
+                 level_all=not m)
 
     @rpc
     def set_level(self, rel, value):
@@ -1778,6 +2515,10 @@ class AudioTab(FindOriginalsMixin, TabService):
         db = self._level_value(value)
         if db is None or rel is None or rel not in self._by_rel:
             return False
+        m = self._pane_mode(rel)
+        if m:
+            # a music mode's file is in the pane: the box is that file's own
+            return self._set_mode_level(rel, m, db, typed=value)
         if db:
             self._level[rel] = db
         else:
@@ -1797,7 +2538,7 @@ class AudioTab(FindOriginalsMixin, TabService):
         def _go():
             self._level_job = None
             if self._current_rel == rel:
-                self._pane_set_gain("rep", self._level.get(rel, 0))
+                self._pane_set_gain("rep", self._rep_gain(rel))
         self._level_job = self._after(350, _go)
 
     @rpc
@@ -2278,8 +3019,11 @@ class AudioTab(FindOriginalsMixin, TabService):
                  {"label": "Choose replacement…", "action": "choose",
                   "icon": "file"}]
         if _nmem.split_decode_name(os.path.basename(rel)):
-            items.append({"label": "Properties…  (name / type)",
+            items.append({"label": "Properties…  (name / type / comment)",
                           "action": "props", "kbd": "F2", "icon": "edit"})
+        else:
+            items.append({"label": "Comment…", "action": "props",
+                          "kbd": "F2", "icon": "edit"})
         has_assignment = bool(self._assign.get(rel))
         is_built = rel in self._changed
         if has_assignment:
@@ -2298,6 +3042,17 @@ class AudioTab(FindOriginalsMixin, TabService):
             items += [{"sep": True},
                       {"label": "Remove replacement", "action": "remove",
                        "icon": "x"}]
+        sm = self._modes_menu(rel)
+        if sm:
+            items += [{"sep": True}, sm]
+        tm = self._turns_menu(rel)
+        if tm:
+            items += [] if sm else [{"sep": True}]
+            items.append(tm)
+        if self._shots_state() is not None:       # PAD-945
+            items += [] if sm or tm else [{"sep": True}]
+            items.append({"label": "Play on a shot in one of the game's modes…", "action": "shot_here",
+                          "icon": "audio", "disabled": bool(self._shots_why())})
         if self._audio_grow_active() and re.match(
                 r"idx\d+", os.path.basename(rel) or ""):
             items += [{"sep": True},
@@ -2323,12 +3078,23 @@ class AudioTab(FindOriginalsMixin, TabService):
             return self._clear_selected(list(sel or self._sel))
         if rel not in self._by_rel:
             return False
+        if action.startswith("mode_"):
+            return self._mode_action(action, rel)
+        if action.startswith("turn_"):
+            return self._turn_action(action, rel)
+        if action.startswith("mturn_"):
+            return self._mode_turn_action(action, rel)
         if action == "play_orig":
             self._load_track(rel, autoplay="orig")
         elif action == "choose":
             return self.choose(rel)
         elif action == "props":
             return {"open": "props", "data": self.props_info(rel)}
+        elif action == "shot_here":                  # PAD-945: this sound, on a shot of a game mode
+            if self._shots_why():
+                return False
+            self._shot_pick = self._shot_source(rel)
+            return {"open": "shots", "data": self._shots_rows()}
         elif action == "play_rep":
             if not self._assign.get(rel):
                 compat.messagebox.showinfo(
@@ -2359,6 +3125,1494 @@ class AudioTab(FindOriginalsMixin, TabService):
         else:
             return False
         return True
+
+    # ------------------------------------------------------------------
+    # PAD-494: music modes - a slot's files for the other MUSIC MODES
+    # ------------------------------------------------------------------
+    def _load_modes(self, staged):
+        """The folder's music modes (``.staged_changes.json`` ``sound_modes``:
+        ``{"names": [...], "slots": {rel: {"2": file, ...}}}``), its slots
+        held to the ones this scan found."""
+        raw = staged.get("sound_modes") if isinstance(staged, dict) else None
+        raw = raw if isinstance(raw, dict) else {}
+        names = raw.get("names")
+        self._mode_names = ([str(n) if isinstance(n, str) else "" for n in names][:_MODES_MAX]
+                            if isinstance(names, (list, tuple)) else [])
+        self._modes = {}
+        slots = raw.get("slots")
+        for rel, files in (slots.items() if isinstance(slots, dict) else ()):
+            if rel not in self._by_rel or not isinstance(files, dict):
+                continue
+            keep = {}
+            for m, f in files.items():
+                try:
+                    m = int(m)
+                except (TypeError, ValueError):
+                    continue
+                if 2 <= m <= _MODES_MAX and isinstance(f, str) and f.strip():
+                    keep[m] = f
+            if keep:
+                self._modes[rel] = keep
+        # each mode file's own loudness; a record without any is from before
+        # they had one (its slots' offsets are carried over once levels load)
+        self._mode_levels = {}
+        levels = raw.get("levels")
+        self._modes_legacy = bool(self._modes) and not isinstance(levels, dict)
+        for rel, v in (levels.items() if isinstance(levels, dict) else ()):
+            if rel not in self._modes or not isinstance(v, dict):
+                continue
+            keep = {}
+            for m, db in v.items():
+                try:
+                    m, db = int(m), int(round(float(db)))
+                except (TypeError, ValueError):
+                    continue
+                if m in self._modes[rel] and db:
+                    keep[m] = max(min(db, 12), -12)
+            if keep:
+                self._mode_levels[rel] = keep
+        self._turns = {}
+        turns = raw.get("turns")
+        for rel, files in (turns.items() if isinstance(turns, dict) else ()):
+            if rel not in self._by_rel or not isinstance(files, (list, tuple)):
+                continue
+            keep = [f for f in files if isinstance(f, str) and f.strip()][:_TURNS_MAX - 1]
+            if keep:
+                self._turns[rel] = keep
+        rnd = raw.get("random")
+        self._random = {rel for rel in (rnd if isinstance(rnd, list) else ())
+                        if isinstance(rel, str) and rel in self._turns}
+        self._turn_levels = {}
+        tl = raw.get("turn_levels")
+        for rel, v in (tl.items() if isinstance(tl, dict) else ()):
+            if rel not in self._turns or not isinstance(v, dict):
+                continue
+            keep = {}
+            for k, db in v.items():
+                try:
+                    k, db = int(k), int(round(float(db)))
+                except (TypeError, ValueError):
+                    continue
+                if 2 <= k <= len(self._turns[rel]) + 1 and db:
+                    keep[k] = max(min(db, 12), -12)
+            if keep:
+                self._turn_levels[rel] = keep
+        self._mode_turns, self._mode_random, self._mode_turn_levels = {}, {}, {}
+        mt = raw.get("mode_turns")
+        for rel, by in (mt.items() if isinstance(mt, dict) else ()):
+            for m, files in (by.items() if isinstance(by, dict) else ()):
+                try:
+                    m = int(m)
+                except (TypeError, ValueError):
+                    continue
+                keep = [f for f in (files if isinstance(files, (list, tuple)) else ())
+                        if isinstance(f, str) and f.strip()][:_TURNS_MAX - 1]
+                if keep and m in (self._modes.get(rel) or {}):
+                    self._mode_turns.setdefault(rel, {})[m] = keep
+        mr = raw.get("mode_random")
+        for rel, ms in (mr.items() if isinstance(mr, dict) else ()):
+            keep = set()
+            for m in (ms if isinstance(ms, (list, tuple)) else ()):
+                try:
+                    if int(m) in (self._mode_turns.get(rel) or {}):
+                        keep.add(int(m))
+                except (TypeError, ValueError):
+                    continue
+            if keep:
+                self._mode_random[rel] = keep
+        ml = raw.get("mode_turn_levels")
+        for rel, by in (ml.items() if isinstance(ml, dict) else ()):
+            for m, v in (by.items() if isinstance(by, dict) else ()):
+                try:
+                    m = int(m)
+                except (TypeError, ValueError):
+                    continue
+                files = (self._mode_turns.get(rel) or {}).get(m)
+                for k, db in (v.items() if files and isinstance(v, dict) else ()):
+                    try:
+                        k, db = int(k), int(round(float(db)))
+                    except (TypeError, ValueError):
+                        continue
+                    if 2 <= k <= len(files) + 1 and db:
+                        self._mode_turn_levels.setdefault(rel, {}).setdefault(m, {})[k] = \
+                            max(min(db, 12), -12)
+        attract = raw.get("attract")
+        self._attract = ([f for f in attract if isinstance(f, str) and f.strip()][:_ATTRACT_MAX]
+                         if isinstance(attract, (list, tuple)) else [])
+        from ...plugins.stern.sound_modes import clean_gap, clean_shots
+        self._attract_gap = clean_gap(raw.get("attract_gap")) if self._attract else 0
+        self._shots = clean_shots(raw.get("shots"))           # PAD-945
+        self._shot_choices = None
+        # PAD-685: the jukebox
+        from ...plugins.stern import jukebox as _JB
+        box = _JB.clean(staged.get(_JB.STAGED_KEY) if isinstance(staged, dict) else None)
+        self._juke = [{"audio": g.audio, "video": g.video, "weight": g.weight, "pool": g.pool} for g in box.songs]
+
+    def _modes_json(self):
+        names = list(self._mode_names)
+        while names and not str(names[-1] or "").strip():
+            names.pop()
+        slots = {rel: {str(m): f for m, f in sorted(v.items())}
+                 for rel, v in sorted(self._modes.items()) if v}
+        turns = {rel: list(v) for rel, v in sorted(self._turns.items()) if v}
+        if not slots and not names and not turns and not self._attract and not self._shots:
+            return None
+        levels = {}
+        for rel, v in sorted(self._mode_levels.items()):
+            keep = {str(m): int(db) for m, db in sorted(v.items())
+                    if db and m in (self._modes.get(rel) or {})}
+            if keep:
+                levels[rel] = keep
+        out = {"names": names, "slots": slots, "levels": levels}
+        if turns:
+            out["turns"] = turns
+            rnd = sorted(rel for rel in self._random if rel in turns)
+            if rnd:
+                out["random"] = rnd
+            tl = {rel: {str(k): int(db) for k, db in sorted(v.items()) if db}
+                  for rel, v in sorted(self._turn_levels.items()) if rel in turns}
+            tl = {rel: v for rel, v in tl.items() if v}
+            if tl:
+                out["turn_levels"] = tl
+        mt = {rel: {str(m): list(f) for m, f in sorted(by.items())
+                    if f and m in (self._modes.get(rel) or {})}
+              for rel, by in sorted(self._mode_turns.items())}
+        mt = {rel: by for rel, by in mt.items() if by}
+        if mt:
+            out["mode_turns"] = mt
+            mr = {rel: sorted(str(m) for m in ms if str(m) in mt.get(rel, {}))
+                  for rel, ms in sorted(self._mode_random.items())}
+            mr = {rel: ms for rel, ms in mr.items() if ms}
+            if mr:
+                out["mode_random"] = mr
+            ml = {rel: {str(m): {str(k): int(db) for k, db in sorted(v.items()) if db}
+                        for m, v in sorted(by.items()) if str(m) in mt.get(rel, {})}
+                  for rel, by in sorted(self._mode_turn_levels.items())}
+            ml = {rel: {m: v for m, v in by.items() if v} for rel, by in ml.items()}
+            ml = {rel: by for rel, by in ml.items() if by}
+            if ml:
+                out["mode_turn_levels"] = ml
+        if self._attract:
+            out["attract"] = list(self._attract)
+            if self._attract_gap:
+                out["attract_gap"] = int(self._attract_gap)
+        if self._shots:
+            out["shots"] = [dict(r) for r in self._shots]
+        return out
+
+    def _mode_level(self, rel, m):
+        """Mode *m*'s file's own loudness offset for slot *rel*, in dB (PAD-638: *m* past
+        :data:`_TURN_BASE` is file m - _TURN_BASE in turn)."""
+        if m > _MODE_TURN_BASE:
+            mm, k = divmod(m - _MODE_TURN_BASE, 20)
+            return int(((self._mode_turn_levels.get(rel) or {}).get(mm) or {}).get(k, 0) or 0)
+        if m > _TURN_BASE:
+            return int((self._turn_levels.get(rel) or {}).get(m - _TURN_BASE, 0) or 0)
+        return int((self._mode_levels.get(rel) or {}).get(m, 0) or 0)
+
+    def _set_mode_level(self, rel, m, db, typed=None):
+        """Mode *m*'s file's loudness for slot *rel*: its own, never the
+        slot's (the slot's offset is its own replacement's). PAD-638: or file k in turn's,
+        *m* = :data:`_TURN_BASE` + k."""
+        turn = m > _TURN_BASE
+        if m > _MODE_TURN_BASE:
+            mm, k = divmod(m - _MODE_TURN_BASE, 20)
+            if not 2 <= k <= len((self._mode_turns.get(rel) or {}).get(mm) or []) + 1:
+                return False
+            lv = self._mode_turn_levels.setdefault(rel, {}).setdefault(mm, {})
+            if db:
+                lv[k] = db
+            else:
+                lv.pop(k, None)
+                if not lv:
+                    self._mode_turn_levels[rel].pop(mm, None)
+                if not self._mode_turn_levels[rel]:
+                    self._mode_turn_levels.pop(rel, None)
+            if rel == self._selected_rel() and self._pane_mode(rel) == m:
+                self.set(level=(str(typed).strip() if typed is not None else "") or str(db))
+            i = self._row_index.get(rel)
+            if i is not None:
+                self.patch_item("rows", i, tn_tip=self._turns_words(rel))
+            if self._pane_mode(rel) == m:
+                self._level_preview_soon(rel)
+            self._save_staged_changes()
+            return True
+        elif turn:
+            if not 2 <= m - _TURN_BASE <= len(self._turns.get(rel) or []) + 1:
+                return False
+            store, key = self._turn_levels, m - _TURN_BASE
+        else:
+            if m not in (self._modes.get(rel) or {}):
+                return False
+            store, key = self._mode_levels, m
+        lv = store.setdefault(rel, {})
+        if db:
+            lv[key] = db
+        else:
+            lv.pop(key, None)
+            if not lv:
+                store.pop(rel, None)
+        if rel == self._selected_rel() and self._pane_mode(rel) == m:
+            self.set(level=(str(typed).strip() if typed is not None else "") or str(db))
+        i = self._row_index.get(rel)
+        if i is not None:
+            if turn:
+                self.patch_item("rows", i, tn_tip=self._turns_words(rel))
+            else:
+                self.patch_item("rows", i, md_tip=self._modes_words(rel))
+        if self._pane_mode(rel) == m:
+            self._level_preview_soon(rel)
+        self._save_staged_changes()
+        return True
+
+    @staticmethod
+    def _db_words(db):
+        return "%+d dB" % db if db else "0 dB"
+
+    def _mode_name(self, m):
+        """Mode *m*'s name: the user's, else "Standard" (mode 1) / "Custom A"... (the plugin
+        writes the same defaults into the machine's menu)."""
+        n = self._mode_names[m - 1] if 0 < m <= len(self._mode_names) else ""
+        return " ".join(str(n or "").split()) or (
+            "Standard" if m <= 1 else "Custom %s" % chr(ord("A") + m - 2))
+
+    def _mode_label(self, m):
+        """"Mode 2 (Orchestral)"."""
+        return "Mode %d (%s)" % (m, self._mode_name(m))
+
+    def _mode_said(self, m):
+        """"mode 2 (Orchestral)", mid-sentence (the name as the user wrote it)."""
+        return "mode %d (%s)" % (m, self._mode_name(m))
+
+    def _modes_cap(self):
+        """The most modes this project's game takes."""
+        return max(2, min(_MODES_MAX, int((self._sm_offer or {}).get("max") or _MODES_MAX)))
+
+    def _modes_max(self):
+        """How many modes the project has: :data:`_MODES_SHOWN`, or more once the user named or
+        added more, or set a file for a higher one."""
+        top = max((m for v in self._modes.values() for m in v), default=0)
+        return min(self._modes_cap(), max(_MODES_SHOWN, len(self._mode_names), top))
+
+    def _modes_words(self, rel):
+        """What the row says of a slot's music modes, or "" for one with none."""
+        md = self._modes.get(rel) or {}
+        if not md:
+            return ""
+        own = (os.path.basename(self._assign[rel]) if self._assign.get(rel)
+               else "the game's own sound")
+        parts = ["%s: %s" % (self._mode_said(1), own)]
+        parts += ["%s: %s%s" % (self._mode_said(m), os.path.basename(f),
+                                (" at %s" % self._db_words(self._mode_level(rel, m))
+                                 if self._mode_level(rel, m) else ""))
+                  for m, f in sorted(md.items())]
+        return ("Music modes - the machine's MUSIC MODE setting picks which "
+                "plays: " + "; ".join(parts) + ".")
+
+    def _modes_why(self, rel):
+        offer = self._sm_offer or {}
+        return offer.get("why") or (offer.get("slots") or {}).get(rel, "")
+
+    def _modes_menu(self, rel):
+        """The row menu's "Music modes" entry and its submenu, or None where
+        the plugin offers no music modes and the slot has no mode files."""
+        md = self._modes.get(rel) or {}
+        if self._sm_offer is None and not md:
+            return None
+        why = self._modes_why(rel)
+        sub = []
+        if why:
+            sub.append({"label": "Why not this sound?", "action": "mode_why"})
+        else:
+            for m in range(2, self._modes_max() + 1):
+                f = md.get(m)
+                sub.append({"label": "%s: %s" % (
+                    self._mode_label(m),
+                    "change %s…" % os.path.basename(f) if f else "choose a sound…"),
+                    "action": "mode_pick:%d" % m, "icon": "file"})
+        if md:
+            sub.append({"sep": True})
+            for m, f in sorted(md.items()):
+                if not why:
+                    sub.append({"label": "Play mode %d's sound (%s)" % (m, os.path.basename(f)),
+                                "action": "mode_play:%d" % m, "icon": "play"})
+                    sub.append({"label": "Loudness of mode %d's sound (%s)…" % (
+                        m, self._db_words(self._mode_level(rel, m))),
+                                "action": "mode_level:%d" % m, "icon": "wave"})
+                sub.append({"label": "Take off mode %d's sound (%s)" % (m, os.path.basename(f)),
+                            "action": "mode_off:%d" % m, "icon": "x"})
+        if not why:
+            sub.append({"sep": True})
+            if self._modes_max() < self._modes_cap():
+                sub.append({"label": "Add a music mode…", "action": "mode_add", "icon": "plus"})
+            sub.append({"label": "Name the music modes…", "action": "mode_names", "icon": "edit"})
+        return {"label": "Music modes" + (" (%d)" % len(md) if md else ""),
+                "icon": "music", "submenu": sub}
+
+    def _modes_changed(self, rel):
+        self._save_staged_changes()
+        self._sel = [rel]
+        self._refresh_list()
+
+    def _mode_action(self, action, rel):
+        kind, _c, arg = action.partition(":")
+        try:
+            m = int(arg) if arg else 0
+        except ValueError:
+            return False
+        md = self._modes.get(rel) or {}
+        if kind == "mode_why":
+            why = self._modes_why(rel)
+            if why:
+                compat.messagebox.showinfo("Music modes", why)
+            return bool(why)
+        if kind == "mode_names":
+            return self._name_modes()
+        if kind == "mode_add":
+            return self._add_mode()
+        if not 2 <= m <= _MODES_MAX:
+            return False
+        if kind == "mode_pick":
+            if self._modes_why(rel):
+                return False
+            # PAD-1084: pick several and the first (by name) is the mode's, the rest play in
+            # turn with it (at random, or one after another: the Play in turn menu's choice)
+            turns_ok = not self._turns_why(rel)
+            paths = self._ask_audio_files(
+                ("Choose the sound %s plays in music %s (pick several and the first is its "
+                 "sound, the others play in turn with it)" if turns_ok else
+                 "Choose the sound %s plays in music %s") % (rel, self._mode_said(m)))
+            if not paths:
+                return False
+            path = paths[0]
+            self._modes.setdefault(rel, {})[m] = path
+            self.log("Replace Audio: %s ← %s, for music %s."
+                     % (rel, os.path.basename(path), self._mode_said(m)), "info")
+            if len(paths) > 1:
+                if turns_ok:
+                    files = self._mode_turns.setdefault(rel, {}).setdefault(m, [])
+                    self._add_in_turn(rel, files, paths[1:], " in %s" % self._mode_said(m))
+                    if not files:
+                        self._mode_turns[rel].pop(m, None)
+                        if not self._mode_turns[rel]:
+                            self._mode_turns.pop(rel, None)
+                else:
+                    self.log("Replace Audio: %s cannot play sounds in turn, so %d of the files "
+                             "picked were left out: %s" % (
+                                 rel, len(paths) - 1,
+                                 ", ".join(os.path.basename(p) for p in paths[1:])), "warning")
+            self._modes_changed(rel)
+            return True
+        f = md.get(m)
+        if not f:
+            return False
+        if kind == "mode_play":
+            if rel != self._current_rel:
+                self._load_track(rel)
+            self._pane_load("rep", f, autoplay=True, gain_db=self._mode_level(rel, m),
+                            label="%s: %s" % (self._mode_label(m), os.path.basename(f)))
+            # the loudness box is this file's own while it is in the pane
+            self._rep_mode = (rel, m)
+            self._level_sync()
+            return True
+        if kind == "mode_level":
+            text = compat.simpledialog.askstring(
+                "Loudness of mode %d's sound" % m,
+                "How loud mode %d's sound (%s) plays, in dB from -12 to +12. 0 matches the "
+                "sound it stands in for. It is this file's own: the loudness set on %s itself "
+                "is that sound's, not this one's." % (m, os.path.basename(f), os.path.basename(rel)),
+                initialvalue=str(self._mode_level(rel, m)))
+            if text is None:
+                return False
+            db = self._level_value(text)
+            if db is None:
+                return False
+            self.log("Replace Audio: %s's sound for music %s plays at %s." % (
+                rel, self._mode_said(m), self._db_words(db)), "info")
+            return self._set_mode_level(rel, m, db)
+        if kind == "mode_off":
+            md.pop(m, None)
+            if not md:
+                self._modes.pop(rel, None)
+            # PAD-638: its own files in turn go with it
+            for store in (self._mode_turns, self._mode_turn_levels):
+                (store.get(rel) or {}).pop(m, None)
+                if not store.get(rel, True):
+                    store.pop(rel, None)
+            (self._mode_random.get(rel) or set()).discard(m)
+            if not self._mode_random.get(rel, True):
+                self._mode_random.pop(rel, None)
+            (self._mode_levels.get(rel) or {}).pop(m, None)
+            if not self._mode_levels.get(rel, True):
+                self._mode_levels.pop(rel, None)
+            if self._pane_mode(rel) == m:
+                self._load_rep_pane(rel)
+            self.log("Replace Audio: %s no longer has a sound for music %s."
+                     % (rel, self._mode_said(m)), "info")
+            self._modes_changed(rel)
+            return True
+        return False
+
+    # ------------------------------------------------------------------
+    # PAD-565: sounds in turn - a slot's files the game plays one after another
+    # ------------------------------------------------------------------
+    def _turns_why(self, rel):
+        offer = self._sm_offer or {}
+        return offer.get("turns_why") or (offer.get("turn_slots") or {}).get(rel, "")
+
+    def _turns_words(self, rel):
+        """What the row says of a slot's files in turn, or "" for one with none."""
+        tn = self._turns.get(rel) or []
+        mtn = self._mode_turns.get(rel) or {}
+        if not tn and not mtn:
+            return ""
+        own = (os.path.basename(self._assign[rel]) if self._assign.get(rel)
+               else "the game's own sound")
+        out = []
+        if tn:
+            names = [own] + [os.path.basename(f) + (
+                " at %s" % self._db_words(self._mode_level(rel, _TURN_BASE + k))
+                if self._mode_level(rel, _TURN_BASE + k) else "") for k, f in enumerate(tn, 2)]
+            out.append(self._turn_words(rel in self._random, names))
+        # PAD-638: each music mode's own
+        for m, files in sorted(mtn.items()):
+            mf = os.path.basename((self._modes.get(rel) or {}).get(m, ""))
+            names = [mf] + [os.path.basename(f) + (
+                " at %s" % self._db_words(self._mode_level(rel, self._mturn(m, k)))
+                if self._mode_level(rel, self._mturn(m, k)) else "")
+                for k, f in enumerate(files, 2)]
+            out.append("In %s: %s" % (self._mode_said(m), self._turn_words(
+                m in (self._mode_random.get(rel) or ()), names)[0].lower()
+                + self._turn_words(m in (self._mode_random.get(rel) or ()), names)[1:]))
+        return " ".join(out)
+
+    @staticmethod
+    def _turn_words(random, names):
+        listed = "; ".join("%d. %s" % (k, n) for k, n in enumerate(names, 1)) + "."
+        if random:
+            return ("Each time the game plays this sound it plays one of these at random, never "
+                    "the same one twice in a row: " + listed)
+        return ("Each time the game plays this sound it plays the next of these, then starts "
+                "again: " + listed)
+
+    def _add_in_turn(self, rel, files, paths, where=""):
+        """PAD-1084: *paths* onto *files* (a slot's, or one music mode's, files in turn) as far
+        as :data:`_TURNS_MAX` goes, the one they play with counted; the rest are logged as left
+        out. Returns how many went on."""
+        room = max(0, _TURNS_MAX - 1 - len(files))
+        took = [p for p in paths if p not in files][:room]
+        left = [p for p in paths if p not in files and p not in took]
+        files.extend(took)
+        for p in took:
+            self.log("Replace Audio: %s plays %s in turn%s (sound %d of %d)." % (
+                rel, os.path.basename(p), where, files.index(p) + 2, len(files) + 1), "info")
+        if left:
+            self.log("Replace Audio: a sound plays at most %d files in turn, its own one "
+                     "included, so %d were left out: %s" % (
+                         _TURNS_MAX, len(left), ", ".join(os.path.basename(p) for p in left)),
+                     "warning")
+        return len(took)
+
+    def _turn_dbs(self, rel):
+        """PAD-1084: the loudness of each file "Loudness of all" sets for a slot's own part: its
+        replacement (when it has one: the game's own sound has no offset) and each file in turn."""
+        own = [self._level.get(rel, 0)] if self._assign.get(rel) else []
+        return own + [self._mode_level(rel, _TURN_BASE + k)
+                      for k in range(2, len(self._turns.get(rel) or []) + 2)]
+
+    def _mturn_dbs(self, rel, m):
+        """PAD-1084: the same for music mode *m*'s part: its file and each file in turn with it."""
+        return [self._mode_level(rel, m)] + [
+            self._mode_level(rel, self._mturn(m, k))
+            for k in range(2, len((self._mode_turns.get(rel) or {}).get(m) or []) + 2)]
+
+    def _level_all_words(self, dbs):
+        """PAD-1084: the "Loudness of all" entry's value: the one they share, or "mixed"."""
+        return self._db_words(dbs[0]) if len(set(dbs)) == 1 else "mixed"
+
+    def _ask_level_all(self, title, what, dbs):
+        """PAD-1084: one dB for several files (blank = 0), or None when cancelled / not a number."""
+        text = compat.simpledialog.askstring(
+            title, "How loud %s play, in dB from -12 to +12. 0 matches the sound they stand in "
+            "for. Each one can still be set on its own afterwards." % what,
+            initialvalue=str(dbs[0]) if len(set(dbs)) == 1 else "")
+        if text is None:
+            return None
+        return self._level_value(text)
+
+    def _set_own_level(self, rel, db):
+        """The slot's own replacement's loudness (the box's own value, no file in turn in it)."""
+        if db:
+            self._level[rel] = db
+        else:
+            self._level.pop(rel, None)
+        i = self._row_index.get(rel)
+        if i is not None:
+            self.patch_item("rows", i, lvl=self._level_disp(rel))
+
+    @staticmethod
+    def _mturn(m, k):
+        """PAD-638: the pane's pseudo mode for music mode *m*'s own file *k* in turn."""
+        return _MODE_TURN_BASE + int(m) * 20 + int(k)
+
+    def _turns_menu(self, rel):
+        """The row menu's "Play in turn" entry and its submenu, or None where the plugin offers
+        no sounds in turn and the slot has none."""
+        tn = self._turns.get(rel) or []
+        offer = self._sm_offer or {}
+        if "turns_why" not in offer and not tn:
+            return None
+        why = self._turns_why(rel)
+        sub = []
+        if why:
+            sub.append({"label": "Why not this sound?", "action": "turn_why"})
+        elif len(tn) + 1 < _TURNS_MAX:
+            sub.append({"label": "Add sounds to play in turn…", "action": "turn_add",
+                        "icon": "plus"})
+        if tn:
+            # PAD-638: one after another, or at random (a jukebox)
+            rnd = rel in self._random
+            sub += [{"sep": True},
+                    {"label": "One after another", "action": "turn_order:0",
+                     "checked": not rnd, "radio": True},
+                    {"label": "At random", "action": "turn_order:1",
+                     "checked": rnd, "radio": True}]
+            dbs = self._turn_dbs(rel)
+            if not why and len(dbs) > 1:            # PAD-1084: one loudness for them all
+                sub.append({"label": "Loudness of all %d sounds (%s)…" % (
+                    len(dbs), self._level_all_words(dbs)), "action": "turn_level_all",
+                    "icon": "wave"})
+            sub.append({"sep": True})
+            for k, f in enumerate(tn, 2):
+                if not why:
+                    sub.append({"label": "Play sound %d (%s)" % (k, os.path.basename(f)),
+                                "action": "turn_play:%d" % k, "icon": "play"})
+                    sub.append({"label": "Loudness of sound %d (%s)…" % (
+                        k, self._db_words(self._mode_level(rel, _TURN_BASE + k))),
+                                "action": "turn_level:%d" % k, "icon": "wave"})
+                sub.append({"label": "Take off sound %d (%s)" % (k, os.path.basename(f)),
+                            "action": "turn_off:%d" % k, "icon": "x"})
+        # PAD-638: a slot with music mode files: each mode's file can have files in turn of its own
+        md = self._modes.get(rel) or {}
+        if md and not why:
+            sub = [{"header": "Its own sound"}] + sub
+            for m, mf in sorted(md.items()):
+                files = (self._mode_turns.get(rel) or {}).get(m) or []
+                sub += [{"sep": True},
+                        {"header": "%s: %s" % (self._mode_label(m), os.path.basename(mf))}]
+                if len(files) + 1 < _TURNS_MAX:
+                    sub.append({"label": "Add sounds to play in turn…",
+                                "action": "mturn_add:%d" % m, "icon": "plus"})
+                if files:
+                    rnd = m in (self._mode_random.get(rel) or ())
+                    dbs = self._mturn_dbs(rel, m)
+                    sub += [{"label": "One after another", "action": "mturn_order:%d:0" % m,
+                             "checked": not rnd, "radio": True},
+                            {"label": "At random", "action": "mturn_order:%d:1" % m,
+                             "checked": rnd, "radio": True},
+                            {"label": "Loudness of all %d sounds (%s)…" % (
+                                len(dbs), self._level_all_words(dbs)),
+                             "action": "mturn_level_all:%d" % m, "icon": "wave"}]
+                for k, f in enumerate(files, 2):
+                    # (the part's header names the mode)
+                    sub += [{"label": "Play sound %d (%s)" % (k, os.path.basename(f)),
+                             "action": "mturn_play:%d:%d" % (m, k), "icon": "play"},
+                            {"label": "Loudness of sound %d (%s)…" % (
+                                k, self._db_words(self._mode_level(rel, self._mturn(m, k)))),
+                             "action": "mturn_level:%d:%d" % (m, k), "icon": "wave"},
+                            {"label": "Take off sound %d (%s)" % (k, os.path.basename(f)),
+                             "action": "mturn_off:%d:%d" % (m, k), "icon": "x"}]
+        return {"label": ("Play at random" if tn and rel in self._random else "Play in turn")
+                + (" (%d sounds)" % (len(tn) + 1) if tn else ""),
+                "icon": "shuffle", "submenu": sub}
+
+    def _mode_turn_action(self, action, rel):
+        """PAD-638: music mode m's own files in turn (``mturn_<what>:<m>[:<k>]``)."""
+        kind, _c, arg = action.partition(":")
+        try:
+            nums = [int(x) for x in arg.split(":")] if arg else []
+        except ValueError:
+            return False
+        if not nums or nums[0] not in (self._modes.get(rel) or {}) or self._turns_why(rel):
+            return False
+        m, k = nums[0], (nums[1] if len(nums) > 1 else 0)
+        files = (self._mode_turns.get(rel) or {}).get(m) or []
+        if kind == "mturn_add":
+            if len(files) + 1 >= _TURNS_MAX:
+                return False
+            # PAD-1084: as many as the picker is given at once
+            paths = self._ask_audio_files(
+                "Choose sounds %s plays in turn with its own in %s (pick one or several)"
+                % (rel, self._mode_said(m)))
+            if not paths:
+                return False
+            files = self._mode_turns.setdefault(rel, {}).setdefault(m, [])
+            if not self._add_in_turn(rel, files, paths, " in %s" % self._mode_said(m)):
+                if not files:
+                    self._mode_turns[rel].pop(m, None)
+                    if not self._mode_turns[rel]:
+                        self._mode_turns.pop(rel, None)
+                return False
+            self._modes_changed(rel)
+            return True
+        if kind == "mturn_level_all":
+            if not files:
+                return False
+            dbs = self._mturn_dbs(rel, m)
+            db = self._ask_level_all(
+                "Loudness of %s's sounds" % self._mode_said(m),
+                "all %d sounds in %s (%s and the %d in turn with it)" % (
+                    len(dbs), self._mode_said(m),
+                    os.path.basename(self._modes[rel][m]), len(files)), dbs)
+            if db is None:
+                return False
+            self._set_mode_level(rel, m, db)
+            for j in range(2, len(files) + 2):
+                self._set_mode_level(rel, self._mturn(m, j), db)
+            self.log("Replace Audio: all %d of %s's sounds in %s play at %s." % (
+                len(dbs), rel, self._mode_said(m), self._db_words(db)), "info")
+            self._level_sync()
+            self._modes_changed(rel)
+            return True
+        if kind == "mturn_order":
+            if not files or bool(k) == (m in (self._mode_random.get(rel) or ())):
+                return False
+            if k:
+                self._mode_random.setdefault(rel, set()).add(m)
+            else:
+                self._mode_random.get(rel, set()).discard(m)
+                if not self._mode_random.get(rel, True):
+                    self._mode_random.pop(rel, None)
+            self.log("Replace Audio: %s plays its %d sounds in %s %s." % (
+                rel, len(files) + 1, self._mode_said(m),
+                "at random" if k else "one after another"), "info")
+            self._modes_changed(rel)
+            return True
+        if not 2 <= k <= len(files) + 1:
+            return False
+        f = files[k - 2]
+        if kind == "mturn_play":
+            if rel != self._current_rel:
+                self._load_track(rel)
+            self._pane_load("rep", f, autoplay=True,
+                            gain_db=self._mode_level(rel, self._mturn(m, k)),
+                            label="%s, sound %d in turn: %s" % (self._mode_label(m), k,
+                                                               os.path.basename(f)))
+            self._rep_mode = (rel, self._mturn(m, k))
+            self._level_sync()
+            return True
+        if kind == "mturn_level":
+            text = compat.simpledialog.askstring(
+                "Loudness of %s sound %d" % (self._mode_said(m), k),
+                "How loud sound %d (%s) plays in %s, in dB from -12 to +12. 0 matches the sound "
+                "it stands in for. It is this file's own." % (k, os.path.basename(f),
+                                                              self._mode_said(m)),
+                initialvalue=str(self._mode_level(rel, self._mturn(m, k))))
+            if text is None:
+                return False
+            db = self._level_value(text)
+            if db is None:
+                return False
+            self.log("Replace Audio: %s's sound %d in %s (%s) plays at %s." % (
+                rel, k, self._mode_said(m), os.path.basename(f), self._db_words(db)), "info")
+            return self._set_mode_level(rel, self._mturn(m, k), db)
+        if kind == "mturn_off":
+            del files[k - 2]
+            lv = (self._mode_turn_levels.get(rel) or {}).get(m) or {}
+            moved = {(j - 1 if j > k else j): db for j, db in lv.items() if j != k}
+            if moved:
+                self._mode_turn_levels.setdefault(rel, {})[m] = moved
+            else:
+                (self._mode_turn_levels.get(rel) or {}).pop(m, None)
+                if not self._mode_turn_levels.get(rel, True):
+                    self._mode_turn_levels.pop(rel, None)
+            if self._pane_mode(rel) and self._pane_mode(rel) > _MODE_TURN_BASE:
+                self._load_rep_pane(rel)
+            if not files:
+                self._mode_turns[rel].pop(m, None)
+                if not self._mode_turns[rel]:
+                    self._mode_turns.pop(rel, None)
+                (self._mode_random.get(rel) or set()).discard(m)
+                if not self._mode_random.get(rel, True):
+                    self._mode_random.pop(rel, None)
+            self.log("Replace Audio: %s no longer plays %s in turn in %s."
+                     % (rel, os.path.basename(f), self._mode_said(m)), "info")
+            self._modes_changed(rel)
+            return True
+        return False
+
+    def _turn_action(self, action, rel):
+        kind, _c, arg = action.partition(":")
+        try:
+            k = int(arg) if arg else 0
+        except ValueError:
+            return False
+        tn = self._turns.get(rel) or []
+        if kind == "turn_why":
+            why = self._turns_why(rel)
+            if why:
+                compat.messagebox.showinfo("Play in turn", why)
+            return bool(why)
+        if kind == "turn_add":
+            if self._turns_why(rel) or len(tn) + 1 >= _TURNS_MAX:
+                return False
+            # PAD-1084: as many as the picker is given at once
+            paths = self._ask_audio_files(
+                "Choose sounds %s plays in turn with its own (pick one or several)" % rel)
+            if not paths:
+                return False
+            files = self._turns.setdefault(rel, [])
+            if not self._add_in_turn(rel, files, paths):
+                if not files:
+                    self._turns.pop(rel, None)
+                return False
+            self._modes_changed(rel)
+            return True
+        if kind == "turn_level_all":
+            dbs = self._turn_dbs(rel)
+            if self._turns_why(rel) or len(dbs) < 2:
+                return False
+            own = bool(self._assign.get(rel))
+            db = self._ask_level_all(
+                "Loudness of the sounds in turn",
+                "all %d sounds %s plays in turn%s" % (
+                    len(dbs), os.path.basename(rel),
+                    " (its replacement %s and the %d with it)" % (
+                        os.path.basename(self._assign[rel]), len(tn)) if own else ""), dbs)
+            if db is None:
+                return False
+            if own:
+                self._set_own_level(rel, db)
+            for j in range(2, len(tn) + 2):
+                self._set_mode_level(rel, _TURN_BASE + j, db)
+            self.log("Replace Audio: all %d of %s's sounds in turn play at %s." % (
+                len(dbs), rel, self._db_words(db)), "info")
+            self._level_sync()
+            if self._current_rel == rel:
+                self._level_preview_soon(rel)
+            self._modes_changed(rel)
+            return True
+        if kind == "turn_order":
+            if not tn or bool(k) == (rel in self._random):
+                return False
+            if k:
+                self._random.add(rel)
+            else:
+                self._random.discard(rel)
+            self.log("Replace Audio: %s plays its %d sounds %s." % (
+                rel, len(tn) + 1, "at random" if k else "one after another"), "info")
+            self._modes_changed(rel)
+            return True
+        if not 2 <= k <= len(tn) + 1:
+            return False
+        f = tn[k - 2]
+        if kind == "turn_play":
+            if rel != self._current_rel:
+                self._load_track(rel)
+            self._pane_load("rep", f, autoplay=True,
+                            gain_db=self._mode_level(rel, _TURN_BASE + k),
+                            label="Sound %d in turn: %s" % (k, os.path.basename(f)))
+            # PAD-638: the loudness box is this file's own while it is in the pane
+            self._rep_mode = (rel, _TURN_BASE + k)
+            self._level_sync()
+            return True
+        if kind == "turn_level":
+            text = compat.simpledialog.askstring(
+                "Loudness of sound %d" % k,
+                "How loud sound %d (%s) plays, in dB from -12 to +12. 0 matches the sound it "
+                "stands in for. It is this file's own: the loudness set on %s itself is that "
+                "sound's, not this one's." % (k, os.path.basename(f), os.path.basename(rel)),
+                initialvalue=str(self._mode_level(rel, _TURN_BASE + k)))
+            if text is None:
+                return False
+            db = self._level_value(text)
+            if db is None:
+                return False
+            self.log("Replace Audio: %s's sound %d (%s) plays at %s." % (
+                rel, k, os.path.basename(f), self._db_words(db)), "info")
+            return self._set_mode_level(rel, _TURN_BASE + k, db)
+        if kind == "turn_off":
+            del tn[k - 2]
+            # PAD-638: the files after it move up one, their loudness with them
+            lv = self._turn_levels.get(rel) or {}
+            moved = {(j - 1 if j > k else j): db for j, db in lv.items() if j != k}
+            if moved:
+                self._turn_levels[rel] = moved
+            else:
+                self._turn_levels.pop(rel, None)
+            if self._pane_mode(rel) and self._pane_mode(rel) > _TURN_BASE:
+                self._load_rep_pane(rel)
+            if not tn:
+                self._turns.pop(rel, None)
+                self._random.discard(rel)
+            self.log("Replace Audio: %s no longer plays %s in turn."
+                     % (rel, os.path.basename(f)), "info")
+            self._modes_changed(rel)
+            return True
+        return False
+
+    # ------------------------------------------------------------------
+    # PAD-641: the sounds the flipper buttons play in attract
+    # ------------------------------------------------------------------
+    def _attract_why(self):
+        return str((self._sm_offer or {}).get("attract_why") or "")
+
+    def _attract_state(self):
+        """The page's Attract flipper sounds button: ``{"files": [name, ...], "paths", "why", "max",
+        "tip"}``, or None where the plugin offers no such thing and the project has none."""
+        if "attract_why" not in (self._sm_offer or {}) and not self._attract:
+            return None
+        names = [os.path.basename(f) for f in self._attract]
+        tip = [_ATTRACT_TIP]
+        if names:
+            tip.append("In turn: " + "; ".join("%d. %s" % (k, n) for k, n in enumerate(names, 1)) + ".")
+        if self._attract_gap:
+            tip.append("At most one every %s." % _gap_words(self._attract_gap))
+        if self._attract_why():
+            tip.append(self._attract_why())
+        return {"files": names, "paths": list(self._attract), "why": self._attract_why(), "max": _ATTRACT_MAX, "tip": tip,
+                "gap": int(self._attract_gap),
+                "gaps": [{"s": g, "label": "Any time" if not g else "At most one every %s" % _gap_words(g)}
+                         for g in sorted(set(_ATTRACT_GAPS) | {int(self._attract_gap)})]}
+
+    @rpc
+    def attract_action(self, action):
+        """The Attract flipper sounds menu: ``add`` (choose a file), ``play:k`` (file k in the
+        Replacement pane), ``off:k`` (take file k off), ``why`` (why this game cannot)."""
+        kind, _c, arg = str(action or "").partition(":")
+        try:
+            k = int(arg) if arg else 0
+        except ValueError:
+            return False
+        why = self._attract_why()
+        if kind == "why":
+            if why:
+                compat.messagebox.showinfo("Attract flipper sounds", why)
+            return bool(why)
+        if kind == "gap":                   # PAD-641 round 2: the time between two of them
+            from ...plugins.stern.sound_modes import clean_gap
+            g = clean_gap(arg)
+            if not self._attract or g == self._attract_gap:
+                return False
+            self._attract_gap = g
+            self.log("Replace Audio: the flipper buttons play %s in attract mode."
+                     % ("a sound at any press, once the last one has played" if not g
+                        else "at most one sound every %s" % _gap_words(g)), "info")
+            self._attract_changed()
+            return True
+        if kind == "add":
+            if why or len(self._attract) >= _ATTRACT_MAX or not self._scan_dir:
+                return False
+            self._cancel_select_job()
+            self.stop_all_preview_playback()
+            path = self._ask_path(
+                "open", "audio_replacement",
+                "Choose a sound the flipper buttons play in attract mode",
+                filetypes=_AUDIO_FILETYPES)
+            if isinstance(path, (list, tuple)):
+                path = path[0] if path else ""
+            if not path:
+                return False
+            self._attract.append(os.path.normpath(path))
+            self.log("Replace Audio: the flipper buttons play %s in attract mode (sound %d of %d)."
+                     % (os.path.basename(path), len(self._attract), len(self._attract)), "info")
+            self._attract_changed()
+            return True
+        if not 1 <= k <= len(self._attract):
+            return False
+        f = self._attract[k - 1]
+        if kind == "play":
+            self._pane_load("rep", f, autoplay=True,
+                            label="Attract flipper sound %d: %s" % (k, os.path.basename(f)))
+            return True
+        if kind == "off":
+            del self._attract[k - 1]
+            self.log("Replace Audio: the flipper buttons no longer play %s in attract mode."
+                     % os.path.basename(f), "info")
+            self._attract_changed()
+            return True
+        return False
+
+    def _attract_changed(self):
+        self._save_staged_changes()
+        self.set(modes_share=(self._sm_offer is not None or bool(self._modes)
+                              or bool(self._turns) or bool(self._attract) or bool(self._shots)))
+        self._refresh_list()
+
+    # ------------------------------------------------------------------
+    # PAD-945: sounds on the shots of the game's modes
+    # ------------------------------------------------------------------
+    def _shots_why(self):
+        return str((self._sm_offer or {}).get("shots_why") or "")
+
+    def _shots_state(self):
+        """The page's Sounds on shots button: ``{"n", "why", "tip"}``, or None where the plugin
+        offers no such thing and the project has none."""
+        if "shots_why" not in (self._sm_offer or {}) and not self._shots:
+            return None
+        tip = [_SHOT_TIP]
+        from ...plugins.stern.sound_modes import shot_lit_words
+        for r in self._shots:
+            lit = shot_lit_words(r.get("lit"))
+            tip.append("%s%s in %s: %s." % (r["switch_name"], " (%s)" % lit if lit else "", r["mode_name"],
+                                             os.path.basename(r["file"])))
+        if self._shots_why():
+            tip.append(self._shots_why())
+        return {"n": len(self._shots), "why": self._shots_why(), "tip": tip}
+
+    def _shot_source(self, rel):
+        """The file a slot plays now: its replacement when it has one, else the game's own sound."""
+        rep = self._assign.get(rel)
+        if isinstance(rep, str) and rep.strip() and os.path.isfile(rep):
+            return os.path.normpath(rep)
+        slot = self._by_rel.get(rel)
+        return os.path.normpath(slot.abs_path) if slot is not None else ""
+
+    def _shot_menus(self):
+        """``(why, modes, switches)`` of the project's game, read once per project
+        (:func:`.sound_modes.shot_choices`)."""
+        assets = self._scan_dir or self._assets()
+        if self._shot_choices is None or self._shot_choices[0] != assets:
+            from ...plugins.stern import sound_modes as _SMo
+            try:
+                got = _SMo.shot_choices(assets)
+            except Exception as e:                      # noqa: BLE001 - said in the window
+                got = ("The game's modes and shots could not be read (%s)." % e, [], [], set())
+            self._shot_choices = (assets, got)
+        return self._shot_choices[1]
+
+    def _shots_rows(self):
+        from ...plugins.stern.sound_modes import SHOT_LIT, shot_lit_words
+        why, modes, switches, lit = self._shot_menus()
+        why = self._shots_why() or why
+        return {"rows": [{"k": k, "mode": r["mode_name"],
+                          "shot": r["switch_name"] + (" (%s)" % shot_lit_words(r.get("lit"))
+                                                      if r.get("lit") else ""),
+                          "sound": os.path.basename(r["file"]), "path": r["file"],
+                          "gone": not os.path.isfile(r["file"])}
+                         for k, r in enumerate(self._shots, 1)],
+                "modes": [{"value": str(i), "label": n} for i, n in modes],
+                "shots": [{"value": str(i), "label": n} for i, n in switches],
+                # round 2: the conditions on the shot's light, and the shots whose light can be read
+                "lits": [{"value": v, "label": shot_lit_words(v) or "any time"} for v in SHOT_LIT],
+                "lit_ok": sorted(str(i) for i in lit),
+                "pick": os.path.basename(self._shot_pick) if self._shot_pick else "",
+                "max": _SHOT_MAX, "why": why, "tip": _SHOT_TIP, "running": self._running()}
+
+    @rpc
+    def shots_open(self):
+        """The Sounds on shots window's rows (no sound picked yet)."""
+        self._shot_pick = ""
+        return self._shots_rows()
+
+    @rpc
+    def shots_action(self, action):
+        """The Sounds on shots window: ``choose`` (pick the sound from a file),
+        ``add:<mode>:<switch>[:<lit>]`` (the picked sound on that shot of that mode; round 2: only when its
+        light shows *lit*, one of :data:`.sound_modes.SHOT_LIT`), ``play:k`` (row k's sound in the
+        Replacement pane), ``off:k``, ``why``. Returns the window's rows."""
+        kind, _c, rest = str(action or "").partition(":")
+        a, _c, b = rest.partition(":")
+        b, _c, lit = b.partition(":")
+        if kind == "why":
+            why = self._shots_rows()["why"]
+            if why:
+                compat.messagebox.showinfo("Sounds on shots", why)
+            return self._shots_rows()
+        if kind == "choose":
+            if self._shots_why() or not self._scan_dir:
+                return self._shots_rows()
+            self._cancel_select_job()
+            self.stop_all_preview_playback()
+            path = self._ask_path("open", "audio_replacement",
+                                  "Choose the sound a shot plays in one of the game's modes",
+                                  filetypes=_AUDIO_FILETYPES)
+            if isinstance(path, (list, tuple)):
+                path = path[0] if path else ""
+            if path:
+                self._shot_pick = os.path.normpath(path)
+            return self._shots_rows()
+        if kind == "add":
+            got = self._shots_rows()
+            if got["why"] or got["running"] or not self._shot_pick or len(self._shots) >= _SHOT_MAX:
+                return got
+            mode = {m["value"]: m["label"] for m in got["modes"]}.get(a)
+            shot = {s["value"]: s["label"] for s in got["shots"]}.get(b)
+            if mode is None or shot is None or not any(x["value"] == lit for x in got["lits"]) \
+                    or (lit and b not in got["lit_ok"]):
+                return got
+            row = {"mode": int(a), "mode_name": mode, "switch": int(b), "switch_name": shot,
+                   "file": self._shot_pick}
+            if lit:
+                row["lit"] = lit
+            key = (row["mode"], row["switch"], lit)
+            self._shots = [r for r in self._shots if (r["mode"], r["switch"], r.get("lit") or "") != key]
+            self._shots.append(row)
+            from ...plugins.stern.sound_modes import shot_lit_words
+            self.log("Replace Audio: %s plays %s when %s is hit%s." % (
+                mode, os.path.basename(self._shot_pick), shot,
+                " while it is %s" % shot_lit_words(lit) if lit else ""), "info")
+            self._shot_pick = ""
+            self._shots_changed()
+            return self._shots_rows()
+        try:
+            k = int(a)
+        except ValueError:
+            return self._shots_rows()
+        if not 1 <= k <= len(self._shots):
+            return self._shots_rows()
+        r = self._shots[k - 1]
+        if kind == "play":
+            from ...plugins.stern.sound_modes import shot_lit_words
+            lit = shot_lit_words(r.get("lit"))
+            self._pane_load("rep", r["file"], autoplay=True,
+                            label="%s%s in %s: %s" % (r["switch_name"], " (%s)" % lit if lit else "",
+                                                      r["mode_name"], os.path.basename(r["file"])))
+        elif kind == "off" and not self._running():
+            del self._shots[k - 1]
+            self.log("Replace Audio: %s no longer plays %s when %s is hit." % (
+                r["mode_name"], os.path.basename(r["file"]), r["switch_name"]), "info")
+            self._shots_changed()
+        return self._shots_rows()
+
+    def _shots_changed(self):
+        self._save_staged_changes()
+        self.set(modes_share=(self._sm_offer is not None or bool(self._modes)
+                              or bool(self._turns) or bool(self._attract) or bool(self._shots)))
+        self._refresh_list()
+
+    # ------------------------------------------------------------------
+    # PAD-685: the jukebox - the song modes play songs drawn at random
+    # ------------------------------------------------------------------
+    def _jukebox_why(self):
+        return (self._sm_offer or {}).get("jukebox_why")
+
+    def _jukebox_state(self):
+        """The page's Jukebox button: ``{"n", "why", "tip"}``, or None on a game with no song modes
+        and a project with no songs."""
+        why = self._jukebox_why()
+        if why is None and not self._juke:
+            return None
+        why = str(why or "")
+        tip = [_JUKE_TIP]
+        if self._juke:
+            tip.append("%d song(s), %d with an intro video." % (
+                len(self._juke), sum(1 for g in self._juke if g.get("video"))))
+        if why:
+            tip.append(why)
+        return {"n": len(self._juke), "why": why, "tip": tip}
+
+    def _juke_pools(self):
+        """PAD-1007: the Jukebox window's pools (``jukebox.pool_rows``, read off the UI thread with the
+        offer), any pool a song names that the offer did not list after them."""
+        from ...plugins.stern import jukebox as _JB
+        rows = [dict(r) for r in ((self._sm_offer or {}).get("jukebox_pools") or ())] or [
+            {"key": _JB.DEFAULT_POOL, "name": _JB.SONG_MODES_POOL.name, "about": _JB.SONG_MODES_POOL.about,
+             "intro": True}]
+        have = {r["key"] for r in rows}
+        for g in self._juke:
+            key = g.get("pool") or _JB.DEFAULT_POOL
+            if key not in have:
+                have.add(key)
+                rows.append({"key": key, "name": key, "intro": False,
+                             "about": "This game has no pool of this name: these songs are left out of a build."})
+        return rows
+
+    def _juke_pool_now(self, pools=None):
+        """The pool the window shows: the one picked last, while the game has it; else its first."""
+        pools = pools or self._juke_pools()
+        keys = [r["key"] for r in pools]
+        return self._juke_pool if self._juke_pool in keys else keys[0]
+
+    def _juke_in(self, pool):
+        """PAD-1007: ``[(k, song)]`` - the songs of *pool*, k their place in the whole jukebox (1..)."""
+        from ...plugins.stern import jukebox as _JB
+        return [(k, g) for k, g in enumerate(self._juke, 1) if (g.get("pool") or _JB.DEFAULT_POOL) == pool]
+
+    def _jukebox_rows(self):
+        from ...plugins.stern import jukebox as _JB
+        words = dict(_JB.WEIGHTS)
+        pools = self._juke_pools()
+        pool = self._juke_pool_now(pools)
+        here = self._juke_in(pool)
+        for r in pools:
+            r["n"] = len(self._juke_in(r["key"]))
+        return {"songs": [{"k": k, "n": n, "audio": os.path.basename(g["audio"]), "path": g["audio"],
+                           "video": os.path.basename(g["video"]) if g.get("video") else "",
+                           "vpath": g.get("video") or "",
+                           "gone": not os.path.isfile(g["audio"]) or bool(
+                               g.get("video") and not os.path.isfile(g["video"])),
+                           "weight": int(g.get("weight") or _JB.DEFAULT_WEIGHT),
+                           "weight_word": words.get(int(g.get("weight") or _JB.DEFAULT_WEIGHT), "")}
+                          for n, (k, g) in enumerate(here, 1)],
+                "pools": pools, "pool": pool, "total": len(self._juke),
+                "weights": [{"w": w, "label": n} for w, n in _JB.WEIGHTS],
+                "max": _JB.MAX_SONGS, "why": str(self._jukebox_why() or ""),
+                "tip": _JUKE_TIP, "running": self._running()}
+
+    @rpc
+    def jukebox_open(self):
+        """The Jukebox window's rows."""
+        return self._jukebox_rows()
+
+    @rpc(loop=False)
+    def jukebox_preview(self, k, fmt="mp4"):
+        """PAD-1003: a copy of jukebox song *k*'s intro video the page's engine can play, for the
+        Jukebox window's preview when the engine can't take the file as it is (an .avi, .wmv, .mpg,
+        ProRes...): ``{"path"}``, or ``{"error"}``. Off the loop: ffmpeg can take a while."""
+        juke = list(self._juke)
+        try:
+            path = juke[int(k) - 1].get("video") or ""
+        except (IndexError, TypeError, ValueError):
+            path = ""
+        if not path or not os.path.isfile(path):
+            return {"error": "This intro video is not on this PC any more."}
+        from .. import video_helpers as _vh
+        try:
+            return {"path": _vh.browser_proxy(path, fmt)}
+        except Exception as e:                              # noqa: BLE001
+            return {"error": "This video can't be played here: %s" % (str(e) or e.__class__.__name__)}
+
+    @rpc
+    def jukebox_action(self, action):
+        """The Jukebox window: ``add`` (choose songs' audio files), ``video:k`` (song k's intro
+        video), ``novideo:k``, ``weight:k:w`` (1 Rare .. 3 Common), ``play:k`` (song k in the
+        Replacement pane), ``up:k`` / ``down:k``, ``off:k`` and ``clear`` (every song, once the
+        person says yes: PAD-1002). PAD-1007: ``pool:<key>`` shows that pool's songs; ``add``,
+        ``clear`` and the moves are the shown pool's. Returns the window's rows."""
+        from ...plugins.stern import jukebox as _JB
+        kind, _c, rest = str(action or "").partition(":")
+        if kind == "pool":
+            if rest in [r["key"] for r in self._juke_pools()]:
+                self._juke_pool = rest
+            return self._jukebox_rows()
+        k_s, _c, val = rest.partition(":")
+        try:
+            k = int(k_s) if k_s else 0
+        except ValueError:
+            return self._jukebox_rows()
+        if kind == "why":
+            why = str(self._jukebox_why() or "")
+            if why:
+                compat.messagebox.showinfo("Jukebox", why)
+            return self._jukebox_rows()
+        if kind == "add":
+            if self._jukebox_why() or len(self._juke) >= _JB.MAX_SONGS or not self._scan_dir:
+                return self._jukebox_rows()
+            self._cancel_select_job()
+            self.stop_all_preview_playback()
+            start = self.window.last_browse_dir("audio_replacement")
+            paths = compat.filedialog.askopenfilenames(
+                title="Choose the jukebox's songs (and their intro videos)",
+                initialdir=start if start and os.path.isdir(start) else "", filetypes=_JUKE_FILETYPES)
+            if isinstance(paths, str):
+                paths = [paths] if paths else []
+            paths = [os.path.normpath(p) for p in (paths or ()) if p]
+            if not paths:
+                return self._jukebox_rows()
+            self.window.remember_browse_dir("audio_replacement", os.path.dirname(paths[0]))
+            self._juke_add(paths)
+            return self._jukebox_rows()
+        if kind == "clear":
+            # PAD-1007: the shown pool's songs (the whole jukebox when the game has one pool)
+            pools = self._juke_pools()
+            pool = self._juke_pool_now(pools)
+            here = self._juke_in(pool)
+            if self._running() or not here:
+                return self._jukebox_rows()
+            n = len(here)
+            name = next((r["name"] for r in pools if r["key"] == pool), pool)
+            if not compat.messagebox.askyesno(
+                    "Jukebox", ("Take all %d song%s out of the jukebox and start over?" if len(pools) == 1 else
+                                "Take all %d song%s out of " + name + " and start over?")
+                    % (n, "" if n == 1 else "s")):
+                return self._jukebox_rows()
+            gone = {k for k, _g in here}
+            self._juke[:] = [g for k, g in enumerate(self._juke, 1) if k not in gone]
+            if len(pools) == 1:
+                self.log("Replace Audio: the jukebox's %d song(s) were taken out; it is empty." % n, "info")
+            else:
+                self.log("Replace Audio: the jukebox's %d song(s) of %s were taken out." % (n, name), "info")
+            self._juke_changed()
+            return self._jukebox_rows()
+        if not 1 <= k <= len(self._juke):
+            return self._jukebox_rows()
+        g = self._juke[k - 1]
+        name = os.path.basename(g["audio"])
+        if kind == "video":
+            start = self.window.last_browse_dir("video_replacement")
+            path = compat.filedialog.askopenfilename(
+                title="Choose the intro video of %s" % name,
+                initialdir=start if start and os.path.isdir(start) else "", filetypes=_VIDEO_FILETYPES)
+            if isinstance(path, (list, tuple)):
+                path = path[0] if path else ""
+            if not path:
+                return self._jukebox_rows()
+            self.window.remember_browse_dir("video_replacement", os.path.dirname(path))
+            g["video"] = os.path.normpath(path)
+            self.log("Replace Audio: jukebox song %d (%s) opens with %s." % (k, name, os.path.basename(path)),
+                     "info")
+        elif kind == "novideo":
+            g["video"] = ""
+            self.log("Replace Audio: jukebox song %d (%s) opens with its song mode's own intro." % (k, name),
+                     "info")
+        elif kind == "weight":
+            w = _JB.clean_weight(val)
+            if w == g.get("weight"):
+                return self._jukebox_rows()
+            g["weight"] = w
+            self.log("Replace Audio: jukebox song %d (%s) is %s." % (k, name, dict(_JB.WEIGHTS)[w]), "info")
+        elif kind == "play":
+            self._pane_load("rep", g["audio"], autoplay=True, label="Jukebox song %d: %s" % (k, name))
+            return self._jukebox_rows()
+        elif kind in ("up", "down"):
+            # PAD-1007: past the next song of its own pool
+            places = [i for i, _g in self._juke_in(g.get("pool") or _JB.DEFAULT_POOL)]
+            at = places.index(k)
+            other = at - 1 if kind == "up" else at + 1
+            if not 0 <= other < len(places):
+                return self._jukebox_rows()
+            j = places[other] - 1
+            self._juke[k - 1], self._juke[j] = self._juke[j], self._juke[k - 1]
+        elif kind == "off":
+            del self._juke[k - 1]
+            self.log("Replace Audio: %s is no longer in the jukebox." % name, "info")
+        else:
+            return self._jukebox_rows()
+        self._juke_changed()
+        return self._jukebox_rows()
+
+    def _juke_pick(self, what, files, none_label):
+        """PAD-999: one of several files picked for a song under one name (``Hey Jude.wav`` and
+        ``Hey Jude.mp3``): which is it? None for *none_label*."""
+        if len(files) == 1:
+            return files[0]
+        buttons = [dict({"id": str(i), "label": os.path.basename(f)}, **({"style": "primary"} if not i else {}))
+                   for i, f in enumerate(files)] + [{"id": "none", "label": none_label}]
+        answer = compat.ctx().dialogs.message(
+            "question", "Jukebox: which %s?" % what,
+            "%d of the files you picked are the %s of %s. Which one goes in the jukebox?"
+            % (len(files), what, os.path.splitext(os.path.basename(files[0]))[0]),
+            buttons, default="0")
+        try:
+            return files[int(answer)]
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def _juke_add(self, paths):
+        """PAD-999: Add songs with the songs' audio and intro videos picked at once. A song's files
+        are named alike but for the extension; a video with no audio of its name makes no song, and
+        an audio with no video is a song with its song mode's own intro. Several audio (or video)
+        files of one name ask which one. A song whose name is in the jukebox already takes that
+        song's place (its weight and place in the list kept, its intro video kept when none came
+        with it), and the person is told. PAD-1007: the songs go in the pool the window shows, and
+        only a song of that pool is taken to be the same song (one song may be in several pools)."""
+        from ...plugins.stern import jukebox as _JB
+        songs, lone = _JB.pair_files(paths)
+        added, replaced, full = 0, [], []
+        pool = self._juke_pool_now()
+        mine = [g for _k, g in self._juke_in(pool)]
+        for key, audios, videos in songs:
+            audio = self._juke_pick("song's audio", audios, "Leave this song out")
+            if audio is None:
+                continue
+            video = self._juke_pick("intro video", videos, "No intro video") if videos else ""
+            name = os.path.basename(audio)
+            old = next((g for g in mine if _JB.song_key(g["audio"]) == key), None)
+            if old is not None:
+                old["audio"] = audio
+                if video:
+                    old["video"] = video
+                replaced.append(name)
+                continue
+            if len(self._juke) >= _JB.MAX_SONGS:
+                full.append(name)
+                continue
+            g = {"audio": audio, "video": video or "", "weight": _JB.DEFAULT_WEIGHT, "pool": pool}
+            self._juke.append(g)
+            mine.append(g)
+            added += 1
+        lone_names = [os.path.basename(v) for v in lone]
+        said = ["the jukebox has %d more song(s) (%d in all)" % (added, len(self._juke))]
+        if replaced:
+            said.append("%d took the place of the song(s) of the same name" % len(replaced))
+        self.log("Replace Audio: %s." % ", ".join(said), "info")
+        for v in lone_names:
+            self.log("Replace Audio: %s was left out of the jukebox: no song's audio of its name was "
+                     "picked with it." % v, "warning")
+        notes = []
+        if replaced:
+            notes.append("Already in the jukebox, so these took the place of the song of the same "
+                         "name (it keeps its place in the list and how often it comes up):\n"
+                         + "\n".join(replaced))
+        if lone_names:
+            notes.append("Left out: these videos have no song's audio file of the same name, and a "
+                         "video is only a song's intro:\n" + "\n".join(lone_names))
+        if full:
+            notes.append("Left out: the jukebox takes at most %d songs:\n%s"
+                         % (_JB.MAX_SONGS, "\n".join(full)))
+        if notes:
+            compat.messagebox.showwarning("Jukebox", "\n\n".join(notes))
+        if added or replaced:
+            self._juke_changed()
+
+    def _juke_changed(self):
+        from ...plugins.stern import jukebox as _JB
+        assets_dir = self._assets()
+        if assets_dir and os.path.isdir(assets_dir) and self._scan_dir and \
+                self._norm(self._scan_dir) == self._norm(assets_dir):
+            _JB.save(assets_dir, _JB.clean({"songs": self._juke}))
+            cb = self.window.cb.get("on_folder_state_written")
+            if cb is not None:
+                cb(assets_dir)
+        self._juke_spent = self._juke_rep is not None    # PAD-1106: the next ▶ draws from the new list
+        self._refresh_list()
+
+    def _add_mode(self):
+        """One more music mode (up to the game's most), named as it is added."""
+        n = self._modes_max() + 1
+        if n > self._modes_cap():
+            return False
+        text = compat.simpledialog.askstring(
+            "Add a music mode",
+            "The name of music mode %d: the machine's MUSIC MODE setting names it in its help "
+            "line." % n, initialvalue=self._mode_name(n))
+        if text is None:
+            return False
+        self._mode_names = ([self._mode_name(m) for m in range(1, n)]
+                            + [" ".join(str(text).split())])
+        self.log("Replace Audio: music %s added." % self._mode_said(n), "info")
+        self._save_staged_changes()
+        self._refresh_list()
+        return True
+
+    def _name_modes(self):
+        """Ask for the music modes' names, one line: the machine shows them in
+        MUSIC MODE's help line ("1 = Standard, 2 = Orchestral"). More names than
+        modes add modes, up to the game's most."""
+        n = self._modes_max()
+        now = ", ".join(self._mode_name(m) for m in range(1, n + 1))
+        text = compat.simpledialog.askstring(
+            "Name the music modes",
+            "The names of modes 1 to %d, separated by commas (up to %d names). Mode 1 is every "
+            "sound as it plays now; the machine's MUSIC MODE setting names them in its help "
+            "line." % (n, self._modes_cap()), initialvalue=now)
+        if text is None:
+            return False
+        names = [" ".join(t.split()) for t in str(text).split(",")][:self._modes_cap()]
+        n = max(n, len(names))
+        self._mode_names = names
+        self.log("Replace Audio: the music modes are %s." % ", ".join(
+            "%d %s" % (m, self._mode_name(m)) for m in range(1, n + 1)), "info")
+        self._save_staged_changes()
+        self._refresh_list()
+        return True
+
+    # PAD-553: the music modes as a file of their own
+    @rpc
+    def modes_save(self):
+        """More > Save the music modes to a file...: the modes' names, every sound's files for
+        the other modes with their loudness, and those files, in one file another project
+        loads. Returns its path, or None."""
+        from ...plugins.stern import media_share as MS
+        project = self._assets()
+        if not project or not (self._modes or self._turns or self._attract):
+            compat.messagebox.showinfo(
+                "Save the music modes",
+                "This project has no music modes to save: no sound has a file for another mode "
+                "yet (right-click a sound > Music modes).")
+            return None
+        self._save_staged_changes()
+        path = self._ask_path(
+            "save", "music_modes_file", "Save the music modes to a file",
+            initialfile="%s music modes.zip" % (os.path.basename(os.path.normpath(project))
+                                                or "project"),
+            filetypes=[("PAD music modes", "*.zip")], defaultextension=".zip")
+        if not path:
+            return None
+        try:
+            got = MS.save_music_modes(project, path)
+        except (MS.ShareError, OSError) as e:
+            compat.messagebox.showinfo("Save the music modes", str(e))
+            return None
+        self.log("Replace Audio: saved the music modes (%d sound(s), %d file(s)) to %s."
+                 % (got["slots"], got["files"], path), "success")
+        if got["gone"]:
+            compat.messagebox.showinfo(
+                "Save the music modes", "Saved to %s.\n\nLeft out, no longer on this PC: %s."
+                % (os.path.basename(path), ", ".join("%s (mode %d)" % (os.path.basename(f), m)
+                                                     for _r, m, f in got["gone"])))
+        return path
+
+    @rpc
+    def modes_load(self, path=None):
+        """More > Load music modes from a file...: a file Save the music modes to a file wrote,
+        here or on another PC, onto this project's sounds (the same sound found by what it is
+        when this card numbers it otherwise). A sound's file for a mode replaces the one it has
+        (asked first). Returns the report, or None."""
+        from ...plugins.stern import media_share as MS
+        from ...core import staged_changes
+        project = self._assets()
+        if not project or self._running():
+            return None
+        if not path:
+            path = self._ask_path("open", "music_modes_file", "Load music modes from a file",
+                                  filetypes=[("PAD music modes", "*.zip"), ("All files", "*.*")])
+            if isinstance(path, (list, tuple)):
+                path = path[0] if path else ""
+        if not path:
+            return None
+        self._save_staged_changes()
+        try:
+            got = MS.load_music_modes(project, path)
+        except (MS.ShareError, OSError) as e:
+            compat.messagebox.showinfo("Load music modes", str(e))
+            return None
+        rec = got["record"]
+        if not rec["slots"] and not rec.get("attract"):
+            compat.messagebox.showinfo(
+                "Load music modes", "Nothing in %s could be loaded here:\n\n%s" % (
+                    os.path.basename(path), "\n".join("%s: %s" % (os.path.basename(r), w)
+                                                      for r, w in got["left"][:12])))
+            return None
+        clash = MS.replaced_music(project, rec)
+        if clash and not compat.messagebox.askyesno(
+                "Load music modes",
+                "%d of the sounds in %s already have a file here for the same mode (%s). Loading "
+                "replaces them.\n\nLoad the file?" % (
+                    len(clash), os.path.basename(path), ", ".join(
+                        "%s mode %d" % (os.path.basename(r), m) for r, m in clash[:6])
+                    + (", ..." if len(clash) > 6 else ""))):
+            return None
+        n = MS.put_music(project, rec)
+        self._load_modes(staged_changes.load(project))
+        self.set(modes_share=True)
+        self._refresh_list()
+        self.log("Replace Audio: loaded the music modes of %s: %d sound(s), their files in the "
+                 "\"%s\" folder." % (os.path.basename(path), n, MS.MUSIC_DIR), "success")
+        lines = ["%d sound(s) have their files for the other music modes (%s)." % (
+            len(rec["slots"]), ", ".join("%d %s" % (m, self._mode_name(m))
+                                         for m in range(1, self._modes_max() + 1)))]
+        if rec.get("attract"):
+            lines.append("The flipper buttons play %d sound(s) in attract mode." % len(rec["attract"]))
+        made = (got["about"] or {}).get("label")
+        if made:
+            lines.append("The file was saved from a project of %s." % made)
+        for r, to, how in got["found"]:
+            self.log("Replace Audio: %s from the file is %s here (%s)." % (
+                os.path.basename(r), os.path.basename(to), how), "info")
+        if got["found"]:
+            lines.append("%d sound(s) have another name on this card and were found by what "
+                         "they are (the log names them)." % len(got["found"]))
+        for r, why in got["left"]:
+            self.log("Replace Audio: %s from the file is left out: %s." % (r, why), "warning")
+        if got["left"]:
+            more = len(got["left"]) - 6
+            lines.append("Left out: %s%s." % ("; ".join(
+                "%s (%s)" % (os.path.basename(r), w) for r, w in got["left"][:6]),
+                " and %d more (the log names them)" % more if more > 0 else ""))
+        compat.messagebox.showinfo("Load music modes", "\n\n".join(lines))
+        return {"loaded": n, "found": len(got["found"]), "left": len(got["left"])}
 
     def _open_target(self, rel, which):
         """The file "Open in default app" hands the OS (PAD-208): the
@@ -2456,96 +4710,198 @@ class AudioTab(FindOriginalsMixin, TabService):
         rel = rel or self._selected_rel()
         if rel is None or rel not in self._by_rel:
             return None
+        comment = self._load_comments().get(rel, "")
         parts = name_memory.split_decode_name(os.path.basename(rel))
         if parts is None:
-            return None
+            # PAD-1069: a sound whose name can't change still takes a comment
+            return {"rel": rel, "renamable": False, "comment": comment,
+                    "prompt": os.path.basename(rel)}
         prefix, label, ext = parts
         return {
-            "rel": rel,
+            "rel": rel, "renamable": True, "comment": comment,
             "prompt": ("Name for this sound — remembered for future extracts\n"
                        "(blank restores \"%s\" and forgets it):"
                        % (prefix + ext)),
-            "label": label,
+            # PAD-1310: the words as typed (callouts.csv), not the file-safe
+            # name, while they still make it
+            "label": self._callout_words(rel, label),
             "suggestions": self._sound_test_suggestions(),
             "category": self._cats.get(rel) or "other",
             "cats": [{"value": k, "label": v} for k, v in _CAT_NAMES],
         }
 
     @rpc
-    def rename(self, rel, text, new_cat):
+    def rename(self, rel, text, new_cat, comment=None):
         """OK in Audio Properties: rename the file in place (keeping its
-        decode index), re-point the baseline, remember the name and Type."""
+        decode index), re-point the baseline, remember the name and Type;
+        then the sound's *comment* (None: left as it is) goes into
+        callouts.csv (PAD-1069)."""
+        new_rel = self._props_rename(rel, text, new_cat)
+        if new_rel is None:
+            return False
+        if comment is not None:
+            self.set_comment(new_rel, comment)
+        return True
+
+    def _props_rename(self, rel, text, new_cat):
+        """:meth:`rename` without the comment: the sound's path after it, or
+        None when it failed."""
         from ...core import name_memory
-        from ...core.audio_slots import replace_with_retry
-        from ...core.checksums import rename_in_baseline
         slot = self._by_rel.get(rel)
         if slot is None:
-            return False
+            return None
         parts = name_memory.split_decode_name(os.path.basename(rel))
         if parts is None:
-            return False
+            return None
         prefix, label, ext = parts
         m = re.match(r"^#\d+\s+(.*)$", text or "")
         name = m.group(1) if m else (text or "")
+        # PAD-1310: only the file name loses what Windows can't hold; the
+        # words as typed go into callouts.csv
+        words = " ".join(name.split())
         if new_cat not in dict(_CAT_NAMES):
             new_cat = "other"
         cur_cat = self._cats.get(rel) or "other"
-        new_label = name_memory.sanitize_label(name)
+        wanted = name_memory.sanitize_label(name)
+        new_label = self._fit_label(rel, wanted)
+        if wanted and not new_label:
+            compat.messagebox.showerror(
+                "Audio Properties",
+                "This sound's folder is too deep for Windows to hold a name "
+                "after it:\n%s\n\nMove the project to a shorter folder."
+                % os.path.dirname(slot.abs_path))
+            return None
+        if new_label != wanted:
+            self.log("Replace Audio: name shortened to %d characters so the "
+                     "file's path stays inside Windows' 260-character limit."
+                     % len(new_label), "info")
         if new_label == label:
             if new_cat == cur_cat:
-                return True
+                # the same file name, but the words may differ ("Here?" for
+                # "Here_")
+                self._callouts_follow({rel: rel}, {rel: words})
+                return rel
             md5 = name_memory.baseline_md5(self._scan_dir, rel)
             if md5 is None and rel not in self._changed:
                 md5 = name_memory.file_md5(slot.abs_path)
             self._cats[rel] = new_cat
-            if md5 and new_label:
-                name_memory.remember(md5, new_label, category=new_cat)
+            if md5:
+                # PAD-1061: a sound with no name keeps its Type too
+                if new_label:
+                    name_memory.remember(md5, new_label, category=new_cat)
+                else:
+                    name_memory.remember_category(md5, new_cat)
                 note = " (remembered)"
             else:
-                note = (" (this session only — give the slot a name to "
-                        "remember its Type across extracts)")
+                note = (" (this session only: the slot is modded and has "
+                        "no baseline)")
             self.log("Replace Audio: %s Type → %s%s" % (rel, new_cat, note),
                      "info")
+            self._callouts_follow({rel: rel}, {rel: words})
             self._refresh_type_filter()
             self._refresh_list()
-            return True
+            return rel
+        new_base = ("%s - %s%s" % (prefix, new_label, ext) if new_label
+                    else prefix + ext)
+        if name_memory.clashes(slot.abs_path, os.path.join(
+                os.path.dirname(slot.abs_path), new_base)):
+            compat.messagebox.showerror(
+                "Audio Properties",
+                "A file named\n%s\nalready exists in that folder." % new_base)
+            return None
+        self._stop_playback()
+        try:
+            new_rel, md5 = self._rename_slot(rel, new_label, new_cat)
+        except OSError as e:
+            compat.messagebox.showerror("Audio Properties",
+                                        "Rename failed:\n%s" % e)
+            return None
+        if md5 and not new_label and new_cat != cur_cat:
+            # the name was cleared but the Type the user picked stays
+            name_memory.remember_category(md5, new_cat)
+        self._repoint_baseline({rel: new_rel})
+        self._callouts_follow({rel: new_rel}, {new_rel: words})
+        self._sel = [new_rel]
+        self._refresh_type_filter()
+        self._refresh_list()
+        self._on_select(None)
+        if not md5:
+            note = " (not remembered: the slot is modded and has no baseline)"
+        elif new_label:
+            note = " (remembered for future extracts)"
+        elif (new_cat != cur_cat
+              or self._cat_to_remember(new_rel, "", new_cat)):
+            note = " (name forgotten, Type %s remembered)" % new_cat
+        else:
+            note = " (forgotten)"
+        self.log("Replace Audio: renamed %s → %s%s" % (rel, new_base, note),
+                 "info")
+        self._save_staged_changes()
+        return new_rel
+
+    def _cat_to_remember(self, rel, label, cat):
+        """The Type to remember with *label* for slot *rel*: always with a
+        name; with a cleared one only when it is not the Type the slot gets
+        anyway (PAD-1060: a cleared name took the user's Type with it)."""
+        if label:
+            return cat
+        from ...core import audio_categories
+        try:
+            return None if cat == audio_categories.derived(
+                self._scan_dir, rel) else cat
+        except Exception:                               # noqa: BLE001
+            return cat
+
+    def _fit_label(self, rel, label):
+        """*label* (already sanitized) as much of it as fits as decode slot
+        *rel*'s name where the file lives (PAD-1158:
+        :func:`name_memory.fit_label`)."""
+        from ...core import name_memory
+        slot = self._by_rel.get(rel)
+        parts = name_memory.split_decode_name(os.path.basename(rel))
+        if slot is None or parts is None or not label:
+            return label
+        return name_memory.fit_label(os.path.dirname(slot.abs_path),
+                                     parts[0], label, parts[2])
+
+    def _rename_slot(self, rel, new_label, new_cat):
+        """Rename decode slot *rel* on disk to ``<prefix> - <new_label>``
+        (bare prefix when blank), remember the name and Type against its
+        factory hash, and move every per-slot setting to the new rel.
+        Returns ``(new_rel, md5)`` (md5 None when nothing was remembered);
+        raises OSError when the target exists or the move fails.  The caller
+        re-points the extract baseline (:meth:`_repoint_baseline`) and
+        repaints the list."""
+        from ...core import name_memory
+        from ...core.audio_slots import replace_with_retry
+        slot = self._by_rel[rel]
+        prefix, _label, ext = name_memory.split_decode_name(
+            os.path.basename(rel))
         new_base = ("%s - %s%s" % (prefix, new_label, ext) if new_label
                     else prefix + ext)
         folder = rel.rpartition("/")[0]
         new_rel = (folder + "/" + new_base) if folder else new_base
         dst = os.path.join(os.path.dirname(slot.abs_path), new_base)
-        if os.path.exists(dst):
-            compat.messagebox.showerror(
-                "Audio Properties",
-                "A file named\n%s\nalready exists in that folder." % new_base)
-            return False
+        if name_memory.clashes(slot.abs_path, dst):
+            raise OSError("a file named %s already exists" % new_base)
         md5 = name_memory.baseline_md5(self._scan_dir, rel)
         if md5 is None and rel not in self._changed:
             md5 = name_memory.file_md5(slot.abs_path)
-        self._stop_playback()
-        try:
-            replace_with_retry(slot.abs_path, dst)
-        except OSError as e:
-            compat.messagebox.showerror("Audio Properties",
-                                        "Rename failed:\n%s" % e)
-            return False
-        try:
-            rename_in_baseline(self._scan_dir, {rel: new_rel})
-        except OSError as e:
-            self.log(
-                "Replace Audio: renamed the file, but couldn't re-point the "
-                "extract baseline (%s) — the slot will read as \"changed on "
-                "disk\" until the next Extract, even though its audio is "
-                "untouched." % e, "error")
+        replace_with_retry(slot.abs_path, dst)
         if md5:
             try:
-                name_memory.remember(md5, new_label, category=new_cat)
+                name_memory.remember(
+                    md5, new_label,
+                    category=self._cat_to_remember(new_rel, new_label,
+                                                   new_cat))
             except OSError as e:
                 self.log(
                     "Replace Audio: couldn't remember \"%s\" for future "
                     "extracts (%s)." % (new_label, e), "error")
+        # PAD-984: and what the tab read about the slot when it loaded (the
+        # Requests count, the variants note): the bytes and idx are unchanged
         for d in (self._assign, self._loop, self._keep, self._cats,
-                  self._level):
+                  self._level, self._uses or {}, self._variants or {}):
             if rel in d:
                 d[new_rel] = d.pop(rel)
         if rel in self._changed:
@@ -2564,19 +4920,523 @@ class AudioTab(FindOriginalsMixin, TabService):
                     rels[i] = new_rel
         if self._current_rel == rel:
             self._clear_preview()
-        self._sel = [new_rel]
-        self._refresh_type_filter()
+        return new_rel, md5
+
+    def _repoint_baseline(self, renames):
+        """Re-point the extract baseline at renamed files (bytes unchanged),
+        so they don't read as "changed on disk"."""
+        from ...core.checksums import rename_in_baseline
+        if not renames:
+            return
+        try:
+            rename_in_baseline(self._scan_dir, renames)
+        except OSError as e:
+            self.log(
+                "Replace Audio: renamed the file, but couldn't re-point the "
+                "extract baseline (%s) — the slot will read as \"changed on "
+                "disk\" until the next Extract, even though its audio is "
+                "untouched." % e, "error")
+
+    # ------------------------------------------------------------------
+    # More > Rename from callouts.csv (PAD-894)
+    # ------------------------------------------------------------------
+    def _callout_finder(self, callouts):
+        """A function giving the scanned sound a *callouts* row is about, or
+        None: by folder + file, or, when that name has changed since the CSV
+        was written (a rename in Audio Properties), by its idx number in the
+        same folder."""
+        from ...core import name_memory
+        by_stem = {}
+        for rel in self._by_rel:
+            parts = name_memory.split_decode_name(rel.rpartition("/")[2])
+            if parts:
+                stem = parts[0].rpartition(" - ")[2].lower()
+                by_stem[(rel.rpartition("/")[0].lower(), stem)] = rel
+
+        def find(row):
+            fname = callouts.get(row, "file")
+            if not fname:
+                return None
+            folder = callouts.get(row, "folder").replace("\\", "/").strip("/")
+            rel = (folder + "/" + fname) if folder else fname
+            if rel in self._by_rel:
+                return rel
+            parts = name_memory.split_decode_name(fname)
+            stem = parts[0].rpartition(" - ")[2].lower() if parts else None
+            return by_stem.get((folder.lower(), stem))
+        return find
+
+    def _callout_renames(self, callouts):
+        """``(plan, unmatched, fixed)`` for *callouts*: plan is
+        ``[(rel, label, row)]`` for every row whose text names a scanned
+        decode sound something other than what it is called now (rows find
+        their sound by :meth:`_callout_finder`).  *unmatched* counts rows with
+        text whose sound is not here; *fixed* the sounds whose names cannot
+        change (not idx-numbered)."""
+        from ...core import name_memory
+        find = self._callout_finder(callouts)
+        plan, seen = [], set()
+        unmatched = fixed = 0
+        for row in callouts.rows:
+            text = callouts.get(row, "text")
+            if not text or not callouts.get(row, "file"):
+                continue
+            rel = find(row)
+            if rel is None:
+                unmatched += 1
+                continue
+            if rel in seen:
+                continue
+            seen.add(rel)
+            parts = name_memory.split_decode_name(rel.rpartition("/")[2])
+            if parts is None:
+                fixed += 1
+                continue
+            label = self._fit_label(rel, name_memory.sanitize_label(text))
+            if label and label != parts[1]:
+                plan.append((rel, label, row))
+        return plan, unmatched, fixed
+
+    @rpc
+    def rename_from_callouts(self):
+        """More > Rename from callouts.csv…: give every sound the text its
+        row in the project's callouts.csv has now (corrected by hand or in a
+        spreadsheet), the way Audio Properties renames one: the idx number
+        stays, characters a file name can't hold become '_', and the name is
+        remembered for future extracts.  The CSV's file column follows."""
+        from ...core.transcribe import CALLOUTS_CSV, CalloutsFile
+        title = "Rename from callouts.csv"
+        if self._running():
+            return False
+        if not self._slots or not self._scan_dir:
+            compat.messagebox.showinfo(
+                title, "Scan an assets folder first — the audio table is "
+                       "empty.")
+            return False
+        path = os.path.join(self._scan_dir, CALLOUTS_CSV)
+        if not os.path.isfile(path):
+            compat.messagebox.showinfo(
+                title, "This project has no %s yet.\n\nAuto-name call-outs on "
+                       "the Extract tab writes one: a row per sound with the "
+                       "words heard in it, which you can correct and bring "
+                       "back here." % CALLOUTS_CSV)
+            return False
+        try:
+            callouts = CalloutsFile(path)
+        except (OSError, ValueError, csv.Error) as e:
+            compat.messagebox.showerror(title, "Couldn't read %s:\n%s"
+                                        % (CALLOUTS_CSV, e))
+            return False
+        plan, unmatched, fixed = self._callout_renames(callouts)
+        notes = []
+        if unmatched:
+            notes.append("%d row(s) name a sound this project doesn't have."
+                         % unmatched)
+        if fixed:
+            notes.append("%d sound(s) keep their names: only idx-numbered "
+                         "sounds can be renamed." % fixed)
+        if not plan:
+            compat.messagebox.showinfo(
+                title, "Every sound already has the name %s gives it."
+                       % CALLOUTS_CSV + "".join("\n\n" + n for n in notes))
+            return True
+        if not compat.messagebox.askyesno(
+                title, "Rename %d sound(s) to their text in %s?\n\nEach keeps "
+                       "its idx number, characters a file name can't hold "
+                       "become _, and the names are remembered for future "
+                       "extracts." % (len(plan), CALLOUTS_CSV)):
+            return False
+        self._stop_playback()
+        renames, failed, forgot = {}, [], 0
+        file_key = callouts.key("file")
+        for rel, label, row in plan:
+            try:
+                new_rel, md5 = self._rename_slot(
+                    rel, label, self._cats.get(rel) or "other")
+            except OSError as e:
+                failed.append("%s: %s" % (rel, e))
+                continue
+            renames[rel] = new_rel
+            row[file_key] = new_rel.rpartition("/")[2]
+            forgot += not md5
+        self._repoint_baseline(renames)
+        if renames:
+            try:
+                callouts.save()
+            except OSError as e:
+                self.log("Replace Audio: renamed the sounds, but couldn't "
+                         "update %s (%s)." % (CALLOUTS_CSV, e), "error")
+            self._sel = [renames.get(r, r) for r in self._sel]
+            self._refresh_type_filter()
+            self._refresh_list()
+            self._on_select(None)
+            self._save_staged_changes()
+        for line in failed:
+            self.log("Replace Audio: couldn't rename %s" % line, "error")
+        self.log("Replace Audio: renamed %d sound(s) from %s."
+                 % (len(renames), CALLOUTS_CSV),
+                 "success" if renames else "info")
+        msg = "Renamed %d sound(s)." % len(renames)
+        if forgot:
+            notes.append("%d of them were modded with no extract baseline, so "
+                         "their names are not remembered for future extracts."
+                         % forgot)
+        if failed:
+            notes.append("%d couldn't be renamed:\n%s" % (
+                len(failed), "\n".join(failed[:10])
+                + ("\n…" if len(failed) > 10 else "")))
+        compat.messagebox.showinfo(title, msg + "".join("\n\n" + n
+                                                        for n in notes))
+        return True
+
+    # ------------------------------------------------------------------
+    # More > Update callouts.csv from the names (PAD-1048)
+    # ------------------------------------------------------------------
+    def _callouts_from_names(self, callouts, rels=None, words=None):
+        """Bring *callouts* in step with the names the sounds have now (all
+        scanned sounds, or only *rels*): a row whose sound was renamed since
+        the CSV was written gets its file and, unless its words already make
+        that name, its text; with *rels* None a named sound with no row gets
+        one.  PAD-1060: the row's classification follows the Type the sound
+        has now (a callout moved to Sound FX is no longer "speech"), and a
+        sound with no name that is not a callout loses its words, or Rename
+        from callouts.csv put the old name back (with *rels* None only as
+        its row stops being speech: the rows earlier Properties saves left
+        behind).  A cleared callout keeps them.  Returns ``(updated,
+        added)``; nothing is saved here.  PAD-1310: *words* (``{rel: text}``,
+        what was typed in Audio Properties) is the text a row gets in place
+        of the file-safe name while it makes that name ("Who are you?" for
+        "Who are you_"), and gives a sound with no row one when it differs
+        from the name."""
+        from ...core import name_memory
+        find = self._callout_finder(callouts)
+        want = set(self._by_rel if rels is None else rels)
+        keys = {k: callouts.key(k) for k in
+                ("folder", "file", "seconds", "classification", "text")}
+        updated = added = 0
+        seen = set()
+        for row in callouts.rows:
+            rel = find(row)
+            if rel is None or rel in seen:
+                continue
+            seen.add(rel)
+            if rel not in want:
+                continue
+            fname = rel.rpartition("/")[2]
+            parts = name_memory.split_decode_name(fname)
+            if parts is None:
+                continue
+            label, text = parts[1], callouts.get(row, "text")
+            changed = callouts.get(row, "file") != fname
+            row[keys["file"]] = fname
+            kind = (callouts.get(row, "classification") or "").strip().lower()
+            want_kind = _type_kind(self._cats.get(rel), kind)
+            if keys["classification"] and want_kind != kind:
+                row[keys["classification"]] = want_kind
+                changed = True
+            if not label and text and want_kind != "speech" and (
+                    rels is not None or kind == "speech"):
+                row[keys["text"]] = ""
+                changed = True
+            # the words win while they still make this name ("Kaiju award:
+            # 2x" files as "Kaiju award_ 2x"); a blank name keeps them
+            # typed words win only while they hold what the file name can't
+            # (typing the plain name keeps "Okay." for "Okay")
+            typed = (words or {}).get(rel, "")
+            if label and typed not in (text, label) and self._words_make(
+                    rel, typed, label):
+                row[keys["text"]] = typed
+                changed = True
+            elif label and not self._words_make(rel, text, label):
+                row[keys["text"]] = label
+                changed = True
+            updated += changed
+        if rels is not None:
+            for rel in sorted(want - seen, key=str.lower):
+                parts = name_memory.split_decode_name(rel.rpartition("/")[2])
+                typed = (words or {}).get(rel, "")
+                if (parts and parts[1] and typed != parts[1]
+                        and rel in self._by_rel
+                        and self._words_make(rel, typed, parts[1])):
+                    callouts.rows.append(self._new_callout_row(
+                        callouts, rel, typed))
+                    added += 1
+            return updated, added
+        for rel in sorted(want - seen, key=str.lower):
+            parts = name_memory.split_decode_name(rel.rpartition("/")[2])
+            if not parts or not parts[1]:
+                continue
+            callouts.rows.append(self._new_callout_row(
+                callouts, rel, parts[1]))
+            added += 1
+        return updated, added
+
+    def _new_callout_row(self, callouts, rel, text):
+        """A callouts.csv row for scanned sound *rel* with *text*."""
+        keys = {k: callouts.key(k) for k in
+                ("folder", "file", "seconds", "classification", "text")}
+        slot = self._by_rel[rel]
+        folder, _, fname = rel.rpartition("/")
+        row = {keys["file"]: fname, keys["text"]: text}
+        if keys["folder"]:
+            row[keys["folder"]] = folder
+        if keys["seconds"]:
+            row[keys["seconds"]] = ("%.3f" % slot.duration
+                                    if slot.duration else "")
+        if keys["classification"]:
+            row[keys["classification"]] = _type_kind(self._cats.get(rel), "")
+        return row
+
+    def _words_make(self, rel, text, label):
+        """Whether *text* makes the file name *label* for sound *rel* (the
+        characters Windows can't hold swapped out, shortened to fit)."""
+        from ...core import name_memory
+        return bool(text) and self._fit_label(
+            rel, name_memory.sanitize_label(text)) == label
+
+    def _callout_words(self, rel, label):
+        """The words callouts.csv has for sound *rel* when they make its file
+        name *label* (PAD-1310: "Who are you? Spider-Man: Here!" for "Who are
+        you_ Spider-Man_ Here!"), else *label*."""
+        from ...core.transcribe import CALLOUTS_CSV, CalloutsFile
+        if not label or not self._scan_dir:
+            return label
+        path = os.path.join(self._scan_dir, CALLOUTS_CSV)
+        if not os.path.isfile(path):
+            return label
+        try:
+            callouts = CalloutsFile(path)
+        except (OSError, ValueError, csv.Error):
+            return label
+        find = self._callout_finder(callouts)
+        for row in callouts.rows:
+            if find(row) == rel:
+                text = " ".join(callouts.get(row, "text").split())
+                return text if self._words_make(rel, text, label) else label
+        return label
+
+    def _callouts_follow(self, renames, words=None):
+        """A rename in Audio Properties: the project's callouts.csv rows for
+        the renamed sounds follow (*renames* is ``{old_rel: new_rel}``), so
+        the CSV never names a file that is gone.  Quiet when there is no CSV;
+        an unreadable one is left alone and logged.  PAD-1310: *words* are
+        the words typed for them (see :meth:`_callouts_from_names`); words
+        the file name can't hold make the CSV when there is none."""
+        from ...core import name_memory
+        from ...core.transcribe import CALLOUTS_CSV, CalloutsFile
+        if not renames or not self._scan_dir:
+            return
+        path = os.path.join(self._scan_dir, CALLOUTS_CSV)
+
+        def lost(rel, typed):
+            parts = name_memory.split_decode_name(rel.rpartition("/")[2])
+            return bool(parts and parts[1] and typed and typed != parts[1])
+        try:
+            if os.path.isfile(path):
+                callouts = CalloutsFile(path)
+            elif any(lost(r, t) for r, t in (words or {}).items()):
+                callouts = CalloutsFile.empty(path)
+            else:
+                return
+            if any(self._callouts_from_names(
+                    callouts, renames.values(), words)):
+                callouts.save()
+        except (OSError, ValueError, csv.Error) as e:
+            self.log("Replace Audio: renamed the sound, but couldn't update "
+                     "%s (%s)." % (CALLOUTS_CSV, e), "error")
+
+    # ------------------------------------------------------------------
+    # PAD-1069: comments on sounds, kept in callouts.csv
+    # ------------------------------------------------------------------
+    def _load_comments(self):
+        """``{rel: comment}`` from the comment column of the project's
+        callouts.csv (each row finds its sound by :meth:`_callout_finder`),
+        read again only when the file or the sounds have changed."""
+        from ...core.transcribe import CALLOUTS_CSV, COMMENT, CalloutsFile
+        path = os.path.join(self._scan_dir or "", CALLOUTS_CSV)
+        try:
+            st = os.stat(path) if self._scan_dir else None
+        except OSError:
+            st = None
+        sig = (path, st and st.st_mtime_ns, st and st.st_size,
+               hash(frozenset(self._by_rel)))
+        if sig == self._comments_sig:
+            return self._comments
+        self._comments_sig, self._comments = sig, {}
+        if st is None or not self._by_rel:
+            return self._comments
+        try:
+            callouts = CalloutsFile(path)
+        except (OSError, ValueError, csv.Error):
+            return self._comments
+        if callouts.key(COMMENT) is None:
+            return self._comments
+        find = self._callout_finder(callouts)
+        seen = set()
+        for row in callouts.rows:
+            rel = find(row)
+            if rel is None or rel in seen:
+                continue
+            seen.add(rel)
+            note = " ".join(callouts.get(row, COMMENT).split())
+            if note:
+                self._comments[rel] = note
+        return self._comments
+
+    @rpc
+    def comments_from_callouts(self):
+        """PAD-1246: More > Update comments from callouts.csv…: take every
+        sound's comment from the comment column of the project's callouts.csv
+        as it is now (filled in by hand, in a spreadsheet or by an LLM), each
+        row finding its sound by folder + file or its idx number like Rename
+        from callouts.csv.  Names, types and the other columns are left as
+        they are.  Says how many comments came in, changed or went."""
+        from ...core.transcribe import CALLOUTS_CSV, COMMENT, CalloutsFile
+        title = "Update comments from callouts.csv"
+        if not self._slots or not self._scan_dir:
+            compat.messagebox.showinfo(
+                title, "Scan an assets folder first — the audio table is "
+                       "empty.")
+            return False
+        path = os.path.join(self._scan_dir, CALLOUTS_CSV)
+        if not os.path.isfile(path):
+            compat.messagebox.showinfo(
+                title, "This project has no %s yet.\n\nAuto-name call-outs on "
+                       "the Extract tab writes one, and so does a comment typed "
+                       "in Audio Properties." % CALLOUTS_CSV)
+            return False
+        try:
+            callouts = CalloutsFile(path)
+        except (OSError, ValueError, csv.Error) as e:
+            compat.messagebox.showerror(title, "Couldn't read %s:\n%s"
+                                        % (CALLOUTS_CSV, e))
+            return False
+        if callouts.key(COMMENT) is None:
+            compat.messagebox.showinfo(
+                title, "%s has no comment column.\n\nAdd a column headed "
+                       "\"comment\" and put each sound's note on its row, then "
+                       "press this again." % CALLOUTS_CSV)
+            return False
+        shown = dict(self._comments)
+        self._comments_sig = None            # read the file whatever it says
+        now = dict(self._load_comments())
+        find = self._callout_finder(callouts)
+        unmatched = sum(1 for r in callouts.rows
+                        if callouts.get(r, COMMENT) and callouts.get(r, "file")
+                        and find(r) is None)
+        added = sum(1 for r in now if r not in shown)
+        changed = sum(1 for r in now if r in shown and shown[r] != now[r])
+        cleared = sum(1 for r in shown if r not in now)
         self._refresh_list()
-        self._on_select(None)
-        if not md5:
-            note = " (not remembered: the slot is modded and has no baseline)"
-        elif new_label:
-            note = " (remembered for future extracts)"
-        else:
-            note = " (forgotten)"
-        self.log("Replace Audio: renamed %s → %s%s" % (rel, new_base, note),
-                 "info")
-        self._save_staged_changes()
+        parts = [("%d new" % added) if added else "",
+                 ("%d changed" % changed) if changed else "",
+                 ("%d cleared" % cleared) if cleared else ""]
+        parts = [p for p in parts if p]
+        msg = ("%d sound(s) have a comment from %s." % (len(now), CALLOUTS_CSV)
+               if now else "%s gives no sound a comment." % CALLOUTS_CSV)
+        msg += (" Since the list last showed them: %s." % ", ".join(parts)
+                if parts else " The list already showed every one of them.")
+        if unmatched:
+            msg += ("\n\n%d row(s) with a comment name a sound this project "
+                    "doesn't have." % unmatched)
+        if now and self._show_comments_pref() is False:
+            msg += ("\n\nTick Show comments in the toolbar to see the Comment "
+                    "column.")
+        self.log("Replace Audio: comments from %s: %d sound(s)%s."
+                 % (CALLOUTS_CSV, len(now),
+                    (" (" + ", ".join(parts) + ")") if parts else ""), "info")
+        compat.messagebox.showinfo(title, msg)
+        return True
+
+    @rpc
+    def set_comment(self, rel, text):
+        """The comment on sound *rel* (Audio Properties): saved in the
+        comment column of the project's callouts.csv, the column added and
+        the sound given a row when it has none (the file made when the
+        project has none).  Blank clears it."""
+        from ...core import name_memory
+        from ...core.transcribe import CALLOUTS_CSV, COMMENT, CalloutsFile
+        slot = self._by_rel.get(rel)
+        if slot is None or not self._scan_dir:
+            return False
+        text = " ".join(str(text or "").split())
+        if text == self._load_comments().get(rel, ""):
+            return True
+        path = os.path.join(self._scan_dir, CALLOUTS_CSV)
+        try:
+            callouts = (CalloutsFile(path) if os.path.isfile(path)
+                        else CalloutsFile.empty(path))
+            if callouts.key(COMMENT) is None:
+                callouts.fields.append(COMMENT)
+            key = callouts.key(COMMENT)
+            find = self._callout_finder(callouts)
+            row = next((r for r in callouts.rows if find(r) == rel), None)
+            if row is None:
+                parts = name_memory.split_decode_name(rel.rpartition("/")[2])
+                row = self._new_callout_row(callouts, rel,
+                                            parts[1] if parts else "")
+                callouts.rows.append(row)
+            row[key] = text
+            callouts.save()
+        except (OSError, ValueError, csv.Error) as e:
+            compat.messagebox.showerror(
+                "Audio Properties",
+                "Couldn't save the comment in %s:\n%s" % (CALLOUTS_CSV, e))
+            return False
+        self.log("Replace Audio: %s %s (%s)" % (
+            rel, ("comment: " + text) if text else "comment cleared",
+            CALLOUTS_CSV), "info")
+        self._refresh_list()
+        return True
+
+    @rpc
+    def update_callouts(self):
+        """More > Update callouts.csv from the names…: write the names the
+        sounds have now (renamed in Audio Properties, or by Rename from
+        callouts.csv) into the project's callouts.csv, the reverse of Rename
+        from callouts.csv, so the work survives a fresh extract or a share.
+        A row for a sound that is gone stays as it was; a named sound with no
+        row gets one; the file is made when the project has none."""
+        from ...core.transcribe import CALLOUTS_CSV, CalloutsFile
+        title = "Update callouts.csv"
+        if self._running():
+            return False
+        if not self._slots or not self._scan_dir:
+            compat.messagebox.showinfo(
+                title, "Scan an assets folder first — the audio table is "
+                       "empty.")
+            return False
+        path = os.path.join(self._scan_dir, CALLOUTS_CSV)
+        try:
+            callouts = (CalloutsFile(path) if os.path.isfile(path)
+                        else CalloutsFile.empty(path))
+        except (OSError, ValueError, csv.Error) as e:
+            compat.messagebox.showerror(title, "Couldn't read %s:\n%s"
+                                        % (CALLOUTS_CSV, e))
+            return False
+        updated, added = self._callouts_from_names(callouts)
+        if not updated and not added:
+            compat.messagebox.showinfo(
+                title, "%s already has every sound's name." % CALLOUTS_CSV)
+            return True
+        if not compat.messagebox.askyesno(
+                title, "Write the names the sounds have now into %s?\n\n"
+                       "%d row(s) get their sound's new name and %d named "
+                       "sound(s) get a row. Rows for sounds this project "
+                       "doesn't have are kept as they are."
+                       % (CALLOUTS_CSV, updated, added)):
+            return False
+        try:
+            callouts.save()
+        except OSError as e:
+            compat.messagebox.showerror(title, "Couldn't write %s:\n%s"
+                                        % (CALLOUTS_CSV, e))
+            return False
+        self.log("Replace Audio: %s: %d row(s) updated, %d added."
+                 % (CALLOUTS_CSV, updated, added), "success")
+        compat.messagebox.showinfo(
+            title, "Updated %d row(s) and added %d.\n\n%s" % (
+                updated, added, os.path.normpath(path)))
         return True
 
     # ------------------------------------------------------------------
@@ -2628,12 +5488,16 @@ class AudioTab(FindOriginalsMixin, TabService):
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
+                uses = self._uses
                 w.writerow(["Original Track", "Length", "Format", "Type",
                             "Replacement", "Changed On Disk", "Loop",
-                            "Full Length", "Level dB"])
+                            "Full Length", "Level dB"]
+                           + (["Game Sound Requests"] if uses is not None
+                              else []) + ["Comment"])
+                comments = self._load_comments()
                 for s in sorted(self._slots, key=lambda q: q.rel_path):
                     rel = s.rel_path
-                    w.writerow([
+                    row = [
                         rel, s.duration_str(), s.format_summary(),
                         _CAT_DISP.get(_cat_key(s), "Other"),
                         self._assign.get(rel, ""),
@@ -2641,7 +5505,13 @@ class AudioTab(FindOriginalsMixin, TabService):
                         "yes" if self._loop.get(rel) else "",
                         "yes" if self._keep.get(rel) else "",
                         self._level.get(rel, "") or "",
-                    ])
+                    ]
+                    if uses is not None:
+                        u = uses.get(rel)
+                        row.append("" if u is None else " ".join(
+                            "#%d" % r for r, _n in u) or "none")
+                    row.append(comments.get(rel, ""))
+                    w.writerow(row)
         except OSError as e:
             compat.messagebox.showerror("Export CSV",
                                         "Couldn't write the CSV:\n%s" % e)
@@ -2656,7 +5526,10 @@ class AudioTab(FindOriginalsMixin, TabService):
     @rpc
     def advanced_get(self):
         cfg = dict(ADV_DEFAULTS)
-        cfg.update({k: v for k, v in self._advanced.items() if v is not None})
+        # only the options the dialog has: an "audio_grow" an older
+        # settings.json carries is gone with its checkbox (PAD-843)
+        cfg.update({k: v for k, v in self._advanced.items()
+                    if v is not None and k in ADV_DEFAULTS})
         if cfg.get("loudness") not in dict(LOUDNESS_CHOICES):
             cfg["loudness"] = "match"
         if cfg.get("head_mode") not in dict(HEAD_CHOICES):
@@ -2666,9 +5539,11 @@ class AudioTab(FindOriginalsMixin, TabService):
         cfg["loudness_db"] = cfg.get("loudness_db") or 0
         cfg["slot_seed_db"] = cfg.get("slot_seed_db") or 65
         cfg["experiment_idxs"] = str(cfg.get("experiment_idxs") or "")
-        return {"cfg": cfg, "defaults": dict(ADV_DEFAULTS),
+        full = getattr(self, "_adv_full", True)
+        return {"cfg": cfg, "defaults": dict(ADV_DEFAULTS), "full": full,
                 "loudness": [{"value": k, "label": v}
-                             for k, v in LOUDNESS_CHOICES],
+                             for k, v in (LOUDNESS_CHOICES if full
+                                          else LOUDNESS_CHOICES_OWN)],
                 "head": [{"value": k, "label": v} for k, v in HEAD_CHOICES],
                 "leadout": [{"value": k, "label": v}
                             for k, v in LEADOUT_CHOICES]}
@@ -2698,8 +5573,6 @@ class AudioTab(FindOriginalsMixin, TabService):
             "experiment_idxs": idxs,
             "slot_seed": bool(cfg.get("slot_seed")),
             "slot_seed_db": num(cfg.get("slot_seed_db"), 40, 90, 65),
-            "blip_free_optin": bool(cfg.get("blip_free_optin")),
-            "audio_grow": bool(cfg.get("audio_grow")),
             "loudness": cfg.get("loudness") if cfg.get("loudness")
             in dict(LOUDNESS_CHOICES) else "match",
             "loudness_db": num(cfg.get("loudness_db"), -12, 12, 0),
@@ -2741,7 +5614,7 @@ class AudioTab(FindOriginalsMixin, TabService):
     #: Each column's Tk ``minwidth`` (``_build_audio_tab``): a saved width
     #: never shows narrower than the Tk tree let it be dragged.
     _MIN_WIDTHS = {"#0": 80, "len": 66, "fmt": 104, "rep": 110, "loop": 40,
-                   "keep": 40, "type": 64, "lvl": 58}
+                   "keep": 40, "type": 64, "lvl": 58, "cm": 90}
 
     def _all_widths(self):
         s = getattr(self.app, "_settings", None) if self.app else None

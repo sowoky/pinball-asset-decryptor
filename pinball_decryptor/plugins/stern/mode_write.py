@@ -22,9 +22,10 @@ This module is the planning half, testable without a card: the gates, the card c
 asset build, which request the end sound rides on, the manifest, the p2 payload and what the
 log and the change scan say. :mod:`.engine` runs it.
 
-GATES. THE PREVIEW SWITCH comes first: the mode maker ships dark, and a copy of the app
-carries modes only while Settings > Preview features holds a signed code for it
-(:mod:`...core.preview`, :func:`preview_on`). Off, a Write never reads the project's modes
+GATES. THE PREVIEW SWITCH comes first (:mod:`...core.preview`, :func:`preview_on`). The
+mode maker shipped dark behind a signed code until PAD-763, and is in every copy since
+(``preview.RELEASED``), so the switch is always on; the off path stays for a feature that
+is a preview again. Off, a Write never reads the project's modes
 at all - it says in one sentence that they are left out - and takes the path a build
 without the family takes. ``PAD_STERN_MODES=0`` leaves modes out of every build. A mode build needs an image
 file and a host that can write files into ext4 (a direct-SD write cannot add a file). A
@@ -320,11 +321,23 @@ def lookup(reader, card_rel):
 
 
 def _elf_segments(elf):
-    if elf[:4] != b"\x7fELF" or elf[4] != 1:
-        raise ModeWriteError("the card's game program is not a 32-bit ELF")
+    """``[(vaddr, file offset, file size)]`` of the program's loaded segments. A Spike 2 game
+    is a 32-bit ELF; PAD-1272: a Spike 3 game is a 64-bit one (aarch64, a PIE: a port's
+    addresses are the program's own, so they are looked up in its segments the same way)."""
+    if elf[:4] != b"\x7fELF" or elf[4] not in (1, 2):
+        raise ModeWriteError("the card's game program is not an ELF")
+    out = []
+    if elf[4] == 2:
+        phoff, = struct.unpack_from("<Q", elf, 0x20)
+        phentsize, phnum = struct.unpack_from("<HH", elf, 0x36)
+        for i in range(phnum):
+            p_type, _fl, p_off, p_vaddr, _pa, p_filesz = struct.unpack_from(
+                "<IIQQQQ", elf, phoff + i * phentsize)
+            if p_type == 1:
+                out.append((p_vaddr, p_off, p_filesz))
+        return out
     phoff, = struct.unpack_from("<I", elf, 0x1C)
     phentsize, phnum = struct.unpack_from("<HH", elf, 0x2A)
-    out = []
     for i in range(phnum):
         p_type, p_off, p_vaddr, _pa, p_filesz, _ms, _fl, _al = struct.unpack_from(
             "<8I", elf, phoff + i * phentsize)
@@ -397,8 +410,9 @@ def find_port(prof, elf):
     one; they are refused, naming the build to make them for."""
     tried, unproven = [], []
     own = MP.port_path(prof)
+    arch = MR.elf_arch(elf)
     for game_dir, version, path in MR.port_paths():
-        if game_dir != prof.game_dir:
+        if game_dir != prof.game_dir or MR.port_arch(path) != arch:   # PAD-1277: this machine's ports
             continue
         sites = port_sites(path)
         bad = site_mismatches(path, elf)
@@ -418,6 +432,28 @@ def find_port(prof, elf):
         "what the app knows of how to run modes on %s does not match this card's game "
         "program, so a mode could never start on it%s"
         % (prof.label, " (tried: " + "; ".join(tried) + ")" if tried else ""))
+
+
+def with_framework(port, elf, scratch):
+    """PAD-710: a port without the lines of the game's own mode framework (a shipped port of an older build, one
+    derived before them) gets them from THIS card's program, in a copy beside the build (the port itself is left as
+    it is): a mode in the place of one of the game's modes then counts as it on that build too. The port as it was
+    when the card's program has none (a plain-C title) or it has them already."""
+    from . import mode_framework as MF
+    try:
+        with open(port, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return port
+    lines = (MF.lines_for(elf, text) + MF.plain_lines_for(elf, text)   # C++ titles' framework; plain-C titles' books
+             + MF.challenge_place_lines(text))                          # challenges that are one of its modes
+    if not lines:
+        return port
+    os.makedirs(scratch, exist_ok=True)
+    out = os.path.join(scratch, "game.framework.port")
+    with open(out, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text.rstrip("\n") + "\n\n" + "\n".join(lines) + "\n")
+    return out
 
 
 def request_sids(game_elf, image_head, request):
@@ -448,7 +484,7 @@ def request_sids(game_elf, image_head, request):
         if o is None or o <= table:
             continue
         out = []
-        for i in range(64):
+        for i in range(SR.LIST_MAX):
             if o + 4 * i + 4 > len(game_elf):
                 break
             (s,) = struct.unpack_from("<I", game_elf, o + 4 * i)
@@ -560,6 +596,28 @@ class ModePlan:
     #: (None when the project has none) and ``clips.cfg`` beside the mode files ("" = none)
     variants: object = None
     clips_file: str = ""
+    #: PAD-494: ``sounds.cfg`` beside the mode files, the music modes' descriptors ("" = none)
+    sounds_file: str = ""
+    #: PAD-537: ``picture.cfg`` beside the mode files, the picture settings ("" = none)
+    picture_file: str = ""
+    #: PAD-1382: ``settings.cfg`` beside the mode files, the settings sharing the MORE SETTINGS rows ("" = none)
+    settings_file: str = ""
+    #: PAD-782: ``attract.cfg`` beside the mode files, the owner's attract items ("" = none)
+    attract_file: str = ""
+    #: PAD-1017: ``coop.cfg`` beside the mode files, co-op play ("" = none)
+    coop_file: str = ""
+    #: PAD-1033: ``handicap.cfg`` beside the mode files, a handicap for each player ("" = none)
+    handicap_file: str = ""
+    #: PAD-1022: ``idle.cfg`` beside the mode files, inactivity pausing the timers ("" = none)
+    idle_file: str = ""
+    #: PAD-1040: ``cabshow.cfg`` beside the mode files, the card's expression light shows ("" = none)
+    cabshow_file: str = ""
+    #: PAD-1041: ``comp.cfg`` beside the mode files, Prolonged Competition on the start menu ("" = none)
+    comp_file: str = ""
+    #: PAD-1204: ``scorefeed.cfg`` beside the mode files, each game's final scores posted to the owner's server ("" = none)
+    scorefeed_file: str = ""
+    #: PAD-1280: ``records.cfg`` beside the mode files, the owner's records on the high scores ("" = none)
+    records_file: str = ""
     #: PAD-446: the names of the modes on the card ([] for a card of random clips only)
     mode_names: list = field(default_factory=list)
 
@@ -607,8 +665,9 @@ _SPEC_FIELD = {"sound_end": "end_sound"}
 def end_on_carrier(prof):
     """item 164: a title whose time-up callout is not known carries a mode's END sound on a
     carrier too (mode_file.c ``sound_end``), one per mode, instead of re-pointing the time-up
-    request - :func:`.mode_project.end_sound_carried`."""
-    return not prof.callout_time_up
+    request - :func:`.mode_project.end_sound_carried`. A Spike 3 build always does (PAD-1296: its
+    sounds are swapped in; nothing re-points a request of its program)."""
+    return not prof.callout_time_up or getattr(prof, "arch", "arm") == "a64"
 
 
 def carried_keys(prof):
@@ -681,7 +740,8 @@ def choose_own_sounds(project, modes, sound_ok, end_sound=None, log=None):
         return []
     from . import mode_sounds as MS
     game, version = MS.title_version(prof.key)
-    if MS.carriers(game, version) is None:
+    c = MS.profile_carriers(prof.key)
+    if c is None:
         log("Modes: the start sound, shot sound and music of %s are not put on this card: no "
             "stock requests to carry them have been measured for %s yet."
             % (_names(wanted), prof.label), "warning")
@@ -689,7 +749,6 @@ def choose_own_sounds(project, modes, sound_ok, end_sound=None, log=None):
     taken = [int(end_sound["request"])] if end_sound and end_sound.get("request") else []
     taken_beds = []
     out = []
-    c = MS.carriers(game, version)
     for slug, spec, key in wanted:
         if MS.swapped(c, key):
             # hud-layers: a carrier shared with the other modes; the engine picks which
@@ -714,7 +773,7 @@ def choose_own_sounds(project, modes, sound_ok, end_sound=None, log=None):
             entry["sid"] = int(got["music_sid"])
             entry["seconds"] = int(getattr(spec, "seconds", 0) or 0)
             taken_beds.append(entry["sid"])
-        if MS.carriers(game, version).swap:
+        if c.swap:
             entry["swap"] = True        # item 163: swapped in at run time, no stock sound id changes
         out.append(entry)
     out, dropped = _share_swapped(out, c, taken)
@@ -741,9 +800,15 @@ def own_cfg_args(project, slug, spec, own_sounds):
         return None, None
     requests = {u["key"]: int(u["request"]) for u in mine}
     for u in mine:
-        if u["key"] == "music" and u.get("sid"):
+        if u["key"] == "music" and u.get("bank_sid"):
+            # PAD-595: its bed in a sound bank of its own, played by that bank's sound id
+            requests["music_sid"] = int(u["bank_sid"])
+        elif u["key"] == "music" and u.get("sid"):
             requests["music_sid"] = int(u["sid"])     # item 150 follow-up: the mode's own bed
-        if u.get("stock_key") and u.get("our_key"):
+        if u.get("bank_sid") and u["key"] != "music":
+            # PAD-595: a call in a sound bank: its carrier is pointed at the bank's sound id
+            requests.setdefault("sids", []).append((int(u["request"]), int(u["bank_sid"])))
+        elif u.get("stock_key") and u.get("our_key"):
             # item 163: the mode swaps its own record in on this carrier
             requests.setdefault("swaps", []).append((int(u["request"]), u["stock_key"], u["our_key"]))
     ms = {u["key"]: int(u["ms"]) for u in mine if u.get("ms") and u["key"] != "music"}
@@ -765,8 +830,13 @@ def mode_file_text(project, slug, spec, own_sounds):
 
 
 def plan(project, stock_hud, stock_bank, game_elf, scratch, ffmpeg=None, sound_ok=(True, ""),
-         log=None, end_sound="choose", own_sounds=None, progress=None, stock_font=b"", hud_font=b"",
-         modes_on=True, variants=False, variants_prof=None, cancel=None):
+         log=None, end_sound="choose", own_sounds=None, progress=None, stock_font=b"", hud_font=b"", stock_select=b"",
+         modes_on=True, variants=False, variants_prof=None, cancel=None, sound_modes="",
+         sound_modes_prof=None, picture="", picture_prof=None, read_card=None, scan_card=None,
+         attract=False, attract_prof=None, find_scene=None, coop=False, coop_prof=None, coop_setting=0, idle=False,
+         idle_prof=None, handicap=False, handicap_prof=None, handicap_setting=0, cabs=None, cabs_prof=None,
+         cabs_sids=None, comp=False, comp_prof=None, screen_times=None, screen_prof=None, score_feed="",
+         score_feed_prof=None, records=None, records_prof=None, code_ok=True, arch="arm"):
     """Build a project's modes against this card's STOCK scenes into *scratch* and say what
     goes where. ``None`` when the project has no modes. Raises :class:`ModeWriteError`.
     *end_sound* is the build's own decision when it has already made one (the engine
@@ -778,16 +848,124 @@ def plan(project, stock_hud, stock_bank, game_elf, scratch, ffmpeg=None, sound_o
     PAD-446: *variants* adds the project's clips that play one of several at random
     (:mod:`.clip_variants`) to the same bank, and ``clips.cfg`` beside the mode files. A
     project with variants and no modes (or *modes_on* False: the build carries none) is a plan
-    of its own, for *variants_prof*, the title of the card being written."""
+    of its own, for *variants_prof*, the title of the card being written. PAD-723: *read_card*
+    ``(card path) -> bytes or None`` reads the other bank scenes a random clip may be in, and
+    *scan_card* ``(names) -> {name: scenes naming it}`` counts them across the card.
+
+    PAD-494: *sound_modes* is the music modes' ``sounds.cfg`` the engine wrote (the bank already
+    holds their files), put beside the mode files; with no mode and no random clip it is a plan of
+    its own, for *sound_modes_prof*.
+
+    PAD-537: *picture* is the picture settings' ``picture.cfg`` the engine wrote, put beside the
+    mode files; with nothing else it is a plan of its own, for *picture_prof*.
+
+    PAD-782: *attract* adds the project's attract items (:mod:`.attract_items`) to the same bank, and
+    ``attract.cfg`` beside the mode files; with nothing else it is a plan of its own, for
+    *attract_prof*.
+
+    PAD-1017: *coop* puts co-op play's ``coop.cfg`` beside the mode files (the right flipper button read off
+    *game_elf*); with nothing else it is a plan of its own, for *coop_prof*. *coop_setting* (round 2) is the live
+    value of the service menu's CO-OP PLAY row the engine added, when the menu switches co-op.
+
+    PAD-1022: *idle* puts ``idle.cfg`` beside the mode files (inactivity pauses the game's timers); with nothing
+    else it is a plan of its own, for *idle_prof*, and the file says the card has no modes.
+
+    PAD-1033: *handicap* puts ``handicap.cfg`` beside the mode files (a handicap for each player, its levels worked out
+    of *game_elf*); with nothing else it is a plan of its own, for *handicap_prof*. *handicap_setting* is the live value
+    of the service menu's HANDICAP row the engine added (0: none, always on).
+
+    PAD-1040: *cabs* (the project's expression light shows) puts ``cabshow.cfg`` beside the mode files, each show
+    with the sound ids that start its song on this card (*cabs_sids*, ``{slot: [sid, ...]}``); with nothing else it is
+    a plan of its own, for *cabs_prof*, and the file says the card has no modes.
+
+
+    PAD-1041: *comp* puts ``comp.cfg`` beside the mode files (Prolonged Competition on the start menu, its flag and
+    captions read off *game_elf*); with nothing else it is a plan of its own, for *comp_prof*.
+
+    PAD-1115: *screen_times* (``clips.cfg``'s ``stime`` lines, :func:`.screen_time.cfg_lines`) make the game's
+    screens that show a replaced clip last as long as it; with nothing else they are a plan of their own, for
+    *screen_prof*.
+
+    PAD-1204: *score_feed* (an address) puts ``scorefeed.cfg`` beside the mode files: each game's final scores posted
+    there (the logins' tables read off *game_elf*); with nothing else it is a plan of its own, for *score_feed_prof*,
+    and the file says the card has no modes.
+
+    PAD-1280: *records* (:func:`.mode_records.load`'s) put ``records.cfg`` beside the mode files: the owner's records
+    on the game's high scores, each game's mode named by its object read off *game_elf*; with nothing else it is a
+    plan of its own, for *records_prof* (a whole install, as co-op play: the score gate holds Insider's reports
+    back)."""
     from . import mode_assets
     log = log or (lambda *a, **k: None)
     modes = card_modes(project, project_modes(project)) if modes_on else []
-    code = code_mode_list(project) if modes_on else []   # the code modes' own assets travel too
+    # the code modes' own assets travel too (code_ok False leaves them out; PAD-1295: a Spike 3
+    # card takes them, compiled for its 64-bit ARM: arch="a64")
+    code = code_mode_list(project) if modes_on and code_ok else []
     if not modes and not code:
+        result = None
         if variants:
-            return variants_plan(project, stock_bank, game_elf, scratch, variants_prof, log=log,
-                                 progress=progress, cancel=cancel)
-        return None
+            result = variants_plan(project, stock_bank, game_elf, scratch, variants_prof, log=log,
+                                   progress=progress, cancel=cancel, read_card=read_card,
+                                   scan_card=scan_card)
+            if result is not None:
+                result.sounds_file = sound_modes or ""
+                result.picture_file = picture or ""
+        if result is None and sound_modes:
+            result = sound_modes_plan(project, game_elf, sound_modes_prof or variants_prof,
+                                      sound_modes)
+            result.picture_file = picture or ""
+        if result is None and picture:
+            result = picture_plan(project, game_elf, picture_prof or variants_prof, picture)
+        if attract:                                  # PAD-782: the attract items, alone or with the above
+            if result is None:
+                result = attract_plan(project, game_elf,
+                                      attract_prof or variants_prof or sound_modes_prof or picture_prof)
+            attract_into(project, result, stock_bank, os.path.join(scratch, "tree"), log=log,
+                         progress=progress, cancel=cancel, read_card=read_card, find_scene=find_scene)
+        if coop:                                     # PAD-1017: co-op play, alone or with the above
+            if result is None:
+                result = coop_plan(project, game_elf, coop_prof or attract_prof or variants_prof
+                                   or sound_modes_prof or picture_prof)
+            coop_into(result, game_elf, scratch, coop_setting, only=True, stock_hud=stock_hud, stock_font=stock_font,
+                      stock_bank=stock_bank, ffmpeg=ffmpeg, progress=progress, read_card=read_card)
+        if idle:                                     # PAD-1022: inactivity pausing the timers, alone or with the above
+            if result is None:
+                result = idle_plan(project, game_elf, idle_prof or coop_prof or attract_prof or variants_prof
+                                   or sound_modes_prof or picture_prof)
+            idle_into(result, scratch, only=True)
+        if handicap:                                 # PAD-1033: the players' handicaps, alone or with the above
+            if result is None:
+                result = handicap_plan(project, game_elf, handicap_prof or idle_prof or coop_prof or attract_prof
+                                       or variants_prof or sound_modes_prof or picture_prof)
+            handicap_into(result, game_elf, scratch, handicap_setting, only=True)
+        if cabs:                                     # PAD-1040: the expression light shows, alone or with the above
+            if result is None:
+                result = cabs_plan(project, game_elf, cabs_prof or handicap_prof or idle_prof or coop_prof
+                                   or attract_prof or variants_prof or sound_modes_prof or picture_prof)
+            cabs_into(result, scratch, cabs, cabs_sids or {}, only=True, log=log, game_elf=game_elf)
+        if comp:                                     # PAD-1041: Prolonged Competition, alone or with the above
+            if result is None:
+                result = comp_plan(project, game_elf, comp_prof or handicap_prof or idle_prof or coop_prof
+                                   or attract_prof or variants_prof or sound_modes_prof or picture_prof)
+            comp_into(result, game_elf, scratch, only=True)
+        if screen_times:                             # PAD-1115: screen times, alone or with the above
+            if result is None:
+                result = screen_plan(project, game_elf, screen_prof or comp_prof or handicap_prof or idle_prof
+                                     or coop_prof or attract_prof or variants_prof or sound_modes_prof
+                                     or picture_prof)
+            screen_into(result, os.path.join(scratch, "screens"), screen_times, only=True)
+        if score_feed:                               # PAD-1204: the score feed, alone or with the above
+            if result is None:
+                result = feed_plan(project, game_elf, score_feed_prof or screen_prof or comp_prof or handicap_prof
+                                   or idle_prof or coop_prof or attract_prof or variants_prof or sound_modes_prof
+                                   or picture_prof)
+            feed_into(result, game_elf, scratch, score_feed, only=True)
+        if records:                                  # PAD-1280: the owner's records, alone or with the above
+            if result is None:
+                result = records_plan(project, game_elf, records_prof or score_feed_prof or screen_prof or comp_prof
+                                      or handicap_prof or idle_prof or coop_prof or attract_prof or variants_prof
+                                      or sound_modes_prof or picture_prof)
+            records_into(result, game_elf, scratch, records)
+        return result
     titles = {spec.title for _s, spec in modes}
     if len(titles) > 1:
         raise ModeWriteError("every mode on a card must be for the same game")
@@ -801,7 +979,7 @@ def plan(project, stock_hud, stock_bank, game_elf, scratch, ffmpeg=None, sound_o
                 raise ModeWriteError(CM.NO_TITLE)
     except MP.ModeProjectError as e:
         raise ModeWriteError(str(e)) from None
-    port = find_port(prof, game_elf)
+    port = with_framework(find_port(prof, game_elf), game_elf, scratch)
     if (any(spec.clip != "none" for _s, spec in modes) or any(c.clip_list() for _s, c in code)) and not ffmpeg:
         from ...core.audio import find_ffmpeg
         ffmpeg = find_ffmpeg()
@@ -812,6 +990,8 @@ def plan(project, stock_hud, stock_bank, game_elf, scratch, ffmpeg=None, sound_o
             kw["stock_font"] = stock_font
         if hud_font:
             kw["hud_font"] = hud_font
+        if stock_select:
+            kw["stock_select"] = stock_select     # PAD-707: the new monsters' screen
         if progress is not None:
             kw["progress"] = progress
         build = mode_assets.build(project, stock_hud, stock_bank, tree, ffmpeg=ffmpeg, **kw)
@@ -852,25 +1032,895 @@ def plan(project, stock_hud, stock_bank, game_elf, scratch, ffmpeg=None, sound_o
             result.lines.append("what the app knows of how to run modes on %s has never run in the "
                                 "emulator, so they may not start on this card" % prof.label)
     if code:
-        code_plan(project, result, code, tree, prof, log=log)
+        code_plan(project, result, code, tree, prof, log=log, arch=arch)
         result.lines += describe_code(code, result, prof=prof, project=project)
     stock_plan(project, result, tree)
     result.mode_names = [spec.name for _s, spec in modes] + [c.name for _s, c in code]
     if variants:
         variants_into(project, result, stock_bank, tree, only=False, log=log, progress=progress,
-                      cancel=cancel)
+                      cancel=cancel, read_card=read_card, scan_card=scan_card)
+    if attract:                                      # PAD-782: onto the bank as the modes left it
+        attract_into(project, result, stock_bank, tree, log=log, progress=progress, cancel=cancel,
+                     read_card=read_card, find_scene=find_scene)
+    result.sounds_file = sound_modes or ""
+    result.picture_file = picture or ""
+    if coop:                                         # PAD-1017
+        coop_into(result, game_elf, scratch, coop_setting,   # PAD-1031: the pick's screens went in with the modes' build
+                  stock_bank=stock_bank, ffmpeg=ffmpeg, progress=progress, read_card=read_card)
+    if idle:                                         # PAD-1022
+        idle_into(result, scratch, only=False)
+    if handicap:                                     # PAD-1033
+        handicap_into(result, game_elf, scratch, handicap_setting, only=False)
+    if cabs:                                         # PAD-1040
+        cabs_into(result, scratch, cabs, cabs_sids or {}, only=False, log=log, game_elf=game_elf)
+    if comp:                                         # PAD-1041
+        comp_into(result, game_elf, scratch, only=False)
+    if screen_times:                                 # PAD-1115
+        screen_into(result, os.path.join(scratch, "screens"), screen_times, only=False)
+    if score_feed:                                   # PAD-1204
+        feed_into(result, game_elf, scratch, score_feed, only=False)
+    if records:                                      # PAD-1280
+        records_into(result, game_elf, scratch, records)
+    return result
+
+
+# ---- PAD-1280: the owner's records on the game's high scores ---------------------------------------
+def records_plan(project, game_elf, prof):
+    """A plan carrying only the owner's records: no mode, no scene; the runtime and the title's port on p2 with
+    ``records.cfg`` (:func:`records_into`)."""
+    from . import mode_records as MRec
+    why = MRec.title_refusal(prof)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        port = find_port(prof, game_elf)
+    except ModeWriteError:
+        raise ModeWriteError("this card's game program is not the %s the app knows how to file high scores on"
+                             % prof.label) from None
+    return ModePlan(project=project, profile=prof, port=port, build=None)
+
+
+def records_into(result, game_elf, scratch, records):
+    """``records.cfg`` for *result*'s card: *records*, each game's mode they count in named by its object read off
+    *game_elf* (:func:`.mode_records.game_modes`); a record whose mode the program has not is left out, said in
+    the plan's lines."""
+    from . import mode_project as MP
+    from . import mode_records as MRec
+    why = MRec.title_refusal(result.profile)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        port = MP.read_port(MP.port_path(result.profile))
+    except (OSError, MP.ModeProjectError):
+        raise ModeWriteError(MRec.NO_PORT % result.profile.label) from None
+    modes = MRec.game_modes(game_elf, port)
+    try:
+        text = MRec.cfg_text(records, modes)
+    except MRec.RecordError as e:
+        raise ModeWriteError(str(e)) from None
+    os.makedirs(scratch, exist_ok=True)
+    path = os.path.join(scratch, MRec.CFG_NAME)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    result.records_file = path
+    names = {"game:%d" % i: n for i, n, _o in modes}
+    for line in text.splitlines():
+        if line.startswith("# ") and " left out: " in line:
+            result.lines.append("records: " + line[2:])
+    for r in records[:MRec.MAX_RECORDS]:
+        if not r["mode"].startswith("game:") or r["mode"] in names:
+            result.lines.append("records: %s - %s" % (r["name"], MRec.describe(r, names)))
+
+
+# ---- PAD-1204: the score feed --------------------------------------------------------------------
+def feed_plan(project, game_elf, prof):
+    """A plan carrying only the score feed: no mode, no scene; the runtime and the title's port on p2 with
+    ``scorefeed.cfg`` (:func:`feed_into`)."""
+    from . import score_feed as SF
+    why = SF.title_refusal(prof)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        port = find_port(prof, game_elf)
+    except ModeWriteError:
+        raise ModeWriteError("this card's game program is not the %s the app knows how to see a game's end on"
+                             % prof.label) from None
+    return ModePlan(project=project, profile=prof, port=port, build=None)
+
+
+def feed_into(result, game_elf, scratch, url, only):
+    """``scorefeed.cfg`` for *result*'s card: *url*, the game's name, the logins' tables read off *game_elf*; *only*
+    when the card carries no modes (the runtime then arms this alone)."""
+    from . import score_feed as SF
+    why = SF.title_refusal(result.profile)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        text = SF.cfg_text(url, getattr(result.profile, "label", ""), game_elf, only)
+    except SF.ScoreFeedError as e:
+        raise ModeWriteError(str(e)) from None
+    os.makedirs(scratch, exist_ok=True)
+    path = os.path.join(scratch, SF.CFG_NAME)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    result.scorefeed_file = path
+    result.lines.append("score feed: %s%s" % (SF.HOW % url, "" if "\nusers " in text
+                                              else " (this game's Insider logins are not known: the reports name none)"))
+    return result
+
+
+# ---- PAD-1041: Prolonged Competition on the start menu -------------------------------------------
+def comp_plan(project, game_elf, prof):
+    """A plan carrying only Prolonged Competition: no mode, no scene; the runtime and the title's port on p2 with
+    ``comp.cfg`` (:func:`comp_into`)."""
+    from . import prolonged_comp as PCo
+    why = PCo.title_refusal(prof)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        port = find_port(prof, game_elf)
+    except ModeWriteError:
+        raise ModeWriteError("this card's game program is not the %s the app knows the start menu of"
+                             % prof.label) from None
+    return ModePlan(project=project, profile=prof, port=port, build=None)
+
+
+def comp_into(result, game_elf, scratch, only):
+    """``comp.cfg`` for *result*'s card: the Competition flag and the menu's captions read off *game_elf*; *only* when
+    the card carries no modes (the runtime then arms this alone)."""
+    from . import prolonged_comp as PCo
+    why = PCo.title_refusal(result.profile)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        text = PCo.cfg_text(game_elf, only)
+    except PCo.CompError as e:
+        raise ModeWriteError(str(e)) from None
+    os.makedirs(scratch, exist_ok=True)
+    path = os.path.join(scratch, PCo.CFG_NAME)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    result.comp_file = path
+    result.lines.append("prolonged competition: %s" % PCo.HOW)
+    return result
+
+
+# ---- PAD-1022: inactivity pauses the game's timers -----------------------------------------------
+def idle_plan(project, game_elf, prof):
+    """A plan carrying only inactivity pausing the timers: no mode, no scene; the runtime and the title's port on p2
+    with ``idle.cfg`` (:func:`idle_into`)."""
+    from . import idle_pause as IP
+    why = IP.title_refusal(prof)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        port = find_port(prof, game_elf)
+    except ModeWriteError:
+        raise ModeWriteError("this card's game program is not the %s the app knows how to pause the timers of"
+                             % prof.label) from None
+    return ModePlan(project=project, profile=prof, port=port, build=None)
+
+
+def idle_into(result, scratch, only):
+    """``idle.cfg`` for *result*'s card; *only* when the card carries no modes (the runtime then arms this alone)."""
+    from . import idle_pause as IP
+    why = IP.title_refusal(result.profile)
+    if why:
+        raise ModeWriteError(why)
+    os.makedirs(scratch, exist_ok=True)
+    path = os.path.join(scratch, IP.CFG_NAME)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(IP.cfg_text(only))
+    result.idle_file = path
+    result.lines.append("inactivity pauses timers: %s" % IP.HOW)
+    return result
+
+
+# ---- PAD-1115: a game screen that shows a replaced clip lasts as long as the clip ----------------
+def screen_plan(project, game_elf, prof):
+    """A plan carrying only the screen times (:mod:`.screen_time`): no mode, no scene; the runtime and the
+    title's port on p2 with ``stime`` lines in ``clips.cfg`` (:func:`screen_into`)."""
+    if prof is None:
+        raise ModeWriteError("the app cannot tell which game this project is for")
+    try:
+        port = find_port(prof, game_elf)
+    except ModeWriteError:
+        raise ModeWriteError("this card's game program is not the %s the app knows how to time the screens of"
+                             % prof.label) from None
+    return ModePlan(project=project, profile=prof, port=port, build=None)
+
+
+def screen_into(result, scratch, lines, only):
+    """Put the screen times' ``stime`` *lines* in *result*'s ``clips.cfg``: after the random clips' lines when the
+    build has them, else in a file of their own (``only`` first when the card carries no modes)."""
+    from . import clip_variants as CV
+    if not lines:
+        return result
+    path = getattr(result, "clips_file", "")
+    if path and os.path.isfile(path):
+        with open(path, "a", encoding="utf-8", newline="\n") as f:
+            f.write("# PAD-1115: screens that last as long as their clip\n" + "\n".join(lines) + "\n")
+    else:
+        os.makedirs(scratch, exist_ok=True)
+        path = os.path.join(scratch, CV.CFG_NAME)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("# PAD-1115: screens that last as long as their clip (pad_mode_runtime.c)\n"
+                    + ("only\n" if only else "") + "\n".join(lines) + "\n")
+        result.clips_file = path
+    for line in lines:
+        cols = line.split("\t")
+        result.lines.append("screen times: the %s screen lasts as long as its clip, %.2f s"
+                            % (cols[5], int(cols[4]) / 1000.0))
+    return result
+
+
+# ---- PAD-1040: the cabinet's expression light shows ----------------------------------------------
+def cabs_plan(project, game_elf, prof):
+    """A plan carrying only the expression light shows: no mode, no scene; the runtime and the title's port on p2
+    with ``cabshow.cfg`` (:func:`cabs_into`)."""
+    from . import cab_shows as CS
+    why = CS.title_refusal(prof)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        port = find_port(prof, game_elf)
+    except ModeWriteError:
+        raise ModeWriteError("this card's game program is not the %s the app knows the cabinet lights of"
+                             % prof.label) from None
+    return ModePlan(project=project, profile=prof, port=port, build=None)
+
+
+def cabs_into(result, scratch, shows, sids_of, only, log=None, game_elf=None):
+    """``cabshow.cfg`` for *result*'s card; *only* when the card carries no modes (the runtime then arms the shows
+    alone, before the score gate: the card stays on Insider Connected). PAD-1063: a show with a step of the game's own
+    show needs *game_elf*'s show table (:func:`.cab_stock.read`); without it that show is left out."""
+    from . import cab_shows as CS
+    why = CS.title_refusal(result.profile)
+    if why:
+        raise ModeWriteError(why)
+    stock = None
+    if game_elf and any(CS.uses_game(s) for s in shows):
+        from . import cab_stock
+        try:
+            stock = cab_stock.read(game_elf)
+        except Exception as e:                          # noqa: BLE001 - those shows are left out, said below
+            if log:
+                log("Expression lights: the game's own shows could not be read (%s)." % e, "warning")
+    text, skipped = CS.cfg_text(shows, sids_of, only, stock=stock)
+    for name in skipped:
+        if log:
+            log("Expression lights: the show \"%s\" is left out: it has no song this game plays, no steps, or a "
+                "step of the game's own show this card's program does not have." % name, "warning")
+    if len(skipped) == len(shows):
+        return result
+    os.makedirs(scratch, exist_ok=True)
+    path = os.path.join(scratch, CS.CFG_NAME)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    result.cabshow_file = path
+    result.lines.append("expression lights: %d show(s), each played with its song" % (len(shows) - len(skipped)))
+    return result
+
+
+# ---- PAD-1033: a handicap for each player ------------------------------------------------------
+def handicap_plan(project, game_elf, prof):
+    """A plan carrying only the players' handicaps: no mode, no scene; the runtime and the title's port on p2 with
+    ``handicap.cfg`` (:func:`handicap_into`)."""
+    from . import handicap as HC
+    why = HC.title_refusal(prof)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        port = find_port(prof, game_elf)
+    except ModeWriteError:
+        raise ModeWriteError("this card's game program is not the %s the app knows how to give handicaps to"
+                             % prof.label) from None
+    return ModePlan(project=project, profile=prof, port=port, build=None)
+
+
+def handicap_into(result, game_elf, scratch, setting=0, only=False):
+    """``handicap.cfg`` for *result*'s card: the flipper buttons and each level's changes read off *game_elf*, the
+    service menu's HANDICAP value *setting* when it switches them, *only* when the card carries no modes."""
+    from . import handicap as HC
+    from . import sound_modes as SMo
+    why = HC.title_refusal(result.profile)
+    if why:
+        raise ModeWriteError(why)
+    key = SMo.title_key(result.profile)
+    try:
+        port = MP.read_port(result.port) if result.port and os.path.isfile(result.port) else None
+        custom = HC.load_custom(getattr(result, "project", ""))   # the owner's levels (the Levels dialog)
+        text = HC.cfg_text(game_elf, key, setting=setting, only=only, port=port, custom=custom)
+        said = HC.describe(game_elf, key, custom)
+    except (HC.HandicapError, MP.ModeProjectError, OSError, ValueError) as e:
+        raise ModeWriteError(str(e)) from None
+    os.makedirs(scratch, exist_ok=True)
+    path = os.path.join(scratch, HC.CFG_NAME)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    result.handicap_file = path
+    result.lines.append("handicaps: %s" % HC.HOW)
+    result.lines.append("handicaps: %s" % ("switched in the service menu (HANDICAP), Off to start with" if setting
+                                           else "always on (no HANDICAP row in the service menu)"))
+    for lv, words in said:
+        result.lines.append("handicap %+d: %s" % (lv, "; ".join(words)))
+    return result
+
+
+# ---- PAD-1017: co-op play ----------------------------------------------------------------------
+def coop_plan(project, game_elf, prof):
+    """A plan carrying only co-op play: no mode, no scene; the runtime and the title's port on p2 with
+    ``coop.cfg`` (:func:`coop_into`)."""
+    from . import coop_play as CP
+    why = CP.title_refusal(prof)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        port = find_port(prof, game_elf)
+    except ModeWriteError:
+        raise ModeWriteError("this card's game program is not the %s the app knows how to add co-op play to"
+                             % prof.label) from None
+    return ModePlan(project=project, profile=prof, port=port, build=None)
+
+
+#: PAD-1079: the bank crop the characters' videos play at (the identity: the clip on the glass as made)
+CLIP_CROP = "Normal"
+_IDENTITY = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+
+
+def coop_clips_into(result, stock_bank, scratch, ffmpeg=None, progress=None):
+    """PAD-1079: each co-op character's video, made into a clip of the bank's size with the picture where its card's
+    window is (coop_play.window_clip), added to the bank scene the build has so far (the modes' and attract items'
+    own, or the stock one). Returns ``[(character number, clip name)]`` for coop.cfg's ``char_clip`` lines ([] when no
+    character has one, or the title has no backdrop to play them in). They play at the bank's ``Normal`` crop (the
+    surface 1:1 on the glass, so the window lands where the card's is; Godzilla's backdrop_crop, ScoreFrame, scales it
+    1.065 and moves it -43,-98): a bank without one gets no videos."""
+    from . import clip_variants as CV
+    from . import coop_play as CP
+    from . import video_bank as VB
+    project = getattr(result, "project", "")
+    prof = result.profile
+    got = CP.clip_entries(project)
+    if not got or not CP.wants_screens(project, prof):
+        return []
+    if not CP.can_video(prof):
+        result.lines.append("co-op characters: their videos are left out - %s cannot play a clip behind its "
+                            "screens yet, so their pictures show" % prof.label)
+        return []
+    if not stock_bank:
+        raise ModeWriteError("the co-op characters' videos: the card's video bank was not read")
+    if not ffmpeg:
+        from ...core.audio import find_ffmpeg
+        ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise ModeWriteError("the co-op characters' videos need ffmpeg, and none was found")
+    bank_card = CV.bank_scene(prof)
+    bank_src = dict(result.replaced).get(bank_card, "")
+    if bank_src:
+        with open(bank_src, "rb") as f:
+            bank = f.read()
+    else:
+        bank = stock_bank
+    if VB.crop_transform(stock_bank, CLIP_CROP) != _IDENTITY:
+        result.lines.append("co-op characters: their videos are left out - %s's video bank has no %s crop that plays "
+                            "a clip 1:1 on the glass, so their pictures show" % (prof.label, CLIP_CROP))
+        return []
+    w, h = VB.clip_frame(stock_bank)
+    assets = bank_card[:-len("scene.radium")] + "scene.assets/"
+    folder = os.path.join(scratch, "coop_clips")
+    os.makedirs(folder, exist_ok=True)
+    out = []
+    for k, (i, name, src) in enumerate(got):
+        if progress is not None:
+            progress(k, len(got), "Making the co-op characters' videos (%d of %d)..." % (k + 1, len(got)))
+        made = os.path.join(folder, "%s.mp4" % name)
+        try:
+            CP.window_clip(src, made, w, h, ffmpeg)
+        except CP.CoopError as e:
+            raise ModeWriteError(str(e)) from None
+        try:
+            bank, info = VB.add_clip(bank, name, os.path.getsize(made))
+        except VB.VideoBankError as e:
+            raise ModeWriteError("the co-op characters' videos: %s could not be added to the video bank (%s)"
+                                 % (name, e)) from None
+        result.new.append((assets + info["path"], made))
+        out.append((i + 1, name))
+    if not bank_src:
+        bank_src = os.path.join(scratch, "coop_tree", *bank_card.split("/"))
+        os.makedirs(os.path.dirname(bank_src), exist_ok=True)
+        result.replaced.append((bank_card, bank_src))
+    with open(bank_src, "wb") as f:
+        f.write(bank)
+    names = {i: c["name"] for i, c in enumerate(CP.load_characters(project)["list"])}
+    result.lines.append("co-op characters: a video in the picture's place for %s"
+                        % ", ".join(names.get(n - 1, str(n)) for n, _name in out))
+    return out
+
+
+def coop_intro_into(result, stock_bank, scratch, ffmpeg=None, progress=None):
+    """PAD-1114: the co-op and team games' intro video, made into a full-screen clip of the bank's size
+    (coop_play.intro_clip, the whole picture fitted in) and added to the bank scene the build has so far (the modes',
+    the characters' videos' or the stock one). Returns ``(clip name, ms)`` for coop.cfg's ``intro`` line, or None when
+    the project has no intro. Its sound is the sound build's (sound_modes "the co-op intro")."""
+    from . import clip_variants as CV
+    from . import coop_play as CP
+    from . import video_bank as VB
+    from ...core.video import detect_video_info
+    project = getattr(result, "project", "")
+    src = CP.intro_path(project) if project else ""
+    if not src:
+        return None
+    if not stock_bank:
+        raise ModeWriteError("the co-op intro video: the card's video bank was not read")
+    if not ffmpeg:
+        from ...core.audio import find_ffmpeg
+        ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise ModeWriteError("the co-op intro video needs ffmpeg, and none was found")
+    if progress is not None:
+        progress(0, 1, "Making the co-op intro video...")
+    bank_card = CV.bank_scene(result.profile)
+    bank_src = dict(result.replaced).get(bank_card, "")
+    if bank_src:
+        with open(bank_src, "rb") as f:
+            bank = f.read()
+    else:
+        bank = stock_bank
+    w, h = VB.clip_frame(stock_bank)
+    folder = os.path.join(scratch, "coop_clips")
+    os.makedirs(folder, exist_ok=True)
+    made = os.path.join(folder, "%s.mp4" % CP.INTRO_CLIP)
+    try:
+        CP.intro_clip(src, made, w, h, ffmpeg)
+    except CP.CoopError as e:
+        raise ModeWriteError(str(e)) from None
+    info = detect_video_info(made)
+    ms = int(round(float(getattr(info, "duration", 0) or 0) * 1000)) if info else 0
+    try:
+        bank, got = VB.add_clip(bank, CP.INTRO_CLIP, os.path.getsize(made))
+    except VB.VideoBankError as e:
+        raise ModeWriteError("the co-op intro video could not be added to the video bank (%s)" % e) from None
+    result.new.append((bank_card[:-len("scene.radium")] + "scene.assets/" + got["path"], made))
+    if not bank_src:
+        bank_src = os.path.join(scratch, "coop_tree", *bank_card.split("/"))
+        os.makedirs(os.path.dirname(bank_src), exist_ok=True)
+        result.replaced.append((bank_card, bank_src))
+    with open(bank_src, "wb") as f:
+        f.write(bank)
+    result.lines.append("co-op intro: %s (%.1f s) opens each co-op and team game; both flipper buttons skip it"
+                        % (os.path.basename(src), ms / 1000.0))
+    return CP.INTRO_CLIP, ms
+
+
+def coop_ceremony_into(result, stock_bank, scratch, ffmpeg=None, progress=None):
+    """PAD-1219: what plays behind the co-op award cards, filling the glass with the game's HUD off it. The owner's
+    awards ceremony video (coop_play.ceremony_path), made into a silent full-screen clip of the bank's size
+    (coop_play.intro_clip) and added to the bank scene the build has so far, at the bank's "Normal" crop; else the
+    game's own End of Ball Bonus loop at the crop the game plays it at. Returns ``(clip name, crop)`` for coop.cfg's
+    ``ceremony`` line, or None when there is neither (the runtime keeps the city under the cards, HUD off)."""
+    from . import coop_play as CP
+    from . import video_bank as VB
+    from ...core.video import detect_video_info
+    project = getattr(result, "project", "")
+    src = CP.ceremony_path(project) if project else ""
+    if not src:
+        loop = CP.bonus_loop(stock_bank) if stock_bank else None
+        if loop is None:
+            result.lines.append("co-op awards: the cards show over the main play, the HUD off it - %s's video bank "
+                                "has no End of Ball Bonus loop the app knows" % result.profile.label)
+            return None
+        result.lines.append("co-op awards: the cards show over the game's End of Ball Bonus loop (%s)" % loop[0])
+        return loop
+    bank_card, bank, bank_src = _coop_bank(result, stock_bank, "the co-op awards ceremony video")
+    ffmpeg = _ffmpeg_for(ffmpeg, "the co-op awards ceremony video")
+    if progress is not None:
+        progress(0, 1, "Making the co-op awards ceremony video...")
+    w, h = VB.clip_frame(stock_bank)
+    folder = os.path.join(scratch, "coop_clips")
+    os.makedirs(folder, exist_ok=True)
+    made = os.path.join(folder, "%s.mp4" % CP.CEREMONY_CLIP)
+    try:
+        CP.intro_clip(src, made, w, h, ffmpeg)
+    except CP.CoopError as e:
+        raise ModeWriteError(str(e)) from None
+    info = detect_video_info(made)
+    try:
+        bank, got = VB.add_clip(bank, CP.CEREMONY_CLIP, os.path.getsize(made))
+    except VB.VideoBankError as e:
+        raise ModeWriteError("the co-op awards ceremony video could not be added to the video bank (%s)" % e) from None
+    result.new.append((bank_card[:-len("scene.radium")] + "scene.assets/" + got["path"], made))
+    _coop_bank_put(result, scratch, bank_card, bank, bank_src)
+    result.lines.append("co-op awards: %s (%.1f s, looped) plays behind the award cards"
+                        % (os.path.basename(src), float(getattr(info, "duration", 0) or 0) if info else 0.0))
+    return CP.CEREMONY_CLIP, "Normal"
+
+
+def _coop_bank(result, stock_bank, what):
+    """``(bank card path, the bank scene as the build has it so far, its scratch file or "")``."""
+    from . import clip_variants as CV
+    if not stock_bank:
+        raise ModeWriteError("%s: the card's video bank was not read" % what)
+    bank_card = CV.bank_scene(result.profile)
+    bank_src = dict(result.replaced).get(bank_card, "")
+    if bank_src:
+        with open(bank_src, "rb") as f:
+            return bank_card, f.read(), bank_src
+    return bank_card, stock_bank, ""
+
+
+def _coop_bank_put(result, scratch, bank_card, bank, bank_src):
+    if not bank_src:
+        bank_src = os.path.join(scratch, "coop_tree", *bank_card.split("/"))
+        os.makedirs(os.path.dirname(bank_src), exist_ok=True)
+        result.replaced.append((bank_card, bank_src))
+    with open(bank_src, "wb") as f:
+        f.write(bank)
+
+
+def _ffmpeg_for(ffmpeg, what):
+    if not ffmpeg:
+        from ...core.audio import find_ffmpeg
+        ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise ModeWriteError("%s needs ffmpeg, and none was found" % what)
+    return ffmpeg
+
+
+def coop_picked_into(result, stock_bank, scratch, ffmpeg=None, progress=None):
+    """PAD-1123: each co-op character's picked clip (a video, or a picture shown as long as its sound, at least
+    coop_play.PICKED_STILL_SECONDS), made full-screen at the bank's size (coop_play.picked_clip) and added to the bank
+    scene the build has so far. Returns ``[(character number, clip name, ms)]`` for coop.cfg's ``char_picked`` lines.
+    Its sound is the sound build's (sound_modes "the co-op intro", one pseudo mode a character)."""
+    from . import coop_play as CP
+    from . import video_bank as VB
+    from ...core.video import detect_video_info
+    project = getattr(result, "project", "")
+    got = CP.picked_entries(project) if project and CP.load_characters(project)["pick"] else []
+    if not got:
+        return []
+    ffmpeg = _ffmpeg_for(ffmpeg, "the co-op characters' picked clips")
+    bank_card, bank, bank_src = _coop_bank(result, stock_bank, "the co-op characters' picked clips")
+    w, h = VB.clip_frame(stock_bank)
+    assets = bank_card[:-len("scene.radium")] + "scene.assets/"
+    folder = os.path.join(scratch, "coop_clips")
+    os.makedirs(folder, exist_ok=True)
+    chars = CP.load_characters(project)["list"]
+    out = []
+    for k, (i, name, src) in enumerate(got):
+        if progress is not None:
+            progress(k, len(got), "Making the co-op characters' picked clips (%d of %d)..." % (k + 1, len(got)))
+        made = os.path.join(folder, "%s.mp4" % name)
+        secs = None
+        if CP.is_still(src):                            # a picture: as long as its sound, if it has a longer one
+            snd = CP.picked_sound_source(project, chars[i])
+            secs = max(CP.PICKED_STILL_SECONDS, min(CP.media_seconds(snd, ffmpeg) if snd else 0.0,
+                                                    CP.PICKED_MAX_SECONDS))
+        try:
+            CP.picked_clip(src, made, w, h, ffmpeg, seconds=secs)
+        except CP.CoopError as e:
+            raise ModeWriteError(str(e)) from None
+        info = detect_video_info(made)
+        ms = int(round(float(getattr(info, "duration", 0) or 0) * 1000)) if info else 0
+        try:
+            bank, added = VB.add_clip(bank, name, os.path.getsize(made))
+        except VB.VideoBankError as e:
+            raise ModeWriteError("the co-op characters' picked clips: %s could not be added to the video bank (%s)"
+                                 % (name, e)) from None
+        result.new.append((assets + added["path"], made))
+        out.append((i + 1, name, ms))
+    _coop_bank_put(result, scratch, bank_card, bank, bank_src)
+    result.lines.append("co-op characters: a clip once picked for %s"
+                        % ", ".join(chars[n - 1]["name"] for n, _name, _ms in out))
+    return out
+
+
+def coop_bonus_into(result, stock_bank, scratch, read_card=None, ffmpeg=None, progress=None):
+    """PAD-1123: the game's End of Ball Bonus loop made again for each co-op character with its picture (or video) and
+    name on a strip at the foot of the screen (coop_play.bonus_clip), added to the bank scene the build has so far. The
+    loop is the project's own file of it (the stock one extracted, or the owner's replacement) or else the card's. Returns
+    ``(the game's loop name, [(character number, clip name)])`` for coop.cfg's ``bonus_loop`` / ``char_bonus`` lines,
+    or None when the characters' bonus is off, or the bank has no bonus loop (one line says so)."""
+    from . import clip_variants as CV
+    from . import coop_play as CP
+    from . import video_bank as VB
+    project = getattr(result, "project", "")
+    got = CP.bonus_entries(project) if project and CP.load_characters(project)["pick"] else []
+    if not got:
+        return None
+    if CV.route_of(result.profile) != "clip_play":
+        result.lines.append("co-op characters: not on the End of Ball Bonus - %s asks for its clips in a way the "
+                            "runtime cannot swap one of them per teammate yet" % result.profile.label)
+        return None
+    bank_card, bank, bank_src = _coop_bank(result, stock_bank, "the co-op characters on the bonus")
+    stock = VB.parse(stock_bank)
+    loop = CP.bonus_loop(stock_bank, stock)
+    if loop is None:
+        result.lines.append("co-op characters: not on the End of Ball Bonus - %s's video bank has no bonus loop the "
+                            "app knows" % result.profile.label)
+        return None
+    loop_name, crop = loop
+    entry = next(c for c in stock.library.entries if c.name == loop_name)
+    assets = bank_card[:-len("scene.radium")] + "scene.assets/"
+    card_path = assets + entry.path
+    src = ""
+    for rel, path in CV.manifest(project).items():          # the project's own: an owner's replacement goes on too
+        if path == card_path and os.path.isfile(os.path.join(project, *rel.split("/"))):
+            src = os.path.join(project, *rel.split("/"))
+            break
+    folder = os.path.join(scratch, "coop_clips")
+    os.makedirs(folder, exist_ok=True)
+    if not src:
+        blob = read_card(card_path) if read_card is not None else None
+        if not blob:
+            result.lines.append("co-op characters: not on the End of Ball Bonus - its loop (%s) could not be read off "
+                                "the card" % loop_name)
+            return None
+        src = os.path.join(folder, "bonus_loop_stock.mp4")
+        with open(src, "wb") as f:
+            f.write(blob)
+    ffmpeg = _ffmpeg_for(ffmpeg, "the co-op characters on the bonus")
+    w, h = VB.clip_frame(stock_bank, stock)
+    transform = VB.crop_transform(stock_bank, crop, stock)
+    chars = CP.load_characters(project)
+    theme = CP.theme_of(chars.get("theme"))
+    seconds = CP.media_seconds(src, ffmpeg) or None
+    out = []
+    for k, (i, name, pic, vid) in enumerate(got):
+        if progress is not None:
+            progress(k, len(got), "Putting the co-op characters on the bonus (%d of %d)..." % (k + 1, len(got)))
+        made = os.path.join(folder, "%s.mp4" % name)
+        who = chars["list"][i]["name"]
+        box = CP.bonus_box(transform, w, h, CP.bonus_strip(who))     # round 4: portrait bottom-right, name on its foot
+        try:
+            CP.bonus_clip(src, made, box, ffmpeg, picture=pic, video=vid, size=(w, h), seconds=seconds,
+                          colour=chars["list"][i].get("colour") or theme["accent"], name=who,
+                          theme=chars.get("theme"), project=project)
+        except CP.CoopError as e:
+            raise ModeWriteError(str(e)) from None
+        try:
+            bank, added = VB.add_clip(bank, name, os.path.getsize(made))
+        except VB.VideoBankError as e:
+            raise ModeWriteError("the co-op characters on the bonus: %s could not be added to the video bank (%s)"
+                                 % (name, e)) from None
+        result.new.append((assets + added["path"], made))
+        out.append((i + 1, name))
+    _coop_bank_put(result, scratch, bank_card, bank, bank_src)
+    result.lines.append("co-op characters: on their teammate's End of Ball Bonus (%s, its portrait bottom-right, its name across the picture's foot) "
+                        "for %s" % (loop_name, ", ".join(chars["list"][n - 1]["name"] for n, _name in out)))
+    return loop_name, out
+
+
+def coop_into(result, game_elf, scratch, setting=0, only=False, stock_hud=b"", stock_font=b"", stock_bank=b"",
+              ffmpeg=None, progress=None, read_card=None):
+    """``coop.cfg`` for *result*'s card: co-op on, the right flipper button read off *game_elf*, and (round 2) the
+    service menu's CO-OP PLAY value *setting* when it switches co-op. PAD-1031: the pick's screens go into the HUD
+    scene - with the modes' own when *result* built them (mode_assets.build), else here from *stock_hud* - and
+    coop.cfg names the scene. PAD-1079: the characters' videos go into the video bank (:func:`coop_clips_into`, from
+    *stock_bank*) and coop.cfg names each character's clip."""
+    from . import coop_play as CP
+    from . import scene_write as SW
+    why = CP.title_refusal(result.profile)
+    if why:
+        raise ModeWriteError(why)
+    project = getattr(result, "project", "")
+    a64 = getattr(result.profile, "arch", "arm") == "a64"     # PAD-1326: no pick, characters or videos on Spike 3
+    screens = not a64 and CP.wants_screens(project, result.profile)
+    if screens and result.build is None:
+        if not stock_hud:
+            screens = False
+        else:
+            try:
+                hud = SW.add_screens(stock_hud, CP.pick_screens(project, words_for=CP.words_for(project))
+                                     + CP.award_screens(project),             # PAD-1028 round 2
+                                     font_source=stock_font or None)[0]
+            except SW.SceneWriteError as e:
+                raise ModeWriteError("the co-op pick's screens: %s" % e) from None
+            rel = "%s/scene.radium" % result.profile.lcd("hud")
+            src = os.path.join(scratch, "coop_tree", *rel.split("/"))
+            os.makedirs(os.path.dirname(src), exist_ok=True)
+            with open(src, "wb") as f:
+                f.write(hud)
+            result.replaced.append(("%s/%s" % (result.profile.game_dir, rel), src))
+    try:
+        text = CP.cfg_text(game_elf, CP.load_awards(project), CP.load_characters(project),     # PAD-1028/1031
+                           CP.port_sites(result.profile), CP.port_values(result.profile), setting=setting, only=only)
+        if screens:
+            text += "screens %s\n" % result.profile.hud_scene
+            text += "award_cards on\n"            # PAD-1028 round 2: the awards on the winners' cards
+            ceremony = coop_ceremony_into(result, stock_bank, scratch, ffmpeg=ffmpeg, progress=progress)
+            if ceremony:
+                text += "ceremony %s %s\n" % ceremony               # PAD-1219: behind the cards, the HUD off
+            clips = coop_clips_into(result, stock_bank, scratch, ffmpeg=ffmpeg, progress=progress)
+            for n, name in clips:
+                text += "char_clip %d %s\n" % (n, name)             # PAD-1079: its video, behind its card
+            if clips:
+                text += "clip_crop %s\n" % CLIP_CROP
+        intro = None if a64 else coop_intro_into(result, stock_bank, scratch, ffmpeg=ffmpeg,   # PAD-1114
+                                                 progress=progress)
+        if intro:
+            text += "intro %s %d\n" % intro
+        for n, name, ms in ([] if a64 else coop_picked_into(result, stock_bank, scratch, ffmpeg=ffmpeg,
+                                                             progress=progress)):
+            text += "char_picked %d %s %d\n" % (n, name, ms)           # PAD-1123: full screen once picked
+        bonus = None if a64 else coop_bonus_into(result, stock_bank, scratch, read_card=read_card, ffmpeg=ffmpeg,
+                                                 progress=progress)
+        if bonus:
+            text += "bonus_loop %s\n" % bonus[0]                        # PAD-1123: the teammate's on their bonus
+            for n, name in bonus[1]:
+                text += "char_bonus %d %s\n" % (n, name)
+    except CP.CoopError as e:
+        raise ModeWriteError(str(e)) from None
+    os.makedirs(scratch, exist_ok=True)
+    path = os.path.join(scratch, CP.CFG_NAME)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    result.coop_file = path
+    if a64:                                           # PAD-1326: a Spike 3 card's co-op
+        result.lines.append("co-op play: %s" % CP.HOW_A64)
+        if setting:
+            result.lines.append("co-op play: switched in the service menu (CO-OP PLAY: 0 Off, 1 On); %s" % (
+                "Insider Connected is off only while it is 1" if only
+                else "the card's modes keep its scores off Insider Connected either way"))
+        result.lines.append("co-op play: %s" % CP.A64_LEFT_OUT)
+        return result
+    result.lines.append("co-op play: %s" % CP.HOW)
+    if setting:
+        result.lines.append("co-op play: switched in the service menu (CO-OP PLAY: 0 Off, 1 Classic, 2 Enhanced; "
+                            "CO-OP PLAY, TEAM PLAY 2 VS 2, 2 VS 1 and 3 VS 1 on the start menu at 1 or 2, "
+                            "ENHANCED STANDARD at 2); %s" % (
+            "Insider Connected is off only while it is 1 or 2" if only
+            else "the card's modes keep its scores off Insider Connected either way"))
+        result.lines.append("co-op play: Team 2v2, 2v1 and 3v1: %s" % CP.TEAMS_HOW)    # PAD-1042
+        result.lines.append("co-op play: %s" % CP.STANDARD_HOW)                   # PAD-1224
+        result.lines.append("co-op play: %s" % CP.CLASSIC_HOW)                     # PAD-1065
+    got = [line.split(" ", 3)[3] for line in text.splitlines() if line.startswith("award ")]
+    result.lines.append("co-op awards after each co-op game: %s" % (", ".join(got) if got else "none"))
+    got = [line.split(" ", 2)[2].split("|")[0] for line in text.splitlines() if line.startswith("character ")]
+    if got:
+        result.lines.append("co-op characters, each teammate picks one at their first ball: %s" % ", ".join(got))
+    return result
+
+
+# ---- PAD-782: the owner's attract items -----------------------------------------------------------
+def attract_plan(project, game_elf, prof):
+    """A plan carrying only the attract items: the runtime, the title's port and ``attract.cfg`` on p2,
+    the items' clips in the bank (:func:`attract_into`)."""
+    from . import attract_items as AI
+    why = AI.title_refusal(prof)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        port = find_port(prof, game_elf)
+    except ModeWriteError:
+        raise ModeWriteError("this card's game program is not the %s the app knows how to add to the "
+                             "attract mode of" % prof.label) from None
+    return ModePlan(project=project, profile=prof, port=port, build=None)
+
+
+def attract_into(project, result, stock_bank, tree, log=None, progress=None, cancel=None, read_card=None,
+                 find_scene=None):
+    """Add the project's attract items to *result*: each a new clip in the bank scene the build has so
+    far (the modes' and random clips' own, or the stock one), the bank a rewritten file, ``attract.cfg``
+    for p2."""
+    from . import attract_items as AI
+    from . import clip_variants as CV
+    prof = result.profile
+    bank_card = CV.bank_scene(prof)
+    bank_src = ""
+    for card, src in result.replaced:
+        if card == bank_card:
+            bank_src = src
+    if bank_src:
+        with open(bank_src, "rb") as f:
+            bank = f.read()
+    else:
+        bank = stock_bank
+    if not bank:
+        raise ModeWriteError("the card's video bank (%s) was not read" % bank_card)
+    srcs = dict(result.replaced)
+
+    def read_scene(sc):
+        """a scene as the build has it so far: rewritten already, or the card's own"""
+        if sc in srcs:
+            with open(srcs[sc], "rb") as f:
+                return f.read()
+        return read_card(sc) if read_card is not None else None
+    try:
+        ab = AI.build(project, prof, bank, os.path.join(tree, "attract"), log=log, progress=progress,
+                      cancel=cancel, read_card=read_scene, find_scene=find_scene)
+    except AI.AttractError as e:
+        raise ModeWriteError("attract items: %s" % e) from None
+    if ab is None:
+        return result
+    scene = ab.scene or bank_card
+    if scene != bank_card:                       # clip v2: the attract video element's own scene
+        bank_src = srcs.get(scene, "")
+        bank = None
+    if ab.bank != bank:
+        if not bank_src:
+            bank_src = os.path.join(tree, "attract", *scene.split("/"))
+            os.makedirs(os.path.dirname(bank_src), exist_ok=True)
+            result.replaced.append((scene, bank_src))
+        with open(bank_src, "wb") as f:
+            f.write(ab.bank)
+    result.new.extend(ab.new)
+    result.attract_file = ab.cfg
+    result.lines += ["attract items: %s" % line for line in ab.lines]
+    result.lines.append("attract items: %s" % AI.INSIDER_WORDS.rstrip("."))
+    return result
+
+
+# ---- PAD-494: music modes ---------------------------------------------------------------------
+def sound_modes_plan(project, game_elf, prof, cfg):
+    """A plan carrying only the project's music modes (:mod:`.sound_modes`): no mode, no scene;
+    the runtime and the title's port on p2 with the engine's ``sounds.cfg`` (which says
+    ``only``)."""
+    from . import sound_modes as SMo
+    if prof is None:
+        raise ModeWriteError(SMo.NO_TITLE)
+    # PAD-565: a card of sounds in turn only has no MUSIC MODE setting line; PAD-645: one of the
+    # flipper buttons' sounds in attract alone has neither, and its own gate (the engine left out
+    # whatever else the title cannot play)
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            kinds = {line.split("\t", 1)[0] for line in f}
+    except OSError:
+        kinds = {"setting"}
+    turns = "setting" not in kinds
+    if turns and not kinds & {"turn", "tsid"} and "attract" in kinds:
+        why = SMo.attract_refusal(prof)
+    else:
+        why = SMo.title_refusal(prof, turns=turns)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        port = find_port(prof, game_elf)
+    except ModeWriteError:
+        raise ModeWriteError("this card's game program is not the %s the app knows how to play "
+                             "%s on" % (prof.label, "sounds in turn" if turns else "music modes")
+                             ) from None
+    result = ModePlan(project=project, profile=prof, port=port, build=None)
+    result.sounds_file = cfg
+    return result
+
+
+# ---- PAD-537: the picture settings ---------------------------------------------------------------
+def picture_plan(project, game_elf, prof, cfg):
+    """A plan carrying only the picture settings (:mod:`.picture_settings`): no mode, no scene;
+    the runtime and the title's port on p2 with the engine's ``picture.cfg`` (which says
+    ``only``)."""
+    from . import picture_settings as PS
+    why = PS.title_refusal(prof)
+    if why:
+        raise ModeWriteError(why)
+    try:
+        port = find_port(prof, game_elf)
+    except ModeWriteError:
+        raise ModeWriteError("this card's game program is not the %s the app knows how to change "
+                             "the picture on" % prof.label) from None
+    result = ModePlan(project=project, profile=prof, port=port, build=None)
+    result.picture_file = cfg
     return result
 
 
 # ---- PAD-446: clips that play one of several at random -----------------------------------------
-def variants_plan(project, stock_bank, game_elf, scratch, prof, log=None, progress=None, cancel=None):
+def CV_scene_counts(reader, game_dir, names):
+    """PAD-723: :func:`.clip_variants.scene_counts`, for the engine."""
+    from . import clip_variants as CV
+    return CV.scene_counts(reader, game_dir, names)
+
+
+def variants_plan(project, stock_bank, game_elf, scratch, prof, log=None, progress=None, cancel=None,
+                  read_card=None, scan_card=None):
     """A plan carrying only the project's random clips (:mod:`.clip_variants`): no mode; the
     runtime and the title's port on p2 with a ``clips.cfg`` that says ``only``. ``None`` when
     the project has none that can go on *prof*'s card."""
     from . import clip_variants as CV
+    from . import jukebox as JB
     if prof is None:
         raise ModeWriteError(CV.NO_TITLE)
-    why = CV.title_refusal(prof)
+    # PAD-685: a project whose only clips are its jukebox's intro videos needs a jukebox title
+    why = CV.title_refusal(prof) if CV.load(project) else JB.title_refusal(prof)
     if why:
         raise ModeWriteError(why)
     try:
@@ -883,14 +1933,16 @@ def variants_plan(project, stock_bank, game_elf, scratch, prof, log=None, progre
     tree = os.path.join(scratch, "tree")
     os.makedirs(tree, exist_ok=True)
     variants_into(project, result, stock_bank, tree, only=True, log=log, progress=progress,
-                  cancel=cancel)
+                  cancel=cancel, read_card=read_card, scan_card=scan_card)
     return result if result.variants is not None else None
 
 
-def variants_into(project, result, stock_bank, tree, only, log=None, progress=None, cancel=None):
+def variants_into(project, result, stock_bank, tree, only, log=None, progress=None, cancel=None,
+                  read_card=None, scan_card=None):
     """Add the project's random clips to *result*: onto the bank scene the modes were built
     into (or the stock one), each added clip a new file, the bank a rewritten one, ``clips.cfg``
-    for p2. *only*: the card carries no mode."""
+    for p2. *only*: the card carries no mode. PAD-723: a clip in another of the title's bank
+    scenes goes into that one, read with *read_card*, and it is rewritten too."""
     from . import clip_variants as CV
     prof = result.profile
     bank_card = CV.bank_scene(prof)
@@ -907,18 +1959,26 @@ def variants_into(project, result, stock_bank, tree, only, log=None, progress=No
         raise ModeWriteError("the card's video bank (%s) was not read" % bank_card)
     try:
         vb = CV.build(project, prof, bank, os.path.join(tree, "variants"), only, log=log,
-                      progress=progress, cancel=cancel)
+                      progress=progress, cancel=cancel, read_card=read_card, scan_card=scan_card)
     except CV.VariantError as e:
         raise ModeWriteError("random clips: %s" % e) from None
     if vb is None:
         return result
-    if not bank_src:
-        bank_src = os.path.join(tree, "variants", *bank_card.split("/"))
-        os.makedirs(os.path.dirname(bank_src), exist_ok=True)
-        result.replaced.append((bank_card, bank_src))
-    with open(bank_src, "wb") as f:
-        f.write(vb.bank)
+    if vb.bank != bank:
+        if not bank_src:
+            bank_src = os.path.join(tree, "variants", *bank_card.split("/"))
+            os.makedirs(os.path.dirname(bank_src), exist_ok=True)
+            result.replaced.append((bank_card, bank_src))
+        with open(bank_src, "wb") as f:
+            f.write(vb.bank)
+    for card, data in sorted(vb.others.items()):     # PAD-723: the title's other bank scenes
+        src = os.path.join(tree, "variants", *card.split("/"))
+        os.makedirs(os.path.dirname(src), exist_ok=True)
+        with open(src, "wb") as f:
+            f.write(data)
+        result.replaced.append((card, src))
     result.new.extend(vb.new)
+    result.replaced.extend(vb.reused)            # PAD-862: files the card has, rewritten
     result.variants = vb
     result.clips_file = vb.cfg
     result.lines += ["random clips: %s" % line for line in vb.lines]
@@ -1150,7 +2210,9 @@ def conflicts(result, touched_rels=(), audio_idx=(), sound_idx=None):
 
     PAD-469: only a scene this build copies whole (``result.replaced``) counts. Random clips
     alone, or modes with no screen, leave the HUD as the card has it, so the project's own
-    HUD edits go on beside them."""
+    HUD edits go on beside them. PAD-1035: a scene the build DOES rewrite is built from the
+    card's bytes with the project's in-place edits on, and its growing edits are applied over
+    it (engine), so *touched_rels* only names what could not be carried."""
     out = []
     hud, bank = scene_rels(result.profile)
     touched = {r.lstrip("/") for r in touched_rels}
@@ -1271,18 +2333,22 @@ def p2_offset(disk_f):
 
 
 # ---- the system partition ---------------------------------------------------------------------
-def p2_payload(result, out_dir, project=None):
+def p2_payload(result, out_dir, project=None, arch="arm"):
     """Stage what goes in ``/usr/local/padmode``: the pinned object as ``mode.so``, the mode
     files in slot order, the port as ``game.port``. Returns ``{"so", "cfgs", "port"}``.
     PAD-432: with ``project``, its modes as Save to a file saves them too (``"bundle"``,
-    :func:`card_bundle`), for another project to load them from the card."""
+    :func:`card_bundle`), for another project to load them from the card.
+    PAD-1272: ``arch="a64"`` stages the Spike 3 runtime (``mode64.so``) as ``mode.so``, for the
+    games partition's ``pad/padmode`` (:mod:`.spike3_modes`)."""
     os.makedirs(out_dir, exist_ok=True)
     so = os.path.join(out_dir, "mode.so")
     # A missing file here is a broken install or staging, never "nothing to write":
     # say so as this module's error, so the build stops with the reason.
     try:
-        # a project with code modes carries the object compiled from them (code_plan)
-        shutil.copyfile(getattr(result, "object", "") or MR.prebuilt_object(), so)
+        # a project with code modes carries the object compiled from them (code_plan, for
+        # the card's machine: PAD-1295 compiles a Spike 3 card's for 64-bit ARM); else the pinned one
+        obj = getattr(result, "object", "")
+        shutil.copyfile(obj or (MR.prebuilt_object(arch) if arch != "arm" else MR.prebuilt_object()), so)
         cfgs = []
         for name, src in result.mode_files:
             dst = os.path.join(out_dir, name)
@@ -1305,6 +2371,61 @@ def p2_payload(result, out_dir, project=None):
             from . import clip_variants as CV
             dst = os.path.join(out_dir, CV.CFG_NAME)
             shutil.copyfile(result.clips_file, dst)
+            extras.append(dst)
+        if getattr(result, "sounds_file", ""):         # PAD-494: sounds.cfg, the music modes
+            from . import sound_modes as SMo
+            dst = os.path.join(out_dir, SMo.CFG_NAME)
+            shutil.copyfile(result.sounds_file, dst)
+            extras.append(dst)
+        if getattr(result, "picture_file", ""):        # PAD-537: picture.cfg, the picture settings
+            from . import picture_settings as PS
+            dst = os.path.join(out_dir, PS.CFG_NAME)
+            shutil.copyfile(result.picture_file, dst)
+            extras.append(dst)
+        if getattr(result, "settings_file", ""):       # PAD-1382: settings.cfg, the shared MORE SETTINGS rows
+            from . import menu_settings as MSet
+            dst = os.path.join(out_dir, MSet.SHARED_CFG)
+            shutil.copyfile(result.settings_file, dst)
+            extras.append(dst)
+        if getattr(result, "attract_file", ""):        # PAD-782: attract.cfg, the attract items
+            from . import attract_items as AI
+            dst = os.path.join(out_dir, AI.CFG_NAME)
+            shutil.copyfile(result.attract_file, dst)
+            extras.append(dst)
+        if getattr(result, "coop_file", ""):           # PAD-1017: coop.cfg, co-op play
+            from . import coop_play as CP
+            dst = os.path.join(out_dir, CP.CFG_NAME)
+            shutil.copyfile(result.coop_file, dst)
+            extras.append(dst)
+        if getattr(result, "idle_file", ""):           # PAD-1022: idle.cfg, inactivity pausing the timers
+            from . import idle_pause as IP
+            dst = os.path.join(out_dir, IP.CFG_NAME)
+            shutil.copyfile(result.idle_file, dst)
+            extras.append(dst)
+        if getattr(result, "handicap_file", ""):       # PAD-1033: handicap.cfg, a handicap for each player
+            from . import handicap as HC
+            dst = os.path.join(out_dir, HC.CFG_NAME)
+            shutil.copyfile(result.handicap_file, dst)
+            extras.append(dst)
+        if getattr(result, "cabshow_file", ""):        # PAD-1040: cabshow.cfg, the card's expression light shows
+            from . import cab_shows as CS
+            dst = os.path.join(out_dir, CS.CFG_NAME)
+            shutil.copyfile(result.cabshow_file, dst)
+            extras.append(dst)
+        if getattr(result, "comp_file", ""):           # PAD-1041: comp.cfg, Prolonged Competition
+            from . import prolonged_comp as PCo
+            dst = os.path.join(out_dir, PCo.CFG_NAME)
+            shutil.copyfile(result.comp_file, dst)
+            extras.append(dst)
+        if getattr(result, "scorefeed_file", ""):      # PAD-1204: scorefeed.cfg, the score feed
+            from . import score_feed as SF
+            dst = os.path.join(out_dir, SF.CFG_NAME)
+            shutil.copyfile(result.scorefeed_file, dst)
+            extras.append(dst)
+        if getattr(result, "records_file", ""):        # PAD-1280: records.cfg, the owner's records
+            from . import mode_records as MRec
+            dst = os.path.join(out_dir, MRec.CFG_NAME)
+            shutil.copyfile(result.records_file, dst)
             extras.append(dst)
     except OSError as e:
         raise ModeWriteError("the modes' system-partition files could not be staged (%s)"
@@ -1383,7 +2504,8 @@ def install_command(ex, image_path, payload, epoch):
             % (q(ex.to_exec_path(tools_dir())), int(epoch), " ".join(q(a) for a in args)))
 
 
-def install_p2(image_path, payload, epoch, log=None, executor=None, timeout=900, modes=True):
+def install_p2(image_path, payload, epoch, log=None, executor=None, timeout=900, modes=True,
+               who=None):
     """Put the payload on the card's system partition (mode_install.py: debugfs, e2fsck
     before and after, a fresh read-back, game_monitor hooked). Returns its report line.
     *modes* False (PAD-446): the card carries random clips and no mode, so the runtime keeps
@@ -1394,7 +2516,7 @@ def install_p2(image_path, payload, epoch, log=None, executor=None, timeout=900,
         executor = create_executor()
     out = executor.run(install_command(executor, image_path, payload, epoch), timeout=timeout)
     line = next((l for l in out.splitlines() if l.startswith("[mode]")), out.strip())
-    log("%s: %s" % ("Modes" if modes else "Random clips", line), "info")
+    log("%s: %s" % ("Modes" if modes else who or "Random clips", line), "info")
     if modes:
         log("Modes: %s" % MP.INSIDER_NOTE, "info")
     return line
@@ -1510,11 +2632,17 @@ def assets_fingerprint(assets_dir):
 
 def _assets_fingerprints(assets_dir, apart=None):
     """``(whole, rest)``: :func:`assets_fingerprint` of *assets_dir*, and the same of it without
-    the folder *apart* (``None``: ``rest`` is ``None``), in one walk."""
+    the folder *apart* (``None``: ``rest`` is ``None``), in one walk.  What the app keeps
+    in the folder for itself (its log, which every logged line moves, the caches, the
+    build output) is not walked: none of it is an edit (PAD-509)."""
+    from ...core.checksums import FINGERPRINT_SKIP_DIRS, FINGERPRINT_SKIP_FILES
     apart = os.path.normcase(os.path.abspath(apart)) if apart else None
     newest, count = 0, 0
     r_newest, r_count = 0, 0
-    for root, _dirs, files in os.walk(assets_dir):
+    for root, dirs, files in os.walk(assets_dir):
+        if root == assets_dir:
+            dirs[:] = [d for d in dirs if d not in FINGERPRINT_SKIP_DIRS]
+            files = [f for f in files if f not in FINGERPRINT_SKIP_FILES]
         inside = apart is not None and (
             os.path.normcase(os.path.abspath(root)) + os.sep).startswith(apart + os.sep)
         for name in files:
@@ -1649,7 +2777,7 @@ def _set_intact_reason(set_dir, base_card, E):
 #: milliseconds where the build took most of a minute. A field not named here (a new one
 #: included) always builds the set again.
 SETTINGS_ONLY_FIELDS = frozenset((
-    "start_shot", "start_count", "seconds", "scoring_shots", "countdown", "lights",
+    "start_shot", "start_or", "start_count", "seconds", "scoring_shots", "countdown", "lights",
     "light_color", "light_on_raw", "light_off_raw", "stack", "award_ladder", "shot_award",
     "end_shot", "callout_at", "restore_after", "starts_on", "ends_on", "starts", "cooldown",
     "priority", "light_shots", "light_shots_pattern", "start_also", "after", "after_when",
@@ -1898,7 +3026,9 @@ def _tryit_set_from_manifest(project, modes, code, set_dir, listed, counts, E, r
         reused=reused,
         files=[r.get("path", "").lstrip("/") for r in listed.get("files") or ()],
         new_files=[str(r).strip("/") for r in carried.get("added") or ()],
-        mode_files=[n for n in carried.get("files") or () if n.endswith(".cfg")],
+        # the mode files alone: stock.cfg, clips.cfg and sounds.cfg sit beside them (PAD-533: a
+        # code mode's long calls bring sounds.cfg to a set of no form mode)
+        mode_files=[n for n in carried.get("files") or () if re.fullmatch(r"mode\d*\.cfg", n)],
         slots=[(slot, slug, spec.name) for slot, (slug, spec) in enumerate(modes)],
         port=port, end_sound=carried.get("end_sound"), counts=tuple(counts),
         own_sounds=own_sounds_by_slug(carried.get("own_sounds")),
@@ -1962,6 +3092,8 @@ def sound_words(key):
     (``call:<cue>`` -> "<cue> call")."""
     if str(key).startswith("call:"):
         return "%s call" % str(key)[5:]
+    if str(key).startswith("music:"):                   # PAD-658: a further music bed
+        return "%s music bed" % str(key)[6:]
     return SOUND_WORDS.get(key, key)
 
 
@@ -1983,12 +3115,13 @@ def choose_code_sounds(project, code, sound_ok, prof, taken=(), taken_beds=(), l
             "%s are not put on the card." % (why, ", ".join(sorted({w["name"] for w in wants}))), "info")
         return []
     game, version = MS.title_version(prof.key)
-    if MS.carriers(game, version) is None:
+    # PAD-1295: the profile's own machine (a Spike 3 build's ``_spike3`` key has its own carriers)
+    c = MS.profile_carriers(prof.key)
+    if c is None:
         log("Modes: the music and calls of the code mode(s) are not put on this card: no stock "
             "requests to carry them have been measured for %s yet." % prof.label, "warning")
         return []
     taken, taken_beds, out = [int(t) for t in taken], [int(b) for b in taken_beds], []
-    c = MS.carriers(game, version)
     for w in wants:
         kind = "music" if w["music"] else "sound_start"
         if MS.swapped(c, "music" if w["music"] else "call"):
@@ -2000,14 +3133,24 @@ def choose_code_sounds(project, code, sound_ok, prof, taken=(), taken_beds=(), l
         try:
             got = MS.assign(game, version, [(kind,)], taken=taken, taken_beds=taken_beds)[0]
         except MS.ModeSoundError as e:
+            if w["music"] and c.swap_calls:
+                # PAD-658: the title's spare bed sids are all taken (Godzilla LE 1.16 has 12): the bed rides the
+                # music carrier SWAPPED in at run time, as a Pro's music and this title's calls do - no ceiling
+                entry = dict(w, request=0, swap=True)
+                entry.pop("priority", None)
+                out.append(entry)
+                log("Modes: %s's %s plays through the music carrier swapped in at run time (%s)."
+                    % (w["name"], sound_words(w["key"]), e), "info")
+                continue
             log("Modes: %s's %s is not put on this card: %s." % (w["name"], sound_words(w["key"]), e), "warning")
             continue
         entry = dict(w, request=int(got[kind]))
-        taken.append(entry["request"])
         if w["music"] and got.get("music_sid"):
             entry["sid"] = int(got["music_sid"])
             taken_beds.append(entry["sid"])
-        if MS.carriers(game, version).swap:
+        else:                           # PAD-658: a bed shares the music carrier (its own sid): not taken
+            taken.append(entry["request"])
+        if c.swap:
             entry["swap"] = True        # item 163: swapped in at run time
         entry.pop("priority", None)
         out.append(entry)
@@ -2029,14 +3172,20 @@ def own_sounds_taken(own):
 BUILD_MODE = "build_mode.sh"
 
 
-def compile_command(ex, out, sources):
+def compile_command(ex, out, sources, arch="arm"):
     """The bash command that builds *sources* (the code modes' .c files) with the mode-file
-    interpreter into *out*, through ``sdk/build_mode.sh`` in the executor's Linux."""
+    interpreter into *out*, through ``sdk/build_mode.sh`` in the executor's Linux.
+    PAD-1295: ``arch="a64"`` builds for a Spike 3 card's 64-bit ARM (``build_mode.sh -a a64``)
+    with the pinned aarch64 gcc :func:`.mode_runtime.xgcc_script` unpacks (once, about 41 MB);
+    Spike 2's command is the one it always was."""
     import shlex
     q = shlex.quote
     ab = os.path.abspath
     sdk = MR.sdk_dir()
-    args = [ex.to_exec_path(ab(os.path.join(sdk, BUILD_MODE))), "-o", ex.to_exec_path(ab(out))]
+    args = [ex.to_exec_path(ab(os.path.join(sdk, BUILD_MODE)))]
+    if arch == "a64":
+        args += ["-a", "a64"]
+    args += ["-o", ex.to_exec_path(ab(out))]
     args += [ex.to_exec_path(ab(s)) for s in sources]
     args.append(ex.to_exec_path(ab(os.path.join(sdk, "mode_file.c"))))
     return "bash " + " ".join(q(a) for a in args)
@@ -2078,7 +3227,7 @@ def _mode_folder_files(folder):
     return got
 
 
-def code_object_key(sources):
+def code_object_key(sources, arch="arm"):
     """The digest an object is kept under: the bytes of every code mode's C file and of every
     other file under its folder a compile could include (:func:`_mode_folder_files`), and of
     everything of the SDK ``build_mode.sh`` compiles in (the runtime, the mode-file interpreter,
@@ -2093,7 +3242,9 @@ def code_object_key(sources):
         files += [(os.path.relpath(p, folder).replace(os.sep, "/"), p)
                   for p in _mode_folder_files(folder)
                   if os.path.normcase(os.path.abspath(p)) != os.path.normcase(os.path.abspath(src))]
-    h = hashlib.sha256(b"pad code object 2\0")
+    if arch == "a64":            # PAD-1295: the pinned compiler that makes the 64-bit object
+        files.append(("xgcc.pins", os.path.join(os.path.dirname(MR.xgcc_script()), "xgcc.pins")))
+    h = hashlib.sha256(b"pad code object 2\0" + (b"a64\0" if arch == "a64" else b""))
     for name, p in files:
         h.update(name.encode("utf-8") + b"\0")
         st = os.stat(p)
@@ -2133,7 +3284,7 @@ def _keep_object(key, built):
         pass
 
 
-def compile_code_object(sources, out, log=None, executor=None, timeout=600):
+def compile_code_object(sources, out, log=None, executor=None, timeout=600, arch="arm"):
     """Build the object a card with code modes carries: the runtime, every code mode and the
     mode-file interpreter (so the project's form modes run beside them). Returns *out*. Raises
     :class:`ModeWriteError` with the compiler's words when it fails.
@@ -2152,7 +3303,7 @@ def compile_code_object(sources, out, log=None, executor=None, timeout=600):
     key = None
     if executor is None and os.environ.get(CODE_CACHE_ENV) != "0":
         try:
-            key = code_object_key(sources)
+            key = code_object_key(sources, arch)
         except OSError:
             key = None
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
@@ -2177,7 +3328,7 @@ def compile_code_object(sources, out, log=None, executor=None, timeout=600):
         from ...core.executor import create_executor
         executor = create_executor()
     try:
-        said = executor.run(compile_command(executor, out, sources), timeout=timeout)
+        said = executor.run(compile_command(executor, out, sources, arch), timeout=timeout)
     except Exception as e:                   # the executor's CommandError, a missing WSL
         raise ModeWriteError("the code modes did not build: %s" % str(e)[-600:]) from None
     if not os.path.isfile(out):
@@ -2185,15 +3336,15 @@ def compile_code_object(sources, out, log=None, executor=None, timeout=600):
                              % (said or "").strip()[-400:])
     if key:
         _keep_object(key, out)
-    say("Modes: built the code mode(s) %s into the card's mode.so with the mode-file interpreter (%d bytes)."
-        % (names, os.path.getsize(out)), "info")
+    say("Modes: built the code mode(s) %s into the card's mode.so with the mode-file interpreter (%d bytes%s)."
+        % (names, os.path.getsize(out), ", for Spike 3's 64-bit ARM" if arch == "a64" else ""), "info")
     return out
 
 
 _compile_code_object = compile_code_object
 
 
-def prefetch_code_object(sources, timeout=600):
+def prefetch_code_object(sources, timeout=600, arch="arm"):
     """Start compiling *sources* in the background now, into the kept objects, so the build's
     own :func:`compile_code_object` of them later finds the object ready (or waits for the rest
     of this compile) instead of compiling at the end of the build. Returns the started thread,
@@ -2206,7 +3357,7 @@ def prefetch_code_object(sources, timeout=600):
     if os.environ.get(CODE_CACHE_ENV) == "0":
         return None
     try:
-        key = code_object_key(sources)
+        key = code_object_key(sources, arch)
     except OSError:
         return None
     with _PENDING_LOCK:
@@ -2220,7 +3371,7 @@ def prefetch_code_object(sources, timeout=600):
         try:
             from ...core.executor import create_executor
             ex = create_executor()
-            ex.run(compile_command(ex, out, sources), timeout=timeout)
+            ex.run(compile_command(ex, out, sources, arch), timeout=timeout)
             if os.path.isfile(out):
                 _keep_object(key, out)
                 with _PENDING_LOCK:
@@ -2240,7 +3391,7 @@ def prefetch_code_object(sources, timeout=600):
     return t
 
 
-def code_plan(project, result, code, tree, prof, log=None):
+def code_plan(project, result, code, tree, prof, log=None, arch="arm"):
     """Fill *result* (a :class:`ModePlan`) with the CODE modes: the compiled object and one
     ``<slug>.assets`` per code mode naming its screen, its clip and the own sounds the engine
     carried (``result.own_sounds``). Code modes' screens and clips are already in ``result.build``."""
@@ -2259,5 +3410,6 @@ def code_plan(project, result, code, tree, prof, log=None):
         result.asset_files.append((slug + CM.RUNTIME_SUFFIX, path))
     result.code = list(code)
     result.object = compile_code_object([CM.source_path(project, s) for s, _c in code],
-                                        os.path.join(tree, "padmode_obj", "mode.so"), log=log)
+                                        os.path.join(tree, "padmode_obj", "mode.so"), log=log,
+                                        **({"arch": arch} if arch != "arm" else {}))
     return result

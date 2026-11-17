@@ -34,6 +34,18 @@ THE PROGRAM (``blocks.json``)::
       "clips": [{"name": "sever", "file": "sever.mp4"}],      PAD-374: its own clips and sounds,
       "sounds": [{"name": "roar", "file": "roar.wav", "priority": 4}],   files in its folder
       "music": "music.wav",       its own music bed while it runs ("" = the game's music)
+      "beds": [{"name": "swamp", "file": "music_swamp.wav"}],   PAD-658: more beds; a Play the music block switches
+                                  to one while it runs ({"op": "music", "bed": "swamp"}; "" = its own music again)
+      "screen_style": "words",    PAD-521: its own screen as words alone, large and white over the game's video (the
+                                  game's own look: a name over its intro, the TOTAL over its end); "panel" = the panel
+      "bar": {"on": true, "color": "#00c040"},   PAD-521: its name in the game's own status bar (James Bond: the
+                                  coloured bar under the TV), in this colour, its clock draining along it
+             ("fill": "value", "value": {"k": "scored"}, "of": {"k": "num", "v": 12})   PAD-721: or filling with
+                                  a value out of another instead (its shots made of 12: full when all are made)
+      "info": {"on": true, "text": "SUPER JACKPOT", "value": {"k": "var", "name": "superjackpot"}},   PAD-547: a line
+                                  under its name while it runs, its words and the value as it changes ("SUPER
+                                  JACKPOT = 53,200,000"), where the title's port puts one (James Bond: under the
+                                  status bar, as the game's own mini-wizards show theirs); on every title with screens
       "scripts": [
         {"hat": {"kind": "shot", "shot": "Left ramp", "when": "idle"},
          "do": [{"op": "if", "cond": {...}, "then": [...], "else": [...]}, ...]}
@@ -46,21 +58,91 @@ seconds while it runs, N seconds left, the ball drains, one of the game's events
 or end the mode, score, set or change a variable, if / else, a callout, words on the mode's
 screen, light or free a shot's inserts, add time or set the clock (to any value: a variable,
 the seconds left, a sum), a multiball, a line in the log, and (PAD-374) play one of the mode's
-own clips (full screen, behind the HUD once, or behind the HUD over and over while it runs) or
+own clips (full screen, behind the HUD once, or behind the HUD over and over while it runs - in When the mode
+ends, behind its TOTAL in the loop's place, PAD-733) or
 one of its own sounds (with a callout of the game's when the card could not carry it), and
 (PAD-376) run a light show (a ready-made one, or its own steps: the examples' kit_show) and light
 a shot at a pace of its own (any value, in ms) or blinking faster as the clock runs down, and (PAD-395)
 hold one of the game's mechanisms (Godzilla's magnet, and on a Premium/LE the Mechagodzilla magnet
 and the bridge) for a time, hold the next ball (or every ball) in the scoop, and let go, and (PAD-392)
-turn Godzilla Premium/LE's shield targets toward the player or away, kept there while it runs, (PAD-418)
+turn Godzilla Premium/LE's shield targets toward the player or away, kept there while it runs, (PAD-589)
+move its building to one of the game's own floors, put back when it ends, (PAD-418)
 play one of the game's own light shows by its port's name (Godzilla Premium/LE's ten), and (PAD-414)
 shake the cabinet's shaker for N ms at a strength, or with one of the game's own shakes (its jackpot shake...) -
 one in When the mode ends runs out after the mode, and (PAD-436) hand the player one of the game's own
-mini-wizards, lit for its start shot or started (James Bond LE 1.06's four). Values: a
+mini-wizards, lit for its start shot or started (James Bond LE 1.06's four), and (PAD-503) light the
+mode itself at a shot, as the game lights one of its mini-wizards. Values: a
 number, a variable, a shot's hits this ball, how many shots the mode has scored, its points so
-far, the seconds left, the balls in play, the player up, and + - x / of two values. Conditions:
+far, the seconds left, the balls in play, the player up, (PAD-889) James Bond's Bond Women multiplier as it is now (2-7
+while it runs, else 1: the game already counts it into the multiplier every Score block's points go through, so it is
+for showing and deciding on, not for multiplying by again), and + - x / of two values. Conditions:
 compare two values, and / or / not, the mode is running, one of the game's own modes is running,
-the mode could start now.
+the mode could start now, the mode is lit, the shield targets face away (PAD-690).
+
+COMBOS (PAD-708). A combo was built by hand from a timer and a variable (King Caesar's TAG TEAM: the Godzilla
+target starts a 20 s timer, and a pop bumper or the Mecha lane made while it runs counts one), several blocks a
+pair. The hat ``{"kind": "combo", "shots": ["Left ramp", "Right ramp"], "seconds": 3, "when": "running",
+"name": "RAMPS"}`` runs when its shots are made in that order, each within ``seconds`` of the one before: two
+shots are "<shot> follows <shot> within N seconds", more an ordered combo (ramp -> loop -> ramp). A step may be
+any shot (``"*"``), any shot the mode has lit as it is made (``"lit"``), so "any lit shot after any lit shot"
+chains, or one of several shots (a list: ``["Pop bumper", "Mecha exit bottom"]``, TAG TEAM's second shot). It is judged on the mode's own shot stream (every shot it hears, in order: the same on every title, LE
+or Pro). A shot that is not the next step leaves the combo as it is - the ball passes spinners, lanes and pops
+that are shots too on its way from one shot to the next, as TAG TEAM's hand-built window allowed - its first shot
+made again begins it again from there, and only the window lapsing ends it. Two values go with it: the COMBOS IN A ROW for the player up (``{"k":
+"combo_chain"}``: each shot that makes one or more combos adds one; it goes back to 0 when the window of the last one
+lapses with no other, when the ball ends, and as the mode starts and ends - the "x combo" a score multiplies by,
+a COMBO counter on the HUD), and a combo's SHOTS MADE SO FAR (``{"k": "combo_steps", "combo": "RAMPS"}``, by
+its name: 2 after the ramp and the loop of ramp -> loop -> ramp, 0 once its window lapses). Not the game's own
+combos: the game's rules keep theirs.
+
+LIT AT A SHOT (PAD-503). A Bond owner made modes of their own for the two films with no mini-wizard and
+wanted them as the game's four are: lit at the Right ramp with the film's villain, started by the ramp. Light
+the mode at (``{"op": "light_mode", "shot": ..., "insert": "MR. HENDERSON", "color": ..., "pattern": "blink"}``) lights
+it for the player up: while the mode is not running, the shot's inserts and the one insert named (any the port
+names, "" = none) are held in its colour, ball after ball, and that shot made starts the mode as Start the mode
+does (so it waits, and stays lit, while one of the game's own modes or a multiball is in its way, as the mode is
+set). Starting, however it starts, puts the light out; a new game too. Each player's is their own.
+The same owner's next games (PAD-503, v1.169.0): the light went out when the game's mode that won the film's last
+part ended, and a Right ramp in the middle of the game's Mr Osato started the mode. So (1) a NEW GAME is the SDK's
+witness (player 1's score back to 0, or pm_in_game() rising while it is 0: ``new_game``), not pm_in_game() rising:
+James Bond ends play at the end of each of its multiballs and wizard modes (mode-mask busy bits until the ball ends),
+and the next ball's pm_in_game() rising wiped the light, the "each game" values and the timers; (2) the lit shot,
+and any start that waits for the game's modes, also waits on the game's own check before one of its mini-wizards
+(pm_game_wizard_way: its henchman, villain and Q Branch modes, which the port's flags do not show). Then (v1.169.3):
+the Right ramp kept starting one of the game's villains instead - it is where Bond starts its henchman and villain
+modes, and the game handles a shot before the modes hear of it. So (3) while the mode would start on its lit shot,
+it CLAIMS the shot every tick (pm_lit_claim): a hit on that switch holds the game's own starts off while the game
+handles it, and the shot starts the lit mode; the game's henchman or villain waits for a later shot.
+The same owner then (PAD-521) wanted their modes to look like the game's own: while one of its mini-wizards is
+qualified the Right ramp's villain inserts cycle and the film's insert is solid. So the block's ``insert`` may name
+several inserts, separated by commas as pm_lamp_set takes them (up to LIT_INSERTS_MAX; a Chase runs across them in
+that order), and ``solid`` / ``solid_color`` one insert more held solid while it is lit (the film's).
+Then (PAD-556): Blofeld, the game's villain mode, won the film's last part and the villains began to rove at once,
+though the mode could not start until Blofeld was over; the game's own rove only then. So while the game's own check
+says one of its modes is in the way, only the solid insert is held: the shot and the chase come once it is clear.
+Then (PAD-598) a Beatles owner lit their mode at Target 4 with RINGO SPINNER pulsing and wanted that insert to change
+as the mode started, but the Light block could only pick a shot. A Light or Hand back block may name one of the game's
+own lights instead (``insert``: an insert, a GI string or a flasher, the port's `lamp` lines) in the place of its
+``shot``; it is held by name as a shot's lights are (a slot of LIT after the shots), and the lit light going out at the
+start leaves it the mode's.
+
+ONE QUALIFIED AT A TIME (PAD-600). A Beatles owner made four modes, one per target (Target 1-4), each qualified and
+lit by three hits of its target, and wanted only one ready at a time, as Batman's villains are: the target that
+qualifies takes the other targets' hits back below three and puts their lights out. So (1) Set the hits of
+(``{"op": "set_hits", "shot": ..., "value": <num>}``) sets a shot's hits this ball for the player up, and a shot's
+hits are ONE count for every blocks mode on the card: each mode still counts them itself (each sees every shot, and
+every one clears them when the ball ends or a game begins, so their counts agree), and the block keeps the
+difference from the count in a weak global per shot (``pad_hits_<shot>``, as a shared variable is kept) that every
+mode adds in (never below 0); (2) Put out the light of (``{"op": "unlight_mode", "mode": ""}``, "" = this mode, else
+another mode's slug) puts out a Light the mode at for the player up: a mode's light (its ``lit_as``) is a weak global
+too (``pad_lit_<mode>``), so another mode can clear it and that mode's next tick takes its lights down.
+
+A LIGHT UNDER ANOTHER (PAD-601). The same owner used one insert for two things: one mode's light on it, and a
+higher one's over it while that one runs. When the higher one ended its lights went to the game, and the insert was
+dark (or the game's) though the first mode still had it lit; a Light block in its When the mode ends could not put
+it back, as the end hands every light back after that hat. So the runtime keeps, per insert, the holds it was taken
+from (pad_mode_runtime.c ``lamp_under``): when the mode on top lets go, the latest one still holding it has it back.
+And a Light block may light it "off" (held dark), where Hand back lets the game's own light show through.
 
 What a mode in C does with the kit (``sdk/examples/intricate_kit.h``), PAD-377 gives the blocks:
 
@@ -75,7 +157,7 @@ What a mode in C does with the kit (``sdk/examples/intricate_kit.h``), PAD-377 g
   one of the game's own modes runs (the kit's ``kit_wait_game``); the mode stays ready, so the
   next block that starts it afterwards does. "the mode could start now" asks the same.
 - A DISPLAY PRIORITY (``priority``): held while the mode runs (``kit_display``), kept for the
-  total its own screen shows at the end, given back at once at a drain.
+  total its own screen shows at the end (PAD-622: and at a drain, through its TOTAL there).
 
 THE HUD (PAD-375). Ticked on, the mode has what the examples have at the glass's edges, built by the
 card build like theirs (:mod:`.mode_hud`, from the ``hud`` this module writes into assets.json): the
@@ -88,8 +170,22 @@ kit_hud``, copied into the folder at every save), so it steps aside exactly as t
 display of the game's (``pm_display_covered``) its words are blank and the edges stay; while one of
 the game's own modes runs (``pm_aside``) its lines go into the award line, the counters hide, and the
 badge moves one slot down for a battle. The mode's own screen, when it has one, is hidden then too.
-At the end the HUD shows the mode's TOTAL for three seconds (a drain or the game moving on takes it
-down at once).
+At the end the HUD shows the mode's TOTAL for three seconds (the game moving on takes it down at once).
+The corner meter (the top-right POWERUP-style bar, PAD-658) steps aside while one of the game's own modes or
+battles runs: the game letters its MODE CHAMPION (HIGH SCORE / YOUR SCORE) there then (PAD-707).
+
+WHAT IS LIT (PAD-707, David: "whatever progresses the mode in general should be flashing ... and other targets should
+not be flashing"). A mode that keeps the game's modes off (``game_modes`` block or give way) holds every shot insert it
+does not light dark while it runs (``quiet_shots``): its own Light blocks paint over that, a Lights off puts one back
+to dark rather than to the game's, a light show's end puts them dark again first. A mode beside the game's modes
+leaves the game's lights be.
+
+A DRAIN (PAD-622). The game's own mini-wizards (James Bond) show their TOTAL when the ball drains in one,
+and the bonus waits for it. A mode the ball's drain ends does the same: it ends as its clock would (an
+Award it ended on, then its TOTAL, on its HUD or its own screen, the bar kept) and asks the runtime to
+hold the game's end of ball (``pm_ball_end_hold``) for ``DRAIN_TOTAL_MS`` - the 6 s the game's own TOTAL
+shows - or for the rest of a total already showing; when the end of ball goes on, it all goes. A tilted
+ball, or a port without the hold, takes it down at once as before.
 
 PAD-373: what it does about the game's own modes is the form's choice (PAD-363): they may start
 (``stack``), it gives way (``give_way``: it starts only while none of them runs - a Start the mode
@@ -117,6 +213,21 @@ paints every placed insert while it runs, and at its end hands them back and sen
 again; a blink that hurries is sent again each time the clock moves it to a faster pace; and the
 same light lit again is not sent again, so a blink keeps its beat. A show started in When the
 mode ends runs on after the mode, as the examples' end shows do.
+
+THE MODE'S OWN LIGHT SHOWS (PAD-646). David wanted light shows made from scratch, "in a beautiful and
+elegant way": presets with timing, a preview in the app, several shows through a mode. So a mode keeps
+its own named shows (``shows``: ``[{"name", "steps", "repeat"}]``, up to SHOWS_MAX, each up to SHOW_STEPS
+steps), made on the Modes tab's Light shows page (modes_lightshows.js: the show's steps as a timeline,
+each step's pattern, time, colors, centre, pace and GI, and the playfield picture playing the show with
+the very arithmetic the C runs, mirrored insert by insert), and a Run the light show block runs one by
+name (``{"op": "show", "show": "mine", "name": "Kaiju roar"}``) from any rule: at the start, at a shot,
+with N seconds left, at the end. The ready-made shows (SHOWS) and a block's own steps (``"own"``) stay.
+A step may BLEND in from the step before over its first ``blend`` ms (from dark when it is the first),
+centre on a point of its own (``at`` "xy" with ``x``, ``y``, picked on the picture), and the patterns
+gained a spiral out and in, ripples, a beam side to side, a fade up and a held color. A show's
+``repeat`` is how many times it runs (1-REPEAT_MAX), or 0: over and over until the mode ends, when the
+pass it is in finishes (``show_last_pass``). The C keeps one table per show the blocks run, however many
+blocks run it, and only the shows a block runs (an unused table would be a compiler warning).
 """
 from __future__ import annotations
 
@@ -126,12 +237,13 @@ import os
 import re
 
 from . import mode_project as MP
+from . import more_kaiju as MK
 
 BLOCKS_FILE = "blocks.json"
 FORMAT = 1
 SECONDS_MAX = 600
 MAX_SCRIPTS = 48
-MAX_BLOCKS = 400
+MAX_BLOCKS = 600                    # PAD-658: 400 held the bigger examples back once their lines named every shot
 MAX_DEPTH = 10
 MAX_VARS = 24
 MAX_TIMERS = 8
@@ -148,12 +260,73 @@ HATS = {
     "mode_end": "When the mode ends",
     "shot": "When a shot is made",
     "any_shot": "When any shot is made",
+    "switch": "When any playfield switch is hit",     # PAD-675: every switch's own hit, as the C modes counted them
     "every": "Every few seconds while it runs",
     "seconds_left": "When seconds are left",
     "ball_end": "When the ball drains",
+    "drain": "When a ball goes into the trough",      # PAD-690: every ball, one a ball save serves back too
     "event": "When the game does something",
     "timer_done": "When a timer runs out",
+    "challenge": "When the player picks a challenge",
+    "combo": "When shots are made one after another",   # PAD-708: a combo, each shot within N seconds of the last
+    "battle": "When the player picks a battle",       # PAD-706: a slot of Godzilla's battle selection screen
+    "game_mode": "When the game starts one of its modes",   # PAD-710: the mode runs in its place, counting as it
+    "completed": "When the player has completed some of the game's modes",   # PAD-747: N of them, in one game
+    "spare_switch": "When a spare switch closes",     # PAD-826: a board input the game has no switch on (a mod's own)
 }
+#: PAD-615 round 2: the challenge hat's choice that adds the mode to the game's start menu as a challenge of its own
+CHALLENGE_NEW = "A new challenge of its own"
+#: PAD-643: the challenge hat's `launch` - who launches the challenge ball, and when: "clip" (the runtime, once the
+#: mode's start clip is over - the default), "player", or a number of seconds after the mode began (1 to 60)
+CHALLENGE_LAUNCH = ("clip", "player")
+
+
+def challenge_launch_ms(hat):
+    """PAD-643: the runtime's pm_challenge_launch value for a challenge hat: 0 its start clip, -1 the player, ms."""
+    v = str((hat or {}).get("launch") or "clip").strip()
+    if v == "player":
+        return -1
+    if v.isdigit():
+        return max(1, min(60, int(v))) * 1000
+    return 0
+#: PAD-706: the most battle slots a selection screen may have (the runtime's N_ROSTER)
+ROSTER_MAX = 16
+
+
+def battle_name(hat):
+    """PAD-706: a battle hat's battle, as the page named it when it was picked (``name``), else its slot."""
+    hat = hat or {}
+    name = str(hat.get("name") or "").strip()
+    if name:
+        return name
+    return "battle %s" % hat.get("slot") if _int_ok(hat.get("slot"), 0, ROSTER_MAX - 1) else "(no battle)"
+
+
+def place_name(hat):
+    """PAD-710: a game-mode hat's mode, as the page named it when it was picked (``name``), else its number."""
+    hat = hat or {}
+    name = str(hat.get("name") or "").strip()
+    if name:
+        return name
+    return "mode %s" % hat.get("mode") if _int_ok(hat.get("mode"), 0, PLACE_MAX - 1) else "(no mode)"
+
+
+#: PAD-710: the game's mode numbers a mode may take the place of (pad_mode_runtime.c PLACE_IDS)
+PLACE_MAX = 128
+#: PAD-747: the game's mode numbers a completed hat may count (pad_mode_runtime.c DONE_IDS: 128 and up are a plain-C
+#: build's modes with books and no start), and how many completed hats a mode may have
+DONE_MAX, DONE_HATS_MAX = 256, 8
+
+
+def done_hat_ids(hat):
+    """PAD-747: a completed hat's mode numbers, in order, without repeats or anything not a number 0-255."""
+    out = []
+    for i in (hat or {}).get("modes") or ():
+        if _int_ok(i, 0, DONE_MAX - 1) and int(i) not in out:
+            out.append(int(i))
+    return out
+
+
 #: a shot / event hat's "when": the mode's state it runs in
 WHEN = {"any": "any time", "idle": "while the mode is not running", "running": "while the mode runs"}
 RESETS = {"ball": "each ball", "mode": "each time the mode starts", "game": "each game"}
@@ -161,24 +334,53 @@ SHARED_RESETS = ("ball", "game")
 STATEMENTS = ("start_mode", "end_mode", "score", "set", "change", "if", "callout", "words",
               "light_shot", "lights_off", "add_time", "set_time", "multiball", "log", "clip", "sound",
               "show", "timer_start", "timer_stop", "hud_text", "hud_counter", "hud_gauge", "hud_award",
-              "hold", "scoop_hold", "let_go", "shield", "game_show", "shake", "shake_game", "game_wizard")
+              "hud_progress",                                            # PAD-690: the panel's number, live
+              "roster_progress",                                         # PAD-733: a new monster's count on its tile
+              "ball_save",                                               # PAD-690: a ball save of its own
+              "drain_to_one",                                            # PAD-733: the extra balls taken away
+              "hold", "scoop_hold", "let_go", "shield", "building", "game_show", "shake", "shake_game", "game_wizard",
+              "music",                                                   # PAD-658: switch to another music bed
+              "gi",                                                      # PAD-767: the GI dark for the rest of the mode
+              "light_mode", "unlight_mode", "set_hits",
+              "spare_drive")                                             # PAD-826: a driver output the game never fires
 #: PAD-395: the mechanisms a block holds, through the runtime as the form's Magnet, Scoop and Other
 #: mechanisms do (PAD-381): a time asked for, clamped to these, and every other limit the runtime's own
 HOLD_MIN_MS, HOLD_MAX_MS = MP.COIL_MIN_MS, MP.COIL_MAX_MS
+#: PAD-826: a spare switch's board and input, a spare output's board and output (the node-bus library's own ranges), and
+#: a spare output's one command (pad_mode_runtime.c's SPARE_PULSE_MAX / SPARE_CMD_MAX: the runtime refuses past them)
+SPARE_NODES, SPARE_INPUTS, SPARE_OUTPUTS = 32, 64, 9
+SPARE_PULSE_MAX_MS, SPARE_CMD_MAX_MS = 1000, 5000
+#: PAD-826: a spare switch is closed when its input reads low (Stern's switches) or high (an opto's way)
+SPARE_CLOSED = {"low": "reads low when closed", "high": "reads high when closed"}
+#: PAD-690: a Ball save block's seconds (pm_ball_save's own range)
+BALL_SAVE_MAX = 120
+#: PAD-621: a post the game keeps up itself is held up to its own longest (James Bond's right return up post: 14 s);
+#: the C clamps to this and the runtime to each mechanism's own limit
+HOLD_LONGEST_MS = MP.COIL_LONGEST_MS
 SCOOP_MIN_MS, SCOOP_MAX_MS = MP.SCOOP_MIN_MS, MP.SCOOP_MAX_MS
+#: PAD-621: a hold's "clock": the mode's clock runs on (""), or stands still until the hold lets go ("wait": the
+#: ball held at the start while its clip plays, as the game's own mini-wizards do at Bond's right return up post)
+HOLD_CLOCK = {"": "its clock runs", "wait": "its clock waits until it lets go"}
 #: a scoop hold's reach: the next ball that settles there, or every one while the mode runs
 SCOOP_WHICH = {"next": "the next ball", "every": "every ball"}
 #: PAD-392: where a block turns the shield targets (Godzilla Premium/LE's platform), kept there while the mode runs;
 #: "leave" stops keeping them (they stay where they are). The runtime turns them back when the mode ends.
 SHIELD_WHERE = {"toward": "toward the player", "away": "away", "leave": "where they are"}
+#: PAD-589: the floors a block sends Godzilla Premium/LE's building to (the game's own; 0 is where it rests). The runtime
+#: puts it back where it was when the mode ends.
+BUILDING_FLOOR = {"1": "floor 1", "2": "floor 2", "3": "floor 3", "0": "back where the game keeps it"}
 #: PAD-414: a shake's strength (the game's own power steps, mode_project.SHAKE_STRENGTHS), and its length: at least
 #: SHAKE_MIN_MS, at most the game's own longest at that strength (the runtime clamps a value worked out while it runs)
 SHAKE_STRENGTH = {v: k for k, v in MP.SHAKE_STRENGTHS.items()}
 SHAKE_MIN_MS, SHAKE_MAX_MS = MP.SHAKE_MIN_MS, 5000
 #: PAD-375: the HUD's pieces (mode_hud.py draws them): the badge's icons, the gauge's pips
-HUD_ICONS = ("xilien", "bolt", "ghidorah", "oxygen", "maser", "radiation", "anguirus")
-GAUGE_KINDS = ("diamond", "segment", "spike")
-GAUGE_MAX = 12                   # intricate_kit.h's KIT_HUD_PIPS
+HUD_ICONS = ("xilien", "bolt", "ghidorah", "oxygen", "maser", "radiation", "anguirus",
+             # PAD-658: the badges PAD-379's modes drew (mode_hud.py), so their blocks keep them
+             "rage", "crystal", "snowflake", "rose", "claw")
+GAUGE_KINDS = ("diamond", "segment", "spike",
+               "bar")            # PAD-658: PAD-416's POWERUP-style meter at the top-right corner; its value a percent
+GAUGE_MAX = 12                   # a pip gauge's pips
+BAR_MAX = 40                     # a bar's slices (intricate_kit.h's KIT_HUD_PIPS, mode_hud.BAR_SLICES_MAX)
 HUD_TEXT_MAX = 40                # a title or line (the kit's KIT_HUD_WORDS is 48, with its number)
 COUNTER_MAX = 16                 # a counter's label or sub-label (the kit holds 23)
 BADGE_MAX = 12                   # the badge's label, lettered on the stock BATTLE panel
@@ -187,12 +389,21 @@ KIT_FILE = "intricate_kit.h"
 HUD_PRIORITY = 180               # a HUD mode with no priority of its own takes the kit's KIT_DISPLAY_MODE:
                                  # pm_display_covered watches for it
 TOTAL_MS = 3000                  # the HUD's TOTAL stays up this long after the end
+DRAIN_TOTAL_MS = 6000            # PAD-622: at a drain, held as the game's own mini-wizards hold theirs
 #: a lit shot's pattern: the SDK's, and its pace (ms) when the block gives none. "hurry" is a
-#: blink that quickens as the clock runs down (PAD-376, the kit's kit_hurry_ms)
+#: blink that quickens as the clock runs down (PAD-376, the kit's kit_hurry_ms); "off" holds it dark (PAD-601: the
+#: game's own light there does not show through, as it does when the light is handed back)
+#: PAD-733: what a shot's script may do that the player hears, sees on the playfield or feels - without one of them
+#: a shot that scores while the mode runs gets the game's rising hit sound and a flash of its inserts (fb_tick)
+FEEDBACK_OPS = ("sound", "callout", "show", "shake", "shake_game", "clip", "game_show")
 PATTERNS = {"solid": ("PM_LAMP_SOLID", 0), "blink": ("PM_LAMP_BLINK", 500),
             "pulse": ("PM_LAMP_PULSE", 1600), "chase": ("PM_LAMP_CHASE", 150),
-            "hurry": ("PM_LAMP_BLINK", 0)}
+            "hurry": ("PM_LAMP_BLINK", 0), "off": ("PM_LAMP_SOLID", 0)}
 RATE_MIN, RATE_MAX = 20, 5000    # a blink's, pulse's or chase's pace, ms
+#: PAD-503: a mode lit at a shot shows it in one of these (no clock runs while it is lit, so no hurry)
+LIT_PATTERNS = ("solid", "blink", "pulse", "chase")
+INSERT_MAX = 39                  # an insert's name (pad_mode_runtime.c struct lamp keeps 39 letters)
+LIT_INSERTS_MAX = 8              # PAD-521: a mode lit at a shot lights up to this many inserts more (a chase runs across them)
 # ---- light shows (PAD-376): the kit's kit_show, steps of a pattern over the placed inserts ----
 #: a step's pattern: its C name, and the words the page shows
 FX = {"burst": ("FX_BURST", "a ring bursting out"), "implode": ("FX_IMPLODE", "a ring closing in"),
@@ -202,20 +413,42 @@ FX = {"burst": ("FX_BURST", "a ring bursting out"), "implode": ("FX_IMPLODE", "a
       "strobe": ("FX_STROBE", "a strobe"), "sparkle": ("FX_SPARKLE", "sparkles"),
       "fire": ("FX_FIRE", "fire"), "pulse": ("FX_PULSE", "breathing"),
       "chase": ("FX_CHASE_RING", "a chase round"), "fade": ("FX_FADE_OUT", "a fade to dark"),
-      "bolts": ("FX_BOLTS", "lightning")}
-#: where a step centres: a place on the playfield picture (x 0-300 across, y 0-600 down)
+      "bolts": ("FX_BOLTS", "lightning"),
+      # PAD-646: the light-show editor's patterns
+      "spiral_out": ("FX_SPIRAL_OUT", "a spiral outwards"), "spiral_in": ("FX_SPIRAL_IN", "a spiral closing in"),
+      "ripple": ("FX_RIPPLE", "ripples outwards"), "bounce": ("FX_BOUNCE", "a beam side to side"),
+      "fade_in": ("FX_FADE_IN", "a fade up from dark"), "solid": ("FX_SOLID", "one color, held")}
+#: PAD-646: the patterns by family, as the editor's list groups them
+FX_GROUPS = (("Rings", ("burst", "implode", "spiral_out", "spiral_in", "ripple", "chase")),
+             ("Sweeps", ("sweep_up", "sweep_down", "sweep_lr", "sweep_rl", "bounce")),
+             ("Beams", ("spin", "rainbow")),
+             ("Flashes", ("strobe", "sparkle", "fire", "bolts", "pulse")),
+             ("Fades", ("fade_in", "fade", "solid")))
+#: where a step centres: a place on the playfield picture (x 0-300 across, y 0-600 down); PAD-646: "xy" is a point
+#: of the step's own (its ``x``, ``y``: picked on the preview's picture)
 PLACES = {"center": ("the middle", 150, 330), "top": ("the top", 150, 120),
           "flippers": ("the flippers", 150, 560), "left": ("the left", 60, 330),
-          "right": ("the right", 240, 330)}
+          "right": ("the right", 240, 330), "xy": ("a point of its own", 150, 330)}
+XY_MAX = 2000                    # a point of a step's own: within the picture's pixels
 #: what the general illumination does during a step (the kit's KIT_GI_*)
 GI = {"keep": "GI: the game's", "dark": "GI: dark", "flash": "GI: flashing"}
-SHOW_STEPS = 10                  # the kit's KIT_SHOW_STEPS
+#: PAD-767: a GI block: the playfield's GI held dark until the mode ends (a show's GI steps still play over it), or the
+#: game's again (David, MELTDOWN: "it would be cooler if the lights stayed off for the whole mode")
+GI_HOLD = {"dark": "dark until the mode ends", "game": "the game's again"}
+SHOW_STEPS = 32                  # PAD-646: was the kit's KIT_SHOW_STEPS (10); the blocks' engine reads a table
 STEP_MS_MIN, STEP_MS_MAX = 50, 10000
 FX_RATE_MAX = 2000
+# PAD-646: a mode's own shows (``shows``: [{name, steps, repeat}]), run by name from a Light show block
+SHOW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _'!-]{0,23}$")
+SHOWS_MAX = 24                   # shows a mode may keep
+REPEAT_MAX = 10                  # a show runs this many times at most; 0 = over and over until the mode ends
 
 
-def _step(fx, ms, a, b, at, rate=0, gi="keep"):
-    return {"fx": fx, "ms": ms, "a": a, "b": b, "at": at, "rate": rate, "gi": gi}
+def _step(fx, ms, a, b, at, rate=0, gi="keep", blend=0):
+    st = {"fx": fx, "ms": ms, "a": a, "b": b, "at": at, "rate": rate, "gi": gi}
+    if blend:
+        st["blend"] = blend
+    return st
 
 
 #: the ready-made shows a Light show block picks from (made after the examples' own)
@@ -256,12 +489,44 @@ SHOWS = {
         _step("spin", 1200, "#a000ff", "#000000", "center", 90, "dark"),
         _step("implode", 900, "#ffb000", "#a000ff", "center", 0, "dark"),
         _step("fade", 700, "#a000ff", "#000000", "center")]),
+    # PAD-646: the editor's own starting points
+    "spiral": ("A spiral outwards", [
+        _step("spiral_out", 1800, "#40c0ff", "#001040", "center", 0, "dark"),
+        _step("spiral_out", 1200, "#ffffff", "#0050ff", "center", 0, "dark", 300),
+        _step("fade", 500, "#0050ff", "#000000", "center", 0, "keep", 200)]),
+    "spiral_in": ("A spiral closing in", [
+        _step("spiral_in", 1800, "#ff40a0", "#200010", "center", 0, "dark"),
+        _step("burst", 700, "#ffffff", "#ff40a0", "center", 0, "flash", 150),
+        _step("fade", 500, "#ff40a0", "#000000", "center", 0, "keep", 200)]),
+    "fade_up": ("A fade up", [
+        _step("fade_in", 1500, "#ffb000", "#000000", "center", 0, "dark"),
+        _step("solid", 800, "#ffb000", "#000000", "center", 0, "dark"),
+        _step("solid", 800, "#ffffff", "#000000", "center", 0, "keep", 800),
+        _step("fade", 600, "#ffffff", "#000000", "center", 0, "keep")]),
+    "left": ("A sweep to the left", [
+        _step("sweep_rl", 700, "#ffffff", "#ff3000", "center", 0, "dark"),
+        _step("sweep_rl", 700, "#ffffff", "#ff3000", "center", 0, "dark"),
+        _step("fade", 400, "#ff3000", "#000000", "center", 0, "keep", 200)]),
+    "right": ("A sweep to the right", [
+        _step("sweep_lr", 700, "#ffffff", "#00c040", "center", 0, "dark"),
+        _step("sweep_lr", 700, "#ffffff", "#00c040", "center", 0, "dark"),
+        _step("fade", 400, "#00c040", "#000000", "center", 0, "keep", 200)]),
+    "ripples": ("Ripples", [
+        _step("ripple", 2400, "#00e0ff", "#002030", "center", 600, "dark"),
+        _step("fade", 600, "#00e0ff", "#000000", "center", 0, "keep", 300)]),
+    "scanner": ("A beam side to side", [
+        _step("bounce", 1600, "#ff0000", "#200000", "center", 0, "dark"),
+        _step("bounce", 1600, "#ff0000", "#200000", "center", 0, "dark"),
+        _step("fade", 400, "#ff0000", "#000000", "center", 0, "keep", 200)]),
 }
 #: the game's own callouts a block can name by what they say (every port carries these roles)
 CALLOUT_ROLES = {"ten_seconds": "Ten seconds left", "time_up": "Time is up"}
-NUM_KINDS = ("num", "var", "hits", "scored", "total", "secs_left", "balls", "player", "op",
-             "timer_left")
-BOOL_KINDS = ("cmp", "and", "or", "not", "running", "stock", "can_start")
+NUM_KINDS = ("num", "var", "hits", "mode_hits", "scored", "total", "secs_left", "balls", "player", "op",
+             "timer_left",
+             "combo_chain", "combo_steps",   # PAD-708: the combos in a row; a combo's shots made so far
+             "women_mult")                   # PAD-889: James Bond's Bond Women multiplier now (1 when none runs)
+BOOL_KINDS = ("cmp", "and", "or", "not", "running", "stock", "can_start", "lit",
+              "shields_away")   # PAD-690: Godzilla Premium/LE's shield targets face away (never on a Pro)
 OPS = {"+": "+", "-": "-", "*": "*", "/": "/"}
 CMPS = {"<": "<", "<=": "<=", "=": "==", "!=": "!=", ">=": ">=", ">": ">"}
 #: PAD-373: what the mode does about the game's own modes while it runs (the form's choice, PAD-363)
@@ -272,12 +537,21 @@ CLIP_WHERE = {"full": "full screen", "behind": "behind the HUD, once",
               "loop": "behind the HUD, over and over"}
 #: a clip's or sound's name: its cue in assets.json and <slug>.assets (code_modes.CUE_RE)
 MEDIA_RE = re.compile(r"^[a-z][a-z0-9_]{0,14}$")
-MAX_CLIPS = 12                   # pad_mode_assets.h PA_CLIPS_MAX
+MAX_CLIPS = 32                   # pad_mode_assets.h PA_CLIPS_MAX (PAD-1030: was 12)
 MAX_SOUNDS = 16                  # pad_mode_assets.h PA_CALLS_MAX
-VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm")
+MAX_BEDS = 6                     # PAD-658: pad_mode_assets.h PA_BEDS_MAX
+VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".gif")   # PAD-693: an animated GIF too
 VAR_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 _]{0,23}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 HOLD_RE = re.compile(r"^[a-z][a-z0-9_]{0,23}$")   # a held coil's name in the port (`text held_coils`)
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")  # PAD-600: another mode a Put out the light of block names
+#: PAD-708: a combo hat's shots (a step is a shot of the card's, COMBO_ANY or COMBO_LIT), its window and how many
+COMBO_ANY = "*"                  # any shot
+COMBO_LIT = "lit"                # any shot the mode has lit (a Light block's, not dark) as it is made
+COMBO_STEPS_MAX = 6
+COMBO_ALTS_MAX = 4               # a step may be one of several shots (["Pop bumper", "Mecha exit bottom"])
+MAX_COMBOS = 8
+COMBO_SECONDS_MIN, COMBO_SECONDS_MAX = 0.5, 60
 
 
 class BlocksError(ValueError):
@@ -320,6 +594,7 @@ def normalize(data):
         out["seconds"] = 30
     out["ends_on_drain"] = bool(out.get("ends_on_drain", True))
     out["screen"] = bool(out.get("screen", False))
+    out["screen_style"] = out.get("screen_style") if out.get("screen_style") in SCREEN_STYLES else "panel"   # PAD-521
     if out.get("game_modes") not in GAME_MODES:          # PAD-373; PAD-398: our modes run alone by default
         out["game_modes"] = "block"
     keep = out.get("keep_rules") if isinstance(out.get("keep_rules"), list) else []      # PAD-398
@@ -337,8 +612,12 @@ def normalize(data):
     out["clips"] = [c for c in (out.get("clips") or []) if isinstance(c, dict)]
     out["sounds"] = [c for c in (out.get("sounds") or []) if isinstance(c, dict)]
     out["music"] = str(out.get("music") or "")
+    out["beds"] = [c for c in (out.get("beds") or []) if isinstance(c, dict)]   # PAD-658
     out["scripts"] = [s for s in (out.get("scripts") or []) if isinstance(s, dict)]
+    out["shows"] = _norm_shows(out.get("shows"))         # PAD-646
     out["hud"] = _norm_hud(out.get("hud"))
+    out["bar"] = _norm_bar(out.get("bar"))
+    out["info"] = _norm_info(out.get("info"))
     for s in out["scripts"]:
         for b in _walk(s.get("do")):
             # PAD-372: Add seconds takes a value; one saved before held a plain number
@@ -346,6 +625,84 @@ def normalize(data):
             if b.get("op") == "add_time" and isinstance(secs, (int, float)) and not isinstance(secs, bool):
                 b["seconds"] = {"k": "num", "v": b["seconds"]}
     return out
+
+
+def _norm_shows(shows):
+    """PAD-646: the mode's own light shows, each ``{name, steps, repeat}`` and nothing else: a show that is not a
+    dict, or has no list of steps, is dropped; what is wrong inside one :func:`problems` names."""
+    out = []
+    for s in (shows if isinstance(shows, list) else [])[:SHOWS_MAX]:
+        if not isinstance(s, dict) or not isinstance(s.get("steps"), list):
+            continue
+        try:
+            repeat = max(0, min(REPEAT_MAX, int(s.get("repeat", 1))))
+        except (TypeError, ValueError):
+            repeat = 1
+        out.append({"name": str(s.get("name") or "").strip()[:24],
+                    "steps": [st for st in s["steps"] if isinstance(st, dict)], "repeat": repeat})
+    return out
+
+
+def show_named(program, name):
+    """PAD-646: the mode's own show called ``name`` (as typed, else by its letters alone), or None."""
+    want = str(name or "").strip()
+    shows = program.get("shows") or []
+    for s in shows:
+        if s.get("name") == want:
+            return s
+    for s in shows:
+        if str(s.get("name") or "").lower() == want.lower():
+            return s
+    return None
+
+
+def show_blocks(program):
+    """PAD-646: every Light show block in the program with the script it is in: ``[(script index, block)]``."""
+    out = []
+    for i, s in enumerate(program.get("scripts") or []):
+        for b in _walk(s.get("do") or []):
+            if b.get("op") == "show":
+                out.append((i, b))
+    return out
+
+
+BAR_COLOR = "#00c040"            # PAD-521: the status bar's colour unless one is picked
+BAR_OF = 10                      # PAD-721: a bar that fills with a value: out of this unless said
+#: PAD-521: its own screen - the panel with its name, or its words alone over the game's video, as the game's own
+SCREEN_STYLES = {"panel": "a panel", "words": "words over the video"}
+WORDS_NAME_MS, WORDS_SHOW_MS = 4000, 3000   # words alone: its name at the start, a Words block's line, then gone
+
+
+def _norm_bar(b):
+    """PAD-521: the game's own status bar - off unless ticked, in a colour of its own."""
+    b = b if isinstance(b, dict) else {}
+    out = {"on": bool(b.get("on", False)),
+           "color": b.get("color") if COLOR_RE.match(str(b.get("color") or "")) else BAR_COLOR}
+    if b.get("fill") == "value":        # PAD-721: a value out of another fills it, not the clock
+        out["fill"] = "value"
+        for key, dflt in (("value", {"k": "scored"}), ("of", {"k": "num", "v": BAR_OF})):
+            v = b.get(key, dflt)        # an emptied slot stays empty: problems names it
+            out[key] = v if isinstance(v, dict) else None
+    return out
+
+
+INFO_TEXT_MAX = 40               # PAD-547: the info line's words; its value follows them
+
+
+def _norm_info(i):
+    """PAD-547: the info line under its name - off unless ticked; its words (capitals, as the game letters them) and the
+    value it follows (None = words alone; problems names a bad one)."""
+    i = i if isinstance(i, dict) else {}
+    return {"on": bool(i.get("on", False)), "text": str(i.get("text") or "").strip()[:INFO_TEXT_MAX],
+            "value": i.get("value") if isinstance(i.get("value"), dict) else None}
+
+
+def info_line_c(text, with_value):
+    """PAD-547: the printf the info line is made with: "SUPER JACKPOT = %s" (the value with commas), the words alone, or
+    the value alone - as the game's own: "SUPER JACKPOT = %,02llu"."""
+    if not with_value:
+        return text
+    return (text + " = %s") if text else "%s"
 
 
 def _norm_hud(h):
@@ -363,19 +720,29 @@ def _norm_hud(h):
                          "value": value(c.get("value"))})
     t = h.get("timer") if isinstance(h.get("timer"), dict) else {}
     g = h.get("gauge") if isinstance(h.get("gauge"), dict) else {}
+    kind = g.get("kind") if g.get("kind") in GAUGE_KINDS else GAUGE_KINDS[0]
+    bar = kind == "bar"
     try:
-        count = max(1, min(GAUGE_MAX, int(g.get("count", 3))))
+        count = max(1, min(BAR_MAX if bar else GAUGE_MAX, int(g.get("count", 20 if bar else 3))))
     except (TypeError, ValueError):
-        count = 3
+        count = 20 if bar else 3
+    words = [text(w, COUNTER_MAX) for w in (g.get("words") if isinstance(g.get("words"), list) else [])][:2]
     return {"on": bool(h.get("on", False)), "line": text(h.get("line"), HUD_TEXT_MAX),
             "counters": counters,
             "timer": {"on": bool(t.get("on", True)), "label": text(t.get("label"), BADGE_MAX),
                       "icon": t.get("icon") if t.get("icon") in HUD_ICONS else HUD_ICONS[0]},
             "gauge": {"on": bool(g.get("on", False)), "label": text(g.get("label"), COUNTER_MAX),
-                      "kind": g.get("kind") if g.get("kind") in GAUGE_KINDS else GAUGE_KINDS[0],
+                      "kind": kind,
                       "count": count,
                       "color": g.get("color") if COLOR_RE.match(str(g.get("color") or "")) else "#ff7800",
-                      "value": value(g.get("value"))}}
+                      "value": value(g.get("value")),
+                      # PAD-658: shown while the mode is not running too - a meter toward its start (David: "it
+                      # should always be shown (whenever the HUD is shown)")
+                      "meter": bool(g.get("meter", False)),
+                      # a bar's two lines of words beside it (the stock meter's GODZILLA / POWERUP), the word its
+                      # label says when full (else 100%), its icon
+                      "words": [w for w in words if w], "full": text(g.get("full"), COUNTER_MAX),
+                      "icon": g.get("icon") if g.get("icon") in HUD_ICONS else "rage"}}
 
 
 def hud_spec(program, slug=""):
@@ -393,7 +760,16 @@ def hud_spec(program, slug=""):
     out = {"title": title, "line": h["line"] or " ", "counters": counters}
     if h["timer"]["on"]:
         out["timer"] = {"label": h["timer"]["label"] or title[:BADGE_MAX], "icon": h["timer"]["icon"]}
-    if h["gauge"]["on"]:
+    else:                   # PAD-690: no running timer, but the progress panel wears its badge all the same
+        out["badge"] = {"label": h["timer"]["label"] or title[:BADGE_MAX], "icon": h["timer"]["icon"]}
+    ready = ready_label(ready_shots(program))
+    if ready:               # PAD-733: the shot that starts it, on its badge at 0
+        out["ready"] = ready
+    if h["gauge"]["on"] and h["gauge"]["kind"] == "bar":        # PAD-658: the corner meter, in the stock's fire
+        gg = h["gauge"]
+        out["gauge"] = {"label": " ", "kind": "bar", "count": gg["count"], "icon": gg["icon"],
+                        "words": gg["words"] or [gg["label"] or title[:COUNTER_MAX]]}
+    elif h["gauge"]["on"]:
         rgb = int(h["gauge"]["color"][1:], 16)
         out["gauge"] = {"label": h["gauge"]["label"] or " ", "kind": h["gauge"]["kind"],
                         "count": h["gauge"]["count"],
@@ -421,7 +797,10 @@ def refresh(project):
     """Every blocks mode's C brought up to what its blocks make NOW, before a build compiles it: the C is written
     only when the blocks are saved, so a mode saved by an older app kept that app's translation (PAD-457: the claim
     of the game's mini-wizards a mode hands out). Only a C that differs is written; the blocks are not touched, and
-    one that cannot be read is left for the build to report. Returns the slugs written."""
+    one that cannot be read is left for the build to report. Returns the slugs written.
+    PAD-1030: its assets.json too (:func:`_sync_assets`, written only when it differs) - the clips and sounds the build
+    carries. A Bond owner's two modes, saved by v1.351.0 (which kept 12 clips), still held 12 there after the update:
+    the 13th, each mode's loop behind the HUD, was never put on the card, and the game's own video showed instead."""
     from . import code_modes as CM
     out = []
     for slug in CM.code_slugs(project) if project else []:
@@ -432,16 +811,20 @@ def refresh(project):
             text = to_c(program, slug)
         except Exception:                               # noqa: BLE001 - never a build broken by this
             continue
+        try:
+            _sync_assets(project, slug, program)
+        except Exception:                               # noqa: BLE001 - the build reports an assets.json it cannot read
+            pass
         folder = MP.mode_folder(project, slug)
         src = os.path.join(folder, slug + ".c")
+        if program["hud"]["on"]:
+            _copy_kit(folder)                           # PAD-680: a fix in the kit alone reaches the mode too
         try:
             with open(src, "r", encoding="utf-8") as f:
                 if f.read() == text:
                     continue
         except OSError:
             pass
-        if program["hud"]["on"]:
-            _copy_kit(folder)
         _write(src, text)
         out.append(slug)
     return out
@@ -480,10 +863,16 @@ def _sync_assets(project, slug, program):
         spec = CM.CodeAssets(screen=False)
     hud = hud_spec(program, slug)
     clips, calls = media_assets(program)
+    beds = {c["name"]: c["file"] for c in program.get("beds") or []
+            if MEDIA_RE.match(str(c.get("name") or "")) and c.get("file")}          # PAD-658
     changed = (spec.name != (program["name"] or slug.upper()) or bool(spec.screen) != program["screen"]
+               or dict(getattr(spec, "beds", None) or {}) != beds
                or spec.seconds != max(1, program["seconds"] or 60)
                or (spec.clips or {}) != clips or (spec.calls or {}) != calls
-               or (spec.music or "") != program["music"] or dict(spec.hud or {}) != hud)
+               or (spec.music or "") != program["music"] or dict(spec.hud or {}) != hud
+               or (getattr(spec, "screen_style", "") or "panel") != program["screen_style"]
+               or bool(getattr(spec, "info_line", False)) != program["info"]["on"]
+               or dict(getattr(spec, "more", None) or {}) != more_of(program))
     if changed or not os.path.isfile(os.path.join(MP.mode_folder(project, slug), CM.ASSETS_FILE)):
         spec.name = program["name"] or slug.upper()
         spec.screen = program["screen"]
@@ -492,20 +881,167 @@ def _sync_assets(project, slug, program):
         spec.clips = clips
         spec.calls = calls
         spec.music = program["music"]
+        spec.beds = beds
+        spec.screen_style = "words" if program["screen_style"] == "words" else ""
+        spec.info_line = program["info"]["on"]          # PAD-547: the build adds PadMode_<slug>_Info
+        spec.more = more_of(program)                    # PAD-707: the build puts its tile on the selection screen
         CM.save(project, slug, spec)
+
+
+#: PAD-733: words of a shot's name that do not tell it apart on the screen
+_SHOT_FILLER = ("TARGET", "SHOT", "THE", "OF")
+
+
+def _screen_words(program):
+    """every line the mode puts on the screen (HUD lines, awards, counters, words), upper case"""
+    out = []
+    for s in program.get("scripts") or []:
+        for b in _walk(s.get("do") or []):
+            if b.get("op") in ("hud_text", "hud_award", "hud_counter", "words"):
+                out.extend(str(b.get(k) or "").upper() for k in ("text", "sub", "label"))
+    hud = program.get("hud") or {}
+    out.append(str(hud.get("line") or "").upper())
+    out.extend(str(c.get(k) or "").upper() for c in hud.get("counters") or [] for k in ("label", "sub"))
+    return [t for t in out if t.strip()]
+
+
+def _named_on_screen(shot, lines):
+    """the screen names this shot: a line holds every word of its name that tells it apart ("SHOOT THE CENTER
+    POWERLINE" names Powerline center), or its first word as a group ("HIT THE POWERLINES")"""
+    words = [w for w in re.findall(r"[A-Z]+", str(shot).upper()) if w not in _SHOT_FILLER]
+    if not words:
+        return True
+    return any(all(w in t for w in words) or (words[0] + "S") in t for t in lines)
+
+
+def white_shot_notes(program, white_shots):
+    """PAD-733 (David: "For custom mode shots then, we should use shots that can be colored. Exceptions are for shots
+    that are named on the screen"): a shot lit in a colour whose inserts are one white light each (the card's
+    ``white_shots``, mode_project) shows no colour - a small white light the player cannot tell is the mode's - unless
+    the mode's screen names it. One note per such shot."""
+    white = set(white_shots or ())
+    if not white:
+        return []
+    program = normalize(program)
+    lit = []
+    for s in program["scripts"]:
+        for b in _walk(s.get("do") or []):
+            if (b.get("op") in ("light_shot", "light_mode") and b.get("shot") in white
+                    and str(b.get("color") or "").lower() not in ("#000000", "000000") and b["shot"] not in lit):
+                lit.append(b["shot"])
+    lines = _screen_words(program)
+    return ["%s is lit, and its insert is a single white light: the mode's color does not show there. Light a shot "
+            "whose insert shows color, or name %s on the screen (a HUD line or award)." % (n, n)
+            for n in lit if not _named_on_screen(n, lines)]
+
+
+def preview_shots(program):
+    """PAD-733 (David, v29: "During the monster selection screen when I overlay the selected monster the respective
+    indicators need to be blinking on the play field"): the shots a mode lights while it runs - every Light a shot
+    block with a colour, outside the scripts that run only while it is not running - in the order first lit. Its tile
+    on the selection screen blinks them (pm_roster_more_shots), as the game's own battles blink theirs."""
+    out = []
+    for s in program.get("scripts") or []:
+        hat = s.get("hat") or {}
+        if hat.get("when") == "idle" or hat.get("kind") == "mode_end":
+            continue
+        for b in _walk(s.get("do") or []):
+            shot = b.get("shot")
+            if (b.get("op") == "light_shot" and shot and shot != "*" and not b.get("insert")
+                    and b.get("pattern") != "off" and str(b.get("color") or "#ffffff").lower() not in ("#000000", "000000")
+                    and shot not in out):
+                out.append(shot)
+    return out
+
+
+READY_MAX = 24                   # PAD-733: the words of a progress badge's READY picture
+
+
+def ready_shots(program):
+    """PAD-733 (David: "anytime a HUD mode gets to zero it's shot on the playfield needs to blink to let you know
+    that that shot is ready to be starting a mode"): the shots that start the mode once its count is done (its
+    progress panel number at 0) - a mode lit at a shot (Light the mode at) its shots, which that block lights itself;
+    else each shot whose "while it is not running" script starts it, or starts the timer whose script does. None for
+    a mode with no number on the panel (no Set the progress number block)."""
+    scripts = program.get("scripts") or []
+    blocks = [b for s in scripts for b in _walk(s.get("do") or [])]
+    if not any(b.get("op") == "hud_progress" for b in blocks):
+        return []
+    lit = [b.get("shot") or (lit_inserts(b.get("insert")) or [""])[0] for b in blocks if b.get("op") == "light_mode"]
+    if any(lit):
+        return list(dict.fromkeys(s for s in lit if s))
+    timers = {(s.get("hat") or {}).get("timer") for s in scripts if (s.get("hat") or {}).get("kind") == "timer_done"
+              and any(b.get("op") == "start_mode" for b in _walk(s.get("do") or []))}
+    out = []
+    for s in scripts:
+        h = s.get("hat") or {}
+        if h.get("kind") != "shot" or h.get("when") != "idle" or not h.get("shot"):
+            continue
+        if any(b.get("op") == "start_mode" or (b.get("op") == "timer_start" and b.get("timer") in timers)
+               for b in _walk(s.get("do") or [])):
+            out.append(h["shot"])
+    return list(dict.fromkeys(out))
+
+
+def ready_recount(program, g):
+    """PAD-733: the C of the mode's first Set the progress number value when it counts a value kept each ball (its
+    count starts again with the ball: the panel's number and the blink are put right then), else ""."""
+    ball = {v.get("name") for v in program.get("vars") or [] if v.get("reset") == "ball"}
+
+    def names(e):
+        if isinstance(e, dict):
+            if e.get("k") == "var":
+                yield e.get("name")
+            for v in e.values():
+                yield from names(v)
+
+    for s in program.get("scripts") or []:
+        for b in _walk(s.get("do") or []):
+            if b.get("op") == "hud_progress":
+                return g.num(b.get("value")) if ball & set(names(b.get("value"))) else ""
+    return ""
+
+
+def ready_label(shots):
+    """PAD-733: the words a progress badge shows in its number's place at 0 - the one shot's name, or the words
+    several share at the front ("Shield target left" ... "Shield ramp spinner" -> SHIELD), else the first one's."""
+    words = [str(s).upper().split() for s in shots or [] if s]
+    if not words:
+        return ""
+    common = []
+    for col in zip(*words):
+        if len(set(col)) != 1:
+            break
+        common.append(col[0])
+    return " ".join(common or words[0])[:READY_MAX].strip()
+
+
+def more_of(program):
+    """PAD-707: ``{"slot": n, "picture": file}`` when a script's When is a pick on MORE KAIJU (the list of monsters
+    behind battle slot n), else ``{}`` - what assets.json tells the build, which draws the mode's page on the list."""
+    for s in program.get("scripts") or []:
+        h = s.get("hat") or {}
+        if h.get("kind") == "battle" and h.get("more") and _int_ok(h.get("slot"), 0, ROSTER_MAX - 1):
+            out = {"slot": int(h["slot"])}
+            if h.get("picture"):
+                out["picture"] = str(h["picture"])
+            return out
+    return {}
 
 
 def media_assets(program):
     """``(clips, calls)`` as assets.json holds them: ``{name: file}`` and ``{name: {"wav",
-    "priority"}}``, every well-named entry with a file (the first of a name wins)."""
+    "priority"}}``, every well-named entry with a file (the first of a name wins). PAD-1030: all of them, past
+    MAX_CLIPS / MAX_SOUNDS too, so the build refuses the mode (code_modes.validate) instead of leaving the last
+    ones out quietly (13 clips: the background loop added last never played)."""
     clips, calls = {}, {}
     for c in program.get("clips") or []:
         name, f = str(c.get("name") or ""), str(c.get("file") or "")
-        if MEDIA_RE.match(name) and f and name not in clips and len(clips) < MAX_CLIPS:
+        if MEDIA_RE.match(name) and f and name not in clips:
             clips[name] = f
     for c in program.get("sounds") or []:
         name, f = str(c.get("name") or ""), str(c.get("file") or "")
-        if MEDIA_RE.match(name) and f and name not in calls and len(calls) < MAX_SOUNDS:
+        if MEDIA_RE.match(name) and f and name not in calls:
             calls[name] = {"wav": f, "priority": _priority(c.get("priority"))}
     return clips, calls
 
@@ -607,9 +1143,45 @@ def new_blocks_mode(project, name, shots=(), example=None):
     return slug, path
 
 
+#: PAD-675: the one blocks example New mode offers, on every game: the starter above on the shots the form mode of
+#: the same name uses (the port's example start shot, then a ramp as its jackpot)
+BASIC_EXAMPLE = "TARGET RUSH"
+BASIC_ABOUT = ("A small, whole mode to start from: three hits on one shot start it, every shot scores more than the "
+               "last, a lit jackpot shot adds time, and a callout at ten seconds left.")
+
+
+def card_checks(p):
+    """The keyword arguments :func:`problems` takes for title profile ``p`` (the card's shots, events, mechanisms,
+    shaker, the game's own light shows, mini-wizards, inserts, building, challenges and coil limits), as the
+    Modes tab checks a program."""
+    if p is None:
+        return {}
+    return {
+        "shots": [n for n, _m in p.shots],
+        "events": list(p.events or ()),
+        "mechs": ({"magnet": "magnet"} if p.can("magnet") else {}) | (dict(p.held_coils) if p.can("coils") else {}),
+        "scoop": p.can("scoop"),
+        "drain": bool(getattr(p, "drain_shot", "")),
+        "shield": getattr(p, "shield_rule", "") if p.can("shield") else False,
+        "game_shows": [n for n, _k, _s in getattr(p, "game_shows", ())],
+        "shaker": {"shakes": [n for n, _l in p.shakes], "max": list(p.shake_max_ms)} if p.can("shaker") else False,
+        "game_wizards": [n for n, _f in getattr(p, "game_wizards", ())] if p.can("wizard") else [],
+        "inserts": list(getattr(p, "inserts", ()) or ()),
+        "building": getattr(p, "building_rule", "") if p.can("building") else False,
+        "challenges": list(getattr(p, "challenges", ()) or ()) + ([CHALLENGE_NEW] if getattr(p, "challenge_menu", 0)
+                                                                   else []),
+        "hold_caps": {n: ms for n, ms in getattr(p, "coil_caps", ()) or ()},
+        "roster": list(getattr(p, "roster", ()) or ()),     # PAD-706: the battle slots a mode may take ([] = none)
+        "places": [list(x) for x in getattr(p, "places", ()) or ()],   # PAD-710: [[id, name, counts]] ([] = none)
+        "done": [list(x) for x in getattr(p, "done_modes", ()) or ()] if p.can("done") else [],   # PAD-747: [[id, name]]
+        "spare": list(getattr(p, "spare", ()) or ()),       # PAD-826: "in" / "out" ([] = neither)
+    }
+
+
 # ---- what is wrong with a program ----------------------------------------------------------------
 def problems(program, shots=None, events=None, folder=None, mechs=None, scoop=None, shield=None, game_shows=None, shaker=None,
-             game_wizards=None):
+             game_wizards=None, inserts=None, building=None, modes=None, challenges=None, hold_caps=None,
+             drain=None, roster=None, places=None, done=None, spare=None):
     """Every reason the program cannot be built, as sentences (empty = it can). ``shots`` and
     ``events``, when given, are the card's: a block naming a shot or event the card does not
     have is named here; ``folder``, when given, is the mode's, where its own clips and sounds
@@ -619,7 +1191,13 @@ def problems(program, shots=None, events=None, folder=None, mechs=None, scoop=No
     else the name of its own shield feature ("" when the port names none); so is ``game_shows`` (PAD-418): the
     names of the game's own light shows its port names ([] = none on this game); so is ``shaker`` (PAD-414): False where the game has no
     shaker a mode may shake, else ``{"shakes": names of the game's own, "max": its longest per strength}``; so is
-    ``game_wizards`` (PAD-436): the names of the game's own mini-wizards ([] = none a mode may hand over on this game).
+    ``game_wizards`` (PAD-436): the names of the game's own mini-wizards ([] = none a mode may hand over on this game);
+    so is ``inserts`` (PAD-503): the names of the inserts a mode may light ([] = none on this game: a mode lit at a
+    shot is lit without them); so is ``modes`` (PAD-600): the slugs of the project's blocks modes another mode's
+    light may be put out in; so is ``challenges`` (PAD-615): the names of the game's challenges a mode may take the
+    place of ([] = none on this game); so is ``roster`` (PAD-706): the names of the battle selection's slots, in slot
+    order ([] = none a mode may take on this game); so is ``places`` (PAD-710): the game's own modes a mode may take
+    the place of, ``[[id, name, counts], ...]`` ([] = none on this game).
     The C is written anyway (a missing shot is 0 to the game, which never matches),
     so a half-made program always saves."""
     program = normalize(program)
@@ -657,13 +1235,29 @@ def problems(program, shots=None, events=None, folder=None, mechs=None, scoop=No
     sounds = _check_media(program["sounds"], "sound", MAX_SOUNDS, folder, out)
     if program["music"] and folder is not None and not os.path.isfile(os.path.join(folder, program["music"])):
         out.append("Its music %s is not in the mode's folder: pick it again." % program["music"])
+    beds = _check_media(program["beds"], "music bed", MAX_BEDS, folder, out)        # PAD-658
+    if beds and not program["music"]:
+        out.append("More music beds need its own music first: pick its music.")
     ctx = {"vars": set(n.lower() for n in names), "timers": tseen,
            "shots": set(shots) if shots is not None else None,
            "events": set(events) if events is not None else None, "count": 0, "out": out,
-           "seconds": program["seconds"], "clips": clips, "sounds": sounds,
+           "seconds": program["seconds"], "clips": clips, "sounds": sounds, "beds": beds,
            "mechs": dict(mechs) if mechs is not None else None, "scoop": scoop, "shield": shield,
+           "hold_caps": dict(hold_caps or {}),        # PAD-621: {name: ms} a mechanism held longer than 5 s
+           "building": building,
+           "drain": drain,                            # PAD-690: whether a ball in the trough is reported
            "game_shows": list(game_shows) if game_shows is not None else None,
-           "shaker": shaker, "game_wizards": list(game_wizards) if game_wizards is not None else None}
+           "shaker": shaker, "game_wizards": list(game_wizards) if game_wizards is not None else None,
+           "inserts": list(inserts) if inserts is not None else None,
+           "modes": set(modes) if modes is not None else None,
+           "challenges": list(challenges) if challenges is not None else None, "picked": set(),
+           "combos": combo_names(program),            # PAD-708: the combos a value may name
+           "roster": list(roster) if roster is not None else None, "battles": set(),   # PAD-706
+           "places": {int(x[0]): x for x in places} if places is not None else None, "placed": set(),   # PAD-710
+           "done": {int(x[0]): x for x in done} if done is not None else None, "done_hats": 0,   # PAD-747
+           "spare": list(spare) if spare is not None else None,       # PAD-826: "in" / "out" this card's game has
+           "program": program}                        # PAD-646: a Light show block names one of its shows
+    _check_shows(program, ctx)                        # PAD-646
     hud = program["hud"]
     if hud["on"]:
         for k, c in enumerate(hud["counters"]):
@@ -671,9 +1265,24 @@ def problems(program, shots=None, events=None, folder=None, mechs=None, scoop=No
                 _check_num(c["value"], "The HUD's counter %d" % (k + 1), ctx)
         if hud["gauge"]["on"] and hud["gauge"]["value"] is not None:
             _check_num(hud["gauge"]["value"], "The HUD's gauge", ctx)
+    bar = program["bar"]
+    if bar["on"] and bar.get("fill") == "value":              # PAD-721
+        _check_num(bar["value"], "The bar's value", ctx)
+        _check_num(bar["of"], "The bar's \"out of\"", ctx)
+    info = program["info"]
+    if info["on"] and info["value"] is not None:              # PAD-547
+        _check_num(info["value"], "The info line", ctx)
+    elif info["on"] and not info["text"]:
+        out.append("The info line has no words and no value: give it one or untick it.")
     for i, s in enumerate(program["scripts"]):
         _check_hat(s.get("hat") or {}, i + 1, ctx)
         _check_stack(s.get("do") or [], 1, "Script %d" % (i + 1), ctx)
+    combos = [s.get("hat") for s in program["scripts"] if (s.get("hat") or {}).get("kind") == "combo"]
+    if len(combos) > MAX_COMBOS:                      # PAD-708
+        out.append("%d combos: %d at most." % (len(combos), MAX_COMBOS))
+    named = [str(h.get("name") or "").strip().lower() for h in combos if str(h.get("name") or "").strip()]
+    for n in sorted({n for n in named if named.count(n) > 1}):
+        out.append("Two combos are called %s." % n.upper())
     if ctx["count"] > MAX_BLOCKS:
         out.append("%d blocks: %d at most." % (ctx["count"], MAX_BLOCKS))
     turns = [b for s in program["scripts"] for b in _walk(s.get("do") or [])
@@ -686,6 +1295,13 @@ def problems(program, shots=None, events=None, folder=None, mechs=None, scoop=No
         elif shield and shield in (program.get("keep_rules") or []):
             out.append("The shield targets stay turned only while %s does not keep counting: it turns them "
                        "back." % shield)
+    moves = [b for s in program["scripts"] for b in _walk(s.get("do") or []) if b.get("op") == "building"]
+    if moves and building not in (None, False):        # PAD-589: never while the game's building locks count
+        if program.get("game_modes", "block") != "block":
+            out.append("The building moves only while the game's modes cannot start: otherwise the game's own %s "
+                       "may want it." % (building or "building locks"))
+        elif building and building in (program.get("keep_rules") or []):
+            out.append("The building moves only while %s does not keep counting." % building)
     return _unique(out)
 
 
@@ -727,7 +1343,7 @@ def notes(program):
             if b.get("op") == "light_shot" and b.get("pattern") == "hurry":
                 ops.add("hurry")
     out = []
-    if "start_mode" not in ops:
+    if not {"start_mode", "light_mode"} & ops:
         out.append("No block starts the mode yet: put Start the mode in a script (Start mode now "
                    "starts it for a test either way).")
     if not program["seconds"] and "end_mode" not in ops and not program["ends_on_drain"]:
@@ -741,8 +1357,10 @@ def notes(program):
     if "words" in ops and not program["screen"]:
         out.append("Show words needs the mode's own screen: tick Its own screen.")
     hud = program["hud"]
-    if not hud["on"] and {"hud_text", "hud_counter", "hud_gauge", "hud_award"} & ops:
+    if not hud["on"] and {"hud_text", "hud_counter", "hud_gauge", "hud_progress"} & ops:
         out.append("The HUD blocks need the HUD: tick Its HUD.")
+    if not hud["on"] and not program["screen"] and "hud_award" in ops:     # PAD-574: or on its own screen
+        out.append("An Award shows on its HUD or its own screen: tick Its HUD or Its own screen.")
     if hud["on"]:
         named = set()
         for s in program["scripts"]:
@@ -755,24 +1373,90 @@ def notes(program):
                            "give it one under Its HUD." % k)
         if "hud_gauge" in ops and not hud["gauge"]["on"]:
             out.append("A block fills the HUD's gauge, which is switched off: tick Gauge under Its HUD.")
+        if hud["gauge"]["on"] and hud["gauge"]["meter"] and hud["gauge"]["value"] is None:
+            out.append("The HUD's gauge shows while the mode is not running, and follows nothing: give it a value "
+                       "to follow (lit to).")
         if hud["timer"]["on"] and not program["seconds"]:
             out.append("The HUD's timer badge counts the mode's clock, and it has none: it is not shown.")
+    if any((s.get("hat") or {}).get("kind") == "challenge"
+           and not any(b.get("op") == "start_mode" for b in _walk(s.get("do") or [])) for s in program["scripts"]):
+        out.append("A When the player picks a challenge script with no Start the mode in it starts nothing: the "
+                   "game's own challenge does not run either.")
+    if any((s.get("hat") or {}).get("kind") == "battle"
+           and not any(b.get("op") == "start_mode" for b in _walk(s.get("do") or [])) for s in program["scripts"]):
+        out.append("A When the player picks a battle script with no Start the mode in it starts nothing: the pick "
+                   "counts as a battle lost.")                                       # PAD-706
+    if any(b.get("op") == "roster_progress" for s in program["scripts"] for b in _walk(s.get("do") or []))             and not more_of(program):                                                # PAD-733
+        out.append("A Selection screen count block shows on a new monster's tile, and this mode has none (a When the "
+                   "player picks a battle hat, a new monster in its place): it shows nothing.")
+    battles = any((s.get("hat") or {}).get("kind") == "battle" for s in program["scripts"])
+    wins = any(b.get("op") == "end_mode" and b.get("won") for s in program["scripts"] for b in _walk(s.get("do") or []))
+    if battles and not wins:
+        out.append("No End the mode block says the battle won, so the battle counts as won when the mode ends by its "
+                   "clock or an End the mode block, and as lost when the ball drains first (then the next lit scoop "
+                   "plays it again, as the game does with its own).")               # PAD-706
+    places = any((s.get("hat") or {}).get("kind") == "game_mode" for s in program["scripts"])    # PAD-710
+    if any((s.get("hat") or {}).get("kind") == "game_mode"
+           and not any(b.get("op") == "start_mode" for b in _walk(s.get("do") or [])) for s in program["scripts"]):
+        out.append("A When the game starts one of its modes script with no Start the mode in it starts nothing: the "
+                   "game's mode does not run either, and counts as lost.")
+    if places and not wins:
+        out.append("No End the mode block says it was completed, so the game's mode it runs in the place of counts as "
+                   "completed when the mode ends by its clock or an End the mode block, and as not completed when the "
+                   "ball drains first.")
+    if wins and not battles and not places:
+        out.append("End the mode, the battle won, wins a battle only for a mode the player picked on the battle "
+                   "selection screen (When the player picks a battle), and completes the game's mode only for one that "
+                   "runs in its place (When the game starts one of its modes): here it just ends the mode.")
     idle = [s for s in program["scripts"] if (s.get("hat") or {}).get("kind") in ("mode_end", "ball_end")
-            or ((s.get("hat") or {}).get("kind") in ("shot", "any_shot", "event")
+            or ((s.get("hat") or {}).get("kind") in ("shot", "any_shot", "switch", "event", "drain", "combo")
                 and (s.get("hat") or {}).get("when") == "idle")]
-    if any(b.get("op") in ("hold", "scoop_hold", "shield") for s in idle for b in _walk(s.get("do") or [])):
+    if any(b.get("op") in ("hold", "scoop_hold", "shield", "building") for s in idle for b in _walk(s.get("do") or [])):
         out.append("A mechanism is held only while the mode runs: a hold in When the mode ends, When the "
                    "ball drains or a script for while it is not running does nothing.")
     idle_show = [s for s in idle if (s.get("hat") or {}).get("kind") != "mode_end"]
     if any(b.get("op") == "game_show" for s in idle_show for b in _walk(s.get("do") or [])):   # PAD-418
         out.append("The game's light show plays only while the mode runs or as it ends: one in When the ball "
                    "drains (the game stops its shows then) or a script for while it is not running does nothing.")
+    if "combo" not in kinds and any(e.get("k") == "combo_chain" for e in _program_values(program)):     # PAD-708
+        out.append("No When block makes a combo, so the combos in a row stay 0: start a script with When shots "
+                   "are made one after another.")
     if "timer_done" in kinds and "timer_start" not in ops:
         out.append("No block starts a timer, so When a timer runs out never runs.")
+    # PAD-646: a show of the mode's own that no block runs, and one that runs until the mode ends started as it ends
+    run = {str(b.get("name") or "").lower() for _i, b in show_blocks(program) if b.get("show") == "mine"}
+    for s in program["shows"]:
+        if s["name"] and s["name"].lower() not in run:
+            out.append("No block runs the light show %r yet: put Run the light show in a script (Light shows "
+                       "names the rules that run each)." % s["name"])
+    for i, b in show_blocks(program):
+        s = show_named(program, b.get("name")) if b.get("show") == "mine" else None
+        if s is not None and not s["repeat"] and (program["scripts"][i].get("hat") or {}).get("kind") == "mode_end":
+            out.append("The light show %r runs over and over until the mode ends, and When the mode ends starts it "
+                       "as it does: it plays once there." % s["name"])
     if "behind" in wheres and "loop" not in wheres:
         out.append("A clip behind the HUD, once, plays in the place of the mode's loop: start a "
                    "clip over and over behind the HUD first (When the mode starts is the place).")
+    ends = [s for s in program["scripts"] if (s.get("hat") or {}).get("kind") == "mode_end"]
+    if any(b.get("op") == "clip" and b.get("where") == "behind" for s in ends for b in _walk(s.get("do") or [])):
+        out.append("A clip behind the HUD in When the mode ends plays full screen: the mode's loop ends with it, "   # PAD-658
+                   "so there is nothing left to play behind. Its TOTAL shows after the clip.")
     return out
+
+
+def _program_values(program):
+    """PAD-708: every value and condition of the program (its blocks', its HUD's, its info line's and its bar's)."""
+    def deep(o):
+        if isinstance(o, dict):
+            if "k" in o:
+                yield o
+            for v in o.values():
+                yield from deep(v)
+        elif isinstance(o, list):
+            for v in o:
+                yield from deep(v)
+    yield from deep([s.get("do") for s in program.get("scripts") or []])
+    yield from deep([program.get("hud"), program.get("info"), program.get("bar")])
 
 
 def _unique(items):
@@ -801,6 +1485,15 @@ def _check_shot(shot, where, ctx):
         ctx["out"].append("%s names %s, a shot this card does not have." % (where, shot))
 
 
+def _check_light(name, where, ctx):
+    """PAD-598: a Light or Hand back block's one light of the game's own (an insert, a GI string, a flasher: the port's
+    `lamp` lines), by name."""
+    if not isinstance(name, str) or "," in name or len(name) > INSERT_MAX:
+        ctx["out"].append("%s lights an insert that is not one." % where)
+    elif ctx["inserts"] is not None and name not in ctx["inserts"]:
+        ctx["out"].append("%s names the light %s, which this card's game does not have." % (where, name))
+
+
 def _check_hat(hat, n, ctx):
     kind = hat.get("kind")
     where = "Script %d" % n
@@ -809,8 +1502,21 @@ def _check_hat(hat, n, ctx):
         return
     if kind in ("shot",):
         _check_shot(hat.get("shot"), where + "'s When", ctx)
-    if kind in ("shot", "any_shot", "event") and hat.get("when", "any") not in WHEN:
+    if kind == "combo":                                                              # PAD-708
+        _check_combo(hat, where, ctx)
+    if kind in ("shot", "any_shot", "switch", "event", "drain", "combo", "spare_switch") and \
+            hat.get("when", "any") not in WHEN:
         ctx["out"].append("%s's When has no while." % where)
+    if kind == "spare_switch":                                                       # PAD-826
+        if ctx.get("spare") is not None and "in" not in ctx["spare"]:
+            ctx["out"].append("%s waits for a spare switch, which a mode cannot read on this card's game." % where)
+        elif not _int_ok(hat.get("node"), 0, SPARE_NODES - 1) or not _int_ok(hat.get("input"), 0, SPARE_INPUTS - 1):
+            ctx["out"].append("%s's spare switch needs its board (0 to %d) and input (0 to %d)."
+                              % (where, SPARE_NODES - 1, SPARE_INPUTS - 1))
+        elif hat.get("closed", "low") not in SPARE_CLOSED:
+            ctx["out"].append("%s's spare switch reads low or high when closed." % where)
+    if kind == "drain" and ctx.get("drain") is False:
+        ctx["out"].append("%s waits for a ball in the trough, which this card's game does not report." % where)
     if kind == "event":
         ev = hat.get("event")
         if not ev:
@@ -823,6 +1529,128 @@ def _check_hat(hat, n, ctx):
             ctx["out"].append("%s's seconds must be 1 to %d." % (where, SECONDS_MAX))
     if kind == "timer_done":
         _check_timer(hat.get("timer"), where + "'s When", ctx)
+    if kind == "challenge":                                                          # PAD-615
+        name = hat.get("challenge")
+        if ctx["challenges"] is not None and not ctx["challenges"]:
+            ctx["out"].append("%s waits for a challenge to be picked, which a mode cannot take the place of on this "
+                              "card's game." % where)
+        elif not name:
+            ctx["out"].append("%s's When has no challenge chosen." % where)
+        elif ctx["challenges"] is not None and name not in ctx["challenges"]:
+            ctx["out"].append("%s waits for the challenge %s, which this card's game does not have." % (where, name))
+        elif name in ctx["picked"]:
+            ctx["out"].append("%s waits for %s too: one script per challenge." % (where, name))
+        elif str(hat.get("launch") or "clip") not in CHALLENGE_LAUNCH and not _int_ok(hat.get("launch"), 1, 60):
+            ctx["out"].append("%s's ball launch must be when its start clip is over, by the player, or 1 to 60 "
+                              "seconds after it starts." % where)                       # PAD-643
+        else:
+            ctx["picked"].add(name)
+    if kind == "battle":                                                             # PAD-706
+        slot = hat.get("slot")
+        if ctx["roster"] is not None and not ctx["roster"]:
+            ctx["out"].append("%s waits for a battle to be picked, which a mode cannot take the place of on this "
+                              "card's game." % where)
+        elif not _int_ok(slot, 0, ROSTER_MAX - 1):
+            ctx["out"].append("%s's When has no battle chosen." % where)
+        elif ctx["roster"] is not None and int(slot) >= len(ctx["roster"]):
+            ctx["out"].append("%s waits for battle %d, which this card's battle selection does not have."
+                              % (where, int(slot)))
+        elif int(slot) in ctx["battles"]:
+            ctx["out"].append("%s waits for %s too: one script per battle." % (where, battle_name(hat)))
+        else:
+            ctx["battles"].add(int(slot))
+    if kind == "completed":                                                          # PAD-747
+        ids = done_hat_ids(hat)
+        ctx["done_hats"] += 1
+        if ctx["done"] is not None and not ctx["done"]:
+            ctx["out"].append("%s waits for the game's modes to be completed, which the app cannot tell on this card's "
+                              "game." % where)
+        elif not ids:
+            ctx["out"].append("%s's When has none of the game's modes ticked." % where)
+        elif ctx["done"] is not None and [i for i in ids if i not in ctx["done"]]:
+            ctx["out"].append("%s counts mode %s, which this card's game does not say it completed." % (
+                where, ", ".join(str(i) for i in ids if i not in ctx["done"])))
+        elif not _int_ok(hat.get("count"), 1, len(ids)):
+            ctx["out"].append("%s's When needs 1 to %d of the game's modes ticked completed." % (where, len(ids)))
+        elif ctx["done_hats"] == DONE_HATS_MAX + 1:
+            ctx["out"].append("A mode has up to %d When the player has completed scripts." % DONE_HATS_MAX)
+    if kind == "game_mode":                                                          # PAD-710
+        mid = hat.get("mode")
+        if ctx["places"] is not None and not ctx["places"]:
+            ctx["out"].append("%s waits for the game to start one of its modes, which a mode cannot take the place of "
+                              "on this card's game." % where)
+        elif not _int_ok(mid, 0, PLACE_MAX - 1):
+            ctx["out"].append("%s's When has none of the game's modes chosen." % where)
+        elif ctx["places"] is not None and int(mid) not in ctx["places"]:
+            ctx["out"].append("%s waits for the game's %s, which this card's game does not let a mode take the place "
+                              "of." % (where, place_name(hat)))
+        elif int(mid) in ctx["placed"]:
+            ctx["out"].append("%s waits for the game's %s too: one script per game mode." % (where, place_name(hat)))
+        else:
+            ctx["placed"].add(int(mid))
+
+
+def combo_names(program):
+    """PAD-708: the names of the program's combos (lower case), as a Shots made so far value names one."""
+    return {str((s.get("hat") or {}).get("name") or "").strip().lower()
+            for s in (program or {}).get("scripts") or [] if isinstance(s, dict)
+            and (s.get("hat") or {}).get("kind") == "combo" and str((s.get("hat") or {}).get("name") or "").strip()}
+
+
+def combo_ms(hat):
+    """PAD-708: a combo hat's window, in ms: its seconds (to a tenth), clamped."""
+    try:
+        secs = float((hat or {}).get("seconds"))
+    except (TypeError, ValueError):
+        secs = 3.0
+    return int(round(max(COMBO_SECONDS_MIN, min(COMBO_SECONDS_MAX, secs)) * 1000))
+
+
+def combo_steps(hat):
+    """PAD-708: a combo hat's steps, as saved: each a name, COMBO_ANY, COMBO_LIT, or a list of names (one of them)."""
+    shots = (hat or {}).get("shots")
+    if not isinstance(shots, list):
+        return []
+    return [[str(y or "") for y in x] if isinstance(x, list) else str(x or "") for x in shots]
+
+
+def step_shots(step):
+    """PAD-708: the card's shots a combo step names (none for any shot or a lit shot)."""
+    if isinstance(step, list):
+        return [x for x in step if x not in (COMBO_ANY, COMBO_LIT)]
+    return [] if step in (COMBO_ANY, COMBO_LIT) else [step]
+
+
+def _check_combo(hat, where, ctx):
+    shots = hat.get("shots")
+    if not isinstance(shots, list) or len(shots) < 2:
+        ctx["out"].append("%s's combo needs two shots or more: one, then the next." % where)
+        shots = shots if isinstance(shots, list) else []
+    elif len(shots) > COMBO_STEPS_MAX:
+        ctx["out"].append("%s's combo has %d shots: %d at most." % (where, len(shots), COMBO_STEPS_MAX))
+    for k, shot in enumerate(shots):
+        if shot in (COMBO_ANY, COMBO_LIT):
+            continue
+        if isinstance(shot, list):                    # one of several shots
+            if not 1 <= len(shot) <= COMBO_ALTS_MAX or any(not isinstance(x, str) or x in (COMBO_ANY, COMBO_LIT)
+                                                         for x in shot):
+                ctx["out"].append("%s's combo shot %d is one of 1 to %d shots of the card's." % (where, k + 1,
+                                                                                               COMBO_ALTS_MAX))
+            for x in shot if isinstance(shot, list) else ():
+                if isinstance(x, str) and x not in (COMBO_ANY, COMBO_LIT):
+                    _check_shot(x, "%s's combo shot %d" % (where, k + 1), ctx)
+            continue
+        _check_shot(shot if isinstance(shot, str) else "", "%s's combo shot %d" % (where, k + 1), ctx)
+    try:
+        secs = float(hat.get("seconds"))
+    except (TypeError, ValueError):
+        secs = None
+    if secs is None or not COMBO_SECONDS_MIN <= secs <= COMBO_SECONDS_MAX:
+        ctx["out"].append("%s's combo window must be %g to %d seconds." % (where, COMBO_SECONDS_MIN, COMBO_SECONDS_MAX))
+    name = hat.get("name")
+    if name not in (None, "") and not VAR_RE.match(str(name)):
+        ctx["out"].append("%s's combo name %r is not one: start with a letter, then letters, digits, spaces or _ "
+                          "(24 at most)." % (where, name))
 
 
 def _check_timer(name, where, ctx):
@@ -875,14 +1703,17 @@ def _check_stack(stack, depth, where, ctx):
         elif op in ("light_shot", "lights_off"):
             if op == "lights_off" and b.get("shot") == "*":
                 continue
-            _check_shot(b.get("shot"), where + "'s lights", ctx)
+            if b.get("insert"):                         # PAD-598: one of the game's lights by name, not a shot's
+                _check_light(b.get("insert"), where, ctx)
+            else:
+                _check_shot(b.get("shot"), where + "'s lights", ctx)
             if op == "light_shot":
-                if not COLOR_RE.match(str(b.get("color") or "")):
-                    ctx["out"].append("%s lights a shot in no colour." % where)
+                if b.get("pattern") != "off" and not COLOR_RE.match(str(b.get("color") or "")):
+                    ctx["out"].append("%s lights a shot in no color." % where)
                 if b.get("pattern") not in PATTERNS:
                     ctx["out"].append("%s lights a shot in no pattern." % where)
                 rate = b.get("rate")
-                if rate is not None and b.get("pattern") not in ("solid", "hurry"):
+                if rate is not None and b.get("pattern") not in ("solid", "hurry", "off"):
                     _check_num(rate, where, ctx)
                     if (isinstance(rate, dict) and rate.get("k") == "num"
                             and _int_ok(rate.get("v"), -NUMBER_MAX, NUMBER_MAX)
@@ -904,6 +1735,9 @@ def _check_stack(stack, depth, where, ctx):
                 ctx["out"].append("%s asks for a multiball of 2 to 6 balls." % where)
             if not _int_ok(b.get("save", 0), 0, 60):
                 ctx["out"].append("%s has a ball save of 0 to 60 seconds." % where)
+        elif op == "ball_save":
+            if not _int_ok(b.get("seconds"), 1, BALL_SAVE_MAX):
+                ctx["out"].append("%s has a ball save of 1 to %d seconds." % (where, BALL_SAVE_MAX))
         elif op == "log":
             if len(str(b.get("text") or "")) > TEXT_MAX:
                 ctx["out"].append("%s logs more than %d letters." % (where, TEXT_MAX))
@@ -918,10 +1752,15 @@ def _check_stack(stack, depth, where, ctx):
             if not _int_ok(b.get("counter"), 1, 3):
                 ctx["out"].append("%s sets a HUD counter: 1, 2 or 3." % where)
             _check_num(b.get("value"), where, ctx)
-            if len(str(b.get("sub") or "")) > COUNTER_MAX:
+            if len(str(b.get("sub") or "")) > COUNTER_MAX or len(str(b.get("label") or "")) > COUNTER_MAX:
                 ctx["out"].append("%s has a counter's words of more than %d letters." % (where, COUNTER_MAX))
         elif op == "hud_gauge":
             _check_num(b.get("value"), where, ctx)
+        elif op == "hud_progress":
+            _check_num(b.get("value"), where, ctx)
+        elif op == "roster_progress":                                               # PAD-733
+            _check_num(b.get("done"), where, ctx)
+            _check_num(b.get("of"), where, ctx)
         elif op == "hud_award":
             for key in ("text", "sub"):
                 if len(str(b.get(key) or "")) > HUD_TEXT_MAX:
@@ -947,6 +1786,13 @@ def _check_stack(stack, depth, where, ctx):
                                   "Its own clips and sounds." % (where, b.get("clip")))
             if b.get("where") not in CLIP_WHERE:
                 ctx["out"].append("%s plays a clip with no where." % where)
+        elif op == "music":                                                          # PAD-658
+            bed = b.get("bed") or ""
+            if not ctx["program"].get("music"):
+                ctx["out"].append("%s plays a music bed, and the mode has no music of its own: pick its music." % where)
+            elif bed and bed not in ctx["beds"]:
+                ctx["out"].append("%s plays the music bed %s, which the mode does not have: add it under Its own clips "
+                                  "and sounds." % (where, bed))
         elif op == "sound":
             if not b.get("sound"):
                 ctx["out"].append("%s plays a sound with none chosen." % where)
@@ -963,7 +1809,10 @@ def _check_stack(stack, depth, where, ctx):
             elif ctx["mechs"] is not None and what not in ctx["mechs"]:
                 ctx["out"].append("%s holds the %s, which a mode cannot hold on this card's game."
                                   % (where, what))
-            _check_ms(b.get("ms"), HOLD_MIN_MS, HOLD_MAX_MS, "%s holds it" % where, ctx)
+            _check_ms(b.get("ms"), HOLD_MIN_MS, max(HOLD_MAX_MS, min(ctx["hold_caps"].get(what, 0), HOLD_LONGEST_MS)),
+                      "%s holds it" % where, ctx)
+            if b.get("clock", "") not in HOLD_CLOCK:                       # PAD-621
+                ctx["out"].append("%s holds it: the clock runs or waits." % where)
         elif op == "scoop_hold":
             if b.get("which", "next") not in SCOOP_WHICH:
                 ctx["out"].append("%s holds a ball in the scoop: the next one or every one." % where)
@@ -982,6 +1831,29 @@ def _check_stack(stack, depth, where, ctx):
             elif ctx["shield"] is False:
                 ctx["out"].append("%s turns the shield targets, which a mode cannot do on this card's game."
                                   % where)
+        elif op == "gi":                                                             # PAD-767
+            if b.get("gi") not in GI_HOLD:
+                ctx["out"].append("%s sets the GI: dark until the mode ends, or the game's again." % where)
+        elif op == "building":                                                       # PAD-589
+            if str(b.get("floor")) not in BUILDING_FLOOR:
+                ctx["out"].append("%s moves the building: to floor 1, 2 or 3, or back where the game keeps it."
+                                  % where)
+            elif ctx["building"] is False:
+                ctx["out"].append("%s moves the building, which a mode cannot do on this card's game." % where)
+        elif op == "spare_drive":                                                    # PAD-826
+            if ctx.get("spare") is not None and "out" not in ctx["spare"]:
+                ctx["out"].append("%s drives a spare output, which a mode cannot do on this card's game." % where)
+            elif not _int_ok(b.get("node"), 0, SPARE_NODES - 1) or not _int_ok(b.get("output"), 0, SPARE_OUTPUTS - 1):
+                ctx["out"].append("%s drives a spare output: its board (0 to %d) and output (0 to %d)."
+                                  % (where, SPARE_NODES - 1, SPARE_OUTPUTS - 1))
+            elif not _int_ok(b.get("power"), 1, 255) or not _int_ok(b.get("hold_power", 0), 0, 255):
+                ctx["out"].append("%s drives a spare output: its power is 1 to 255, its hold 0 to 255 (0 = none)."
+                                  % where)
+            elif not _int_ok(b.get("ms"), 1, SPARE_PULSE_MAX_MS):
+                ctx["out"].append("%s drives a spare output: its pulse is 1 to %d ms." % (where, SPARE_PULSE_MAX_MS))
+            elif not _int_ok(b.get("hold_ms", 0), 0, SPARE_CMD_MAX_MS) or int(b.get("ms")) + (
+                    int(b.get("hold_ms", 0)) if int(b.get("hold_power", 0)) else 0) > SPARE_CMD_MAX_MS:
+                ctx["out"].append("%s drives a spare output for more than %d ms in all." % (where, SPARE_CMD_MAX_MS))
         elif op in ("shake", "shake_game"):                                          # PAD-414
             shaker = ctx["shaker"]
             if shaker is False:
@@ -1026,6 +1898,59 @@ def _check_stack(stack, depth, where, ctx):
                                   "have." % (where, name))
             if b.get("how", "light") not in MP.WIZARD_HOW:
                 ctx["out"].append("%s lights the game's mini-wizard or starts it." % where)
+        elif op == "set_hits":                          # PAD-600: one qualified at a time
+            _check_shot(b.get("shot"), where + "'s Set the hits of", ctx)
+            _check_num(b.get("value"), where, ctx)
+        elif op == "unlight_mode":                      # PAD-600: this mode's light, or another blocks mode's
+            mode = b.get("mode") or ""
+            if not isinstance(mode, str) or (mode and not SLUG_RE.match(mode)):
+                ctx["out"].append("%s puts out the light of a mode that is not one." % where)
+            elif mode and ctx["modes"] is not None and mode not in ctx["modes"]:
+                ctx["out"].append("%s puts out the light of a mode that is not in this project (%s): pick it "
+                                  "again." % (where, mode))
+        elif op == "light_mode":                        # PAD-503: lit at a shot, as the game's mini-wizards are
+            _check_shot(b.get("shot"), where + "'s Light the mode at", ctx)
+            if not COLOR_RE.match(str(b.get("color") or "")):
+                ctx["out"].append("%s lights the mode in no color." % where)
+            if b.get("pattern") not in LIT_PATTERNS:
+                ctx["out"].append("%s lights the mode in no pattern." % where)
+            names = lit_inserts(b.get("insert"))
+            if names is None:
+                ctx["out"].append("%s lights an insert that is not one." % where)
+            else:
+                if len(names) > LIT_INSERTS_MAX:
+                    ctx["out"].append("%s lights more than %d inserts." % (where, LIT_INSERTS_MAX))
+                for insert in names:
+                    if ctx["inserts"] and insert not in ctx["inserts"]:
+                        ctx["out"].append("%s lights the insert %s, which this card's game does not have."
+                                          % (where, insert))
+            solid = b.get("solid") or ""                # PAD-521: one insert more, held solid (the film's)
+            if not isinstance(solid, str) or "," in solid or len(solid) > INSERT_MAX:
+                ctx["out"].append("%s holds an insert solid that is not one." % where)
+            elif solid and ctx["inserts"] and solid not in ctx["inserts"]:
+                ctx["out"].append("%s holds the insert %s solid, which this card's game does not have." % (where, solid))
+            elif solid and not COLOR_RE.match(str(b.get("solid_color") or "#ffffff")):
+                ctx["out"].append("%s holds an insert solid in no color." % where)
+
+
+def lit_inserts(value):
+    """PAD-521: the inserts a Light the mode at block names (its ``insert``: one name, or several separated by commas,
+    as the runtime's pm_lamp_set takes them; "" = none), in order and each once; None when that is not a list of
+    names."""
+    if value is None:
+        return []
+    if not isinstance(value, str):
+        return None
+    out = []
+    for n in value.split(","):
+        n = n.strip()
+        if not n:
+            continue
+        if len(n) > INSERT_MAX:
+            return None
+        if n not in out:
+            out.append(n)
+    return out
 
 
 def _check_ms(ms, lo, hi, where, ctx):
@@ -1036,52 +1961,107 @@ def _check_ms(ms, lo, hi, where, ctx):
         ctx["out"].append("%s %d to %d ms." % (where, lo, hi))
 
 
-def _check_show(b, where, ctx):
-    show = b.get("show")
-    if show in SHOWS:
-        return
-    if show != "own":
-        ctx["out"].append("%s runs a light show with none chosen." % where)
-        return
-    steps = b.get("steps")
+def _check_steps(steps, what, ctx):
+    """A show's steps (a block's own, or one of the mode's shows'): each a pattern over the inserts for some ms, in
+    two colors, from a place, at a pace, with the GI set; PAD-646: blending in from the step before for some ms, and
+    a point of its own when its place is "xy"."""
     if not isinstance(steps, list) or not steps:
-        ctx["out"].append("%s runs a light show of its own with no steps." % where)
+        ctx["out"].append("%s has no steps." % what)
         return
     if len(steps) > SHOW_STEPS:
-        ctx["out"].append("%s's light show has %d steps: %d at most." % (where, len(steps), SHOW_STEPS))
+        ctx["out"].append("%s has %d steps: %d at most." % (what, len(steps), SHOW_STEPS))
     for n, st in enumerate(steps, 1):
-        here = "%s's light show, step %d," % (where, n)
+        here = "%s, step %d," % (what, n)
         if not isinstance(st, dict) or st.get("fx") not in FX:
             ctx["out"].append("%s has no pattern." % here)
             continue
         if not _int_ok(st.get("ms"), STEP_MS_MIN, STEP_MS_MAX):
             ctx["out"].append("%s lasts %d to %d ms." % (here, STEP_MS_MIN, STEP_MS_MAX))
         if not (COLOR_RE.match(str(st.get("a") or "")) and COLOR_RE.match(str(st.get("b") or ""))):
-            ctx["out"].append("%s has a colour missing." % here)
+            ctx["out"].append("%s has a color missing." % here)
         if st.get("at", "center") not in PLACES:
             ctx["out"].append("%s has no place." % here)
+        elif st.get("at") == "xy" and not (_int_ok(st.get("x"), 0, XY_MAX) and _int_ok(st.get("y"), 0, XY_MAX)):
+            ctx["out"].append("%s centers on a point of its own that is not on the picture." % here)
         if not _int_ok(st.get("rate", 0), 0, FX_RATE_MAX):
             ctx["out"].append("%s has a pace of 0 to %d ms." % (here, FX_RATE_MAX))
         if st.get("gi", "keep") not in GI:
             ctx["out"].append("%s says nothing of the lights between the inserts." % here)
+        if not _int_ok(st.get("blend", 0), 0, STEP_MS_MAX):
+            ctx["out"].append("%s blends in over 0 to %d ms." % (here, STEP_MS_MAX))
 
 
-def show_steps(b):
-    """The steps a Light show block runs: its ready-made show's, or its own."""
+def _check_shows(program, ctx):
+    """PAD-646: the mode's own shows: each named (its letters, digits, spaces, - _ ' !), no two alike, its steps
+    as :func:`_check_steps` wants them."""
+    seen = set()
+    for n, s in enumerate(program["shows"], 1):
+        name = s["name"]
+        what = "The light show %s" % (("%r" % name) if name else "%d" % n)
+        if not SHOW_NAME_RE.match(name):
+            ctx["out"].append("%s's name is not one: letters, digits, spaces, - _ ' and ! (24 at most)." % what
+                              if name else "Light show %d has no name." % n)
+        elif name.lower() in seen:
+            ctx["out"].append("Two of the mode's light shows are called %r: give one another name." % name)
+        seen.add(name.lower())
+        _check_steps(s["steps"], what, ctx)
+
+
+def _check_show(b, where, ctx):
+    show = b.get("show")
+    if show in SHOWS:
+        return
+    if show == "mine":                      # PAD-646: one of the mode's own, by name
+        if not b.get("name"):
+            ctx["out"].append("%s runs a light show of the mode's with none chosen: make one under Light shows." % where)
+        elif show_named(ctx["program"], b.get("name")) is None:
+            ctx["out"].append("%s runs the light show %r, which the mode does not have: make it under Light shows."
+                              % (where, b.get("name")))
+        return
+    if show != "own":
+        ctx["out"].append("%s runs a light show with none chosen." % where)
+        return
+    if not isinstance(b.get("steps"), list) or not b["steps"]:
+        ctx["out"].append("%s runs a light show of its own with no steps." % where)
+        return
+    _check_steps(b["steps"], "%s's light show" % where, ctx)
+
+
+def show_steps(b, program=None):
+    """The steps a Light show block runs: its ready-made show's, one of the mode's own (PAD-646, ``program``'s
+    ``shows`` by the block's ``name``), or its own."""
     if b.get("show") in SHOWS:
         return SHOWS[b["show"]][1]
-    steps = b.get("steps") if b.get("show") == "own" else None
+    if b.get("show") == "mine":
+        s = show_named(program or {}, b.get("name"))
+        steps = (s or {}).get("steps")
+    else:
+        steps = b.get("steps") if b.get("show") == "own" else None
     return [st for st in (steps or []) if isinstance(st, dict) and st.get("fx") in FX][:SHOW_STEPS]
 
 
+def show_repeat(b, program=None):
+    """PAD-646: how many times the block's show runs (0 = until the mode ends): a show of the mode's own says."""
+    if b.get("show") == "mine":
+        s = show_named(program or {}, b.get("name"))
+        if s is not None:
+            return int(s.get("repeat", 1))
+    return 1
+
+
 def show_choices():
-    """What the Light show block's boxes offer: the ready-made shows (with their steps, so "its
-    own steps" can start from one), the patterns, the places and the GI's settings."""
+    """What the Light show block's boxes and the Light shows editor offer: the ready-made shows (with their steps,
+    so a show of the mode's can start from one), the patterns (and their families), the places, the GI's settings,
+    and the editor's limits."""
     return {"shows": [{"key": k, "label": label, "steps": copy.deepcopy(steps)}
                       for k, (label, steps) in SHOWS.items()],
             "fx": [[k, words] for k, (_c, words) in FX.items()],
+            "fx_groups": [[g, list(keys)] for g, keys in FX_GROUPS],
             "places": [[k, p[0]] for k, p in PLACES.items()],
-            "gi": [[k, words] for k, words in GI.items()]}
+            "place_xy": {k: [p[1], p[2]] for k, p in PLACES.items() if k != "xy"},
+            "gi": [[k, words] for k, words in GI.items()],
+            "limits": {"steps": SHOW_STEPS, "shows": SHOWS_MAX, "repeat": REPEAT_MAX, "ms": [STEP_MS_MIN, STEP_MS_MAX],
+                       "rate": FX_RATE_MAX, "name": 24}}
 
 
 def _check_num(e, where, ctx, depth=0):
@@ -1098,10 +2078,17 @@ def _check_num(e, where, ctx, depth=0):
     elif k == "var":
         if str(e.get("name") or "").lower() not in ctx["vars"]:
             ctx["out"].append("%s uses a variable that is not there: make it under Variables." % where)
-    elif k == "hits":
+    elif k in ("hits", "mode_hits"):                     # PAD-721: mode_hits = since the mode started
         _check_shot(e.get("shot"), where + "'s hits", ctx)
     elif k == "timer_left":
         _check_timer(e.get("timer"), where + "'s time left", ctx)
+    elif k == "combo_steps":                                                        # PAD-708
+        name = str(e.get("combo") or "").strip().lower()
+        if not name:
+            ctx["out"].append("%s counts the shots of a combo with none chosen." % where)
+        elif name not in ctx.get("combos", ()):
+            ctx["out"].append("%s counts the shots of the combo %s, which no When block makes: give a combo that "
+                              "name." % (where, e.get("combo")))
     elif k == "op":
         if e.get("op") not in OPS:
             ctx["out"].append("%s has a sum with no + - x or /." % where)
@@ -1162,6 +2149,7 @@ class _Gen:
         self.p = program
         self.slug = slug
         self.shots = []                 # shot names, in first-use order
+        self.lamps = []                 # PAD-598: the game's lights the blocks light by name, in first-use order
         self.events = []
         self.vars = {}                  # lower name -> index
         self.var_names = []
@@ -1184,12 +2172,38 @@ class _Gen:
                 self.timers[n.lower()] = len(self.timer_names)
                 self.timer_names.append(n)
         self.hits = []                  # shots whose hits this ball the program reads
-        self.shows = []                 # each Light show block's steps, in order: SHOW_<n>
+        self.shows = []                 # the shows the blocks run, in order: SHOW_<n> ({key, steps, name, repeat};
+                                        # PAD-646: one of the mode's own, by its key, once however many blocks run it)
         self.holds = []                 # PAD-395: the mechanisms its blocks hold or let go, by the port's name
         self.mech = False               # PAD-395: a block holds or lets go of something (the helpers go in)
         self.game_show = False          # PAD-418: a block plays one of the game's own light shows
+        self.gi = False                 # PAD-767: a block holds the GI dark until the mode ends
         self.game_wizard = False        # PAD-436: a block hands the player one of the game's own mini-wizards
         self.wizard_names = []          # PAD-457: ... which ones: the mode claims them as it loads
+        self.lit = []                   # PAD-503: each Light the mode at's (shot index, inserts, rgb, pattern, ms,
+                                        # PAD-521: the insert held solid and its rgb)
+        self.lit_asked = False          # PAD-503: a condition asks whether the mode is lit
+        self.fb_ctx = False             # PAD-733: the script being read is a shot's while the mode runs
+        self.fb_used = False            # PAD-733: one of those scores (fb_owe)
+        self.unlit = []                 # PAD-600: the other modes whose light a block puts out, by slug
+        self.unlight_own = False        # PAD-600: a block puts out this mode's own light
+        self.combos = []                # PAD-708: the combo hats, in the order of their scripts (COMBO[k])
+        self.combo_at = {}              # PAD-708: a combo's lower-case name -> k (the first of that name)
+        for s in program["scripts"]:
+            h = s.get("hat") or {}
+            if h.get("kind") == "combo" and len(self.combos) < MAX_COMBOS:
+                name = str(h.get("name") or "").strip().lower()
+                if name and name not in self.combo_at:
+                    self.combo_at[name] = len(self.combos)
+                self.combos.append(h)
+        self.battle_won = False         # PAD-706: an End the mode block wins the battle the mode replaced
+        # PAD-706: it takes a battle's place, and no End the mode block says the battle won: then its own end (its
+        # clock, an End the mode block) wins it - it has no other way to, and a lost battle is the player's again at
+        # every lit scoop until it is won - and only a drain, a tilt or the game moving on loses it
+        self.battle_hat = any((sc.get("hat") or {}).get("kind") in ("battle", "game_mode")   # PAD-710: the same rule
+                              for sc in program["scripts"])
+        self.wins_by_end = self.battle_hat and not any(
+            b.get("op") == "end_mode" and b.get("won") for sc in program["scripts"] for b in _walk(sc.get("do") or []))
 
     def var(self, i, p="P()"):
         """Variable ``i`` of player ``p``, as C: its own row, or the shared global."""
@@ -1202,6 +2216,16 @@ class _Gen:
 
     def shot(self, name):
         return "S[%d]" % self.shot_i(name)
+
+    def light_i(self, b):
+        """The C of a Light or Hand back block's slot in LIT: its shot's, or (PAD-598) after the shots, the game's
+        light it names."""
+        name = b.get("insert")
+        if name and isinstance(name, str):
+            if name not in self.lamps:
+                self.lamps.append(name)
+            return "N_SHOTS + %d" % self.lamps.index(name)
+        return "%d" % self.shot_i(b.get("shot"))
 
     def shot_i(self, name):
         name = str(name or "")
@@ -1222,6 +2246,12 @@ class _Gen:
             self.hits.append(name)
         return "H[%d][P()]" % self.hits.index(name), idx
 
+    def hits_of(self, name):
+        """PAD-600: a shot's hits this ball for the player up, as every blocks mode on the card sees them: this
+        mode's own count and what a Set the hits of block (in any of them) moved it by."""
+        h, _idx = self.hit(name)
+        return "hits_of(%s, %s[P()])" % (h, hits_ident(name))
+
     # values
     def num(self, e):
         if not isinstance(e, dict):
@@ -1239,8 +2269,16 @@ class _Gen:
         if k == "timer_left":
             i = self.timer(e.get("timer"))
             return "timer_left(%d)" % i if i is not None else "0LL"
+        if k == "combo_chain":          # PAD-708
+            return "combo_in_row()" if self.combos else "0LL"
+        if k == "combo_steps":
+            i = self.combo_at.get(str(e.get("combo") or "").strip().lower())
+            return "combo_made_so_far(%d)" % i if i is not None else "0LL"
         if k == "hits":
-            return "(long long)" + self.hit(e.get("shot"))[0]
+            return self.hits_of(e.get("shot"))
+        if k == "mode_hits":            # PAD-721: made while it runs, since it started (its progress shots)
+            h, _idx = self.hit(e.get("shot"))
+            return "(long long)MH[%d]" % self.hits.index(str(e.get("shot") or ""))
         if k == "scored":
             return "(long long)run.shots"
         if k == "total":
@@ -1251,6 +2289,8 @@ class _Gen:
             return "(long long)pm_balls_in_play()"
         if k == "player":
             return "(long long)pm_player()"
+        if k == "women_mult":           # PAD-889: the game's own 2X-7X (its Score blocks are already multiplied by it)
+            return "(long long)pm_bond_women_mult()"
         if k == "op":
             a, b = self.num(e.get("a")), self.num(e.get("b"))
             op = e.get("op")
@@ -1277,6 +2317,11 @@ class _Gen:
             return "pm_stock_mode_running(PM_STOCK_ANY)"
         if k == "can_start":
             return "can_start()"
+        if k == "lit":
+            self.lit_asked = True
+            return "lit_now()"
+        if k == "shields_away":     # PAD-690: -1 on a game with no platform (a Pro's shields always face the player)
+            return "(pm_shield_position() == PM_SHIELD_AWAY)"
         return "0"
 
     # blocks
@@ -1287,9 +2332,23 @@ class _Gen:
             if not isinstance(b, dict):
                 continue
             op = b.get("op")
+            n = len(out)
+            self._op(b, op, out, pad, ind)
+            if len(out) > n and op in FEEDBACK_OPS:              # PAD-733: the shot said so itself
+                out.append(pad + "fb_paid();")
+            elif len(out) > n and op == "score" and self.fb_ctx:  # PAD-733: a shot that counts is owed a word
+                self.fb_used = True
+                out.append(pad + "fb_owe();")
+        return out
+
+    def _op(self, b, op, out, pad, ind):
+        if True:
             if op == "start_mode":
                 out.append(pad + 'start("a block", 1);')
             elif op == "end_mode":
+                if b.get("won") or self.wins_by_end:   # PAD-706: the battle it took the place of is won
+                    self.battle_won = True
+                    out.append(pad + "battle_won = 1;")
                 out.append(pad + 'end("a block");')
             elif op == "score":
                 out.append(pad + "score(%s);" % self.num(b.get("points")))
@@ -1330,21 +2389,35 @@ class _Gen:
                 pat, ms = PATTERNS[pattern]
                 color = str(b.get("color") or "#ffffff")
                 rgb = int(color[1:], 16) if COLOR_RE.match(color) else 0xFFFFFF
+                if pattern == "off":
+                    rgb = 0                             # PAD-601: held dark
                 rate = b.get("rate")
-                pace = self.num(rate) if rate is not None and pattern not in ("solid", "hurry") else "%dLL" % ms
-                out.append(pad + "light(%d, 0x%06xu, %s, %s, %d);"
-                           % (self.shot_i(b.get("shot")), rgb, pat, pace, 1 if pattern == "hurry" else 0))
+                pace = self.num(rate) if rate is not None and pattern not in ("solid", "hurry", "off") else "%dLL" % ms
+                out.append(pad + "light(%s, 0x%06xu, %s, %s, %d);"
+                           % (self.light_i(b), rgb, pat, pace, 1 if pattern == "hurry" else 0))
+            elif op == "gi":                                                          # PAD-767
+                if b.get("gi") in GI_HOLD:
+                    self.gi = True
+                    out.append(pad + "gi_hold(%d);" % (b["gi"] == "dark"))
             elif op == "lights_off":
-                if b.get("shot") == "*":
+                if b.get("shot") == "*" and not b.get("insert"):
                     out.append(pad + "unlight_all();")
                 else:
-                    out.append(pad + "unlight(%d);" % self.shot_i(b.get("shot")))
+                    out.append(pad + "unlight(%s);" % self.light_i(b))
             elif op == "show":
-                steps = show_steps(b)
+                steps = show_steps(b, self.p)
                 if steps:
-                    self.shows.append(steps)
-                    name = b.get("show") if b.get("show") in SHOWS else "its own"
-                    out.append(pad + "show_start(SHOW_%d, %d, %s);" % (len(self.shows) - 1, len(steps), _c_str(name)))
+                    # PAD-646: one of the mode's own shows has one table however many blocks run it
+                    name = b.get("show") if b.get("show") in SHOWS else b.get("name") if b.get("show") == "mine" else "its own"
+                    key = ("mine:" + str(name).lower()) if b.get("show") == "mine" else None
+                    i = next((i for i, s in enumerate(self.shows) if key and s["key"] == key), None)
+                    if i is None:
+                        self.shows.append({"key": key, "steps": steps, "name": name, "repeat": show_repeat(b, self.p)})
+                        i = len(self.shows) - 1
+                    out.append(pad + "show_start(SHOW_%d, %d, %s, %d);" % (i, len(steps), _c_str(name), self.shows[i]["repeat"]))
+            elif op == "set_time" and b.get("at_least"):     # PAD-658: Keep at least N seconds on the clock
+                n = self.num(b.get("seconds"))
+                out.append(pad + "if (run.on && RUN_SECONDS && secs_left() < (%s)) set_time(%s);" % (n, n))
             elif op in ("add_time", "set_time"):
                 out.append(pad + "%s(%s);" % (op, self.num(b.get("seconds"))))
             elif op == "multiball":
@@ -1355,8 +2428,26 @@ class _Gen:
                     balls, save = 2, 0
                 # PAD-373: its own multiball is not one of the game's modes beginning
                 out.append(pad + "if (run.on && pm_multiball_start(%du, %du)) run.own_mball = 1;" % (balls, save))
+            elif op == "ball_save":                # PAD-690: a drain while it is on is served back, the ball goes on
+                try:
+                    secs = max(1, min(BALL_SAVE_MAX, int(b.get("seconds"))))
+                except (TypeError, ValueError):
+                    secs = 10
+                out.append(pad + "if (run.on && !pm_ball_save(%du)) pm_log(\"ball save refused\");" % secs)
+            elif op == "drain_to_one":             # PAD-733: the flippers off until the extra balls drain, one back
+                out.append(pad + "if (run.on && pm_balls_in_play() > 1 && !pm_drain_to_one()) "
+                           "pm_log(\"the extra balls stay: this game cannot take them away\");")
             elif op == "log":
                 out.append(pad + 'pm_log("%%s", %s);' % _c_str(str(b.get("text") or "")[:TEXT_MAX]))
+            elif op == "hud_award" and not self.p["hud"]["on"] and self.p["screen"]:
+                value = b.get("value")      # PAD-574: on its own screen, as a Words block for the award's moment
+                try:
+                    secs = max(1, min(AWARD_SECONDS_MAX, int(b.get("seconds"))))
+                except (TypeError, ValueError):
+                    secs = 2
+                out.append(pad + "award_words(%s, %s, %d, %du);" % (
+                    _c_str(str(b.get("text") or "")[:HUD_TEXT_MAX]),
+                    self.num(value) if value is not None else "0LL", 0 if value is None else 1, secs * 1000))
             elif op.startswith("hud_") and not self.p["hud"]["on"]:
                 out.append(pad + "/* %s: the mode has no HUD */" % op)
             elif op == "hud_text":
@@ -1370,11 +2461,18 @@ class _Gen:
                 except (TypeError, ValueError):
                     k = 1
                 sub = b.get("sub")
-                out.append(pad + "hud_counter(%d, %s, %s);" % (
+                label = b.get("label")                      # PAD-658: the counter's label from now on, or none
+                out.append(pad + "hud_counter(%d, %s, %s, %s);" % (
                     k - 1, self.num(b.get("value")),
-                    "0" if sub is None else _c_str(str(sub)[:COUNTER_MAX])))
+                    "0" if sub is None else _c_str(str(sub)[:COUNTER_MAX]),
+                    "0" if not label else _c_str(str(label)[:COUNTER_MAX])))
             elif op == "hud_gauge":
                 out.append(pad + "hud_level = %s;" % self.num(b.get("value")))
+            elif op == "hud_progress":
+                out.append(pad + "hud_progress(%s);" % self.num(b.get("value")))
+            elif op == "roster_progress":                # PAD-733: its new monster's tile on the selection screen
+                out.append(pad + "pm_roster_more_progress((long)(%s), (long)(%s));"
+                           % (self.num(b.get("done")), self.num(b.get("of"))))
             elif op == "hud_award":
                 value = b.get("value")
                 try:
@@ -1391,6 +2489,10 @@ class _Gen:
                     fn = {"full": "clip_full", "behind": "clip_behind", "loop": "clip_loop"}.get(
                         b.get("where"), "clip_full")
                     out.append(pad + "%s(%s);" % (fn, _c_str(name)))
+            elif op == "music":                          # PAD-658: another of its music beds, or its own again
+                bed = str(b.get("bed") or "")
+                if bed == "" or MEDIA_RE.match(bed):
+                    out.append(pad + "pa_music_bed(&own, %s);" % _c_str(bed))
             elif op == "sound":
                 name = str(b.get("sound") or "")
                 if MEDIA_RE.match(name):
@@ -1405,7 +2507,8 @@ class _Gen:
                     self.mech = True
                     if what not in self.holds:
                         self.holds.append(what)
-                    out.append(pad + "hold(%s, %s);" % (_c_str(what), self.num(b.get("ms"))))
+                    out.append(pad + "%s(%s, %s);" % ("hold_wait" if b.get("clock") == "wait" else "hold",   # PAD-621
+                                                      _c_str(what), self.num(b.get("ms"))))
             elif op == "scoop_hold":
                 self.mech = True
                 out.append(pad + "scoop_hold(%s, %d);" % (self.num(b.get("ms")), 0 if b.get("which") == "every" else 1))
@@ -1427,6 +2530,18 @@ class _Gen:
                 if where:
                     self.mech = True
                     out.append(pad + "shield(%s);" % where)
+            elif op == "building":                                                    # PAD-589
+                floor = str(b.get("floor"))
+                if floor in BUILDING_FLOOR:
+                    self.mech = True
+                    out.append(pad + "building(%d);" % int(floor))
+            elif op == "spare_drive":                                                 # PAD-826: the runtime's limits
+                if all(_int_ok(b.get(k, 0), 0, SPARE_CMD_MAX_MS)
+                       for k in ("node", "output", "power", "ms", "hold_power", "hold_ms")):
+                    hp = int(b.get("hold_power", 0) or 0)
+                    out.append(pad + "if (run.on) pm_spare_drive(%du, %du, %du, %du, %du, %du);" % (
+                        int(b["node"]), int(b["output"]), int(b["power"]), int(b["ms"]), hp,
+                        int(b.get("hold_ms", 0) or 0) if hp else 0))
             elif op == "shake":                                                       # PAD-414
                 strength = SHAKE_STRENGTH.get(b.get("strength"))
                 if strength is not None:
@@ -1449,7 +2564,37 @@ class _Gen:
                     if name not in self.wizard_names:
                         self.wizard_names.append(name)
                     out.append(pad + "game_wizard(%s, %d);" % (_c_str(name), 1 if b.get("how") == "start" else 0))
-        return out
+            elif op == "light_mode":                                                  # PAD-503
+                pattern = b.get("pattern") if b.get("pattern") in LIT_PATTERNS else "blink"
+                pat, ms = PATTERNS[pattern]
+                color = str(b.get("color") or "")
+                rgb = int(color[1:], 16) if COLOR_RE.match(color) else 0xFFD000
+                insert = ",".join((lit_inserts(b.get("insert")) or [])[:LIT_INSERTS_MAX])
+                solid = b.get("solid") if isinstance(b.get("solid"), str) else ""
+                if "," in solid or len(solid) > INSERT_MAX:
+                    solid = ""
+                scol = str(b.get("solid_color") or "#ffffff")
+                srgb = int(scol[1:], 16) if COLOR_RE.match(scol) else 0xFFFFFF
+                spec = (self.shot_i(b.get("shot")), insert, rgb, pat, ms, solid, srgb if solid else 0)
+                if spec not in self.lit:
+                    self.lit.append(spec)
+                out.append(pad + "light_mode(%d);" % self.lit.index(spec))
+            elif op == "set_hits":                                                    # PAD-600
+                name = b.get("shot")
+                h, _idx = self.hit(name)
+                out.append(pad + "%s[P()] = %s - (long long)%s;" % (hits_ident(name), self.num(b.get("value")), h))
+            elif op == "unlight_mode":                                                # PAD-600
+                mode = b.get("mode") or ""
+                if not isinstance(mode, str) or (mode and not SLUG_RE.match(mode)):
+                    return
+                if not mode or lit_ident(mode) == lit_ident(self.slug):
+                    self.unlight_own = True
+                    out.append(pad + "unlight_mode();")
+                else:
+                    if mode not in self.unlit:
+                        self.unlit.append(mode)
+                    out.append(pad + "unlight_other(%s, %s);   /* the mode %s's light out */"
+                               % (lit_ident(mode), _c_str(mode), _comment(mode)))
 
     @staticmethod
     def callout(v):
@@ -1467,6 +2612,18 @@ class _Gen:
 def c_ident(slug):
     from . import mode_tryit as MT
     return MT._c_ident(slug)
+
+
+def hits_ident(shot):
+    """PAD-600: the C global that moves a shot's hits this ball in every blocks mode that reads them (a Set the hits
+    of block's difference from the count): ``"Target 1"`` -> ``pad_hits_target_1``."""
+    return "pad_hits_" + re.sub(r"[^a-z0-9]", "_", str(shot or "").lower())
+
+
+def lit_ident(slug):
+    """PAD-600: the C global a blocks mode's Light the mode at is held in, per player (its ``lit_as``), so another
+    mode can put it out: ``target_1`` -> ``pad_lit_target_1``."""
+    return "pad_lit_" + re.sub(r"[^a-z0-9]", "_", str(slug or "").lower())
 
 
 def shared_ident(name):
@@ -1489,13 +2646,29 @@ def to_c(program, slug):
     bodies = {k: [] for k in HATS}
     for i, s in enumerate(program["scripts"]):
         hat = s.get("hat") or {}
+        if hat.get("kind") == "drain":      # PAD-690: the port's trough shot (no such shot: pm_shot 0, it never fires)
+            hat = {"kind": "shot", "shot": MP.DRAIN_SHOT, "when": hat.get("when", "any")}
         kind = hat.get("kind")
         if kind not in HATS:
             continue
+        # PAD-733; PAD-767: not an any-shot script's - a score for every switch is a trickle, not a shot that counts
+        # (David, KING KONG: "every single switch hit was playing a sound effect"); the shot's own script says so
+        g.fb_ctx = kind in ("shot", "combo") and hat.get("when", "any") != "idle"
         body = g.stack(s.get("do") or [], 2)
+        g.fb_ctx = False
         bodies[kind].append((i + 1, hat, body))
+    preview = [g.shot_i(n) for n in preview_shots(program)]   # PAD-733: blinked on its selection-screen tile
+    # PAD-733: the shots that start it, blinked once its count is done (a mode lit at a shot lights its own)
+    ready = [g.shot_i(n) for n in ready_shots(program)] if program["hud"]["on"] and not g.lit else []
     # the hats' own shots and events
     hat_code = {k: [] for k in HATS}
+    challenge_names = []                    # PAD-615: the game's challenges its scripts take the place of
+    challenge_launch = []                   # PAD-643: each one's launch (pm_challenge_launch)
+    battle_slots = []                       # PAD-706: the battle selection's slots its scripts take the place of
+    battle_more = set()                     # PAD-707: of those, the ones it is a monster on MORE KAIJU behind
+    place_ids = []                          # PAD-710: the game's own modes its scripts take the place of
+    done_hats = []                          # PAD-747: (count, ids) of each When the player has completed
+    spare_inputs = []                       # PAD-826: (node, input, closed high) of each When a spare switch closes
     for kind, items in bodies.items():
         for n, hat, body in items:
             head = "    /* script %d: %s */" % (n, _comment(_hat_words(hat)))
@@ -1503,12 +2676,18 @@ def to_c(program, slug):
             # a shot or event is judged by the mode's state BEFORE it: the shot that starts
             # the mode is not also one "while it runs"
             gate = {"idle": "!was_on", "running": "was_on"}.get(when)
+            if kind in ("shot", "any_shot", "switch", "spare_switch") and when == "idle":
+                gate = "idle"                   # PAD-675: not running, and no other mode is either
             if kind == "shot":
                 test = "(%s && (shot & %s))" % (g.shot(hat.get("shot")), g.shot(hat.get("shot")))
                 if gate:
                     test = "(%s && %s)" % (gate, test)
             elif kind == "any_shot":
                 test = "(shot & named)"
+                if gate:
+                    test = "(%s && %s)" % (gate, test)
+            elif kind == "switch":                       # PAD-675: the game's 0x1 dispatch, one a switch hit
+                test = "(shot & 1ull)"
                 if gate:
                     test = "(%s && %s)" % (gate, test)
             elif kind == "event":
@@ -1524,6 +2703,43 @@ def to_c(program, slug):
             elif kind == "timer_done":
                 t = g.timer(hat.get("timer"))
                 test = "(due[%d])" % t if t is not None else "(0)"
+            elif kind == "combo":                        # PAD-708: judged as the shot came (combo_shot), its gate too
+                k = next((i for i, h in enumerate(g.combos) if h is hat), None)
+                for x in combo_steps(hat)[:COMBO_STEPS_MAX]:   # its shots in the table before the table is written
+                    for name in step_shots(x)[:COMBO_ALTS_MAX]:
+                        g.shot_i(name)
+                test = "(combo_fired & %du)" % (1 << k) if k is not None else "(0)"
+            elif kind == "battle":                       # PAD-706: picked on the game's thread, run on the tick
+                slot = int(hat.get("slot")) if _int_ok(hat.get("slot"), 0, ROSTER_MAX - 1) else -1
+                if slot not in battle_slots:
+                    battle_slots.append(slot)
+                if hat.get("more"):
+                    battle_more.add(slot)
+                test = "(picked & %du)" % (1 << battle_slots.index(slot))
+            elif kind == "game_mode":                    # PAD-710: the game's start, taken on its thread, run on the tick
+                mid = int(hat.get("mode")) if _int_ok(hat.get("mode"), 0, PLACE_MAX - 1) else -1
+                if mid not in place_ids:
+                    place_ids.append(mid)
+                test = "(picked & %du)" % (1 << place_ids.index(mid))
+            elif kind == "completed":                    # PAD-747: the count met, run when nothing is in the way
+                k = len(done_hats)
+                done_hats.append((max(1, int(hat.get("count"))) if _int_ok(hat.get("count"), 1, DONE_MAX) else 1,
+                                  done_hat_ids(hat)))
+                test = "(done_fired & %du)" % (1 << k) if k < DONE_HATS_MAX else "(0)"
+            elif kind == "spare_switch":                 # PAD-826: its own shot bit, given by pm_spare_shot
+                key = spare_key(hat)
+                if key not in spare_inputs:
+                    spare_inputs.append(key)
+                k = spare_inputs.index(key)
+                test = "(spare_mask[%d] && (shot & spare_mask[%d]))" % (k, k)
+                if gate:
+                    test = "(%s && %s)" % (gate, test)
+            elif kind == "challenge":                    # PAD-615: picked on the game's thread, run on the tick
+                name = str(hat.get("challenge") or "")
+                if name not in challenge_names:
+                    challenge_names.append(name)
+                    challenge_launch.append(challenge_launch_ms(hat))      # PAD-643
+                test = "(picked & %du)" % (1 << challenge_names.index(name))
             else:
                 test = None
             if test is None:
@@ -1533,9 +2749,22 @@ def to_c(program, slug):
 
     hud = program["hud"]
     has_hud = hud["on"]
+    # PAD-658: the clip a note, and a TOTAL with nothing looping, show over: the mode's first clip "over and over"
+    # (When the mode starts' first, else any script's), else the first clip When the mode starts plays (ANGUIRUS: his
+    # entrance), else its first clip
+    in_order = [b for s in sorted(program["scripts"], key=lambda s: (s.get("hat") or {}).get("kind") != "mode_start")
+                for b in _walk(s.get("do") or []) if b.get("op") == "clip" and b.get("clip")]
+    covers = [b["clip"] for b in in_order if b.get("where") == "loop"] + [b["clip"] for b in in_order] + \
+        [c["name"] for c in program.get("clips") or []]
+    note_cue = covers[0] if media and has_hud and covers else None
     # PAD-375: a mode with a HUD or a screen of its own watches the game's displays (the kit's
     # kit_display): its words step aside under one, so it holds a display priority while it runs
     watch = has_hud or program["screen"]
+    has_bar = program["bar"]["on"]          # PAD-521: its name, colour and clock in the game's own status bar
+    bar_fill = (g.num(program["bar"]["value"]), g.num(program["bar"]["of"]))         if has_bar and program["bar"].get("fill") == "value" else None   # PAD-721: or a value out of another
+    info = program["info"]                  # PAD-547: a line of words and a value under its name
+    has_info = info["on"]
+    info_live = g.num(info["value"]) if has_info and info["value"] is not None else None
     live = []                           # (counter 0-2, C of its value): counters that follow a value
     gauge_live = None
     if has_hud:
@@ -1554,7 +2783,8 @@ def to_c(program, slug):
     L.append(" *")
     L.append(" * MADE FROM blocks.json: the Modes tab writes this file again every time the blocks")
     L.append(" * change, so an edit here is lost at the next one. To carry on in C, press Edit as C")
-    L.append(" * on the mode's page: the blocks are put away and this file is yours.")
+    L.append(" * on the mode's page: the blocks are put away and this file is yours. That is ONE WAY:")
+    L.append(" * C is never turned back into blocks (Duplicate the mode first to keep a blocks copy).")
     L.append(" *")
     L.append(" * " + _comment(summary(program)) + ".")
     L.append(" */")
@@ -1574,7 +2804,15 @@ def to_c(program, slug):
     L.append("#define DISPLAY_PRIORITY %d          /* held while it runs; 0 = none (MODE_SDK.md) */"
              % (program["priority"] or (HUD_PRIORITY if has_hud else 0)))
     L.append("#define TIMER_MAX_MS     %dL" % TIMER_MAX_MS)
-    L.append("#define ENDING_MS        3000        /* the total its own screen shows at the end */")
+    L.append("#define ENDING_MS        %d        /* the total its own screen shows at the end */" % TOTAL_MS)
+    L.append("#define DRAIN_TOTAL_MS   %d        /* PAD-622: ...and at a drain, the game's end of ball waiting */" % DRAIN_TOTAL_MS)
+    L.append("#define ENDING_NOW_MS    (drain_long ? DRAIN_TOTAL_MS : ENDING_MS)")
+    words_only = program["screen"] and program["screen_style"] == "words"
+    L.append("#define WORDS_ONLY       %d          /* PAD-521: its screen is words alone: shown a moment, not all along */"
+             % (1 if words_only else 0))
+    if has_bar:
+        L.append("#define BAR_RGB          0x%06xu   /* PAD-521: its color in the game's own status bar */"
+                 % int(program["bar"]["color"][1:], 16))
     L.append("#define UNUSED __attribute__((unused))   /* a helper the blocks may not call */")
     L.append("")
     gm = program["game_modes"]                           # PAD-373: as a form mode's (PAD-363)
@@ -1593,6 +2831,23 @@ def to_c(program, slug):
     L.append("/* The screen a build added for this mode (its folder is \"%s\"). Not there = no screen. */" % slug)
     L.append('#define SCREEN_NODE  "PadMode_%s_Screen"' % slug)
     L.append('#define SCREEN_TEXT  "PadMode_%s_Screen.PadMode_%s_Screen_Words"' % (slug, slug))
+    if words_only:
+        L.append("/* PAD-574: its TOTAL as the game's own modes end (James Bond: TOTAL over the number, under the bar): two")
+        L.append(" * screens a build put there. Not there = the TOTAL over its video, on its own screen. */")
+        L.append('#define TOTAL_NAME_NODE "PadMode_%s_TotalName"' % slug)
+        L.append('#define TOTAL_NAME_TEXT "PadMode_%s_TotalName.PadMode_%s_TotalName_Words"' % (slug, slug))
+        L.append('#define TOTAL_NODE   "PadMode_%s_Total"' % slug)
+        L.append('#define TOTAL_TEXT   "PadMode_%s_Total.PadMode_%s_Total_Words"' % (slug, slug))
+        L.append("/* PAD-709: a scored number while it runs, large under the bar as the game's own mini-wizards show a shot's,")
+        L.append(" * not over its video. Not there = over its video, on its own screen. */")
+        L.append('#define POINTS_NODE  "PadMode_%s_Points"' % slug)
+        L.append('#define POINTS_TEXT  "PadMode_%s_Points.PadMode_%s_Points_Words"' % (slug, slug))
+    if has_info:
+        L.append("/* PAD-547: its info line, a screen of its own the build put where the title's port says (James Bond: under")
+        L.append(" * the status bar). Not there = no line. */")
+        L.append('#define INFO_NODE    "PadMode_%s_Info"' % slug)
+        L.append('#define INFO_TEXT    "PadMode_%s_Info.PadMode_%s_Info_Words"' % (slug, slug))
+        L.append("#define INFO_FORMAT  %s" % _c_str(info_line_c(info["text"].replace("%", "%%"), info_live is not None)))
     L.append("")
     L.append("/* ---- the shots, events and variables the blocks name ---- */")
     nshots, nevents, nvars, nhits = max(1, len(g.shots)), max(1, len(g.events)), max(1, len(g.var_names)), max(1, len(g.hits))
@@ -1621,39 +2876,106 @@ def to_c(program, slug):
     for i, n in enumerate(g.hits):
         L.append("/* H[%d] = hits of %s this ball */" % (i, _comment(n)))
     L.append("UNUSED static unsigned H[%d][5];             /* hits this ball, per player */" % nhits)
+    L.append("UNUSED static unsigned MH[%d];               /* PAD-721: hits made while it runs, since it started */"
+             % nhits)
     L.append("UNUSED static const char HIT_OF[%d] = {%s};" % (
         nhits, ", ".join(str(g.shots.index(n)) for n in g.hits) or "0"))
+    hit_moves = []
+    for n in g.hits:
+        if hits_ident(n) not in hit_moves:
+            hit_moves.append(hits_ident(n))
+    if hit_moves:
+        L.append("/* PAD-600: a shot's hits are one count for every blocks mode on the card. Each counts them itself (and")
+        L.append(" * clears them when the ball ends or a game begins, so the counts agree); a Set the hits of block keeps")
+        L.append(" * its difference from the count here, one weak line per shot the linker keeps once, every mode adds it */")
+        for hm in hit_moves:
+            L.append('__attribute__((weak, visibility("hidden"))) long long %s[5];' % hm)
+        L.append("UNUSED static long long hits_of(unsigned h, long long moved)")
+        L.append("{")
+        L.append("    long long n = (long long)h + moved;")
+        L.append("    return n < 0 ? 0 : n;")
+        L.append("}")
+    lit_moves = [lit_ident(m) for m in g.unlit]
+    if lit_moves:
+        L.append("/* PAD-600: the other modes whose light a block puts out: each one's Light the mode at, per player */")
+        for lm in lit_moves:
+            L.append('__attribute__((weak, visibility("hidden"))) int %s[5];' % lm)
     L.append("")
     L.append("static struct {")
     L.append("    int on;")
     L.append("    int own_mball;                    /* a Multiball block served balls: not the game's multiball */")
+    L.append("    int pick_mball;                   /* PAD-768: a battle picked in the game's multiball: it runs through it */")
     L.append("    unsigned player, ticks_left, seconds_shown, elapsed, shots;")
     L.append("    uint64_t total;")
     L.append("} run;")
-    L.append("static int sec_changed, was_in_game, ending;")
+    L.append("static int sec_changed, ending;")
+    L.append("UNUSED static int end_clip;                /* PAD-658: When the mode ends played a full-screen clip */")
+    L.append("#define END_CLIP_MS      7000      /* ... its TOTAL stays this much longer: the clip covers it first (it "
+             "starts half a second in and runs up to 6 s: the TOTAL still has its 3 s after it, run godzilla_angry_r4) */")
+    L.append("#define ENDING_HOLD_MS   (ENDING_NOW_MS + (end_clip ? END_CLIP_MS : 0))")
+    L.append("static unsigned flash_ticks;           /* PAD-521: words alone: how long its words stay up */")
     L.append("static void *screen, *screen_words;")
     L.append("static unsigned hide_ticks, poll;")
     L.append("static unsigned ended_begun;          /* PAD-413: pm_begun() at its end, while its total shows */")
+    L.append("static unsigned award_ticks;          /* PAD-574: an Award's words up this much longer */")
+    L.append("static unsigned total_due;            /* PAD-574: ticks until its TOTAL: an Award it ended on shows first */")
+    L.append("static int drain_long;                 /* PAD-622: its TOTAL at a drain, as long as the game's own */")
+    L.append("static int drain_hold;                 /* PAD-622: the game's end of ball waits on it (set once it does) */")
+    if battle_slots or place_ids or challenge_names or g.battle_won:
+        L.append("static int battle_won;                 /* PAD-706: an End the mode block won the battle it replaced */")
+    if challenge_names:
+        L.append("static int challenge_run;              /* PAD-710: it runs on a challenge pick: its end counts the game's mode */")
+    if battle_slots:
+        L.append("static int battle_held;                /* PAD-706: it runs on a battle pick: its end gives the pick back */")
+    if place_ids:
+        L.append("static int place_held;                 /* PAD-710: it runs in the place of one of the game's modes */")
+    if not has_hud:
+        L.append("static char award_next[96];           /* PAD-574: an Award of When the mode ends, after the one showing */")
+        L.append("static unsigned award_next_ticks;")
+        if words_only:
+            L.append("static char award_next_text[64];      /* PAD-709: ... its words and number apart, for under the bar */")
+            L.append("static long long award_next_value;")
+            L.append("static int award_next_wv;               /* ... 1 = it goes under the bar */")
+    if words_only:
+        L.append("static void *total, *total_words, *total_name, *total_name_words;   /* PAD-574: its TOTAL's two screens */")
+        L.append("static void *points, *points_words;   /* PAD-709: a scored number's screen under the bar */")
+        L.append("static unsigned points_ticks;         /* ... up this much longer */")
+        L.append("static int points_up, points_named;   /* shown now; its words on the TOTAL's word line */")
+        L.append("static int points_award;              /* ... an Award's: its TOTAL waits for it, as for one on its screen */")
+    if has_bar:
+        L.append("static unsigned bar_max, bar_hold;     /* PAD-521: the clock's most ticks; the bar kept through the total */")
     if watch:
         L.append("static int screen_away;                /* its screen hidden: a game display or mode has the middle */")
+    if has_info:
+        L.append("static void *info, *info_words;       /* PAD-547: its info line and that line's words */")
+        L.append("static int info_up;                    /* shown now */")
+        L.append("static char info_now[96];              /* what it says now */")
     if has_hud:
         L.append("")
         L.append("/* ---- the HUD at the glass's edges (PAD-375): the build's PadMode_%s_Hud group, driven by" % slug)
         L.append(" * the kit's struct kit_hud as the examples drive theirs - blank under a display of the game's,")
         L.append(" * aside while one of the game's modes runs. No HUD on the card: nothing shows, the mode runs. */")
-        L.append('static struct kit_hud hud = { .slug = "%s" };' % slug)
+        gg = hud["gauge"]
+        bar = gg["on"] and gg["kind"] == "bar"
+        meter = gg["on"] and gg["meter"] and gg["value"] is not None
+        # PAD-658: a corner bar shown while it is not running stands BESIDE another mode's HUD (the kit's beside)
+        L.append('static struct kit_hud hud = { .slug = "%s"%s };' % (slug, ", .beside = 1" if bar and meter else ""))
         L.append("#define HUD_LINE   %s" % _c_str(hud["line"]))
         L.append("#define HUD_TIMER  %d          /* the badge counts the clock */" % (
             1 if hud["timer"]["on"] and program["seconds"] else 0))
         L.append("#define HUD_GAUGE  %d          /* pips of the gauge; 0 = no gauge */" % (
             hud["gauge"]["count"] if hud["gauge"]["on"] else 0))
         L.append("#define HUD_GAUGE_LABEL %s" % _c_str(hud["gauge"]["label"]))
+        L.append("#define HUD_GAUGE_BAR %d       /* PAD-658: 1 = the corner bar, its value a percent */" % bar)
+        L.append("#define HUD_GAUGE_FULL %s" % _c_str(gg["full"]))
+        L.append("#define HUD_METER  %d          /* PAD-658: 1 = the gauge shows while it is not running too */" % meter)
         L.append("UNUSED static const char *const HUD_LABEL[3] = {%s};" % ", ".join(
             _c_str(c["label"]) for c in hud["counters"]))
         L.append("UNUSED static const char *const HUD_SUB[3] = {%s};" % ", ".join(
             _c_str(c["sub"]) for c in hud["counters"]))
         L.append("static char hud_val[3][24], hud_sub[3][24];   /* each counter's value and sub-label now */")
-        L.append("UNUSED static long long hud_level;          /* the gauge's pips lit */")
+        L.append("static char hud_lab[3][24];                     /* PAD-658: and its label now (a block may change it) */")
+        L.append("UNUSED static long long hud_level;          /* the gauge's pips lit (a bar: its percent) */")
     L.append("")
     L.append("static unsigned P(void)")
     L.append("{")
@@ -1661,11 +2983,25 @@ def to_c(program, slug):
     L.append("    return p <= 4 ? p : 0;")
     L.append("}")
     L.append("")
+    if lit_moves:
+        L.append("/* PAD-600: Put out the light of another mode, for the player up */")
+        L.append("static void unlight_other(int *lit, const char *mode)")
+        L.append("{")
+        L.append("    unsigned p = P();")
+        L.append("    if (!p || !lit[p]) return;")
+        L.append('    pm_log("put out the light of %s for player %u", mode, p);')
+        L.append("    lit[p] = 0;")
+        L.append("}")
+        L.append("")
+    L.extend(_NEW_GAME_C.split("\n"))
     L.append("UNUSED static long long div0(long long a, long long b)")
     L.append("{")
     L.append("    return b ? a / b : 0;")
     L.append("}")
     L.append("")
+    if g.combos:
+        L.extend(_combo_c(g).rstrip("\n").split("\n"))
+        L.append("")
     L.append("UNUSED static unsigned secs_left(void)")
     L.append("{")
     L.append("    return run.on && RUN_SECONDS ? (run.ticks_left + TICKS_PER_SECOND - 1) / TICKS_PER_SECOND : 0;")
@@ -1689,6 +3025,11 @@ def to_c(program, slug):
     L.append("    return left > 0 ? left : 0;")
     L.append("}")
     L.append("")
+    if has_bar:                         # after timer_left: the bar's value or the info line's may name a timer
+        L.extend((_BAR_C % {"fills": 1 if bar_fill else 0, "value": bar_fill[0] if bar_fill else "0LL",
+                            "of": bar_fill[1] if bar_fill else "1LL"}).split("\n"))
+    if has_info:
+        L.extend((_INFO_C % {"value": info_live or "0"}).split("\n"))
     for when in ("ball", "mode"):
         L.append("static void reset_%s(void)          /* the variables reset %s */" % (when, RESETS[when]))
         L.append("{")
@@ -1699,10 +3040,17 @@ def to_c(program, slug):
         L.append("    (void)p;")
         L.append("}")
         L.append("")
-    L.append("UNUSED static void words(const char *text, long long value, int with_value)")
+    if words_only:
+        L.extend((_POINTS_C % {"info": "    info_show(0);\n" if has_info else ""}).split("\n"))
+    L.append("/* a Words block: its line on its own screen (PAD-709: a number while a words-alone one runs goes under the")
+    L.append(" * bar instead: 1 then) */")
+    L.append("UNUSED static int words(const char *text, long long value, int with_value)")
     L.append("{")
     L.append("    char number[32], line[96];")
-    L.append("    if (!screen_words) return;")
+    L.append("    if (!screen_words) return 0;")
+    L.append("    award_ticks = 0;")
+    if words_only:
+        L.append("    if (with_value && run.on && !ending && points_show(text, value, %d)) return 1;" % WORDS_SHOW_MS)
     L.append("    if (with_value) {")
     L.append("        pm_commas(number, sizeof number, value < 0 ? 0 : (uint64_t)value);")
     L.append('        pm_snprintf(line, sizeof line, "%s%s%s", text, text[0] ? " " : "", number);')
@@ -1710,6 +3058,81 @@ def to_c(program, slug):
     L.append("    } else {")
     L.append("        pm_set_text(screen_words, text);")
     L.append("    }")
+    L.append("    if (WORDS_ONLY && run.on && screen) {   /* PAD-521: words alone stay up a moment */")
+    L.append("        flash_ticks = %d * TICKS_PER_SECOND / 1000;" % WORDS_SHOW_MS)
+    L.append("        if (!screen_away) pm_show(screen, 1);" if watch else "        pm_show(screen, 1);")
+    L.append("    }")
+    L.append("    return 0;")
+    L.append("}")
+    L.append("")
+    if not has_hud:
+        L.append("/* PAD-574: an Award block with no HUD: its words and value on its own screen for its moment (its smaller line")
+        L.append(" * has no place there); an End the mode after it lets it show before the TOTAL */")
+        L.append("UNUSED static void award_words(const char *text, long long value, int with_value, unsigned ms)")
+        L.append("{")
+        L.append("    if (!screen_words || !run.on) return;")
+        L.append("    if (ending && (award_ticks%s)) {   /* in When the mode ends, after the Award it ended on: next */"
+                 % (" || points_award" if words_only else ""))
+        L.append("        char number[32];")
+        L.append("        if (with_value) {")
+        L.append("            pm_commas(number, sizeof number, value < 0 ? 0 : (uint64_t)value);")
+        L.append('            pm_snprintf(award_next, sizeof award_next, "%s%s%s", text, text[0] ? " " : "", number);')
+        L.append("        } else {")
+        L.append('            pm_snprintf(award_next, sizeof award_next, "%s", text);')
+        L.append("        }")
+        L.append("        award_next_ticks = ms * TICKS_PER_SECOND / 1000;")
+        if words_only:
+            L.append('        pm_snprintf(award_next_text, sizeof award_next_text, "%s", text);')
+            L.append("        award_next_value = value;")
+            L.append("        award_next_wv = with_value && points_award;   /* PAD-709: under the bar, as the one showing */")
+        L.append("        return;")
+        L.append("    }")
+        if words_only:
+            L.append("    if (with_value && points_show(text, value, ms)) {   /* PAD-709: under the bar, for its moment */")
+            L.append("        points_award = 1;")
+            L.append("        award_ticks = 0;")
+            L.append("        return;")
+            L.append("    }")
+        L.append("    words(text, value, with_value);")
+        L.append("    award_ticks = ms * TICKS_PER_SECOND / 1000;")
+        L.append("    if (WORDS_ONLY && screen) flash_ticks = award_ticks;")
+        L.append("}")
+        L.append("")
+    L.append("/* its TOTAL for its moment at its end (on its own screen; PAD-574: a words-alone one's under the bar as the game's")
+    L.append(" * own modes show theirs, when the build put the two screens there) */")
+    L.append("static void total_show(void)")
+    L.append("{")
+    if words_only:
+        L.append("    points_hide();                    /* PAD-709: a scored number goes: the TOTAL takes its place */")
+    L.append("    if (!screen) return;")
+    if words_only:
+        L.append("    if (total && total_words) {")
+        L.append("        char n[32];")
+        L.append("        pm_show(screen, 0);")
+        L.append("        pm_commas(n, sizeof n, run.total);")
+        L.append("        pm_set_text(total_words, n);")
+        L.append("        pm_show(total, 1);")
+        L.append("        if (total_name && total_name_words) {")
+        L.append('            pm_set_text(total_name_words, "TOTAL");')
+        L.append("            pm_show(total_name, 1);")
+        L.append("        }")
+        L.append("    } else {")
+        L.append("        if (WORDS_ONLY) pm_show(screen, 1);   /* PAD-521: its TOTAL over the game's video */")
+        L.append('        words("TOTAL", (long long)run.total, 1);')
+        L.append("    }")
+    else:
+        L.append('    words("TOTAL", (long long)run.total, 1);')
+    L.append("    hide_ticks = ENDING_NOW_MS / 1000 * TICKS_PER_SECOND;")
+    L.append("}")
+    L.append("")
+    L.append("static void total_hide(void)")
+    L.append("{")
+    L.append("    total_due = 0;")
+    L.append("    if (screen) pm_show(screen, 0);")
+    if words_only:
+        L.append("    points_hide();")
+        L.append("    if (total) pm_show(total, 0);")
+        L.append("    if (total_name) pm_show(total_name, 0);")
     L.append("}")
     L.append("")
     L.append("UNUSED static void score(long long points)")
@@ -1752,11 +3175,12 @@ def to_c(program, slug):
     L.append("")
     if has_hud:
         L.append("/* a counter (0-2) to a value, short enough for its 200 px (950,000 / 4.25M); sub 0 = as it is */")
-        L.append("UNUSED static void hud_counter(int k, long long value, const char *sub)")
+        L.append("UNUSED static void hud_counter(int k, long long value, const char *sub, const char *label)")
         L.append("{")
         L.append("    if (k < 0 || k > 2 || !HUD_LABEL[k][0]) return;      /* a counter with no label is not shown */")
         L.append("    kit_short(hud_val[k], sizeof hud_val[k], value < 0 ? 0 : (uint64_t)value);")
         L.append("    if (sub) kit_copy(hud_sub[k], sizeof hud_sub[k], sub);")
+        L.append("    if (label && label[0]) kit_copy(hud_lab[k], sizeof hud_lab[k], label);   /* PAD-658 */")
         L.append("}")
         L.append("")
         L.append("static void hud_line(char *line, unsigned cap, const char *text, long long value, int with_value)")
@@ -1771,23 +3195,82 @@ def to_c(program, slug):
         L.append("}")
         L.append("")
         L.append("/* the title (0) or the instruction line (1); kept until the mode starts again */")
+        L.append("/* PAD-658: the title and line When the mode ends wrote: its TOTAL's, in the place of \"<NAME> TOTAL\" */")
+        L.append("static char end_title[KIT_HUD_WORDS], end_line[KIT_HUD_WORDS];")
         L.append("UNUSED static void hud_words(int which, const char *text, long long value, int with_value)")
         L.append("{")
         L.append("    char line[KIT_HUD_WORDS];")
         L.append("    hud_line(line, sizeof line, text, value, with_value);")
+        L.append("    if (ending) kit_copy(which ? end_line : end_title, KIT_HUD_WORDS, line);")
         L.append("    if (which) kit_hud_title(&hud, 0, line);")
         L.append("    else kit_hud_title(&hud, line, 0);")
         L.append("}")
+        L.append("")
+        if note_cue:
+            L.append("UNUSED static void note_loop(void);")
+        else:
+            L.append("#define note_loop() ((void)0)           /* no clip of its own loops behind its HUD: a note shows alone */")
         L.append("")
         L.append("/* the award line for a moment; on a mode not running, a note shown alone (kit_hud_note: not over")
         L.append(" * another mode's HUD) */")
         L.append("UNUSED static void hud_award(const char *text, long long value, int with_value, const char *sub,")
         L.append("                             unsigned ms)")
         L.append("{")
-        L.append("    char line[KIT_HUD_WORDS];")
-        L.append("    hud_line(line, sizeof line, text, value, with_value);")
+        L.append("    char line[KIT_HUD_WORDS], under[KIT_HUD_WORDS], number[32];")
+        L.append("    if (!run.on && !sub[0]) sub = MODE_NAME;   /* a note says whose it is */")
+        L.append("    if (with_value && text[0]) {      /* PAD-658: the words big, the number under them with the sub */")
+        L.append("        pm_commas(number, sizeof number, value < 0 ? 0 : (uint64_t)value);   /* (one line of both ran off) */")
+        L.append("        kit_copy(line, sizeof line, text);")
+        L.append('        if (sub[0]) pm_snprintf(under, sizeof under, "%s  -  %s", number, sub);')
+        L.append("        else kit_copy(under, sizeof under, number);")
+        L.append("        sub = under;")
+        L.append("    } else {")
+        L.append("        hud_line(line, sizeof line, text, value, with_value);")
+        L.append("    }")
         L.append("    if (run.on) kit_hud_award(&hud, ms, line, sub);")
-        L.append("    else kit_hud_note(&hud, ms, line, sub[0] ? sub : MODE_NAME);")
+        L.append("    else if (kit_hud_note(&hud, ms, line, sub)) note_loop();")
+        L.append("}")
+        L.append("")
+        L.append("/* PAD-690: the number on this mode's progress panel badge, at once and with no note (a count whose")
+        L.append(" * notes come only every few hits still shows every hit there); not while the mode runs, nor for a mode")
+        L.append(" * with its own meter in the corner (its notes stay off the panel too: David, \"Angry already has its own")
+        L.append(" * meter at the top so we don't need it on the side\") */")
+        if ready:
+            L.append("static void ready_set(int on);")
+        L.append("UNUSED static void hud_progress(long long value)")
+        L.append("{")
+        L.append("    char n[24];")
+        if ready:
+            L.append("    if (run.on) return;")
+            L.append("    ready_set(value <= 0);            /* PAD-733: its count done, the shot that starts it blinks */")
+            L.append("    if (HUD_METER) return;")
+        else:
+            L.append("    if (run.on || HUD_METER) return;")
+        L.append('    pm_snprintf(n, sizeof n, "%lld", value < 0 ? 0LL : value);')
+        L.append('    kit_prog_set(hud.slug, "#", n);')
+        L.append("}")
+        L.append("")
+        L.append("/* PAD-658: the gauge at `v`: a bar's slices lit in proportion to a percent, the percent its label (its full")
+        L.append(" * word at 100); a pip gauge's pips. As a meter (`idle`) while the mode is not running. */")
+        L.append("UNUSED static void gauge_now(long long v, int idle)")
+        L.append("{")
+        L.append("    char label[24];")
+        L.append("    int lit;")
+        L.append("    if (HUD_GAUGE_BAR) {")
+        L.append("        v = v < 0 ? 0 : v > 100 ? 100 : v;")
+        L.append("        lit = (int)(v * HUD_GAUGE / 100);")
+        L.append("        if (v >= 100 && HUD_GAUGE_FULL[0]) kit_copy(label, sizeof label, HUD_GAUGE_FULL);")
+        L.append('        else pm_snprintf(label, sizeof label, "%d%%", (int)v);')
+        L.append("    } else {")
+        L.append("        lit = v < 0 ? 0 : v > HUD_GAUGE ? HUD_GAUGE : (int)v;")
+        L.append("        kit_copy(label, sizeof label, HUD_GAUGE_LABEL);")
+        L.append("    }")
+        L.append("    if (!idle) {")
+        L.append("        kit_hud_gauge(&hud, lit, label);")
+        L.append("        return;")
+        L.append("    }")
+        L.append("    kit_hud_pips(&hud, HUD_GAUGE);      /* the build's count, as at a start */")
+        L.append("    kit_hud_meter(&hud, lit, label);")
         L.append("}")
         L.append("")
         L.append("/* every tick while it runs: the counters that follow a value, the badge, the gauge */")
@@ -1795,15 +3278,13 @@ def to_c(program, slug):
         L.append("{")
         L.append("    int k;")
         for k, expr in live:
-            L.append("    hud_counter(%d, %s, 0);" % (k, expr))
+            L.append("    hud_counter(%d, %s, 0, 0);" % (k, expr))
         if gauge_live is not None:
             L.append("    hud_level = %s;" % gauge_live)
         L.append("    for (k = 0; k < 3; k++)")
-        L.append("        if (HUD_LABEL[k][0]) kit_hud_counter(&hud, k, HUD_LABEL[k], hud_val[k], hud_sub[k]);")
+        L.append("        if (HUD_LABEL[k][0]) kit_hud_counter(&hud, k, hud_lab[k], hud_val[k], hud_sub[k]);")
         L.append("    kit_hud_timer(&hud, HUD_TIMER ? (int)secs_left() : -1);")
-        L.append("    if (HUD_GAUGE)")
-        L.append("        kit_hud_gauge(&hud, hud_level < 0 ? 0 : hud_level > HUD_GAUGE ? HUD_GAUGE : (int)hud_level,")
-        L.append("                      HUD_GAUGE_LABEL);")
+        L.append("    if (HUD_GAUGE) gauge_now(hud_level, 0);")
         L.append("}")
         L.append("")
     if g.shows:
@@ -1811,26 +3292,50 @@ def to_c(program, slug):
     else:
         L.append("#define SHOWING 0                         /* no Light show block */")
         L.append("")
-    L.extend((_LAMPS_C % {"n": len(g.shots), "size": nshots, "lo": RATE_MIN, "hi": RATE_MAX}).split("\n"))
+    forget = "    lit_shown = 0;                    /* PAD-503: the mode's light is held again next tick */\n" if g.lit else ""
+    if ready:
+        forget += "    ready_shown = 0;                  /* PAD-733: and its blink once its count is done */\n"
+        L.append("static int ready_shown;               /* PAD-733: 1 = its blink once its count is done is on the playfield */")
+    if g.lit:
+        L.append("static int lit_shown;                 /* PAD-503: 1 + the LIT_AT held on the playfield now; 0 = none */")
+    L.extend((_LAMPS_C % {"n": len(g.shots), "size": nshots + len(g.lamps), "lo": RATE_MIN, "hi": RATE_MAX,
+                          "forget": forget, "nl": len(g.lamps), "lsize": max(1, len(g.lamps)),
+                          "lamps": ", ".join(_c_str(n) for n in g.lamps) or "0"}).split("\n"))
+    if g.fb_used:                                   # PAD-733: every shot it counts says so
+        L.extend(_FEEDBACK_C.split("\n"))
+    else:
+        L.append("#define fb_paid() ((void)0)              /* PAD-733: no shot of its own scores while it runs */")
+    if g.shows or g.gi:
+        L.extend(_IS_GI_C.split("\n"))
+    if g.gi:
+        L.extend(_GI_HOLD_C.split("\n"))
+    elif g.shows:
+        L.append("#define GI_HELD 0                         /* PAD-767: no GI block */")
     if g.shows:
         L.extend(_SHOW_C.split("\n"))
+    if g.combos:
+        L.extend(_COMBO_SHOT_C.split("\n"))
     if media:
         L.extend((_MEDIA_C % {"slug": slug}).split("\n"))
+    if note_cue:
+        L.extend((_NOTE_LOOP_C % {"cue": _c_str(note_cue)}).split("\n"))
     if g.game_show:
         L.extend(_GAME_SHOW_C.split("\n"))
     if g.game_wizard:
         L.extend(_GAME_WIZARD_C.split("\n"))
     if g.mech:
-        L.extend((_MECH_C % {"lo": HOLD_MIN_MS, "hi": HOLD_MAX_MS, "slo": SCOOP_MIN_MS, "shi": SCOOP_MAX_MS,
+        L.extend((_MECH_C % {"lo": HOLD_MIN_MS, "hi": HOLD_LONGEST_MS, "slo": SCOOP_MIN_MS, "shi": SCOOP_MAX_MS,
                              "release": "".join("    pm_coil_release(%s);\n" % _c_str(n) for n in g.holds)}
                   ).split("\n"))
     L.append("/* What of the game's own is running (a battle, a multiball, one of its timed modes), or 0. A port that")
-    L.append(" * cannot tell answers none. */")
+    L.append(" * cannot tell answers none. PAD-503: and the game's own check before it starts one of its mini-wizards,")
+    L.append(" * where the port names one (James Bond: its henchman, villain and Q Branch modes, which its flags do not show) */")
     L.append("UNUSED static const char *game_busy(void)")
     L.append("{")
     L.append("    int k = pm_stock_mode_running(PM_STOCK_BATTLE | PM_STOCK_MULTIBALL | PM_STOCK_ANY);")
     L.append("    if (k > 0) return pm_stock_mode_what((unsigned)k);")
     L.append("    if (pm_can(PM_CAN_MULTIBALL) && pm_balls_in_play() >= 2) return \"a multiball\";")
+    L.append("    if (pm_game_wizard_way() == 0) return \"one of the game's own modes\";")
     L.append("    return 0;")
     L.append("}")
     L.append("")
@@ -1840,8 +3345,35 @@ def to_c(program, slug):
     L.append("    return !run.on && pm_in_game() && !((WAITS_OUT_MULTIBALL || GAME_MODES) && game_busy());")
     L.append("}")
     L.append("")
+    L.append("/* PAD-675: \"another mode runs\": one of ours, or a battle, multiball or mode of the game's. While it does, this")
+    L.append(" * one's light is down, as David's machine showed a lit mode's inserts still flashing through a battle. The")
+    L.append(" * game's own count only for a mode that waits them out: one that stacks with them plays on beside them */")
+    L.append("UNUSED static int out_of_play(void)")
+    L.append("{")
+    L.append("    return !run.on && (pm_other_running() || ((WAITS_OUT_MULTIBALL || GAME_MODES) && game_busy() != 0));")
+    L.append("}")
+    L.append("")
+    L.append("/* PAD-680: its idle scripts count, note and show their meter through the game's battles - on Godzilla one runs")
+    L.append(" * most of a ball, and a mode that counted nothing then never showed its progress. Only another of ours")
+    L.append(" * stops them */")
+    L.append("UNUSED static int counting(void)")
+    L.append("{")
+    L.append("    return !run.on && !pm_other_running();")
+    L.append("}")
+    L.append("")
     L.append("static void start(const char *why, int counted);")
     L.append("static void end(const char *why);")
+    L.append("static void end_now(const char *why);")
+    if g.lit:
+        L.append("")
+        L.extend(_lit_c(g).rstrip("\n").split("\n"))
+    elif g.lit_asked:
+        L.append("UNUSED static int lit_now(void) { return 0; }   /* no Light the mode at block: never lit */")
+    if ready:
+        L.append("")
+        L.extend(_ready_c(g, ready).rstrip("\n").split("\n"))
+    if g.unlight_own and not g.lit:
+        L.append("UNUSED static void unlight_mode(void) { }   /* no Light the mode at block: never lit */")
     L.append("")
     L.append("static void on_mode_start(void)")
     L.append("{")
@@ -1853,11 +3385,22 @@ def to_c(program, slug):
     L.extend(scripts_of("mode_end") or ["    /* no script */"])
     L.append("}")
     L.append("")
+    L.append("/* PAD-733: 1 while a battle picked on the game's selection screen (or a mode of the game's this one takes the")
+    L.append(" * place of) starts it: the game let its own start now, so there is nothing to wait out (David's Premium, v32:")
+    L.append(" * two KUMONGA picks were refused and given back as lost battles). PAD-768: 2 for a battle pick, which wins over")
+    L.append(" * the game's own modes running then (David: \"Anything from the Kaiju Battle select screen should override the")
+    L.append(" * mini modes\" - Jet Fighter Attack carried on and the picked KING CAESAR ended at once) */")
+    L.append("static int pick_go;")
+    L.append("")
     L.append("/* counted: a block asked (the tab's Start mode now does not wait for the game's modes) */")
     L.append("static void start(const char *why, int counted)")
     L.append("{")
     L.append("    if (run.on || !pm_in_game()) return;")
-    L.append("    if ((WAITS_OUT_MULTIBALL || GAME_MODES) && counted) {   /* it waits: the next Start the mode starts it */")
+    L.append("    if (drain_hold || drain_long) {   /* PAD-622: the last drain's TOTAL goes before it starts again */")
+    L.append("        drain_hold = drain_long = 0;")
+    L.append("        end_now(\"ball ended\");")
+    L.append("    }")
+    L.append("    if ((WAITS_OUT_MULTIBALL || GAME_MODES) && counted && !pick_go) {   /* it waits: the next Start starts it */")
     L.append("        static unsigned long said_at;")
     L.append("        const char *what = game_busy();")
     L.append("        if (what) {")
@@ -1881,23 +3424,46 @@ def to_c(program, slug):
     L.append("    } else if (GAME_MODES == 1) {")
     L.append("        pm_log(\"isolated: gives way - one of the game's modes starting ends it\");")
     L.append("    }")
-    L.append("    run.own_mball = 0;")
+    L.append("    run.own_mball = run.pick_mball = 0;")
+    L.append("    if (pick_go == 2 && GAME_MODES) {   /* PAD-768: the pick ends the game's mini modes; a multiball plays on */")
+    L.append("        pm_game_modes_end(\"a battle picked on the selection screen\");")
+    L.append("        run.pick_mball = pm_aside() == (int)PM_STOCK_MULTIBALL;")
+    L.append("        if (run.pick_mball) pm_log(\"picked in the game's multiball: it runs through it\");")
+    L.append("    }")
+    if battle_slots or place_ids or challenge_names or g.battle_won:
+        L.append("    battle_won = 0;")
     L.append("    run.on = 1;")
     L.append("    run.player = pm_player();")
+    if g.lit:
+        L.append("    lit_started(run.player);          /* PAD-503: begun, however it began: its light is out */")
+    if ready:
+        L.append("    if (run.player <= 4) ready_as[run.player] = 0;   /* PAD-733: begun: no more blink */")
     L.append("    run.ticks_left = RUN_SECONDS * TICKS_PER_SECOND;")
     L.append("    run.seconds_shown = RUN_SECONDS;")
     L.append("    run.elapsed = 0;")
+    if g.fb_used:
+        L.append("    fb_n = 0;                         /* PAD-733: its hit sounds rise from the first again */")
     L.append("    run.shots = 0;")
     L.append("    run.total = 0;")
+    L.append("    for (unsigned k = 0; k < %d; k++) MH[k] = 0;   /* PAD-721: its progress shots, from none */" % nhits)
+    if has_bar:
+        L.append("    bar_max = run.ticks_left;")
+        L.append("    bar_hold = 0;")
+        L.append("    bar_show(1);                      /* PAD-521: its name in the game's bar */")
     if g.mech:
         L.append("    scoop_next = 0;")
+        L.append("    clock_hold = 0;                   /* PAD-621 */")
     L.append("    hide_ticks = 0;")
     L.append('    reset_mode();')
+    if g.combos:
+        L.append("    combo_clear();                    /* PAD-708: no combo or chain from before it began */")
     if watch:
         L.append("    screen_away = 0;")
     L.append("    if (screen) {")
     L.append("        words(MODE_NAME, 0, 0);")
     L.append("        pm_show(screen, 1);")
+    L.append("        if (WORDS_ONLY) flash_ticks = %d * TICKS_PER_SECOND / 1000;   /* PAD-521: its name over the intro */"
+             % WORDS_NAME_MS)
     L.append("    }")
     if has_hud:
         L.append("    {")
@@ -1905,6 +3471,7 @@ def to_c(program, slug):
         L.append("        for (k = 0; k < 3; k++) {")
         L.append('            kit_copy(hud_val[k], sizeof hud_val[k], "0");')
         L.append("            kit_copy(hud_sub[k], sizeof hud_sub[k], HUD_SUB[k]);")
+        L.append("            kit_copy(hud_lab[k], sizeof hud_lab[k], HUD_LABEL[k]);")
         L.append("        }")
         L.append("    }")
         L.append("    hud_level = 0;")
@@ -1918,7 +3485,10 @@ def to_c(program, slug):
         L.append("        pa_music_begin(&own);")
         L.append("    }")
     L.append('    pm_log("START (%s): player %u", why, run.player);')
+    L.append("    quiet_shots();                    /* PAD-707: the shots it does not light, dark */")
     L.append("    on_mode_start();")
+    if has_info:
+        L.append("    if (run.on) info_show(1);          /* PAD-547: what the start's blocks set, on the first frame */")
     if has_hud:
         L.append("    if (run.on) hud_show();            /* what the start's blocks set, on the first frame */")
     L.append("}")
@@ -1927,44 +3497,90 @@ def to_c(program, slug):
     L.append("{")
     L.append("    if (!run.on || ending) return;    /* an End block in When the mode ends */")
     L.append("    ending = 1;")
+    if battle_slots or place_ids or challenge_names:
+        L.append("    const int won = battle_won;       /* PAD-706: as it ended, before When the mode ends runs */")
     L.append("    on_mode_end();")
     L.append("    ending = 0;")
+    if media:   # PAD-733: KING CAESAR's final blow asks its clip, then End - the TOTAL was hidden under it
+        L.append("    if (clip_waiting || pm_clip_playing()) end_clip = 1;   /* PAD-733: a full-screen clip asked as it "
+                 "ended (a final blow's) is its ending's too: the TOTAL after it */")
     L.append("    run.on = 0;")
+    if g.combos:
+        L.append("    combo_clear();                    /* PAD-708: its combos in a row end with it */")
     if media:
         L.append("    loop_waiting = 0;")
-        L.append("    if (looping) {                    /* the city behind the HUD again */")
-        L.append("        pm_backdrop(0);")
-        L.append("        looping = 0;")
-        L.append("    }")
+        L.append("    if (end_cover) {                  /* PAD-733: When the mode ends looped a clip: behind its TOTAL, in the loop's place */")
+        L.append("        const char *n = pa_clip_name(&own, end_cover);")
+        L.append("        if (n && pm_backdrop(n)) pm_log(\"own clip %s (%s) behind its TOTAL\", end_cover, n);")
+        L.append("        end_cover = 0;")
+        if note_cue:
+            L.append("    } else if (!looping) cover_total();   /* PAD-658: nothing loops: its cover clip behind the TOTAL */")
+        else:
+            L.append("    }")
+        L.append("    looping = 0;                      /* PAD-658: the runtime keeps the loop behind the TOTAL it holds, then")
+        L.append("                                       * the city again (at once for an end that holds nothing) */")
         L.append("    pa_end(&own);                     /* its music fades, the game's comes back */")
+    if g.shows:
+        L.append("    show_last_pass();                 /* PAD-646: a show running until the mode ends finishes its pass */")
     L.append("    unlight_all();                    /* a show it ends with paints on, then hands back */")
+    if has_info:
+        L.append("    info_show(0);                     /* PAD-547: its line goes with it */")
+    if words_only:
+        L.append("    if (!points_award) points_hide();   /* PAD-709: a scored number goes; an Award's stays its moment */")
+    L.append("    total_due = screen && screen_words ? award_ticks%s : 0;   /* PAD-574: an Award it ended on, then its TOTAL */"
+             % (("" if has_hud else " + award_next_ticks") + (" + (points_award ? points_ticks : 0)" if words_only else "")))
+    L.append("    award_ticks = 0;")
+    if has_bar:
+        L.append("    bar_show(0);                      /* PAD-521: the bar full, kept through its total */")
+        L.append("    bar_hold = ENDING_NOW_MS / 1000 * TICKS_PER_SECOND + total_due;")
+        L.append("    ended_begun = pm_begun();")
     L.append("    if (screen) {")
-    L.append('        words("TOTAL", (long long)run.total, 1);')
-    L.append("        hide_ticks = %d * TICKS_PER_SECOND;" % (TOTAL_MS // 1000))
+    L.append("        flash_ticks = 0;")
     L.append("        ended_begun = pm_begun();")
     if watch:
         L.append("        if (screen_away) pm_show(screen, 1);")
         L.append("        screen_away = 0;")
+    L.append("        if (!total_due) total_show();")
     L.append("    }")
     if has_hud:
         L.append("    {                                 /* the TOTAL, as the examples end */")
         L.append("        char n[32];")
         L.append("        int k;")
-        L.append('        kit_hud_title(&hud, MODE_NAME " TOTAL", "");')
+        L.append('        kit_hud_title(&hud, end_title[0] ? end_title : MODE_NAME " TOTAL", end_line[0] ? end_line : "");')
+        L.append("        end_title[0] = end_line[0] = 0;")
         L.append("        for (k = 0; k < 3; k++) kit_hud_counter(&hud, k, 0, 0, 0);")
         L.append("        kit_hud_timer(&hud, -1);")
-        L.append("        kit_hud_gauge(&hud, -1, 0);")
-        L.append('        kit_hud_award(&hud, %du, kit_num(n, sizeof n, run.total), " ");' % TOTAL_MS)
-        L.append("        kit_hud_hide_in(&hud, %du);" % TOTAL_MS)
+        L.append("        if (!HUD_METER) kit_hud_gauge(&hud, -1, 0);   /* PAD-658: a meter stays, following on */")
+        L.append('        kit_hud_award(&hud, ENDING_HOLD_MS, kit_num(n, sizeof n, run.total), " ");')
+        L.append("        kit_hud_hide_in(&hud, ENDING_HOLD_MS);")
         L.append("    }")
     L.append("    if (GAME_MODES == 2) pm_block_game_modes(0);   /* the game's modes may start again */")
     L.append("    /* the total keeps the display watched for its moment on its HUD or its own screen (the kit's")
     L.append("     * kit_end_after, pm_end_holding); a drain or the game hands it back at once (end_now) */")
-    L.append("    if (!(DISPLAY_PRIORITY && %s && pm_end_holding(ENDING_MS))) {" % ("1" if has_hud else "screen"))
+    L.append("    if (!(DISPLAY_PRIORITY && %s && pm_end_holding(ENDING_HOLD_MS + total_due * 1000 / TICKS_PER_SECOND))) {"
+             % ("1" if has_hud else "screen"))
     L.append("        pm_display_priority(0);")
     L.append("        pm_end();")
     L.append("    }")
     L.append('    pm_log("END (%s): %u scores, total %llu", why, run.shots, (unsigned long long)run.total);')
+    if battle_slots:
+        L.append("    if (battle_held) {                /* PAD-706: the battle it replaced, won or lost: the game counts it */")
+        L.append("        battle_held = 0;")
+        L.append('        pm_log("the battle it took the place of: %s", won ? "WON" : "lost");')
+        L.append("        pm_roster_over(won);")
+        L.append("    }")
+    if challenge_names:
+        L.append("    if (challenge_run) {              /* PAD-710: a challenge that is one of the game's modes counts as it */")
+        L.append("        challenge_run = 0;")
+        L.append("        pm_place_over(won);")
+        L.append("    }")
+    if place_ids:
+        L.append("    if (place_held) {                 /* PAD-710: the game's mode it ran in the place of: the game counts it */")
+        L.append("        place_held = 0;")
+        L.append('        pm_log("the game\'s mode it took the place of: %s", won ? "COMPLETED" : "not completed");')
+        L.append("        pm_place_over(won);")
+        L.append("    }")
+    L.append("    end_clip = 0;")
     L.append("}")
     L.append("")
     L.append("/* ended by a drain, a tilt's drain, the game moving on or one of its modes beginning: the game's own")
@@ -1974,12 +3590,122 @@ def to_c(program, slug):
     L.append("{")
     L.append("    end(why);")
     L.append("    hide_ticks = 0;")
+    L.append("    total_hide();                     /* PAD-574: its TOTAL, and an Award waiting for it, go too */")
+    if has_bar:
+        L.append("    bar_hold = 0;")
+        L.append("    pm_status_bar(0, 0, 0);           /* PAD-521: the game's display comes at once */")
     L.append("    if (screen) pm_show(screen, 0);")
+    if has_info:
+        L.append("    info_show(0);")
     L.append("    if (DISPLAY_PRIORITY) pm_display_priority(0);")
     if has_hud:
         L.append("    kit_hud_drop_now();")
     L.append("}")
     L.append("")
+    if challenge_names:                     # PAD-615
+        L.append("/* PAD-615: the game's challenges this mode takes the place of (a Player Challenge game with one picked")
+        L.append(" * starts its script instead of the game's own challenge), claimed as it loads */")
+        L.append("static const char *const CHALLENGE_NAMES[%d] = { %s };   /* \"\" = a new one of its own */"
+                 % (len(challenge_names), ", ".join(_c_str("" if n == CHALLENGE_NEW else n) for n in challenge_names)))
+        L.append("static const int CHALLENGE_LAUNCH[%d] = { %s };   /* PAD-643: 0 its start clip, -1 the player, ms */"
+                 % (len(challenge_names), ", ".join(str(v) for v in challenge_launch)))
+        L.append("static int CHALLENGE_AT[%d];" % len(challenge_names))
+        L.append("static volatile unsigned challenge_picked;   /* set on the game's thread, run on the tick */")
+        L.append("")
+        L.append("static int on_challenge(unsigned at)")
+        L.append("{")
+        L.append("    int k;")
+        L.append("    for (k = 0; k < %d; k++)" % len(challenge_names))
+        L.append("        if (CHALLENGE_AT[k] == (int)at) {")
+        L.append("            challenge_picked |= 1u << k;")
+        L.append("            return 1;                 /* the game's own challenge does not start */")
+        L.append("        }")
+        L.append("    return 0;")
+        L.append("}")
+        L.append("")
+    if battle_slots:                        # PAD-706
+        L.append("/* PAD-706: the battles this mode takes the place of on the game's battle selection screen (Godzilla), claimed")
+        L.append(" * as it loads: picking one runs its script instead of the game's battle, and the battle counts as the game's")
+        L.append(" * own, won or lost, when the mode ends */")
+        L.append("static const unsigned BATTLE_SLOTS[%d] = { %s };"
+                 % (len(battle_slots), ", ".join(str(max(0, v)) for v in battle_slots)))
+        L.append("static const unsigned BATTLE_MORE[%d] = { %s };   /* PAD-707: 1 = a new monster of its own on the screen, in its place */"
+                 % (len(battle_slots), ", ".join("1" if v in battle_more else "0" for v in battle_slots)))
+        L.append('#define MORE_PAGE "%s"      /* PAD-707: its tile nodes on the selection screen (the build adds them) */'
+                 % MK.page_names(slug)[0])
+        if battle_more and preview:
+            L.append("static const unsigned char MORE_SHOTS[%d] = { %s };   /* PAD-733: the shots it lights (SHOT_NAMES) */"
+                     % (len(preview), ", ".join(str(i) for i in preview)))
+        L.append("static volatile unsigned battle_picked;    /* set on the game's thread, run on the tick */")
+        L.append("static unsigned battle_player;             /* who picked */")
+        L.append("static unsigned long battle_at;            /* its scripts run from this pm_ms(), once the selection screen has closed */")
+        L.append("static int battle_cleared;                 /* PAD-768: the game's mini modes ended for this pick */")
+        L.append("")
+        L.append("static int on_battle(unsigned slot)")
+        L.append("{")
+        L.append("    /* PAD-733: a pick starts as the selection screen's close ends (pm_roster_closing), as the game's battle")
+        L.append("     * does: the tick it is over, its start clip at once */")
+        L.append("    unsigned k;")
+        L.append("    if (!pm_in_game()) return 0;")
+        L.append("    for (k = 0; k < %d; k++)" % len(battle_slots))
+        L.append("        if (BATTLE_SLOTS[k] == slot) {")
+        L.append("            if (run.on) {                 /* already running: the pick is taken, nothing restarts */")
+        L.append("                battle_held = 1;")
+        L.append('                pm_log("battle %u picked while it runs - its end gives the pick back", slot);')
+        L.append("                return 1;")
+        L.append("            }")
+        L.append("            battle_picked |= 1u << k;")
+        L.append("            battle_cleared = 0;")
+        L.append("            battle_player = pm_player();")
+        L.append("            battle_at = pm_ms();")
+        L.append('            pm_log("battle %u picked - its script runs once the selection screen has closed", slot);')
+        L.append("            return 1;                     /* the game's battle does not start */")
+        L.append("        }")
+        L.append("    return 0;")
+        L.append("}")
+        L.append("")
+    if done_hats:                           # PAD-747
+        done_hats = done_hats[:DONE_HATS_MAX]
+        L.append("/* PAD-747: When the player has completed some of the game's modes: each script's count and the game's modes it")
+        L.append(" * counts (pm_game_modes_done), what each player had last looked, and a count met waiting for nothing in its way */")
+        for k, (_c, ids) in enumerate(done_hats):
+            L.append("static const unsigned char DONE_IDS_%d[%d] = { %s };" % (k, max(1, len(ids)),
+                                                                        ", ".join(str(i) for i in ids) or "0"))
+        L.append("static const unsigned char *const DONE_IDS[%d] = { %s };"
+                 % (len(done_hats), ", ".join("DONE_IDS_%d" % k for k in range(len(done_hats)))))
+        L.append("static const unsigned DONE_N[%d] = { %s };" % (len(done_hats), ", ".join(str(len(i)) for _c, i in done_hats)))
+        L.append("static const unsigned DONE_NEED[%d] = { %s };" % (len(done_hats), ", ".join(str(c) for c, _i in done_hats)))
+        L.append("static unsigned done_last[%d][5];" % len(done_hats))
+        L.append("static unsigned char done_pend[%d][5];" % len(done_hats))
+        L.append("")
+    if place_ids:                           # PAD-710
+        L.append("/* PAD-710: the game's own modes this mode takes the place of, claimed as it loads: when the game starts one,")
+        L.append(" * its script runs instead and, where the game's framework is known, the mode counts as the game's, completed")
+        L.append(" * or not, when it ends */")
+        L.append("static const unsigned PLACE_IDS[%d] = { %s };"
+                 % (len(place_ids), ", ".join(str(max(0, v)) for v in place_ids)))
+        L.append("static volatile unsigned place_picked;     /* set on the game's thread, run on the tick */")
+        L.append("static unsigned place_player;              /* whose */")
+        L.append("")
+        L.append("static int on_place(unsigned id)")
+        L.append("{")
+        L.append("    unsigned k;")
+        L.append("    if (!pm_in_game()) return 0;")
+        L.append("    for (k = 0; k < %d; k++)" % len(place_ids))
+        L.append("        if (PLACE_IDS[k] == id) {")
+        L.append("            if (run.on) {                 /* already running: it takes it, nothing restarts */")
+        L.append("                place_held = 1;")
+        L.append('                pm_log("the game started its %s while this runs - nothing restarts", pm_game_mode_name(id));')
+        L.append("                return 1;")
+        L.append("            }")
+        L.append("            place_picked |= 1u << k;")
+        L.append("            place_player = pm_player();")
+        L.append('            pm_log("the game started its %s - this runs in its place", pm_game_mode_name(id));')
+        L.append("            return 1;                     /* the game's own does not start */")
+        L.append("        }")
+        L.append("    return 0;")
+        L.append("}")
+        L.append("")
     L.append("/* ---- the callbacks ---- */")
     L.append("static void on_init(void)")
     L.append("{")
@@ -1997,7 +3723,40 @@ def to_c(program, slug):
         L.append("    pa_load(&own);")
     for name in g.wizard_names:                     # PAD-457: the game's own lighting leaves them to this mode
         L.append("    pm_game_wizard_claim_named(%s);" % _c_str(name))
-    L.append("    (void)E; (void)EVENT_NAMES; (void)HIT_OF; (void)H;")
+    if challenge_names:                             # PAD-615
+        L.append("    for (i = 0; i < %d; i++) {" % len(challenge_names))
+        L.append("        if (!CHALLENGE_NAMES[i][0]) {     /* its own, on the game's start menu under its name */")
+        L.append("            CHALLENGE_AT[i] = pm_challenge_add(MODE_NAME, on_challenge);")
+        L.append("            if (CHALLENGE_AT[i] < 0) pm_log(\"no challenge of its own: this game's start menu is not ours to add to\");")
+        L.append("            else pm_challenge_launch((unsigned)CHALLENGE_AT[i], CHALLENGE_LAUNCH[i]);   /* PAD-643 */")
+        L.append("            continue;")
+        L.append("        }")
+        L.append("        CHALLENGE_AT[i] = pm_challenge_named(CHALLENGE_NAMES[i]);")
+        L.append("        if (CHALLENGE_AT[i] < 0 || !pm_challenge_claim((unsigned)CHALLENGE_AT[i], on_challenge))")
+        L.append('            pm_log("the challenge %s is not one this game lets a mode take the place of", CHALLENGE_NAMES[i]);')
+        L.append("        else {")
+        L.append("            pm_challenge_title((unsigned)CHALLENGE_AT[i], MODE_NAME);   /* the start menu shows its name */")
+        L.append("            pm_challenge_launch((unsigned)CHALLENGE_AT[i], CHALLENGE_LAUNCH[i]);   /* PAD-643 */")
+        L.append("        }")
+        L.append("    }")
+    if place_ids:                                   # PAD-710
+        L.append("    for (i = 0; i < %d; i++)" % len(place_ids))
+        L.append("        if (!pm_place_claim(PLACE_IDS[i], on_place))")
+        L.append('            pm_log("the game\'s mode %u is not one this game lets a mode take the place of", PLACE_IDS[i]);')
+    if battle_slots:                                # PAD-706
+        L.append("    for (i = 0; i < %d; i++)" % len(battle_slots))
+        L.append("        if (BATTLE_MORE[i] ? pm_roster_more(BATTLE_SLOTS[i], MODE_NAME, MORE_PAGE, 0, on_battle) < 0   /* PAD-707 */")
+        L.append("                           : !pm_roster_claim(BATTLE_SLOTS[i], on_battle))")
+        L.append('            pm_log("battle %u is not one this game lets a mode take the place of%s", BATTLE_SLOTS[i],')
+        L.append('                   BATTLE_MORE[i] ? " (or stand a new monster in its place)" : "");')
+        if battle_more and preview:
+            L.append("        else if (BATTLE_MORE[i]) {      /* PAD-733: the shots it lights, blinking while the cursor is on its tile */")
+            L.append("            uint64_t m = 0;")
+            L.append("            unsigned j;")
+            L.append("            for (j = 0; j < %d; j++) m |= S[MORE_SHOTS[j]];" % len(preview))
+            L.append("            pm_roster_more_shots(m);")
+            L.append("        }")
+    L.append("    (void)E; (void)EVENT_NAMES; (void)HIT_OF; (void)H; (void)MH;")
     L.append("}")
     L.append("")
     L.append("static void find_screen(void)")
@@ -2010,16 +3769,90 @@ def to_c(program, slug):
     L.append("    if (!run.on) pm_show(screen, 0);")
     L.append("}")
     L.append("")
+    if words_only:
+        L.append("static void find_total(void)          /* PAD-574 */")
+        L.append("{")
+        L.append("    static unsigned tries;")
+        L.append("    if (total || !pm_can(PM_CAN_SCREENS) || (tries++ % 30) != 0) return;")
+        L.append('    total = pm_node("hud", TOTAL_NODE);')
+        L.append("    if (!total) return;")
+        L.append('    total_words = pm_text("hud", TOTAL_TEXT);')
+        L.append('    points = pm_node("hud", POINTS_NODE);   /* PAD-709: a card built before it has none */')
+        L.append('    points_words = points ? pm_text("hud", POINTS_TEXT) : 0;')
+        L.append("    if (points) pm_show(points, 0);")
+        L.append('    total_name = pm_node("hud", TOTAL_NAME_NODE);')
+        L.append('    total_name_words = total_name ? pm_text("hud", TOTAL_NAME_TEXT) : 0;')
+        L.append("    pm_show(total, 0);                /* built shown, as every screen is */")
+        L.append("    if (total_name) pm_show(total_name, 0);")
+        L.append("}")
+        L.append("")
+    if has_info:
+        L.append("static void find_info(void)           /* PAD-547 */")
+        L.append("{")
+        L.append("    static unsigned tries;")
+        L.append("    if (info || !pm_can(PM_CAN_SCREENS) || (tries++ % 30) != 0) return;")
+        L.append('    info = pm_node("hud", INFO_NODE);')
+        L.append("    if (!info) return;")
+        L.append('    info_words = pm_text("hud", INFO_TEXT);')
+        L.append("    info_up = 1;                      /* built shown, as every screen is */")
+        L.append("    info_now[0] = 0;")
+        L.append("    if (!run.on) info_show(0);")
+        L.append("}")
+        L.append("")
+    if spare_inputs:                        # PAD-826: each spare switch asked for until the runtime gives its shot bit
+        L.append("/* PAD-826: the spare switches its scripts wait for: board, input, closed reads high */")
+        L.append("static const unsigned char SPARE_IN[%d][3] = { %s };" % (len(spare_inputs), ", ".join(
+            "{ %d, %d, %d }" % k for k in spare_inputs)))
+        L.append("static uint64_t spare_mask[%d];" % len(spare_inputs))
+        L.append("")
+        L.append("static void spare_ask(void)")
+        L.append("{")
+        L.append("    static unsigned tries;")
+        L.append("    char name[24];")
+        L.append("    int k;")
+        L.append("    if ((tries++ % 30) != 0 || tries > 60u * 300u) return;   /* twice a second, the first five minutes */")
+        L.append("    for (k = 0; k < %d; k++)" % len(spare_inputs))
+        L.append("        if (!spare_mask[k]) {")
+        L.append('            pm_snprintf(name, sizeof name, "Spare %u:%u", SPARE_IN[k][0], SPARE_IN[k][1]);')
+        L.append("            spare_mask[k] = pm_spare_shot(SPARE_IN[k][0], SPARE_IN[k][1], name, SPARE_IN[k][2]);")
+        L.append("        }")
+        L.append("}")
+        L.append("")
     L.append("static void on_shot(uint64_t shot)")
     L.append("{")
     L.append("    unsigned p = pm_player();")
     L.append("    int i, was_on = run.on;           /* the mode's state before this shot */")
+    L.append("    int idle;")
     L.append("    if (!pm_in_game() || p < 1 || p > 4) return;")
+    L.append("    /* PAD-675: while the mode is not running, and no other of ours is, its idle scripts count toward it -")
+    L.append("     * through the game's battles too (PAD-680); while another of ours runs nothing counts, notes or shows */")
+    L.append("    idle = !was_on && counting();")
+    L.append("    (void)idle;")
+    switch_scripts = scripts_of("switch")
+    if switch_scripts:
+        L.append("    if (shot & 1ull) {                /* PAD-675: a playfield switch was hit (its 0x1 dispatch) */")
+        L.extend("    " + line if line else line for code in switch_scripts for line in code.split("\n"))
+        L.append("    }")
+    spare_scripts = scripts_of("spare_switch")
+    if spare_scripts:                       # PAD-826: a spare switch's bit is none of the port's named shots
+        L.extend(spare_scripts)
     L.append("    if (!(shot & named)) return;      /* a switch's 0x1 dispatch, not a shot */")
     L.append("    for (i = 0; i < %d; i++)" % len(g.hits))
-    L.append("        if (S[(int)HIT_OF[i]] & shot) H[i][p]++;")
+    L.append("        if (S[(int)HIT_OF[i]] & shot) {")
+    L.append("            H[i][p]++;")
+    L.append("            if (was_on && run.on) MH[i]++;   /* PAD-721: the shot that starts it is not one */")
+    L.append("        }")
     L.append("    (void)i; (void)was_on;")
-    L.extend(scripts_of("shot", "any_shot"))
+    if g.combos:
+        L.append("    combo_shot(shot, was_on, idle);   /* PAD-708: the combos this shot makes, before any script runs */")
+    if g.lit:
+        L.append("    lit_shot(shot);                   /* PAD-503: the shot it is lit at starts it */")
+        L.append("    if (!was_on && run.on) return;    /* PAD-658: and is that alone, not a shot \"while it is not running\" too */")
+    if g.fb_used:
+        L.append("    fb_now = shot;                    /* PAD-733: the shot a score below is owed a word for */")
+    L.extend(scripts_of("shot", "any_shot", "combo"))   # PAD-708: a combo's script in its place among them
+    if g.fb_used:
+        L.append("    fb_now = 0;")
     L.append("}")
     L.append("")
     L.append("static void on_event(unsigned id)")
@@ -2034,36 +3867,178 @@ def to_c(program, slug):
     L.append("{")
     L.append("    unsigned seconds = 0;")
     L.append("    int in_game = pm_in_game();")
+    if spare_inputs:
+        L.append("    spare_ask();                      /* PAD-826: the spare switches' shot bits */")
     L.append("    find_screen();")
+    L.append("    if (drain_hold && !pm_ball_end_holding()) {   /* PAD-622: the game's end of ball goes on: so does its TOTAL */")
+    L.append("        drain_hold = drain_long = 0;")
+    L.append("        end_now(\"ball ended\");")
+    L.append("    }")
+    if words_only:
+        L.append("    find_total();")
+    if has_info:
+        L.append("    find_info();")
     if has_hud:
         L.append("    kit_hud_tick(&hud);                /* finds it, expires an award, writes what changed */")
+    if note_cue:
+        L.append("    note_loop_tick();                 /* PAD-658: a note's loop goes with it */")
     if media:
         L.append("    own_tick();                       /* every tick: an end call outlives the mode */")
     if g.shows:
         L.append("    show_tick();                      /* every tick: an end show outlives the mode */")
-    L.append("    if (in_game && !was_in_game) {    /* a new game: every player's \"each game\" values */")
+    if g.gi:
+        L.append("    gi_tick();                        /* PAD-767: the GI held dark, or given back as the mode ends */")
+    L.append("    if (new_game()) {                 /* every player's \"each game\" values, and no timer runs on */")
     L.append("        unsigned p, v;")
     L.append("        for (p = 0; p < 5; p++) {")
     L.append("            for (v = 0; v < %d; v++) H[v][p] = 0;" % nhits)
+    for hm in hit_moves:
+        L.append("            %s[p] = 0;" % hm)
     for i, (_n, reset) in enumerate(g.var_names):
         L.append("            %s = 0;" % g.var(i, "p"))
+    if g.lit:
+        L.append("            if (lit_as[p]) pm_log(\"a new game: player %u's light is out\", p);")
+        L.append("            lit_as[p] = 0;            /* PAD-503: no one is lit at the start of a game */")
+    if ready:
+        L.append("            ready_as[p] = 0;          /* PAD-733: nor ready */")
     L.append("        }")
+    L.append("        for (v = 0; v < %d; v++) T[v] = 0;" % ntimers)
+    if g.combos:
+        L.append("        combo_clear();                /* PAD-708 */")
+    if done_hats:                                   # PAD-747: a met count belongs to its game
+        L.append("        for (v = 0; v < %d; v++)" % len(done_hats))
+        L.append("            for (p = 0; p < 5; p++) done_last[v][p] = 0, done_pend[v][p] = 0;")
     L.append("    }")
-    L.append("    if (!in_game && was_in_game) {    /* the game is over: no timer runs on */")
-    L.append("        unsigned t;")
-    L.append("        for (t = 0; t < %d; t++) T[t] = 0;" % ntimers)
-    L.append("    }")
-    L.append("    was_in_game = in_game;")
+    if g.combos:
+        L.append("    if (combo_chain_at && pm_ms() - combo_chain_at > combo_chain_ms)   /* PAD-708: its window lapsed */")
+        L.append("        combo_chain_end();")
+    if g.lit:
+        L.append("    lit_tick();                       /* PAD-503: the player up's light while it is not running */")
+    if g.fb_used:
+        L.append("    fb_tick();                        /* PAD-733: a shot that scored and said nothing */")
+    if ready:
+        L.append("    ready_tick();                     /* PAD-733: its count done, the shots that start it blink */")
     L.append("    if (++poll % 30 == 0) {            /* the tab's Start mode now / End mode */")
     L.append('        if (pm_trigger("%s.start")) start("trigger file", 0);' % slug)
     L.append('        if (pm_trigger("%s.stop")) end("trigger file");' % slug)
     L.append("    }")
-    L.append("    if (hide_ticks && !run.on && pm_begun() != ended_begun) {   /* PAD-413: another mode began */")
+    L.append("    if ((hide_ticks || total_due) && !run.on && pm_begun() != ended_begun) {   /* PAD-413: another mode began */")
     L.append("        hide_ticks = 0;")
-    L.append("        if (screen) pm_show(screen, 0);")
+    L.append("        total_hide();")
     L.append('        pm_log("its total gives way - another mode began");')
     L.append("    }")
-    L.append("    if (hide_ticks && --hide_ticks == 0 && !run.on && screen) pm_show(screen, 0);")
+    if has_bar:
+        L.append("    if (bar_hold && !run.on && (pm_begun() != ended_begun || --bar_hold == 0)) {")
+        L.append("        bar_hold = 0;")
+        L.append("        pm_status_bar(0, 0, 0);       /* PAD-521: the bar back (not if another mode of ours has it) */")
+        L.append("    }")
+    L.append("    if (hide_ticks && --hide_ticks == 0 && !run.on) total_hide();")
+    if not has_hud:
+        L.append("    if (award_next_ticks && (!total_due || run.on)) award_next_ticks = 0;")
+        L.append("    if (award_next_ticks && total_due == award_next_ticks) {   /* PAD-574: the next Award's turn */")
+        if words_only:
+            L.append("        if (award_next_wv && points_show(award_next_text, award_next_value,")
+            L.append("                                                         award_next_ticks * 1000 / TICKS_PER_SECOND))")
+            L.append("            points_award = 1;             /* PAD-709: under the bar, as the one before it */")
+            L.append("        else if (screen_words) {")
+            L.append("            points_hide();")
+            L.append("            pm_set_text(screen_words, award_next);")
+            L.append("            pm_show(screen, 1);")
+            L.append("        }")
+        else:
+            L.append("        if (screen_words) pm_set_text(screen_words, award_next);")
+        L.append("        award_next_ticks = 0;")
+        L.append("    }")
+    L.append("    if (total_due && !run.on && --total_due == 0) total_show();   /* PAD-574: the Award it ended on has shown */")
+    challenge_scripts = scripts_of("challenge")
+    if challenge_scripts:                           # PAD-615: the challenge picked at the ball's start
+        L.append("    if (challenge_picked) {")
+        L.append("        unsigned picked = challenge_picked;")
+        L.append("        challenge_picked = 0;")
+        L.append("        if (in_game) {")
+        if g.mech:
+            L.append("            ball_starting = 1;            /* PAD-621: no hold that waits for a ball at the post */")
+        L.extend("        " + line if line else line for code in challenge_scripts for line in code.split("\n"))
+        L.append("            if (run.on) challenge_run = 1;   /* PAD-710 */")
+        if g.mech:
+            L.append("            ball_starting = 0;")
+        L.append("        }")
+        L.append("    }")
+    battle_scripts = scripts_of("battle")
+    if battle_slots:                                # PAD-706: a battle picked, once the selection screen has closed
+        # PAD-768: the game's mini modes end at the pick, on the next tick: their own ending (Jet Fighter Attack's TOTAL
+        # clip) then plays under the selection screen's close, whose end stops the game's player, not over the start clip
+        L.append("    if (battle_picked && !battle_cleared && GAME_MODES && in_game && pm_player() == battle_player) {")
+        L.append("        battle_cleared = 1;")
+        L.append("        pm_game_modes_end(\"a battle picked on the selection screen\");")
+        L.append("    }")
+        L.append("    if (battle_picked && (long)(pm_ms() - battle_at) >= 0 && !pm_roster_closing()) {")
+        L.append("        unsigned picked = battle_picked;")
+        L.append("        battle_picked = 0;")
+        L.append("        if (!in_game || pm_player() != battle_player) {")
+        L.append('            pm_log("the battle pick lapsed - the player changed or the game ended");')
+        L.append("            pm_roster_done();             /* the runtime gives it back to that player, or drops it */")
+        L.append("        } else if (!run.on && pm_other_running()) {")
+        L.append("            battle_picked = picked;       /* another of ours runs: it starts when that one ends */")
+        L.append("            battle_at = pm_ms() + 500;")
+        L.append("        } else {")
+        if media:
+            L.append("            clip_after = 0;               /* PAD-733: its start clip with its start, as the game's battle */")
+        L.append("            pick_go = 2;                  /* PAD-733: the game let its battle start: nothing to wait out;")
+        L.append("                                           * PAD-768: and it wins over the game's mini modes */")
+        L.extend("        " + line if line else line for code in battle_scripts for line in code.split("\n"))
+        L.append("            pick_go = 0;")
+        if media:
+            L.append("            clip_after = PA_CLIP_AFTER_MS;")
+            L.append("            own_clip_due();               /* on the glass in this tick: no frame of the HUD before it */")
+        L.append("            if (run.on) battle_held = 1;")
+        L.append("            else {")
+        L.append('                pm_log("the battle pick started nothing - given back, a battle lost");')
+        L.append("                pm_roster_done();")
+        L.append("            }")
+        L.append("        }")
+        L.append("    }")
+    done_scripts = scripts_of("completed")
+    if done_hats:                                   # PAD-747: the game's modes completed - each script's count, met
+        L.append("    if (in_game && pm_player() >= 1 && pm_player() <= 4) {")
+        L.append("        unsigned p = pm_player(), done_fired = 0, k;")
+        L.append("        for (k = 0; k < %du; k++) {" % len(done_hats))
+        L.append("            int n = pm_game_modes_done(DONE_IDS[k], DONE_N[k]);")
+        L.append("            if (n < 0) continue;              /* the runtime sees none of them here */")
+        L.append("            if ((unsigned)n != done_last[k][p]) {")
+        L.append("                if ((unsigned)n > done_last[k][p])")
+        L.append('                    pm_log("%d of the game\'s modes completed, %u wanted (player %u)", n, DONE_NEED[k], p);')
+        L.append("                if ((unsigned)n >= DONE_NEED[k] && done_last[k][p] < DONE_NEED[k]) done_pend[k][p] = 1;")
+        L.append("                done_last[k][p] = (unsigned)n;")
+        L.append("            }")
+        L.append("            /* met: it runs the moment nothing is in its way (the mode just completed is often still")
+        L.append("             * finishing) - another mode of ours, or one of the game's it gives way to */")
+        L.append("            if (done_pend[k][p] && !run.on && !pm_other_running() && !(GAME_MODES && pm_aside())) {")
+        L.append("                done_pend[k][p] = 0;")
+        L.append("                done_fired |= 1u << k;")
+        L.append("            }")
+        L.append("        }")
+        L.extend("    " + line if line else line for code in done_scripts for line in code.split("\n"))
+        L.append("    }")
+    place_scripts = scripts_of("game_mode")
+    if place_ids:                                   # PAD-710: the game started one of its modes this one holds
+        L.append("    if (place_picked) {")
+        L.append("        unsigned picked = place_picked;")
+        L.append("        place_picked = 0;")
+        L.append("        if (!in_game || pm_player() != place_player) {")
+        L.append('            pm_log("the game\'s start of its mode lapsed - the player changed or the game ended");')
+        L.append("            pm_place_over(0);")
+        L.append("        } else {")
+        L.append("            pick_go = 1;                  /* PAD-733: the game began its own: nothing to wait out */")
+        L.extend("        " + line if line else line for code in place_scripts for line in code.split("\n"))
+        L.append("            pick_go = 0;")
+        L.append("            if (run.on) place_held = 1;")
+        L.append("            else {")
+        L.append('                pm_log("the game started its mode and this started nothing - not completed");')
+        L.append("                pm_place_over(0);")
+        L.append("            }")
+        L.append("        }")
+        L.append("    }")
     timer_scripts = scripts_of("timer_done")
     if timer_scripts:
         L.append("    if (in_game) {                    /* the timers that ran out, then their scripts */")
@@ -2075,6 +4050,13 @@ def to_c(program, slug):
         L.append("        }")
         L.extend("    " + line if line else line for code in timer_scripts for line in code.split("\n"))
         L.append("    }")
+    if has_hud and gauge_live is not None and hud["gauge"]["meter"]:
+        L.append("    if (!run.on) {                    /* PAD-658: the gauge as a meter while it is not running */")
+        L.append("        if (in_game && counting()) {   /* PAD-675: hidden while another of ours runs (PAD-680) */")
+        L.append("            hud_level = %s;" % gauge_live)
+        L.append("            gauge_now(hud_level, 1);")
+        L.append("        } else kit_hud_meter(&hud, -1, 0);")
+        L.append("    }")
     L.append("    sec_changed = 0;")
     L.append("    if (!run.on) return;")
     L.append("    if (!in_game || pm_player() != run.player) {")
@@ -2082,12 +4064,15 @@ def to_c(program, slug):
     L.append("        return;")
     L.append("    }")
     L.append("    if (run.own_mball && pm_balls_in_play() < 2) run.own_mball = 0;   /* its multiball is over */")
-    L.append("    if (GAME_MODES && pm_aside() && !(run.own_mball && pm_aside() == (int)PM_STOCK_MULTIBALL)) {")
+    L.append("    if (run.pick_mball && pm_balls_in_play() < 2) run.pick_mball = 0;   /* PAD-768: the game's is over */")
+    # PAD-710: a mode in the place of one of the game's modes is that mode: the game's others beside it do not end it
+    L.append("    if (GAME_MODES && pm_aside() && !((run.own_mball || run.pick_mball) && pm_aside() == (int)PM_STOCK_MULTIBALL)%s) {"
+             % (" && !place_held" if place_ids else ""))
     L.append("        end_now(\"the game's own mode began\");   /* its screen and HUD go at once, as a tilt's */")
     L.append("        return;")
     L.append("    }")
     L.append("    run.elapsed++;")
-    L.append("    if (RUN_SECONDS) {")
+    L.append("    if (RUN_SECONDS%s) {" % (" && !clock_held()" if g.mech else ""))   # PAD-621: a hold_wait stops it
     L.append("        if (run.ticks_left) run.ticks_left--;")
     L.append("        seconds = secs_left();")
     L.append("        if (seconds != run.seconds_shown) {")
@@ -2096,36 +4081,112 @@ def to_c(program, slug):
     L.append("        }")
     L.append("    }")
     L.append("    (void)seconds;")
+    L.append("    if (WORDS_ONLY && flash_ticks && --flash_ticks == 0 && screen) pm_show(screen, 0);   /* PAD-521 */")
+    L.append("    if (award_ticks) award_ticks--;")
+    if words_only:
+        L.append("    if (points_ticks && --points_ticks == 0) points_hide();   /* PAD-709 */")
+        L.append("    else if (points_ticks) points_place();")
+    if has_bar:
+        L.append("    bar_show(1);                      /* PAD-521: the clock along the bar */")
     L.append("    lamps_tick();")
     if g.mech:
         L.append("    scoop_tick();")
     L.extend(scripts_of("every", "seconds_left"))
-    L.append("    if (run.on && RUN_SECONDS && run.ticks_left == 0)")
+    L.append("    if (run.on && RUN_SECONDS && run.ticks_left == 0) {")
+    if g.wins_by_end:
+        L.append("        battle_won = 1;               /* PAD-706: no block wins the battle: its clock's end does */")
     L.append('        end("time ran out");')
+    L.append("    }")
     if watch:
         L.append("    if (run.on && screen) {           /* its screen out of the way of the game's (PAD-375) */")
-        L.append("        int away = pm_display_covered() || pm_aside();")
+        L.append("        int away = pm_display_covered() || pm_aside() || pm_game_words();   /* PAD-662: any screen of the game's */")
         L.append("        if (away != screen_away) {")
-        L.append("            pm_show(screen, !away);")
+        L.append("            pm_show(screen, !away && (!WORDS_ONLY || flash_ticks));")
         L.append("            screen_away = away;")
         L.append("        }")
         L.append("    }")
     if has_hud:
         L.append("    if (run.on) hud_show();")
+    if has_info:
+        L.append("    if (run.on) info_show(!pm_display_covered() && !pm_aside() && !pm_game_words()%s);   /* PAD-547, PAD-662 */"
+                 % (" && !points_ticks" if words_only else ""))
+    L.append("}")
+    L.append("")
+    L.append("/* PAD-622: a drain while it runs ends it as its clock would - an Award it ended on, then its TOTAL - and the")
+    L.append(" * game's end of ball (its bonus, the next ball, a challenge game's end) waits for that, as it does for the")
+    L.append(" * game's own mini-wizards' totals; a drain while its total still shows waits out the rest. Where the game cannot")
+    L.append(" * wait (a tilted ball, a port without the hold) it all goes at once, as before. */")
+    L.append("static void drain_end(void)")
+    L.append("{")
+    L.append("    unsigned ms;")
+    L.append("    /* PAD-675: not running, and nothing of its own on the glass: the drain is another's. Its end_now here gave")
+    L.append("     * up the display priority and dropped the HUD under the mode whose TOTAL the drain was showing */")
+    L.append("    if (!run.on && !total_due && !hide_ticks) return;")
+    L.append("    drain_long = run.on && pm_can(PM_CAN_BALL_END_HOLD);   /* its TOTAL as long as the game's own then */")
+    if has_hud:
+        L.append("    ms = drain_long ? DRAIN_TOTAL_MS : 0;   /* the HUD's TOTAL */")
+    else:
+        L.append("    ms = 0;")
+    L.append("    end(\"ball ended\");")
+    L.append("    if (screen && (total_due || hide_ticks)) {   /* an Award it ended on, then its TOTAL; or the rest of one */")
+    L.append("        unsigned t = total_due ? total_due + ENDING_NOW_MS / 1000 * TICKS_PER_SECOND : hide_ticks;")
+    L.append("        if (t * 1000 / TICKS_PER_SECOND > ms) ms = t * 1000 / TICKS_PER_SECOND;")
+    L.append("    }")
+    if media:   # PAD-733: v29's drains - the 5 s lost clip took 5.7 of the 6 s, its TOTAL showed a quarter second
+        L.append("    if (ms && (clip_waiting || pm_clip_playing()) && ms < ENDING_MS + END_CLIP_MS)")
+        L.append("        ms = ENDING_MS + END_CLIP_MS;   /* PAD-733: its ending's clip, then its TOTAL, as at its clock's end */")
+    L.append("    if (ms && pm_ball_end_hold(ms)) {")
+    L.append("        drain_hold = 1;                 /* after the ask: a tick between sees the hold, not its end */")
+    L.append('        pm_log("its TOTAL at the drain: the end of ball waits %u ms", ms);')
+    L.append("        return;")
+    L.append("    }")
+    L.append("    drain_long = 0;")
+    L.append("    end_now(\"ball ended\");")
     L.append("}")
     L.append("")
     L.append("static void on_ball_end(void)")
     L.append("{")
     L.append("    unsigned t;")
     L.append("    for (t = 0; t < %d; t++) T[t] = 0;   /* a ball ending stops every timer */" % ntimers)
+    if g.combos:
+        L.append("    combo_clear();                    /* PAD-708: no combo runs on into the next ball */")
     L.extend(scripts_of("ball_end"))
-    L.append("    if (ENDS_ON_DRAIN) end_now(\"ball ended\");")
+    if battle_slots:                                # PAD-706: a pick still waiting for the screen to close lapses
+        L.append("    if (battle_picked) {")
+        L.append("        battle_picked = 0;")
+        L.append('        pm_log("the ball ended before the battle pick started - given back");')
+        L.append("        pm_roster_done();")
+        L.append("    }")
+    if place_ids:                                   # PAD-710: a game's start not begun yet counts as not completed
+        L.append("    if (place_picked) {")
+        L.append("        place_picked = 0;")
+        L.append('        pm_log("the ball ended before it started in the place of the game\'s mode - not completed");')
+        L.append("        pm_place_over(0);")
+        L.append("    }")
+    if battle_slots or place_ids:
+        held = " || ".join(x for x, on in (("battle_held", battle_slots), ("place_held", place_ids)) if on)
+        L.append("    if ((%s) && run.on) drain_end();   /* PAD-706/710: it ends with its ball, as the game's do */" % held)
+        L.append("    else if (ENDS_ON_DRAIN) drain_end();")
+    else:
+        L.append("    if (ENDS_ON_DRAIN) drain_end();")
     if media:
         L.append("    looping = 0;                      /* no backdrop outlives the ball */")
+    if note_cue:
+        L.append("    note_looping = 0;")
     L.append("    {")
     L.append("        unsigned p = P(), v;")
     L.append("        for (v = 0; v < %d; v++) H[v][p] = 0;" % nhits)
+    for hm in hit_moves:
+        L.append("        %s[p] = 0;" % hm)
     L.append('        reset_ball();')
+    if g.lit:
+        L.append("        lit_player = 0;               /* PAD-503: the next ball holds its light again */")
+    if ready:
+        L.append("        ready_player = 0;             /* PAD-733: and its blink */")
+        again = ready_recount(program, g)
+        if again:
+            L.append("        if (ready_as[p] && !run.on) hud_progress(%s);   /* PAD-733: its count starts again with the ball */"
+                     % again)
     L.append("    }")
     L.append("}")
     L.append("")
@@ -2141,10 +4202,166 @@ def to_c(program, slug):
     return "\n".join(L) + "\n"
 
 
-#: the C that holds the shots' lights (PAD-376); %(n)d shots named, LIT sized %(size)d
+def _combo_c(g):
+    """PAD-708: the combo hats' table, each one's shots made so far, and the two values (the combos in a row, a
+    combo's shots made so far). Before the scripts and the HUD, which read the values."""
+    rows, words = [], []
+    gates = {"idle": 1, "running": 2}
+    for k, h in enumerate(g.combos):
+        steps = combo_steps(h)[:COMBO_STEPS_MAX]
+        codes = [[-1] if x == COMBO_ANY else [-2] if x == COMBO_LIT else [g.shot_i(y) for y in step_shots(x)][:COMBO_ALTS_MAX]
+                 for x in steps]
+        n = len(codes) if len(codes) >= 2 and all(codes) else 0      # fewer than two shots, or an empty step: never
+        codes += [[]] * (COMBO_STEPS_MAX - len(codes))
+        rows.append("    { %d, %du, %d, { %s } }," % (n, combo_ms(h), gates.get(h.get("when"), 0), ", ".join(
+            "{ %s }" % ", ".join(str(c) for c in (step + [-3] * (COMBO_ALTS_MAX - len(step)))) for step in codes)))
+        words.append(" * COMBO[%d]: %s" % (k, _comment(_hat_words(h))))
+    return _COMBO_C % {"n": len(g.combos), "steps": COMBO_STEPS_MAX, "alts": COMBO_ALTS_MAX, "rows": "\n".join(rows),
+                       "words": "\n".join(words)}
+
+
+_COMBO_C = """/* ---- PAD-708: the combos: shots made in order, each within its window (ms) of the one before. Judged on the
+ * shots this mode hears; a shot that is not the next step leaves a combo as it is (a spinner or a lane the ball
+ * passes on the way does not break it), its first shot again begins it again, and only the window lapsing ends it.
+ * A step: one of up to COMBO_ALTS shots (their indices in S; -3 = no more), -1 any shot, -2 a shot it has lit as it
+ * is made.
+%(words)s
+ */
+#define N_COMBOS     %(n)d
+#define COMBO_STEPS  %(steps)d
+#define COMBO_ALTS   %(alts)d
+static const struct { int n; unsigned ms; int gate; int step[COMBO_STEPS][COMBO_ALTS]; } COMBO[N_COMBOS] = {
+%(rows)s
+};
+static int combo_at[N_COMBOS];                   /* each combo's shots made so far */
+static unsigned long combo_last[N_COMBOS];       /* ... and when the last of them was made */
+static unsigned combo_fired;                     /* the combos the last shot made, a bit each */
+static long long combo_chain[5];                 /* the combos in a row, per player */
+static unsigned long combo_chain_at, combo_chain_ms;   /* when the last one was made, and its window */
+
+static int combo_step_is(const int *step, uint64_t shot, uint64_t lit)
+{
+    int a;
+    if (step[0] == -1) return (shot & named) != 0;
+    if (step[0] == -2) return (shot & lit) != 0;
+    for (a = 0; a < COMBO_ALTS && step[a] >= 0; a++)
+        if (S[step[a]] && (shot & S[step[a]]) != 0) return 1;
+    return 0;
+}
+
+static void combo_chain_end(void)
+{
+    unsigned p;
+    for (p = 0; p < 5; p++) combo_chain[p] = 0;
+    combo_chain_at = 0;
+}
+
+static void combo_clear(void)                    /* the ball, the mode or the game begins or ends */
+{
+    int k;
+    for (k = 0; k < N_COMBOS; k++) combo_at[k] = 0;
+    combo_fired = 0;
+    combo_chain_end();
+}
+
+/* "the combos in a row" for the player up: 0 once the window of the last one lapsed */
+UNUSED static long long combo_in_row(void)
+{
+    if (!combo_chain_at || pm_ms() - combo_chain_at > combo_chain_ms) return 0;
+    return combo_chain[P()];
+}
+
+/* "a combo's shots made so far", while the last is in its window (a combo just made: what it leaves toward the
+ * next - a lit shot then a lit shot made, its last lit shot is 1) */
+UNUSED static long long combo_made_so_far(int k)
+{
+    if (!combo_at[k] || pm_ms() - combo_last[k] > COMBO[k].ms) return 0;
+    return combo_at[k];
+}
+"""
+
+_COMBO_SHOT_C = """/* PAD-708: a shot into the combos, and the combos it makes (a combo's script runs for it). A combo moves on only
+ * while its When holds: any time, while the mode is not running (as an idle shot), while it runs. One more in a row
+ * for the player up when the shot makes any, the window of the longest it made then running for the next. */
+static uint64_t lit_mask(void)
+{
+    uint64_t m = 0;
+    int i;
+    for (i = 0; i < N_SHOTS; i++)
+        if (LIT[i].on && LIT[i].rgb && S[i]) m |= S[i];   /* lit, not held dark */
+    return m;
+}
+
+static void combo_shot(uint64_t shot, int was_on, int idle)
+{
+    unsigned long now = pm_ms();
+    unsigned long win = 0;
+    uint64_t lit = lit_mask();                   /* as it was made: before this shot's scripts light or free any */
+    int k;
+    combo_fired = 0;
+    for (k = 0; k < N_COMBOS; k++) {
+        int gate = COMBO[k].gate == 1 ? idle : COMBO[k].gate == 2 ? was_on : 1;
+        int first;
+        if (!gate || !COMBO[k].n) continue;
+        if (combo_at[k] && now - combo_last[k] > COMBO[k].ms) combo_at[k] = 0;   /* its window lapsed */
+        first = combo_step_is(COMBO[k].step[0], shot, lit);
+        if (combo_step_is(COMBO[k].step[combo_at[k]], shot, lit)) {
+            combo_last[k] = now;
+            if (++combo_at[k] < COMBO[k].n) continue;
+            combo_fired |= 1u << k;              /* made */
+            if (COMBO[k].ms > win) win = COMBO[k].ms;
+            combo_at[k] = first;                 /* its last shot may begin the next (a lit shot after a lit shot) */
+        } else if (first) {
+            combo_at[k] = 1;                     /* its first shot again: it begins again from here */
+            combo_last[k] = now;
+        }
+    }
+    if (!combo_fired) return;
+    if (combo_chain_at && now - combo_chain_at > combo_chain_ms) combo_chain_end();
+    combo_chain[P()]++;
+    combo_chain_at = now ? now : 1;
+    combo_chain_ms = win;
+    pm_log("combo (%u in a row)", (unsigned)combo_chain[P()]);
+}
+"""
+
+
+#: PAD-503: a new game as the SDK tells one (MODE_SDK.md "What marks a new game"; mode_file.c and the kit's
+#: kit_new_game). pm_in_game() rising alone was the blocks' test, and James Bond LE 1.06 ends play at the end of each
+#: of its multiballs and wizard modes (0x3f79bc: the mode mask's busy bits 0x202, until the ball ends), so the next
+#: ball read as a new game: the mode's light, its "each game" values and its timers were wiped
+_NEW_GAME_C = """/* A new game: player 1's score falling to 0, or pm_in_game() rising while it is 0; seen once, then not again until
+ * player 1 scores or pm_in_game() falls (MODE_SDK.md "What marks a new game"). pm_in_game() rising alone is not one: a
+ * game can end play on a ball and carry on (James Bond, at the end of each of its multiballs and wizard modes). */
+static int new_game(void)
+{
+    static int seen, was_in, was_zero, armed;
+    int in = pm_in_game(), zero = pm_score(1) == 0, fresh = 0;
+    if (!seen) {
+        seen = armed = 1;
+        was_in = in;
+        was_zero = zero;
+        return 0;
+    }
+    if (!zero || (was_in && !in)) armed = 1;  /* player 1 scored, or the game ended */
+    if (zero && armed && (!was_zero || (in && !was_in))) {
+        armed = 0;
+        fresh = 1;
+    }
+    was_in = in;
+    was_zero = zero;
+    return fresh;
+}
+"""
+
+#: the C that holds the shots' lights (PAD-376); %(n)d shots named, LIT sized %(size)d; PAD-598: and %(nl)d of the
+#: game's lights the blocks name (LAMP_NAMES), in LIT after the shots
 _LAMPS_C = """/* ---- the shots' lights the blocks hold (PAD-376): kept, so a light show gives them back when
- * it is over, and a blink that hurries follows the clock ---- */
+ * it is over, and a blink that hurries follows the clock. PAD-598: after the shots, the game's own lights a block
+ * names (an insert, a GI string, a flasher), held by name ---- */
 #define N_SHOTS   %(n)d
+#define N_LIGHTS  (N_SHOTS + %(nl)d)
+UNUSED static const char *const LAMP_NAMES[%(lsize)d] = {%(lamps)s};
 #define RATE_MIN  %(lo)d                     /* a blink's, pulse's or chase's pace, ms */
 #define RATE_MAX  %(hi)d
 UNUSED static struct { unsigned rgb, ms, sent; int pattern, hurry, on; } LIT[%(size)d];
@@ -2162,19 +4379,30 @@ UNUSED static unsigned hurry_ms(void)
     return 100;
 }
 
+/* PAD-707 (David: "whatever progresses the mode in general should be flashing ... and other targets should not be
+ * flashing"): while a mode that keeps the game's modes off runs, the inserts of every shot it does not light are held
+ * dark - the game's own shows of them are for features that cannot start - so what it lights is all that is lit */
+#define QUIET_SHOTS (GAME_MODES != 0)
+UNUSED static void quiet_shots(void)
+{
+    if (QUIET_SHOTS && run.on && named && !SHOWING) pm_lamp_shot(named, 0, PM_LAMP_SOLID, 0);
+}
+
 UNUSED static void lamp_send(int i)
 {
     unsigned ms;
-    if (i < 0 || i >= N_SHOTS || !S[i] || !LIT[i].on || SHOWING) return;
+    if (i < 0 || i >= N_LIGHTS || (i < N_SHOTS && !S[i]) || !LIT[i].on || SHOWING) return;
     ms = LIT[i].hurry ? hurry_ms() : LIT[i].ms;
-    pm_lamp_shot(S[i], LIT[i].rgb, LIT[i].pattern, ms);
+    if (i < N_SHOTS) pm_lamp_shot(S[i], LIT[i].rgb, LIT[i].pattern, ms);
+    else pm_lamp_set(LAMP_NAMES[i - N_SHOTS], LIT[i].rgb, LIT[i].pattern, ms);
     LIT[i].sent = ms;
 }
 
-/* a shot's inserts lit; the same light again is left alone (a blink keeps its beat) */
+/* a shot's inserts lit, or one of the game's lights; the same light again is left alone (a blink keeps its beat) */
 UNUSED static void light(int i, unsigned rgb, int pattern, long long ms, int hurry)
 {
-    if (i < 0 || i >= N_SHOTS) return;
+    if (i < 0 || i >= N_LIGHTS) return;
+    if (!run.on && !ending) return;   /* PAD-658: after the end (a timer still counting) it would be held for good */
     if (pattern == PM_LAMP_SOLID || hurry) ms = 0;
     else if (ms < RATE_MIN) ms = RATE_MIN;
     else if (ms > RATE_MAX) ms = RATE_MAX;
@@ -2190,67 +4418,96 @@ UNUSED static void light(int i, unsigned rgb, int pattern, long long ms, int hur
 
 UNUSED static void unlight(int i)
 {
-    if (i < 0 || i >= N_SHOTS) return;
+    if (i < 0 || i >= N_LIGHTS) return;
     LIT[i].on = 0;
-    if (S[i]) pm_lamp_release_shot(S[i]);
-}
+    if (i >= N_SHOTS) pm_lamp_release(LAMP_NAMES[i - N_SHOTS]);
+    else if (S[i] && QUIET_SHOTS && run.on && !SHOWING) {   /* PAD-707: dark again, not the game's */
+        int j;
+        pm_lamp_shot(S[i], 0, PM_LAMP_SOLID, 0);
+        for (j = 0; j < N_SHOTS; j++)                  /* a shot sharing an insert with it keeps its light */
+            if (j != i && LIT[j].on && S[j] && (S[j] & S[i])) lamp_send(j);
+    } else if (S[i]) pm_lamp_release_shot(S[i]);
+%(forget)s}
 
 static void unlight_all(void)
 {
     int i;
-    for (i = 0; i < N_SHOTS; i++) LIT[i].on = 0;
+    for (i = 0; i < N_LIGHTS; i++) LIT[i].on = 0;
     pm_lamp_release_all();
-}
+%(forget)s}
 
 UNUSED static void relight_all(void)                /* after a show: every light the blocks hold */
 {
     int i;
-    for (i = 0; i < N_SHOTS; i++) lamp_send(i);
+    quiet_shots();                                  /* PAD-707: the others dark again first */
+    for (i = 0; i < N_LIGHTS; i++) lamp_send(i);
 }
 
 static void lamps_tick(void)                        /* a hurrying blink follows the clock */
 {
     int i;
-    for (i = 0; i < N_SHOTS; i++)
+    for (i = 0; i < N_LIGHTS; i++)
         if (LIT[i].on && LIT[i].hurry && !SHOWING && hurry_ms() != LIT[i].sent) lamp_send(i);
 }
 """
 
 
+def step_xy(st):
+    """PAD-646: where a step centres on the playfield picture: its place's point, or its own (``at`` "xy")."""
+    at = PLACES.get(st.get("at"), PLACES["center"])
+    if st.get("at") == "xy" and _int_ok(st.get("x"), 0, XY_MAX) and _int_ok(st.get("y"), 0, XY_MAX):
+        return int(st["x"]), int(st["y"])
+    return at[1], at[2]
+
+
+def step_c(st):
+    """PAD-646: one step as its C table row's fields: ``(fx C name, ms, a, b, x, y, rate, GI C name, blend)``."""
+    gi_c = {"keep": "GI_KEEP", "dark": "GI_DARK", "flash": "GI_FLASH"}
+    col = [int(str(st.get(k))[1:], 16) if COLOR_RE.match(str(st.get(k) or "")) else 0 for k in ("a", "b")]
+    try:
+        ms = max(STEP_MS_MIN, min(STEP_MS_MAX, int(st.get("ms"))))
+    except (TypeError, ValueError):
+        ms = 500
+    try:
+        rate = max(0, min(FX_RATE_MAX, int(st.get("rate") or 0)))
+    except (TypeError, ValueError):
+        rate = 0
+    try:
+        blend = max(0, min(STEP_MS_MAX, int(st.get("blend") or 0)))
+    except (TypeError, ValueError):
+        blend = 0
+    x, y = step_xy(st)
+    return FX[st["fx"]][0], ms, col[0], col[1], x, y, rate, gi_c.get(st.get("gi"), "GI_KEEP"), blend
+
+
 def _show_decls(shows):
-    """The C of the light shows' steps (one table per Light show block) and their state."""
+    """The C of the light shows' steps (one table per show the blocks run: a ready-made one, a block's own steps,
+    or one of the mode's own shows, PAD-646) and their state. ``shows``: ``[{steps, name, repeat}]``."""
     out = ["/* ---- light shows (PAD-376): the kit's kit_show (intricate_kit.h). A show is a few STEPS,",
            " * each a pattern over the playfield's inserts by their PLACE (the port's \"at X,Y\": x 0-300",
-           " * across, y 0-600 down) for some ms, in its two colours; the GI strings follow each step. A",
-           " * port with no placed inserts runs a show on the GI only. ---- */",
+           " * across, y 0-600 down) for some ms, in its two colors; the GI strings follow each step. A",
+           " * port with no placed inserts runs a show on the GI only. PAD-646: a step may BLEND in from",
+           " * the one before over its first ms, and a show may run several times, or until the mode",
+           " * ends (repeat 0: the pass it is in finishes as the mode ends). ---- */",
            "enum { %s };" % ", ".join(c for c, _w in FX.values()),
            "#define GI_KEEP   0                       /* the GI does what the game says */",
            "#define GI_DARK   1                       /* the GI off: only the show lights the playfield */",
            "#define GI_FLASH  2                       /* the GI flashing white with a strobe */",
-           "struct fx_step { int fx; unsigned ms, a, b; int x, y; unsigned rate; int gi; };"]
-    gi_c = {"keep": "GI_KEEP", "dark": "GI_DARK", "flash": "GI_FLASH"}
-    for n, steps in enumerate(shows):
+           "struct fx_step { int fx; unsigned ms, a, b; int x, y; unsigned rate; int gi; unsigned blend; };"]
+    for n, s in enumerate(shows):
+        steps = s["steps"] if isinstance(s, dict) else s
         out.append("static const struct fx_step SHOW_%d[] = {" % n)
         for st in steps:
-            at = PLACES.get(st.get("at"), PLACES["center"])
-            col = [int(str(st.get(k))[1:], 16) if COLOR_RE.match(str(st.get(k) or "")) else 0 for k in ("a", "b")]
-            try:
-                ms = max(STEP_MS_MIN, min(STEP_MS_MAX, int(st.get("ms"))))
-            except (TypeError, ValueError):
-                ms = 500
-            try:
-                rate = max(0, min(FX_RATE_MAX, int(st.get("rate") or 0)))
-            except (TypeError, ValueError):
-                rate = 0
-            out.append("    { %s, %d, 0x%06xu, 0x%06xu, %d, %d, %d, %s },   /* %s, at %s */" % (
-                FX[st["fx"]][0], ms, col[0], col[1], at[1], at[2], rate,
-                gi_c.get(st.get("gi"), "GI_KEEP"), FX[st["fx"]][1], at[0]))
+            fx, ms, a, b, x, y, rate, gi, blend = step_c(st)
+            where = PLACES[st["at"]][0] if st.get("at") in PLACES else PLACES["center"][0]
+            out.append("    { %s, %d, 0x%06xu, 0x%06xu, %d, %d, %d, %s, %d },   /* %s, at %s */" % (
+                fx, ms, a, b, x, y, rate, gi, blend, FX[st["fx"]][1], where))
         out.append("};")
     out += ["#define SHOW_LAMPS 256",
             "static struct {",
-            "    const struct fx_step *steps;",
+            "    const struct fx_step *steps, *prev;   /* prev: the step before the one on (a blend's), 0 = none */",
             "    const char *name;",
-            "    int n, step, on, gi[8], n_gi, placed;",
+            "    int n, step, on, left, forever, gi[8], n_gi, placed;",
             "    unsigned long t0, step_t0;",
             "    unsigned seed;",
             "} show;",
@@ -2274,7 +4531,7 @@ _SHOW_C = r"""static unsigned fx_mix(unsigned a, unsigned b, int f256)       /* 
 
 static unsigned fx_scale(unsigned c, int f256) { return fx_mix(0, c, f256); }
 
-static unsigned fx_hue(int h)             /* 0..1535 round the colour wheel, full brightness */
+static unsigned fx_hue(int h)             /* 0..1535 round the color wheel, full brightness */
 {
     int s = ((h % 1536) + 1536) % 1536, i = s / 256, f = s % 256;
     switch (i) {
@@ -2315,23 +4572,17 @@ static int fx_angle(int dx, int dy)        /* atan2 in 1/1536 turns (the hue whe
     return a % 1536;
 }
 
-static int is_gi(const char *s)            /* a GI string: "GI" a word of its own in the name */
-{
-    int i;
-    for (i = 0; s && s[i] && s[i + 1]; i++)
-        if (s[i] == 'G' && s[i + 1] == 'I' && (i == 0 || s[i - 1] < 'A' || s[i - 1] > 'Z')
-            && (s[i + 2] < 'A' || s[i + 2] > 'Z'))
-            return 1;
-    return 0;
-}
-
-static void show_start(const struct fx_step *steps, int n, const char *name)
+/* PAD-646: repeat = how many times it runs; 0 = over and over until the mode ends (the pass it is in finishes) */
+static void show_start(const struct fx_step *steps, int n, const char *name, int repeat)
 {
     int k, cnt = pm_lamp_count();
     show.steps = steps;
+    show.prev = 0;
     show.n = n;
     show.name = name;
     show.step = 0;
+    show.left = repeat > 0 ? repeat : 1;
+    show.forever = repeat <= 0;
     show.on = pm_can(PM_CAN_LAMPS) && n > 0;
     show.t0 = show.step_t0 = pm_ms();
     show.seed = (unsigned)show.t0 | 1u;
@@ -2341,10 +4592,23 @@ static void show_start(const struct fx_step *steps, int n, const char *name)
         if (pm_lamp_xy(k, &x, &y)) show.placed++;
         else if (show.n_gi < 8 && is_gi(pm_lamp_at(k, 0))) show.gi[show.n_gi++] = k;
     }
-    if (show.on) pm_log("show %s: %d step(s) over %d placed inserts, %d GI string(s)", name, n, show.placed, show.n_gi);
+    if (!show.on) return;
+    if (show.forever)
+        pm_log("show %s: %d step(s) over %d placed inserts, %d GI string(s), until the mode ends", name, n, show.placed, show.n_gi);
+    else if (show.left > 1)
+        pm_log("show %s: %d step(s) over %d placed inserts, %d GI string(s), %d times", name, n, show.placed, show.n_gi, show.left);
+    else
+        pm_log("show %s: %d step(s) over %d placed inserts, %d GI string(s)", name, n, show.placed, show.n_gi);
 }
 
-/* the colour of the insert at (x, y) for step st at `t` ms into it */
+/* the mode ended: a show running until then finishes the pass it is in (one started as it ends plays once) */
+static void show_last_pass(void)
+{
+    show.forever = 0;
+    show.left = 1;
+}
+
+/* the color of the insert at (x, y) for step st at `t` ms into it */
 static unsigned fx_colour(const struct fx_step *st, int x, int y, int idx, unsigned t)
 {
     int f = st->ms ? (int)((unsigned long)t * 256u / st->ms) : 256;     /* 0..256 through the step */
@@ -2402,8 +4666,45 @@ static unsigned fx_colour(const struct fx_step *st, int x, int y, int idx, unsig
         w = x - r;
         if (w < 0) w = -w;
         return w < 18 && (t % rate) < rate * 2 / 3 ? st->a : st->b;
+    /* PAD-646: the editor's patterns */
+    case FX_SPIRAL_OUT:
+    case FX_SPIRAL_IN:
+        /* the burst's ring, its radius turning with the angle round (x, y): one turn = 140 px of radius */
+        d = fx_isqrt(dx * dx + dy * dy) + fx_angle(dx, dy) * 140 / 1536;
+        r = st->fx == FX_SPIRAL_OUT ? f * 840 / 256 : (256 - f) * 840 / 256;
+        w = d - r;
+        if (w > 0 && w < 60) return fx_scale(st->a, 256 - w * 4);
+        if (w <= 0 && w > -140) return fx_mix(st->a, st->b, -w * 256 / 140);
+        return w <= 0 ? st->b : 0;
+    case FX_RIPPLE:
+        /* rings 140 px apart rolling outwards, one every `rate` ms */
+        d = fx_isqrt(dx * dx + dy * dy);
+        v = ((d * 256 / 140 - (int)(t * 256u / rate)) % 256 + 256) % 256;
+        return fx_mix(st->a, st->b, v < 128 ? v * 2 : (256 - v) * 2);
+    case FX_BOUNCE:
+        /* a band from the left edge to the right and back over the step */
+        v = f < 128 ? f * 2 : (256 - f) * 2;
+        r = v * 380 / 256 - 40;
+        w = x - r;
+        if (w < 0) w = -w;
+        if (w < 30) return st->a;
+        return fx_mix(st->a, st->b, (w - 30) * 4);
+    case FX_FADE_IN:
+        return fx_scale(st->a, f);
+    case FX_SOLID:
+        return st->a;
     }
     return 0;
+}
+
+/* PAD-646: the insert's color for the step on, blending in from the step before over the step's first ms (from
+ * dark when there is none before it) */
+static unsigned fx_blend(const struct fx_step *st, int x, int y, int idx, unsigned t)
+{
+    unsigned c = fx_colour(st, x, y, idx, t);
+    if (st->blend && t < st->blend)
+        c = fx_mix(show.prev ? fx_colour(show.prev, x, y, idx, show.prev->ms) : 0u, c, (int)(t * 256u / st->blend));
+    return c;
 }
 
 /* every tick while the show runs: each placed insert painted, the GI as the step says; at its
@@ -2417,7 +4718,12 @@ static void show_tick(void)
     if (!show.on) return;
     while (show.step < show.n && now - show.step_t0 >= show.steps[show.step].ms) {
         show.step_t0 += show.steps[show.step].ms;
+        show.prev = &show.steps[show.step];
         show.step++;
+        if (show.step >= show.n && (show.forever || show.left > 1)) {   /* PAD-646: round again */
+            if (!show.forever) show.left--;
+            show.step = 0;
+        }
     }
     if (show.step >= show.n) {
         show.on = 0;
@@ -2431,13 +4737,69 @@ static void show_tick(void)
     cnt = pm_lamp_count();
     for (k = 0; k < cnt && k < SHOW_LAMPS; k++) {
         int x, y;
-        if (pm_lamp_xy(k, &x, &y)) pm_lamp_paint(k, fx_colour(st, x, y, k, t));
+        if (pm_lamp_xy(k, &x, &y)) pm_lamp_paint(k, fx_blend(st, x, y, k, t));
     }
     for (k = 0; k < show.n_gi; k++) {
         if (st->gi == GI_DARK) pm_lamp_paint(show.gi[k], 0);
         else if (st->gi == GI_FLASH) pm_lamp_paint(show.gi[k], ((t / (st->rate ? st->rate : 100)) % 2) ? 0 : 0xffffffu);
+        else if (GI_HELD) pm_lamp_paint(show.gi[k], 0);              /* PAD-767: a GI block's dark under it */
         else pm_lamp_release(pm_lamp_at(show.gi[k], 0));
     }
+}
+"""
+
+#: a GI string by its name (a light show's GI steps, PAD-767's GI block)
+_IS_GI_C = r"""static int is_gi(const char *s)            /* a GI string: "GI" a word of its own in the name */
+{
+    int i;
+    for (i = 0; s && s[i] && s[i + 1]; i++)
+        if (s[i] == 'G' && s[i + 1] == 'I' && (i == 0 || s[i - 1] < 'A' || s[i - 1] > 'Z')
+            && (s[i + 2] < 'A' || s[i + 2] > 'Z'))
+            return 1;
+    return 0;
+}
+"""
+
+#: PAD-767: the GI block (David, MELTDOWN: "it would be cooler if the lights stayed off for the whole mode")
+_GI_HOLD_C = r"""/* PAD-767: a GI block: the playfield's GI strings painted dark every tick while the mode runs (a light show's own
+ * GI steps play over it; its "the game's" steps stay dark), given back as the mode ends or a GI block says so */
+static int gi_dark;                         /* 1 = held dark */
+static int gi_lamp[8], gi_n;
+#define GI_HELD (gi_dark && run.on)
+
+static void gi_give_back(void)
+{
+    int k;
+    for (k = 0; k < gi_n; k++) pm_lamp_release(pm_lamp_at(gi_lamp[k], 0));
+    gi_n = 0;
+}
+
+UNUSED static void gi_hold(int dark)
+{
+    int k, cnt = pm_lamp_count();
+    if (dark && (!run.on || !pm_can(PM_CAN_LAMPS))) return;
+    if (gi_dark && !dark) gi_give_back();
+    gi_dark = dark;
+    if (!dark) {
+        pm_log("GI: the game's again");
+        return;
+    }
+    gi_n = 0;
+    for (k = 0; k < cnt && gi_n < 8; k++)
+        if (is_gi(pm_lamp_at(k, 0))) gi_lamp[gi_n++] = k;
+    pm_log("GI: %d string(s) dark until the mode ends", gi_n);
+}
+
+static void gi_tick(void)
+{
+    int k;
+    if (gi_dark && !run.on) {               /* the mode is over: the GI goes back to the game */
+        gi_dark = 0;
+        gi_give_back();
+        pm_log("GI: the mode is over - the game's again");
+    }
+    if (!gi_dark || SHOWING) return;
+    for (k = 0; k < gi_n; k++) pm_lamp_paint(gi_lamp[k], 0);
 }
 """
 
@@ -2465,20 +4827,362 @@ _GAME_WIZARD_C = r"""/* PAD-436: one of the game's own mini-wizards, by its port
 UNUSED static void game_wizard(const char *name, int start)
 {
     int r = pm_game_wizard_named(name, start ? PM_WIZARD_START : PM_WIZARD_LIGHT);
-    if (r) pm_log("mini-wizard: the game's %s, %s", name, r == PM_WIZARD_STARTED ? "started" : "lit for its start shot");
+    if (r) pm_log("mini-wizard: the game's %s, %s", name, r == PM_WIZARD_STARTED ? "started" : r == PM_WIZARD_WAITING
+                  ? "to start the moment nothing of the game's is in its way" : "lit for its start shot");
 }
 """
+
+#: PAD-521: the game's own status bar (MODE_SDK.md "The game's status bar")
+_BAR_C = r"""/* PAD-521: its name in the game's own status bar (James Bond: the colored bar under the TV), in BAR_RGB, the clock
+ * draining along it as the game's own modes show theirs; full through its total, then given back. A game without
+ * one shows nothing here. PAD-721: or (BAR_FILLS) filling with a value out of another, as the game's own
+ * mini-wizards fill theirs with the shots made: full once all are, and kept as it was through its total. */
+#define BAR_FILLS %(fills)d
+static void bar_show(int clock)
+{
+    int pct = -1;
+    if (BAR_FILLS) {
+        long long v = %(value)s, of = %(of)s;
+        pct = of <= 0 || v >= of ? 100 : v <= 0 ? 0 : (int)(v * 100 / of);
+    } else if (clock && RUN_SECONDS) {
+        if (run.ticks_left > bar_max) bar_max = run.ticks_left;    /* time added: the bar is full again */
+        pct = bar_max ? (int)((run.ticks_left * 100u + bar_max - 1) / bar_max) : 0;
+    }
+    pm_status_bar(MODE_NAME, BAR_RGB, pct);
+}
+"""
+
+#: PAD-709: a words-alone mode's scored number under its bar; %(info)s = hides its info line, if it has one
+_POINTS_C = r"""/* PAD-709: a number a Words or Award block shows while it runs, as the game's own mini-wizards show a scored shot:
+ * large under the bar for its moment (its words, if any, small over it on the TOTAL's word line; the info line hidden
+ * meanwhile), so the video above stays clear; out of the way of the game's screens. A card built before it has no such
+ * screen: the line goes over the video as before (0). A Words block's number in When the mode ends stays over the
+ * video; an Award's goes under the bar there too, and its TOTAL waits for it. */
+static void points_place(void)
+{
+    int on = !pm_display_covered() && !pm_aside() && !pm_game_words();
+    if (on == points_up) return;
+    pm_show(points, on);
+    if (points_named) pm_show(total_name, on);
+    points_up = on;
+}
+
+static void points_hide(void)
+{
+    points_ticks = 0;
+    if (points && points_up) pm_show(points, 0);
+    if (points_named && points_up) pm_show(total_name, 0);
+    points_up = points_named = points_award = 0;
+}
+
+/* the number (and its words) under the bar for ms; 0 = no such screen on the card */
+static int points_show(const char *text, long long value, unsigned ms)
+{
+    char n[32];
+    if (!points || !points_words) return 0;
+    if (points_named && points_up) pm_show(total_name, 0);
+    pm_commas(n, sizeof n, value < 0 ? 0 : (uint64_t)value);
+    pm_set_text(points_words, n);
+    points_named = text[0] && total_name && total_name_words;
+    if (points_named) pm_set_text(total_name_words, text);
+    points_ticks = ms * TICKS_PER_SECOND / 1000;
+    points_award = 0;
+%(info)s    points_up = -1;                     /* placed now */
+    points_place();
+    return 1;
+}
+"""
+
+#: PAD-547: the info line under its name; %(value)s = the C of the value it follows
+_INFO_C = r"""/* PAD-547: its info line under its name while it runs (James Bond: under the status bar, where the game's own
+ * mini-wizards show their SUPER JACKPOT): its words and the value as it changes, written only when it changed. Hidden
+ * under a display of the game's and at its end. A card built with no line for it shows nothing. */
+static void info_show(int on)
+{
+    char number[32], line[96];
+    long long value = %(value)s;
+    int k;
+    if (!info) return;
+    if (!on) {
+        if (info_up) pm_show(info, 0);
+        info_up = 0;
+        return;
+    }
+    pm_commas(number, sizeof number, value < 0 ? 0 : (uint64_t)value);
+    pm_snprintf(line, sizeof line, INFO_FORMAT, number);
+    for (k = 0; line[k] && line[k] == info_now[k]; k++)
+        ;
+    if (line[k] != info_now[k] && info_words) {
+        pm_set_text(info_words, line);
+        for (k = 0; k < (int)sizeof info_now - 1 && (info_now[k] = line[k]) != 0; k++)
+            ;
+        info_now[sizeof info_now - 1] = 0;
+    }
+    if (!info_up) pm_show(info, 1);
+    info_up = 1;
+}
+"""
+
+#: PAD-503: the mode lit at a shot, as the game lights one of its mini-wizards; %(n)d Light the mode at blocks
+_LIT_C = r"""/* ---- the mode lit at a shot (PAD-503), as the game lights one of its mini-wizards: for the player up, the shot's
+ * inserts and one insert more held in its color while the mode is not running, ball after ball, until that shot
+ * starts it (as Start the mode does: it may wait, and stays lit). Starting, however it starts, puts the light out;
+ * a new game too. Each player's is their own. ---- */
+#define N_LIT_AT %(n)d
+static const struct {
+    int shot;
+    const char *insert;                 /* one insert or several, separated by commas: a chase runs across them */
+    unsigned rgb;
+    int pattern;
+    unsigned ms;
+    const char *solid;                  /* PAD-521: one insert more held solid while it is lit (the film's), "" = none */
+    unsigned solid_rgb;
+} LIT_AT[N_LIT_AT] = {
+%(rows)s};
+/* per player: 1 + the LIT_AT it is lit as; 0 = not lit. PAD-600: a weak global, so another mode's Put out the light
+ * of block can clear it (the linker keeps one) */
+__attribute__((weak, visibility("hidden"))) int %(lit)s[5];
+#define lit_as %(lit)s
+static unsigned lit_player;             /* whose light lit_shown is; 0 = hold it again */
+static int lit_waiting;                 /* PAD-556: lit_shown's shot and inserts wait out the game's own mode (only the
+                                         * solid one is held) */
+
+UNUSED static int lit_now(void)          /* "the mode is lit", for the player up */
+{
+    unsigned p = P();
+    return p && lit_as[p] != 0;
+}
+
+UNUSED static void light_mode(int k)
+{
+    unsigned p = P();
+    if (!p || !pm_in_game() || k < 0 || k >= N_LIT_AT) return;
+    if (lit_as[p] != k + 1) pm_log("lit at %%s for player %%u", SHOT_NAMES[LIT_AT[k].shot], p);
+    lit_as[p] = k + 1;
+}
+
+/* PAD-600: Put out the light of (this mode): the player up's light out; the next tick takes it down */
+UNUSED static void unlight_mode(void)
+{
+    unsigned p = P();
+    if (!p || !lit_as[p]) return;
+    pm_log("light put out for player %%u", p);
+    lit_as[p] = 0;
+}
+
+/* the light taken down: its inserts back to the game (a shot the blocks light themselves stays theirs) */
+static void lit_off(void)
+{
+    int k = lit_shown - 1;
+    if (k < 0) return;
+    if (!lit_waiting && S[LIT_AT[k].shot] && !LIT[LIT_AT[k].shot].on) pm_lamp_release_shot(S[LIT_AT[k].shot]);
+    if (!lit_waiting && LIT_AT[k].insert[0]) pm_lamp_release(LIT_AT[k].insert);
+    if (LIT_AT[k].solid[0]) pm_lamp_release(LIT_AT[k].solid);
+    lit_shown = 0;
+    for (k = N_SHOTS; k < N_LIGHTS; k++) lamp_send(k);   /* PAD-598: one the blocks light by name stays theirs */
+}
+
+/* every tick: the player up's light on the playfield while the mode is not running. While one of the game's own
+ * modes is in its way (James Bond: the villain mode that won the film's last part) its shot and inserts wait, as the
+ * game's own mini-wizards' do, and only the solid one (the film's) is held: the chase starts once that mode is over */
+static void lit_tick(void)
+{
+    unsigned p = pm_player();
+    int want = 0, waiting, k;
+    if (SHOWING) {                      /* a show paints every insert, and hands them all back at its end */
+        lit_shown = 0;
+        return;
+    }
+    if (pm_in_game() && p >= 1 && p <= 4 && !run.on) want = lit_as[p];
+    /* its shot is claimed while it would start there now: the game's own starts on that shot are held off (on James
+     * Bond the Right ramp starts its henchman and villain modes, and the game handles a shot before the modes do) */
+    waiting = want && (pm_game_wizard_way() == 0 || out_of_play());   /* PAD-675: and while another mode runs */
+    pm_lit_claim(want && can_start() && !waiting ? S[LIT_AT[want - 1].shot] : 0);
+    if (want == lit_shown && (!want || (p == lit_player && waiting == lit_waiting))) return;
+    lit_off();
+    lit_waiting = 0;
+    if (!want) return;
+    k = want - 1;
+    if (!waiting && S[LIT_AT[k].shot]) pm_lamp_shot(S[LIT_AT[k].shot], LIT_AT[k].rgb, LIT_AT[k].pattern, LIT_AT[k].ms);
+    if (!waiting && LIT_AT[k].insert[0]) pm_lamp_set(LIT_AT[k].insert, LIT_AT[k].rgb, LIT_AT[k].pattern, LIT_AT[k].ms);
+    if (LIT_AT[k].solid[0]) pm_lamp_set(LIT_AT[k].solid, LIT_AT[k].solid_rgb, PM_LAMP_SOLID, 0);
+    lit_shown = want;
+    lit_waiting = waiting;
+    lit_player = p;
+}
+
+/* a shot: the one the player up's light is at starts the mode - not while the game would not start one of its own
+ * mini-wizards there (its own check: a henchman, villain or Q Branch mode of its own running), whatever the mode's
+ * choice about the game's modes; it stays lit for the next */
+static void lit_shot(uint64_t shot)
+{
+    static unsigned long said_at;
+    unsigned p = pm_player();
+    if (run.on || p < 1 || p > 4 || !lit_as[p]) return;
+    if (!(S[LIT_AT[lit_as[p] - 1].shot] & shot)) return;
+    if (pm_game_wizard_way() == 0) {
+        if (!said_at || pm_ms() - said_at >= 10000)
+            pm_log("not started (its lit shot): one of the game's own modes is in its way - still lit");
+        said_at = pm_ms() ? pm_ms() : 1;
+        return;
+    }
+    start("its lit shot", 1);
+}
+
+/* the mode began for player p: that player's light is out */
+static void lit_started(unsigned p)
+{
+    if (p <= 4) lit_as[p] = 0;
+    lit_off();
+}
+"""
+
+
+_FEEDBACK_C = r"""/* ---- PAD-733: every shot it counts says so (David, SUPER X2: "though the shots were lit I wasn't getting any
+ * feedback either visual or audio or Shaker when I was hitting the shots so the mode felt broken. Every single shot on
+ * our custom modes needs to have feedback when you do it"): a shot that scores while the mode runs and brings no
+ * sound, show, shake or clip of the mode's own within FB_MS (a 1 ms timer's script answers on the next tick) gets the
+ * game's rising hit sound and a strobe of its inserts (pm_lamp_flash: over its own light, which comes back) ---- */
+#define FB_MS       80u
+#define FB_FLASH_MS 360u
+static uint64_t fb_now;                 /* the shot being handled (on_shot) */
+static uint64_t fb_shot;                /* the shot owed its word; 0 = none owed */
+static unsigned long fb_at;
+static unsigned fb_n;                   /* the rising run's step, from the mode's start */
+
+UNUSED static void fb_owe(void)
+{
+    if (run.on && fb_now && !fb_shot) {
+        fb_shot = fb_now;
+        fb_at = pm_ms();
+    }
+}
+
+UNUSED static void fb_paid(void)
+{
+    fb_shot = 0;
+}
+
+static void fb_tick(void)
+{
+    uint64_t m = fb_shot & named;
+    if (!fb_shot || pm_ms() - fb_at < FB_MS) return;
+    fb_shot = 0;
+    if (!run.on) return;
+    pm_hit_sound((int)++fb_n);
+    if (m && !SHOWING) pm_lamp_flash(m, 0xffffffu, FB_FLASH_MS);
+}
+"""
+
+
+_READY_C = r"""/* ---- PAD-733: its count done, the shots that start it blink (David: "anytime a HUD mode gets to zero it's shot on
+ * the playfield needs to blink to let you know that that shot is ready to be starting a mode"): set at the progress
+ * panel's 0 (hud_progress), for the player up, while the mode is not running and nothing is in its way, until it
+ * starts or its count goes up again; the blocks' own lights of those shots come back after it ---- */
+#define N_READY %(n)d
+static const int READY_AT[N_READY] = { %(at)s };   /* %(names)s */
+#define READY_RGB 0xffffffu
+#define READY_MS  250u
+static unsigned char ready_as[5];       /* per player: 1 = its count is done and it has not started */
+static unsigned ready_player;           /* whose blink ready_shown is; 0 = put it on again */
+
+static void ready_set(int on)
+{
+    unsigned p = P();
+    if (!p || p > 4 || !pm_in_game() || ready_as[p] == (on ? 1 : 0)) return;
+    pm_log(on ? "ready for player %%u: its count is done - %(names)s blink until it starts"
+              : "ready no more for player %%u: its count went up", p);
+    ready_as[p] = on ? 1 : 0;
+}
+
+static void ready_off(void)
+{
+    int k;
+    if (!ready_shown) return;
+    for (k = 0; k < N_READY; k++)
+        if (S[READY_AT[k]] && !LIT[READY_AT[k]].on) pm_lamp_release_shot(S[READY_AT[k]]);
+    ready_shown = 0;
+    for (k = 0; k < N_READY; k++) lamp_send(READY_AT[k]);   /* one the blocks light themselves is theirs again */
+}
+
+static void ready_tick(void)
+{
+    unsigned p = pm_player();
+    int want, k;
+    if (SHOWING) {                      /* a show paints every insert, and hands them all back at its end */
+        ready_shown = 0;
+        return;
+    }
+    want = pm_in_game() && p >= 1 && p <= 4 && !run.on && ready_as[p] && pm_game_wizard_way() != 0 && !out_of_play();
+    if (want == ready_shown && (!want || p == ready_player)) return;
+    ready_off();
+    if (!want) return;
+    for (k = 0; k < N_READY; k++)
+        if (S[READY_AT[k]]) pm_lamp_shot(S[READY_AT[k]], READY_RGB, PM_LAMP_BLINK, READY_MS);
+    ready_shown = 1;
+    ready_player = p;
+}
+"""
+
+
+def _ready_c(g, ready):
+    """PAD-733: the C of the blink once its count is done, for the shots ``ready`` (indexes into ``g.shots``)."""
+    return _READY_C % {"n": len(ready), "at": ", ".join(str(k) for k in ready),
+                       "names": _comment(", ".join(g.shots[k] for k in ready))}
+
+
+def _lit_c(g):
+    """PAD-503: the C of the mode lit at a shot, one LIT_AT row per Light the mode at block."""
+    rows = []
+    for shot, insert, rgb, pat, ms, solid, srgb in g.lit:
+        rows.append("    { %d, %s, 0x%06xu, %s, %du, %s, 0x%06xu },   /* %s */" % (
+            shot, _c_str(insert), rgb, pat, ms, _c_str(solid), srgb, _comment(g.shots[shot] or "no shot")))
+    return _LIT_C % {"n": len(g.lit), "rows": "\n".join(rows) + "\n", "lit": lit_ident(g.slug)}
 
 _MECH_C = """/* ---- the mechanisms (PAD-395; MODE_SDK.md "The magnet", "The scoop") ---- */
 static int scoop_next;                  /* 1 = the next ball only, 2 = it is held now: then no more */
 
-/* hold a mechanism (the port's name for it) this many ms; refused, mode.log says why */
+/* hold a mechanism (the port's name for it) this many ms (the runtime keeps each one's own limit: 5 s, or a post's
+ * own longest); refused, mode.log says why */
 UNUSED static void hold(const char *what, long long ms)
 {
     if (!run.on) return;
     if (ms < %(lo)d) ms = %(lo)d;
     if (ms > %(hi)d) ms = %(hi)d;
     if (!pm_coil_hold(what, (unsigned)ms)) pm_log("hold %%s: refused (the runtime's line says why)", what);
+}
+
+/* PAD-621: a hold the clock waits for (the ball held at the start while its clip plays); 0 = the clock runs */
+static const char *clock_hold;
+static int ball_starting;               /* PAD-621: a challenge's scripts run as the ball starts (it is in the shooter lane) */
+
+/* hold it, and the mode's clock stands still until it lets go */
+UNUSED static void hold_wait(const char *what, long long ms)
+{
+    if (!run.on) return;
+    if (ball_starting) {                /* PAD-621 (luvthatapex): a challenge starts at the shooter lane */
+        pm_log("hold %%s: no hold, the mode started as the ball starts (the ball is in the shooter lane) - its clock runs",
+               what);
+        return;
+    }
+    if (ms < %(lo)d) ms = %(lo)d;
+    if (ms > %(hi)d) ms = %(hi)d;
+    if (!pm_coil_hold(what, (unsigned)ms)) {
+        pm_log("hold %%s: refused (the runtime's line says why) - its clock runs", what);
+        return;
+    }
+    clock_hold = what;
+    pm_log("hold %%s: its clock waits until it lets go", what);
+}
+
+/* 1 = the clock waits this tick: a hold_wait still holds */
+static int clock_held(void)
+{
+    if (!clock_hold) return 0;
+    if (run.on && pm_coil_holding(clock_hold)) return 1;
+    pm_log("hold %%s: let go - its clock runs", clock_hold);
+    clock_hold = 0;
+    return 0;
 }
 
 /* hold a ball that settles in the scoop this many ms, then the game kicks it out as always;
@@ -2512,6 +5216,14 @@ UNUSED static void shield(int where)
 {
     if (!run.on) return;
     if (!pm_shield_keep(where)) pm_log("shield: no platform on this game");
+}
+
+/* PAD-589: the building to one of the game's own floors (0 = where it rests); the runtime puts it back where it was
+ * when the mode ends and keeps every limit of its own */
+UNUSED static void building(int floor)
+{
+    if (!run.on) return;
+    if (!pm_building(floor)) pm_log("building: no move to floor %%d (the runtime's line says why)", floor);
 }
 
 /* PAD-414: shake the cabinet this many ms at a strength (0 hard .. 3 soft), or with one of the game's own shakes; the
@@ -2548,17 +5260,58 @@ static void scoop_tick(void)
 
 def uses_media(program):
     """1 when the mode has clips, sounds or music of its own, or a block that plays one."""
-    if program.get("clips") or program.get("sounds") or program.get("music"):
+    if program.get("clips") or program.get("sounds") or program.get("music") or program.get("beds"):
         return True
-    return any(b.get("op") in ("clip", "sound") for s in program.get("scripts") or []
+    return any(b.get("op") in ("clip", "sound", "music") for s in program.get("scripts") or []
                for b in _walk(s.get("do") or []))
 
 
 #: the C of a mode with its own clips and sounds (pad_mode_assets.h); %(slug)s is its folder
+# PAD-658: a note (the mode not running) over the mode's own loop clip, as the game's own feedback screens letter their
+# two lines over a clip of theirs (MASER CANNON CHARGING): on the live city the note's words sat on the game's map labels
+# (run bedfix_pro_r1, bf_ready_c: HE JOINS THE NEXT BATTLE over TANKS 0/10). Its first "over and over" clip.
+_NOTE_LOOP_C = """/* PAD-658: a note shows over the mode's own loop (its cover clip), as the game's feedback screens show over a clip
+ * of theirs; a TOTAL too when nothing loops as it ends */
+#define COVER_CLIP %(cue)s
+static int note_looping;
+UNUSED static void note_loop(void)
+{
+    const char *n;
+    if (note_looping || hud.metering || !own_clip(COVER_CLIP)) return;
+    n = pa_clip_name(&own, COVER_CLIP);
+    note_looping = n && pm_backdrop(n);
+    if (note_looping) pm_log("own clip %%s (%%s) behind its note", COVER_CLIP, n);
+}
+
+static void cover_total(void)
+{
+    const char *n = pa_clip_name(&own, COVER_CLIP);
+    if (n && pm_backdrop(n)) pm_log("own clip %%s (%%s) behind its TOTAL", COVER_CLIP, n);
+}
+
+static void note_loop_tick(void)
+{
+    if (!note_looping) return;
+    if (run.on) {                     /* its own run's loop now */
+        note_looping = 0;
+        return;
+    }
+    if (hud.up && hud.noting && !hud.metering) return;
+    note_looping = 0;
+    pm_backdrop(0);                   /* (another of ours began: the runtime gave the backdrop to it already) */
+}
+"""
+
+
 _MEDIA_C = """/* ---- its own clips and sounds (PAD-374): what Write carried, named in %(slug)s.assets ---- */
 static struct pa_assets own = { .folder = "%(slug)s" };
 static const char *clip_waiting, *loop_waiting;   /* MODE_SDK.md "Clips race the game's own" */
+static const char *end_cover;                     /* PAD-733: the clip When the mode ends loops behind its TOTAL */
 static unsigned long clip_due;
+/* PAD-733: 0 while a battle pick starts the mode - no shot of the game's races its clip there, and the game's own battle
+ * is on the glass in its intro the moment the selection screen has closed (David: "the scene transition ... the same as
+ * what the normal modes do") */
+static unsigned long clip_after = PA_CLIP_AFTER_MS;
 static int looping;                     /* a clip of its own loops behind the HUD */
 
 static int own_clip(const char *cue)
@@ -2577,7 +5330,8 @@ UNUSED static void clip_full(const char *cue)
     if (clip_waiting && clip_waiting != cue)
         pm_log("own clip %%s dropped before it played: %%s was asked for after it", clip_waiting, cue);
     clip_waiting = cue;
-    clip_due = pm_ms() + PA_CLIP_AFTER_MS;
+    clip_due = pm_ms() + clip_after;
+    if (ending) end_clip = 1;
 }
 
 /* behind the HUD over and over while the mode runs (after a full-screen clip still waiting) */
@@ -2585,6 +5339,10 @@ UNUSED static void clip_loop(const char *cue)
 {
     const char *n;
     if (!own_clip(cue)) return;
+    if (ending) {                     /* PAD-733: When the mode ends: behind its TOTAL (MINILLA's snow after he falls) */
+        end_cover = cue;
+        return;
+    }
     if (!run.on) {
         pm_log("own clip %%s: not looped behind the HUD - the mode is not running", cue);
         return;
@@ -2599,9 +5357,15 @@ UNUSED static void clip_loop(const char *cue)
            looping ? "asked" : "this port has no backdrop");
 }
 
-/* behind the HUD once, in the loop's place, then the loop again */
+/* behind the HUD once, in the loop's place, then the loop again. In When the mode ends there is no loop left to
+ * play in (PAD-658, run meltdown_r4: the game's screen showed, not the clip): full screen, the TOTAL after it */
 UNUSED static void clip_behind(const char *cue)
 {
+    if (ending) {
+        pm_log("own clip %%s: the mode is ending - played full screen, not behind the HUD", cue);
+        clip_full(cue);
+        return;
+    }
     if (!own_clip(cue)) return;
     if (!run.on || !looping || !pa_clip_event(&own, cue))
         pm_log("own clip %%s: not played behind the HUD - %%s", cue,
@@ -2616,9 +5380,9 @@ UNUSED static int sound(const char *cue)
     return 0;
 }
 
-static void own_tick(void)
+/* a full-screen clip whose time has come */
+static void own_clip_due(void)
 {
-    pa_tick(&own);
     if (!clip_waiting || pm_ms() < clip_due) return;
     pa_clip_full(&own, clip_waiting);
     clip_waiting = 0;
@@ -2629,7 +5393,38 @@ static void own_tick(void)
     }
 }
 
+static void own_tick(void)
+{
+    pa_tick(&own);
+    own_clip_due();
+}
+
 """
+
+
+def combo_shot_words(shot):
+    """PAD-708: a combo's step in words."""
+    if isinstance(shot, list):
+        return " or ".join(x or "(no shot)" for x in shot) or "(no shot)"
+    return {COMBO_ANY: "any shot", COMBO_LIT: "a lit shot"}.get(shot, shot or "(no shot)")
+
+
+def combo_words(hat, when=True):
+    """PAD-708: a combo hat in words: ``when Left ramp, then Right ramp within 3 s, while it runs``."""
+    steps = [combo_shot_words(x) for x in combo_steps(hat)] or ["(no shots)"]
+    out = "when %s%s within %g s" % (", then ".join(steps), ", each" if len(steps) > 2 else "",
+                                     combo_ms(hat) / 1000.0)
+    if hat.get("name"):
+        out += " (%s)" % hat["name"]
+    return out + (", %s" % WHEN.get(hat.get("when", "any"), "") if when else "")
+
+
+def spare_key(hat):
+    """PAD-826: (board, input, closed reads high) of a When a spare switch closes hat."""
+    def i(v, top):
+        return int(v) if _int_ok(v, 0, top) else 0
+    return (i(hat.get("node"), SPARE_NODES - 1), i(hat.get("input"), SPARE_INPUTS - 1),
+            1 if hat.get("closed") == "high" else 0)
 
 
 def _hat_words(hat):
@@ -2639,6 +5434,12 @@ def _hat_words(hat):
         return "when %s is made, %s" % (hat.get("shot") or "(no shot)", when)
     if kind == "any_shot":
         return "when any shot is made, %s" % when
+    if kind == "switch":
+        return "when any playfield switch is hit, %s" % when
+    if kind == "spare_switch":                                                       # PAD-826
+        return "when the spare switch on board %s input %s closes, %s" % (hat.get("node"), hat.get("input"), when)
+    if kind == "drain":
+        return "when a ball goes into the trough, %s" % when
     if kind == "every":
         return "every %s seconds while it runs" % hat.get("seconds")
     if kind == "seconds_left":
@@ -2647,4 +5448,21 @@ def _hat_words(hat):
         return "when %s, %s" % (MP.EVENT_LABELS.get(hat.get("event"), hat.get("event")), when)
     if kind == "timer_done":
         return "when the timer %s runs out" % (hat.get("timer") or "(no timer)")
+    if kind == "combo":                                                             # PAD-708
+        return combo_words(hat)
+    if kind == "battle":                                                             # PAD-706
+        if hat.get("more"):                                                          # PAD-707
+            return "when the player picks it on the battle selection screen, a new monster in %s's place" % battle_name(hat)
+        return "when the player picks %s on the battle selection screen" % battle_name(hat)
+    if kind == "game_mode":                                                          # PAD-710
+        return "when the game starts its %s" % place_name(hat)
+    if kind == "completed":                                                          # PAD-747
+        return "when the player has completed %s of %d of the game's modes in a game" % (
+            hat.get("count"), len(done_hat_ids(hat)))
+    if kind == "challenge":
+        ms = challenge_launch_ms(hat)                                               # PAD-643
+        return "when the player picks the challenge %s%s" % (
+            hat.get("challenge") or "(no challenge)",
+            ", the player launching its ball" if ms < 0 else ", its ball launched %d s after it starts" % (ms // 1000)
+            if ms else "")
     return HATS.get(kind, "?").lower()

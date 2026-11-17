@@ -298,6 +298,34 @@ for (_g, _v), (_m, _c, _mu, _st) in _SWAP.items():
     TITLES[(_g, _v)] = Carriers(key_mask=_m, calls=_c, music=_mu, status=_st, swap=True)
 
 
+# PAD-1296: Spike 3 builds (64-bit; a mode profile key ending ``_spike3``). Every sound of a mode's own is
+# SWAPPED in: spike3_modes appends its record to the card's image.bin, keyed beside its carrier's record,
+# and the runtime's lookup hook takes that key while the mode plays it (the same item 163 route). A
+# carrier is a request of the build the game never plays. Star Wars ELG 1.10: the Spike 2 build's census
+# carriers two request ids on (its sound requests are Spike 2's + 2: PAD-1282's request_shift), each the
+# same recording (mono calls 2.40 s .. 1.64 s, longest first as on Spike 2; stereo music), and none heard
+# from the game in two emulator games (slot 96, 2026-11-14) in which a mode played its start, shot, end
+# and music on 135 / 201 / 202 / 70. Spike 2's 344 (= 346 here) is left out: it plays the same record as
+# 345, so one swap would take both.
+TITLES_A64 = {
+    ("star_wars_elg", "1.10"): Carriers(key_mask=0, calls=(135, 202, 201, 74, 238), music=(70, 345, 73, 78),
+                                        status="census", swap=True),
+}
+
+
+def profile_carriers(profile_key):
+    """The :class:`Carriers` of a mode profile key (``star_wars_elg_1_10``, or a Spike 3 build's
+    ``star_wars_elg_1_10_spike3``), or ``None`` when none have been measured for that build."""
+    key = str(profile_key)
+    arch = "a64" if key.endswith(SPIKE3_SUFFIX) else "arm"
+    game, version = title_version(key[:-len(SPIKE3_SUFFIX)] if arch == "a64" else key)
+    return carriers(game, version, arch) if game else None
+
+
+#: mode_project.SPIKE3_KEY (not imported: mode_project imports this module)
+SPIKE3_SUFFIX = "_spike3"
+
+
 def swapped(c, key):
     """True when a sound of *key* ("music" or a call's) is SWAPPED in on this title's carriers (item
     163), so a carrier can take several modes' sounds, each its own record (hud-layers)."""
@@ -321,9 +349,10 @@ class ModeSoundError(ValueError):
     """Own sounds that cannot be carried or built as asked."""
 
 
-def carriers(game, version):
-    """The title's :class:`Carriers`, or ``None`` when no carrier has been measured for it."""
-    return TITLES.get((game, str(version)))
+def carriers(game, version, arch="arm"):
+    """The title's :class:`Carriers`, or ``None`` when no carrier has been measured for it. *arch*
+    "a64" is its Spike 3 build's (:data:`TITLES_A64`, PAD-1296)."""
+    return (TITLES_A64 if arch == "a64" else TITLES).get((game, str(version)))
 
 
 def assign(game, version, wants, taken=(), taken_beds=()):
@@ -649,7 +678,9 @@ def request_sids(game_elf_bytes, fragments, requests):
             o = va2off(w) if w else None
             if o is None or o < end:
                 continue
-            for i in range(256):
+            for i in range(SR.LIST_MAX):
+                if o + 4 * i + 4 > len(game_elf_bytes):
+                    break
                 (s,) = struct.unpack_from("<I", game_elf_bytes, o + 4 * i)
                 if s == 0:
                     break
@@ -676,6 +707,50 @@ def request_records(sids_by_req, sites, params, key_mask):
                                  % (req, sids[0], len(recs), key_mask))
         out[req] = recs.pop()
     return out
+
+
+def own_calls(game_elf_bytes, image_head, sites, params, key_mask, limit=21):
+    """PAD-645: CALL carriers read off a build's own play tables, for a build no carrier was measured
+    on (an older or a locally derived build): the requests that play one sid, whose sid names one
+    record no other sid names and no other request plays, mono, longest record first. This is the
+    item 163 static test less the constant-call-site check (the ELF's call sites are not read here),
+    so the game may play one now and then: fit for the flipper buttons' sounds in attract, which
+    swap a carrier's record only while their own file plays. ``()`` when the tables cannot be read."""
+    from .info import container_counts
+    from .spike2 import sound_requests as SR
+    counts = container_counts(image_head)
+    fragments = counts[0] if isinstance(counts, tuple) else counts.get("fragments")
+    count, _table = SR.locate_sound_requests(game_elf_bytes, fragments)
+    if not count:
+        return ()
+    try:
+        by_req = request_sids(game_elf_bytes, fragments, range(1, int(count)))
+    except ModeSoundError:
+        return ()
+    fk = {p["findkey"]: p for p in params if p.get("findkey")}
+    recs_of = {}
+    for s in sites:
+        p = fk.get(_play_key(s.payload, s.sid, key_mask))
+        if p is not None:
+            recs_of.setdefault(s.sid, set()).add(p["idx"])
+    sids_of_rec, reqs_of_sid = {}, {}
+    for sid, recs in recs_of.items():
+        for r in recs:
+            sids_of_rec.setdefault(r, set()).add(sid)
+    for req, sids in by_req.items():
+        for sid in set(sids):
+            reqs_of_sid.setdefault(sid, set()).add(req)
+    by_idx = {p["idx"]: p for p in params}
+    pool = []
+    for req, sids in by_req.items():
+        if len(sids) != 1 or len(recs_of.get(sids[0], ())) != 1 or len(reqs_of_sid.get(sids[0], ())) != 1:
+            continue
+        rec = next(iter(recs_of[sids[0]]))
+        p = by_idx.get(rec) or {}
+        if len(sids_of_rec.get(rec, ())) != 1 or int(p.get("chan", 0) or 0) != 1:
+            continue
+        pool.append((-int(p.get("length", 0) or 0), req))
+    return tuple(req for _n, req in sorted(pool)[:limit])
 
 
 def sid_records(sids, sites, params, key_mask):

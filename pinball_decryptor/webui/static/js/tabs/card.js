@@ -46,14 +46,17 @@ function WhatCard({ shell, s }) {
   const direct = tabs.filter((t) => !needOf(t));
   const folder = tabs.filter((t) => needOf(t) === "project");
   const needs = tabs.filter((t) => needOf(t) === "extract");
+  // PAD-1090: a Spike 3 card's tabs wait on the user's own OTP key
+  const keyed = tabs.filter((t) => needOf(t) === "spike3key");
+  const keyLocked = keyed.some((t) => tabLock(t, ps, shell.spike3_key));
   const anyLocked = folder.concat(needs).some((t) => tabLock(t, ps));
   const project = ps ? html`<${Chip} kind="acc" title=${ps.folder}>${ps.name}<//>` : null;
   const d = (s.project && s.project.details) || {};
   return html`<${Card} cls="c-what-card" title="What you can do with it">
     ${ps && d.card_kind === "other" ? html`<${OtherCardNote} ps=${ps} d=${d} />` : html`<div class="note"><${Icon} name=${anyLocked ? "lock" : "info"} /><div class="body-text">
-      ${!ps ? html`There is no project folder yet. Extract the card into one to unlock the tabs marked with a lock; until then they are greyed out in the list on the left.`
-        : anyLocked && ps.archived ? html`Project ${project} is archived. Extract into it again to unlock the tabs marked with a lock; until then they are greyed out in the list on the left.`
-        : anyLocked ? html`Project ${project} has no extract yet. Extract the card into it to unlock the tabs marked with a lock; until then they are greyed out in the list on the left.`
+      ${!ps ? html`There is no project folder yet. Extract the card into one to unlock the tabs marked with a lock; until then they are grayed out in the list on the left.`
+        : anyLocked && ps.archived ? html`Project ${project} is archived. Extract into it again to unlock the tabs marked with a lock; until then they are grayed out in the list on the left.`
+        : anyLocked ? html`Project ${project} has no extract yet. Extract the card into it to unlock the tabs marked with a lock; until then they are grayed out in the list on the left.`
         : html`Project ${project} holds an extract, so every tab is ready.`}
     </div></div>`}
     ${direct.length ? html`<div class="stack c-sec">
@@ -67,6 +70,10 @@ function WhatCard({ shell, s }) {
     ${needs.length ? html`<div class="stack c-sec">
         <span class="lbl">Needs the card extracted into a project folder</span>
         ${needs.map((t) => html`<${TabRow} t=${t} lock=${tabLock(t, ps)} />`)}
+      </div>` : null}
+    ${keyed.length ? html`<div class="stack c-sec">
+        <span class="lbl">${keyLocked ? "Needs your Spike 3 OTP key (open one of these tabs to give it to PAD)" : "Uses your Spike 3 OTP key (PAD has it)"}</span>
+        ${keyed.map((t) => html`<${TabRow} t=${t} lock=${tabLock(t, ps, shell.spike3_key)} />`)}
       </div>` : null}
   <//>`;
 }
@@ -98,14 +105,15 @@ function Glass({ p }) {
 
 // ------------------------------------------------------ the card details
 // The Image Info report, under the card tile.  While it is read the rows it
-// will fill shimmer in place.
+// will fill shimmer in place; the quick rows show as soon as they are read,
+// the video count following (PAD-626: "partial").
 const SKELETON = [[38, 62], [30, 48], [44, 70], [26, 40], [34, 56]];
 function Details({ info }) {
   const loading = info.state === "loading";
   const sections = info.sections || [];
   return html`<${Card} cls="c-info" title="Card details"
       extra=${html`<span class="small dim">${loading ? "" : info.status}</span>
-        <${Button} kind="ghost" size="sm" icon="copy" disabled=${loading || !sections.length}
+        <${Button} kind="ghost" size="sm" icon="copy" disabled=${loading || info.state === "partial" || !sections.length}
           onClick=${() => call("card.info_copy")} title="Copy the report">Copy<//>
         <${Button} kind="ghost" size="sm" icon="refresh" disabled=${loading}
           onClick=${() => call("card.refresh")} title="Read the card again" />`}>

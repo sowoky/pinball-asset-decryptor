@@ -23,11 +23,20 @@ The links are in the game program, three ways:
 * ``name`` - the one sound whose Sound Test name ends with the clip's name (:func:`named`: "SE
   GZ FX DE BRIDGEATTACK 1" for BridgeAttack_1);
 
-and ``function`` (the call is in that function, nearer another clip's name) is kept for the
-tools only. EMULATOR-PROVEN on Godzilla Premium/LE 1.16 (``docs/architecture/stern.md``):
+and ``function`` (the call is in that function, nearer another clip's name). A clip with none of
+the first three gets the sounds that MAY be its (PAD-592, the Video tab lists them as such):
+``function``, ``names`` (several Sound Test names end with the clip's name: 6 of 16 played with
+it) and ``part`` (the clip's name less its first parts names a few sounds: 5 of 5, :func:`maybe`).
+A name holding the clip's name elsewhere was tried and dropped: 0 of 6 (a Japanese twin, a radio
+line the game picks at random). A
+clip a PAD build added as a random copy of another (``<name>__PadVar<k>``,
+:mod:`.clip_variants`) plays in that clip's place, so it gets that clip's sounds. EMULATOR-PROVEN on Godzilla Premium/LE 1.16 (``docs/architecture/stern.md``):
 pairs whose clip showed and whose request fired within a second of it, record 38 of 38, next 16
 of 18, name 56 of 59; function 6 of 28, and the two kinds dropped here, a table's loader 1 of 23
-and the same mode's code 17 of 478.
+and the same mode's code 17 of 478. PAD-624, on the clips handed a surface (``sound_census.c``'s V
+lines): Uncanny X-Men Pro 0.98 record 5 of 5, next 11 of 14, function 9 of 42; Godzilla Pro 1.16
+record 7 of 9, name 4 of 4, and the Xilien broadcast's scene clips (no video bank) 2 of 2, their
+voice 2.5-3.2 s into the clip.
 
 A request is named by the Sound Test (the menu's node id IS the request id, MODE_API.md item 150:
 :func:`menu_names`) and, once Extract has written :data:`REQUESTS_TSV`, by the ``idx`` records
@@ -48,8 +57,8 @@ import struct
 from dataclasses import dataclass, field
 
 #: bumped when what :func:`analyse` reads changes (a cached :class:`.clip_modes.CardClips` is
-#: read again)
-READ_REV = 2
+#: read again; 6: the sounds each mode's own code asks for, :attr:`SoundReading.modes`, PAD-1064)
+READ_REV = 6
 #: the port sites that play a sound by request, its id in r0 (MODE_API.md)
 SOUND_SITES = ("sound_worker", "sound_play", "sound_nth", "callout", "callout_nth")
 #: how many wrappers deep the entries are followed past the seeds: a port names the game's own
@@ -73,13 +82,21 @@ REC_OFF = 4
 REC_GAP = 64
 #: the fewest letters and digits of a clip's name :func:`named` matches to a Sound Test name
 NAME_MIN = 6
+#: :func:`maybe`'s ``part``: the fewest letters and digits of what is left of a clip's name, and
+#: the most sounds it may name
+PART_MIN = 11
+PART_MAX = 3
 #: how many vtable slots either side of a clip's name getter are tried for its sound's
 GETTER_SLOTS = 4
-HOWS = ("record", "next", "name", "function")
+HOWS = ("record", "next", "name", "function", "names", "part")
+#: the kinds the emulator proved; a clip with one of them gets no ``names`` / ``part``
+SURE = ("record", "next", "name")
 _RANK = {h: i for i, h in enumerate(HOWS)}
 #: Extract's sidecar: every request, the ``idx`` records it plays, its sound ids and Sound Test name
 REQUESTS_TSV = "sound_requests.tsv"
 _IDX_RE = re.compile(r"\bidx(\d{4,})\b")
+#: a clip a PAD build added as a random copy of another (:data:`.clip_variants.NAME_FORMAT`)
+_VARIANT_RE = re.compile(r"^(?P<base>.+)__PadVar\d+$")
 
 
 # ---- the request table -----------------------------------------------------------------------
@@ -90,7 +107,7 @@ def request_table(raw, fragments):
     needs to tell the table from its look-alikes. The registry VA is where the build's
     ``{data_va, count, 20}`` triple for the table sits (None when it is not found)."""
     from .spike2.elf import parse_elf
-    from .spike2.sound_requests import locate_sound_requests
+    from .spike2.sound_requests import LIST_MAX, locate_sound_requests
     count, table = locate_sound_requests(raw, fragments)
     if not count:
         return 0, [], None, None
@@ -117,7 +134,7 @@ def request_table(raw, fragments):
             o = va2off(w) if w else None
             if o is None or o < end:
                 continue
-            for i in range(256):
+            for i in range(LIST_MAX):
                 if o + 4 * i + 4 > len(raw):
                     break
                 s = struct.unpack_from("<I", raw, o + 4 * i)[0]
@@ -140,13 +157,14 @@ def request_table(raw, fragments):
 
 def menu_names(raw, lists):
     """``{request: Sound Test name}``: the menu's node id is the request id; a name is kept only
-    where the menu's sid list is the request's own, list for list (``sound_map.py``)."""
+    where the menu's sid list is the request's own, list for list (``sound_map.py``), and never
+    where the title left the entry on a placeholder sound (PAD-823, ``_placeholder_sids``)."""
     from .spike2 import sfx_names as SN
     t = SN._walk_menu_table(raw)
     if t is None:
         return {}
     ml, nl = t["lists"], len(t["lists"])
-    out = {}
+    found = []
     for p, name in enumerate(t["names"]):
         if not SN._is_sound_entry(name):
             continue
@@ -155,8 +173,9 @@ def menu_names(raw, lists):
             continue
         li = (nl - 1) - nid
         if 0 <= li < nl and ml[li] == lists[nid]:
-            out[nid] = name.strip()
-    return out
+            found.append((nid, ml[li][-1] if ml[li] else None, name.strip()))
+    parked = SN._placeholder_sids([(sid, name) for _nid, sid, name in found if sid is not None])
+    return {nid: name for nid, sid, name in found if sid not in parked}
 
 
 # ---- where the sound functions are -----------------------------------------------------------
@@ -644,17 +663,62 @@ def named(names, menu):
     return out
 
 
+def maybe(names, menu):
+    """``{clip: [(request, how)]}``, the sounds that MAY be a clip's (the Video tab says so):
+    ``names`` where several Sound Test names end with the clip's name (:func:`named` takes only
+    one: "SE GZ FX DE SHOOT AGAIN" and "SE GZ VO GAME SHOOT AGAIN" for shoot_again), letters and
+    digits only and none shorter than :data:`NAME_MIN`; and, for a clip whose whole name no
+    Sound Test name holds, ``part``: the clip's name less its first parts names at most
+    :data:`PART_MAX` sounds, as whole words of at least :data:`PART_MIN` letters ("SE GZ FX DE
+    MONSTER ZERO JACKPOTBUILD1" for m0_jackpotbuild1; a short rest such as "attack2" names
+    sounds of every mode)."""
+    ends, runs = {}, {}
+    for r, n in menu.items():
+        words = re.findall(r"[A-Za-z0-9]+", n)
+        for i in range(len(words)):
+            for j in range(i + 1, len(words) + 1):
+                key = _norm("".join(words[i:j]))
+                if len(key) >= NAME_MIN:
+                    (ends if j == len(words) else runs).setdefault(key, set()).add(r)
+    out = {}
+    for c in names:
+        key = _norm(c)
+        end = ends.get(key) or set()
+        got = [(r, "names") for r in sorted(end)] if len(end) > 1 else []
+        if not end and not runs.get(key):
+            parts = [p for p in re.split(r"[^A-Za-z0-9]+", c) if p]
+            for k in range(1, len(parts)):
+                rest = _norm("".join(parts[k:]))
+                if len(rest) < PART_MIN:
+                    break
+                hit = (ends.get(rest) or set()) | (runs.get(rest) or set())
+                if hit:
+                    if len(hit) <= PART_MAX:
+                        got = [(r, "part") for r in sorted(hit)]
+                    break
+        if got:
+            out[c] = got
+    return out
+
+
+def base_clip(name):
+    """The clip a PAD build's random copy ``<name>__PadVar<k>`` stands in for, else None."""
+    m = _VARIANT_RE.match(name or "")
+    return m.group("base") if m else None
+
+
 def _norm(s):
     return re.sub(r"[^A-Z0-9]", "", s.upper())
 
 
-def pair(prog, refs, calls, count=0, raw=None, extra=None):
+def pair(prog, refs, calls, count=0, raw=None, extra=None, maybes=None):
     """``{clip name: [[request, how, gap, VA], ...]}``, best first (:data:`HOWS`; *gap* in
     instructions, -1 where there is none; VA = the call's, the record's or the getter's, 0 for
     ``name``). *refs* is :func:`.clip_modes.clip_refs`' reading, *calls* :func:`sound_calls`';
     *count* (the build's requests) adds ``record``: the clip's data records (:func:`records`)
     and, with the program's bytes *raw*, its class's sound getter (:func:`getters`); *extra*
-    (``{clip: [request]}``, :func:`named`'s) adds ``name``."""
+    (``{clip: [request]}``, :func:`named`'s) adds ``name``; *maybes* (:func:`maybe`'s) adds
+    ``names`` and ``part`` to a clip with none of :data:`SURE`."""
     by_fn = {}
     for c in calls:
         by_fn.setdefault(c.fn, []).append(c)
@@ -680,8 +744,9 @@ def pair(prog, refs, calls, count=0, raw=None, extra=None):
         for clip, got in getters(prog, raw, refs, count).items():
             recs.setdefault(clip, []).extend(got)
     extra = extra or {}
+    maybes = maybes or {}
     out = {}
-    for clip in sorted(set(places) | set(recs) | set(extra)):
+    for clip in sorted(set(places) | set(recs) | set(extra) | set(maybes)):
         got = {}
 
         def keep(req, how, gap, at):
@@ -698,6 +763,9 @@ def pair(prog, refs, calls, count=0, raw=None, extra=None):
                      abs(c.at - va) // 4, c.at)
         for req in extra.get(clip, ()):
             keep(req, "name", -1, 0)
+        if not any(p[1] in SURE for p in got.values()):
+            for req, how in maybes.get(clip, ()):
+                keep(req, how, -1, 0)
         if got:
             out[clip] = sorted(got.values(), key=lambda p: (
                 _RANK[p[1]], p[2] if p[2] >= 0 else 1 << 30, p[0]))
@@ -717,6 +785,9 @@ class SoundReading:
     names: dict = field(default_factory=dict)     # request -> Sound Test name (paired ones)
     sids: dict = field(default_factory=dict)      # request -> [sid] (paired ones)
     note: str = ""            # why there is nothing, in words
+    #: PAD-1064: mode -> [[request, call VA, calls]], the sounds the mode's own code asks for by a fixed
+    #: number (:func:`mode_calls`), first call first; the Modes tab's How it works lists them
+    modes: dict = field(default_factory=dict)
 
     def sounds_of(self, clip):
         """``[{request, how, gap, at, name, sids}]`` for *clip*, best first."""
@@ -728,7 +799,8 @@ class SoundReading:
         return {"rev": READ_REV, "origin": self.origin, "port": self.port, "count": self.count,
                 "entries": {"%d" % k: v for k, v in self.entries.items()}, "calls": self.calls,
                 "pairs": self.pairs, "names": {"%d" % k: v for k, v in self.names.items()},
-                "sids": {"%d" % k: v for k, v in self.sids.items()}, "note": self.note}
+                "sids": {"%d" % k: v for k, v in self.sids.items()}, "note": self.note,
+                "modes": self.modes}
 
     @classmethod
     def from_json(cls, d):
@@ -739,7 +811,8 @@ class SoundReading:
                    {k: [list(p) for p in v] for k, v in (d.get("pairs") or {}).items()},
                    {int(k): v for k, v in (d.get("names") or {}).items()},
                    {int(k): list(v) for k, v in (d.get("sids") or {}).items()},
-                   d.get("note", ""))
+                   d.get("note", ""),
+                   {k: [list(p) for p in v] for k, v in (d.get("modes") or {}).items()})
 
 
 def analyse(elf, names, fragments, game="", version="", refs=None, ctx=None):
@@ -780,8 +853,16 @@ def analyse(elf, names, fragments, game="", version="", refs=None, ctx=None):
     if refs is None:
         refs = CM.clip_refs(prog, raw, names)
     menu = menu_names(raw, lists)
-    out.pairs = pair(prog, refs, calls, count, raw, named(names, menu))
-    paired = sorted({p[0] for ps in out.pairs.values() for p in ps})
+    out.pairs = pair(prog, refs, calls, count, raw, named(names, menu), maybe(names, menu))
+    # a PAD build's random copy plays in its clip's place (:func:`base_clip`)
+    for clip in names:
+        base = base_clip(clip)
+        if base in out.pairs and not any(p[1] in SURE for p in out.pairs.get(clip, ())):
+            out.pairs[clip] = [list(p) for p in out.pairs[base]]
+    if ctx.get("owners") is not None:
+        out.modes = mode_calls(calls, ctx["owners"])
+    paired = sorted({p[0] for ps in out.pairs.values() for p in ps}
+                    | {p[0] for ps in out.modes.values() for p in ps})
     out.names = {r: menu[r] for r in paired if r in menu}
     out.sids = {r: list(lists[r]) for r in paired}
     if not out.pairs:
@@ -790,67 +871,236 @@ def analyse(elf, names, fragments, game="", version="", refs=None, ctx=None):
     return out
 
 
+def mode_calls(calls, owners):
+    """``{mode: [[request, call VA, calls]]}``: each :class:`Call` given the mode whose code it is in by
+    *owners* (:class:`.clip_modes._Owners`, :class:`.clip_files.FileOwners`), one row per request in the
+    order the mode's code first asks for it, with how many calls ask for it. A call that is no one mode's
+    (main play, attract, code several modes share) is left out."""
+    out = {}
+    for c in calls:
+        mode = owners.of_code(c.at)[0]
+        if not mode:
+            continue
+        rows = out.setdefault(mode, {})
+        if c.request in rows:
+            rows[c.request][2] += 1
+        else:
+            rows[c.request] = [c.request, c.at, 1]
+    return {m: sorted(rows.values(), key=lambda r: r[1]) for m, rows in out.items()}
+
+
 # ---- a request's sounds ------------------------------------------------------------------------
-def resolve_requests(emu, params, lists, fw=None):
+def resolve_requests(emu, params, lists, fw=None, also=None, ceiling=None):
     """``{request: [idx, ...]}``: the master-directory records (Extract's ``idxNNNN.wav``) each
     request's sound ids resolve to, through the firmware's own ``get_asset_descriptor`` on the
     booted codec emulator *emu* (the chain :mod:`.spike2.sfx_names` names the Sound Test's
     sounds by). *params* is ``derive_params``' (rows carry ``key0``). A sound id of another
-    category's bank (a licensed song) names no cat-0 record and is left out."""
+    category's bank (a licensed song) names no cat-0 record and is left out.
+
+    Each sound id counts by its descriptor's primary record. A dict *also* is filled with
+    ``{request: [idx, ...]}`` of the records the request plays as a LATER part of a multi-part
+    descriptor (:func:`.spike2.sfx_names._part_idxs`), which the Audio tab needs to tell a
+    sound the game never asks for (PAD-635).
+
+    With *ceiling* (the bank's fragment count) every sound id up to it is resolved first, so
+    each descriptor is read only as far as the next one starts: the resolver's window runs on
+    into it, and its records are not this request's (PAD-636: on Led Zeppelin Pro 1.22 sid
+    470's window carries sid 471's record)."""
     from .spike2 import sfx_names as SN
+    from .engine import _descriptor_extents
     key0 = {p["key0"]: p["idx"] for p in params if p.get("key0") is not None}
     if not key0:
         return {}
     resolver, buf = SN._find_resolver(emu, fw)
     if resolver is None:
         return {}
+    seen = {}
+    if ceiling:
+        for sid in range(int(ceiling) + 1):
+            r = SN.resolve_descriptor(emu, resolver, buf, sid)
+            if r is not None:
+                seen[sid] = (r[0], r[2])
+    extents = _descriptor_extents([d0 for d0, _d in seen.values()], SN.DESC_WINDOW)
     by_sid, out = {}, {}
     for req, sids in enumerate(lists):
-        got = []
+        got, more = [], []
         for sid in sids:
             if sid not in by_sid:
-                desc = SN._try_resolve(emu, resolver, buf, sid)
-                by_sid[sid] = SN._primary_idx(desc, key0) if desc else None
-            i = by_sid[sid]
-            if i is not None and i not in got:
-                got.append(i)
+                if sid in seen:
+                    d0, desc = seen[sid]
+                    by_sid[sid] = SN._part_idxs(desc, key0, extents[d0])
+                else:
+                    desc = SN._try_resolve(emu, resolver, buf, sid)
+                    by_sid[sid] = SN._part_idxs(desc, key0) if desc else []
+            parts = by_sid[sid]
+            if parts and parts[0] not in got:
+                got.append(parts[0])
+            more.extend(i for i in parts[1:] if i not in more)
         if got:
             out[req] = got
+        more = [i for i in more if i not in got]
+        if more and also is not None:
+            also[req] = more
     return out
 
 
-def write_requests(path, lists, idx_of, names):
-    """Write :data:`REQUESTS_TSV`: one row per request, ``request idx sids name``."""
+def write_requests(path, lists, idx_of, names, also=None):
+    """Write :data:`REQUESTS_TSV`: one row per request, ``request idx sids name also``
+    (*also*: :func:`resolve_requests`' later parts; ``None`` writes the column-less file of an
+    extract that did not resolve them)."""
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write("# The game's sound requests (what its code asks for by number) and the sounds\n"
                 "# each plays: idx = audio/idxNNNN.wav, sids = its sound ids, name = its Sound\n"
-                "# Test name. Written by Extract; the Video tab reads it.\n")
-        f.write("request\tidx\tsids\tname\n")
+                "# Test name, also = the sounds it plays as later parts of a multi-part sound.\n"
+                "# Written by Extract; the Video and Audio tabs read it.\n")
+        f.write("request\tidx\tsids\tname%s\n" % ("\talso" if also is not None else ""))
         for req, sids in enumerate(lists):
-            f.write("%d\t%s\t%s\t%s\n" % (req, ",".join("%d" % i for i in idx_of.get(req, ())),
-                                          ",".join("%d" % s for s in sids),
-                                          (names.get(req) or "").replace("\t", " ")))
+            f.write("%d\t%s\t%s\t%s" % (req, ",".join("%d" % i for i in idx_of.get(req, ())),
+                                        ",".join("%d" % s for s in sids),
+                                        (names.get(req) or "").replace("\t", " ")))
+            if also is not None:
+                f.write("\t" + ",".join("%d" % i for i in also.get(req, ())))
+            f.write("\n")
     os.replace(tmp, path)
 
 
 def read_requests(project):
-    """``{request: {"idx": [...], "name": str}}`` from the project's :data:`REQUESTS_TSV`
-    (``{}`` when the extract predates it)."""
+    """``{request: {"idx": [...], "name": str, "also": [...] or None}}`` from the project's
+    :data:`REQUESTS_TSV` (``{}`` when the extract predates it; ``also`` is ``None`` when the
+    file predates that column)."""
     out = {}
+    has_also = False
     try:
         with open(os.path.join(project, REQUESTS_TSV), encoding="utf-8") as f:
             for line in f:
-                if line.startswith("#") or line.startswith("request\t"):
+                if line.startswith("#"):
+                    continue
+                if line.startswith("request\t"):
+                    has_also = "also" in line.rstrip("\r\n").split("\t")[4:]
                     continue
                 cols = line.rstrip("\r\n").split("\t")
                 if len(cols) < 4 or not cols[0].isdigit():
                     continue
-                out[int(cols[0])] = {"idx": [int(x) for x in cols[1].split(",") if x.isdigit()],
-                                     "name": cols[3]}
+                out[int(cols[0])] = {
+                    "idx": [int(x) for x in cols[1].split(",") if x.isdigit()],
+                    "name": cols[3],
+                    "also": ([int(x) for x in cols[4].split(",") if x.isdigit()]
+                             if has_also and len(cols) > 4 else [] if has_also else None)}
     except OSError:
         pass
     return out
+
+
+#: Extract's list of the decoded sounds that are several VARIANTS of one sound (PAD-637:
+#: multi-band records), ``{"<idx>": variant count}``; absent when the card has none.
+VARIANTS_JSON = "sound_variants.json"
+
+
+def write_variants(project, params):
+    """Write (or, with none on the card, remove) :data:`VARIANTS_JSON` for *params*."""
+    import json
+    from .spike2.emulator import bands_of
+    got = {str(p["idx"]): bands_of(p) for p in params if bands_of(p) > 1}
+    path = os.path.join(project, VARIANTS_JSON)
+    if not got:
+        if os.path.exists(path):
+            os.remove(path)
+        return 0
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(got, f, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+    return len(got)
+
+
+def sound_variants(project):
+    """``{idx: variant count}`` from :data:`VARIANTS_JSON` (``{}`` when there is none)."""
+    import json
+    try:
+        with open(os.path.join(project, VARIANTS_JSON), encoding="utf-8") as f:
+            return {int(k): int(v) for k, v in json.load(f).items() if int(v) > 1}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+#: PAD-1071: each decoded sound's record key - the 8 bytes the game's engine looks a recording up by
+#: (a param's ``findkey``) - one ``idx<TAB>16 hex digits`` line each. The Emulate tab's Sound and video
+#: log reads the key the runtime saw looked up after a request and names the very file it played.
+KEYS_TSV = "sound_keys.tsv"
+
+
+def write_keys(project, params):
+    """Write :data:`KEYS_TSV` for *params* (the extract's records); how many it names."""
+    rows = sorted((int(p["idx"]), bytes(p["findkey"]).hex()) for p in params
+                  if p.get("findkey") is not None and p.get("idx") is not None)
+    path = os.path.join(project, KEYS_TSV)
+    if not rows:
+        return 0
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write("# Each sound's record key (what the game looks it up by): idx, 16 hex digits.\n"
+                "# Written by Extract; the Emulate tab's Sound and video log reads it.\n")
+        for idx, key in rows:
+            f.write("%d\t%s\n" % (idx, key))
+    os.replace(tmp, path)
+    return len(rows)
+
+
+def read_keys(project):
+    """``{16 hex digits: idx}`` from :data:`KEYS_TSV` (``{}`` when the extract predates it)."""
+    out = {}
+    try:
+        with open(os.path.join(project, KEYS_TSV), encoding="utf-8") as f:
+            for line in f:
+                cols = line.split("\t")
+                if len(cols) == 2 and cols[0].isdigit():
+                    out[cols[1].strip().lower()] = int(cols[0])
+    except OSError:
+        pass
+    return out
+
+
+def sound_uses(project):
+    """``{idx: [(request, Sound Test name), ...]}`` of every request that plays each decoded
+    sound, as the first sound of a sound id or a later part of one; a sound no request plays
+    is absent (PAD-635: the Audio tab's Requests column). ``None`` when the project's
+    :data:`REQUESTS_TSV` is missing or predates its ``also`` column, so the answer would miss
+    the later parts and call them unplayed, or names no sound at all (the resolver was not
+    found, which says nothing about the sounds)."""
+    req = read_requests(project)
+    if (not req or any(v["also"] is None for v in req.values())
+            or not any(v["idx"] for v in req.values())):
+        return None
+    out = {}
+    for r, v in sorted(req.items()):
+        for i in v["idx"] + v["also"]:
+            uses = out.setdefault(i, [])
+            if not uses or uses[-1][0] != r:
+                uses.append((r, v["name"]))
+    return out
+
+
+#: Why the Audio tab shows no Requests column on a project with decoded sounds
+#: (:func:`sound_uses_why`)
+WHY_EXTRACT_AGAIN = ("No Requests column: this project's extract did not record which sounds "
+                     "the game's code asks for. Extract the card into it again to see it.")
+WHY_NOT_READ = ("No Requests column: the sounds the game's code asks for could not be read "
+                "from this card.")
+
+
+def sound_uses_why(project):
+    """Why :func:`sound_uses` gives ``None`` for *project*, for the Audio tab to say (PAD-635:
+    a tester saw no column on a project extracted before Extract wrote the full map). ``""``
+    when the column is there, or when the project has no decoded sounds to show it for."""
+    if not audio_files(project):
+        return ""
+    req = read_requests(project)
+    if not req or any(v["also"] is None for v in req.values()):
+        return WHY_EXTRACT_AGAIN
+    if not any(v["idx"] for v in req.values()):
+        return WHY_NOT_READ
+    return ""
 
 
 def audio_files(project):
@@ -869,6 +1119,33 @@ def audio_files(project):
         m = _IDX_RE.search(n)
         if m:
             out.setdefault(int(m.group(1)), "audio/" + n)
+    return out
+
+
+def name_key(name):
+    """A Sound Test name as :func:`audio_names` keys it (letters and digits only)."""
+    return _norm(name or "")
+
+
+def audio_names(files):
+    """``{name_key(Sound Test name): "audio/<file>"}`` from :func:`audio_files`' *files*, for
+    the files Extract named after their sound (``idx0491 - SE GZ FX DE BUILDINGSMASH BREATH
+    NEW.wav``): an extract made before :data:`REQUESTS_TSV` still finds a sound's file by its
+    name (PAD-592). A name two files share names neither."""
+    out, twice = {}, set()
+    for _i, rel in sorted(files.items()):
+        stem = os.path.splitext(rel.rsplit("/", 1)[-1])[0]
+        m = re.match(r"^idx\d{4,} - (.+)$", stem)
+        if not m:
+            continue
+        k = name_key(m.group(1))
+        if not k:
+            continue
+        if k in out:
+            twice.add(k)
+        out[k] = rel
+    for k in twice:
+        out.pop(k, None)
     return out
 
 

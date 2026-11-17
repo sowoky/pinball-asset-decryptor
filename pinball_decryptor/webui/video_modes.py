@@ -25,9 +25,13 @@ Store keys (namespace ``video``):
   rows[i]      + modes (labels), pair (a row of a shared clip), follow (the lead mode's label: a
                follower), copy (a mode's own clip), unplayed, other
   preview      + modes: {rel, kind: lead|follow|copy|unplayed, text, back} or None
-               + sounds: {rel, head, items: [{text, how, tip}], more, foot} or None - the
-               sounds the game plays with the clip (:mod:`..plugins.stern.clip_sounds`),
-               named by the extract's ``sound_requests.tsv`` and audio files
+               + sounds: {rel, head, items: [{text, how, tip, rel, path}], more, maybe_head,
+               maybe: [...], maybe_more, none, foot} or None - the sounds the game plays
+               with the clip (:mod:`..plugins.stern.clip_sounds`), named by the extract's
+               ``sound_requests.tsv`` and audio files; each item's ``rel`` is its Audio row
+               (``open_sound`` shows it there) and ``path`` the file the page plays. A clip
+               with no sure sound lists the ones that MAY be its (PAD-592); one the reading
+               can't pair says why in ``none``, never nothing (PAD-627)
 """
 
 import os
@@ -67,8 +71,52 @@ SOUNDS_HEAD = "Sounds the game plays with this clip (read from its program):"
 SOUNDS_MAX = 8
 SOUNDS_HOW = {"record": "kept with the clip", "next": "asked for right after it",
               "name": "named after it"}
+#: PAD-1190: a clip's song where the game's program is not read (JJP)
+SONG_HEAD = "The song that goes with this clip (a sound named after it, about as long):"
+SONG_FOOT = ("Matched by the files' names and lengths. Tick \"Play it with the clip\" to hear "
+             "it while either player plays.")
+SONGS_MAX = 3
+#: PAD-1266 (Ben): the song note is one row - this label, the song, the "Play it with the clip" box -
+#: and SONG_HEAD / SONG_FOOT are the label's tooltip instead of two lines of their own
+SONG_LABEL = "Song:"
 SOUNDS_FOOT = ("Extract the card again to see which sound files these are: the extract writes "
                "sound_requests.tsv.")
+#: PAD-827: the callout's part for what the emulator saw the game do with the clip
+SEEN_HEAD = "Seen in the emulator (Emulate tab runs of this project):"
+#: PAD-827: the callout's part for what the game program says about how the clip is played
+PROG_HEAD = "From the game program:"
+#: PAD-592: a clip with none of those - the sounds that MAY be its, each kind in words
+MAYBE_HEAD = "No sound is sure for this clip. These may be its:"
+MAYBE_MAX = 12
+MAYBE_HOW = {"function": "asked for in the same part of the program",
+             "names": "named like it", "part": "named like part of its name"}
+NONE_TEXT = ("No sound found for this clip in the game's program. It may have none (a loop or a "
+             "backdrop), or the game picks its sound in a way the program does not show.")
+#: PAD-627: the clips no bank names, each in words (a callout always says why it lists no sound)
+SCENE_TEXT = ("This clip belongs to a scene that plays it on its own, so the game's program "
+              "never asks for it by name and does not say which sound goes with it.")
+UNKNOWN_TEXT = ("This clip is not one the app found in the card's clip banks, so it can't tell "
+                "which sound goes with it.")
+UNREAD_TEXT = "The sounds that go with the clips were not read: %s."
+#: a sound's link and play button (the page's words, here for the tests)
+OPEN_TIP = "Show this sound on the Audio tab"
+#: PAD-624: the toolbar's one line when the card gives the tab nothing to show (the card is not
+#: on this PC, can't be read, or names no mode), and its tooltip's lines
+WHY_GONE = "Played in and clip sounds: the project's card is not on this PC"
+WHY_GONE_TIP = ("The card image this project was extracted from is not on this PC, so the app "
+                "can't read which part of the game plays each clip, or the sounds it plays with "
+                "them. Put the card back where it was, or extract it again.")
+WHY_UNREAD = "Played in and clip sounds: the card could not be read"
+WHY_NO_MODES = "Played in: not shown for this game"
+WHY_NO_MODES_TIP = ("The app can't tell which part of this game plays each clip from its "
+                    "program, so the Played in column is not shown.")
+WHY_SOUNDS_OK = "The sounds the game plays with a clip are shown under it."
+WHY_SOUNDS_NONE = "The sounds the game plays with its clips can't be read from it either."
+
+
+def _sentence(text):
+    text = (text or "").strip()
+    return (text[:1].upper() + text[1:] + ("" if text.endswith(".") else ".")) if text else ""
 
 
 def _and(words):
@@ -87,7 +135,8 @@ class ModesMixin:
         self._m_run = 0
         self._m_filter = ""           # a mode class, OTHER, UNPLAYED, or "" for every clip
         self._m_clear_state()
-        self.set(modes={"ready": False, "busy": False, "note": "", "list": [], "filter": ""})
+        self.set(modes={"ready": False, "busy": False, "note": "", "list": [], "filter": "",
+                        "why": None})
 
     def _m_clear_state(self):
         self._m_modes = {}            # rel -> [mode class] the row stands for
@@ -99,16 +148,19 @@ class ModesMixin:
         self._m_other = set()
         self._m_of = {}               # follower / copy rel -> the shared clip's rel
         self._m_sr = None             # clip_sounds.SoundReading of the card, read once
-        self._m_names = None          # (sound_requests.tsv rows, {idx: audio file}) of the project
+        self._m_names = None          # (sound_requests.tsv rows, {idx: audio file}, {name: audio
+        #                               file}) of the project
 
     def _m_reset(self):
         self._m_run += 1
         self._m_clips = None
         self._m_key = None
+        self._s_cache = None          # PAD-1190: clip songs of the project
         self._m_filter = ""
         self._m_drop_virtual()
         self._m_clear_state()
-        self.set(modes={"ready": False, "busy": False, "note": "", "list": [], "filter": ""})
+        self.set(modes={"ready": False, "busy": False, "note": "", "list": [], "filter": "",
+                        "why": None})
 
     # -- reading the card ------------------------------------------------------------------
     def _m_card(self, project):
@@ -121,7 +173,11 @@ class ModesMixin:
 
     def _m_kick(self, project):
         """After a scan: read which mode plays each clip, once per card (Stern only)."""
-        if self._mfr_key() != "stern" or not project:
+        # (a Spike 2 game program's modes: a Spike 3 card has none to read,
+        # PAD-1186 - its capabilities carry no ``modes``)
+        caps = getattr(getattr(self, "mfr", None), "capabilities", None)
+        if (self._mfr_key() != "stern" or not project
+                or not getattr(caps, "modes", False)):
             self._m_reset()
             return
         card = self._m_card(project)
@@ -269,7 +325,25 @@ class ModesMixin:
         self.set(modes={"ready": True, "busy": False, "note": note,
                         "list": [{"id": m, "label": reading.label(m), "n": counts[m]}
                                  for m in modes] + extra,
-                        "filter": self._m_filter})
+                        "filter": self._m_filter, "why": self._m_why(clips, modes or extra)})
+
+    def _m_why(self, clips, listed):
+        """PAD-624: ``{line, tip}`` for the toolbar when the card gives the tab nothing (no Played
+        in column, maybe no sounds either), so the page says why instead of showing nothing;
+        None when it lists something."""
+        if listed:
+            return None
+        if not clips.game:
+            gone = not clips.card or not os.path.isfile(clips.card)
+            return {"line": WHY_GONE if gone else WHY_UNREAD,
+                    "tip": {"head": WHY_GONE if gone else WHY_UNREAD,
+                            "lines": [WHY_GONE_TIP] if gone else
+                            [_sentence(clips.note or "the card could not be read")]}}
+        sounds = clips.sound_reading
+        return {"line": WHY_NO_MODES,
+                "tip": {"head": WHY_NO_MODES,
+                        "lines": [WHY_NO_MODES_TIP,
+                                  WHY_SOUNDS_OK if sounds.pairs else WHY_SOUNDS_NONE]}}
 
     # -- the followers' rows ---------------------------------------------------------------
     def _m_drop_virtual(self):
@@ -325,7 +399,71 @@ class ModesMixin:
             out["follow"] = self._m_label(lead)
             out["rep"] = "Same clip as %s" % self._m_label(lead)
             out["rep_cls"] = "follow"
+        out.update(self._m_seen_row(rel))
         return out
+
+    # -- PAD-827: what the emulator saw the game do with each clip -----------------------------
+    def _m_seen_all(self):
+        """``{rel: record}`` of :func:`..plugins.stern.clip_seen.load`, read again when the
+        project's file changed."""
+        from ..plugins.stern import clip_seen
+        folder = self._assets_path()
+        path = clip_seen.seen_path(folder) if folder else ""
+        try:
+            m = os.path.getmtime(path) if path else None
+        except OSError:
+            m = None
+        if getattr(self, "_m_seen_key", None) != (path, m):
+            self._m_seen_key = (path, m)
+            self._m_seen = clip_seen.load(folder) if m else {}
+        return self._m_seen
+
+    def _m_seen_parts(self, rel):
+        """``(emulator cell, emulator lines, program cell, program lines)`` for *rel*: what the
+        project's Emulate runs saw (:mod:`..plugins.stern.clip_seen`) and what the card's game
+        program says (:mod:`..plugins.stern.clip_static`, read with the modes). A follower with
+        no file of its own has neither."""
+        from ..plugins.stern import clip_seen, clip_static
+        if rel in self._m_virtual:
+            return "", [], "", []
+        c = self._m_seen_all().get(rel)
+        clips = self._m_clips
+        name = (clips.name_of or {}).get(rel) if clips is not None else None
+        fact = (clips.static or {}).get(name) if name else None
+        pcell, plines = clip_static.words(name, fact)
+        return clip_seen.cell(c), clip_seen.lines(c), pcell, plines
+
+    def _m_seen_row(self, rel):
+        """The row's When it plays cell (the emulator's words, then the program's) and its
+        tooltip lines ("" / [] for a clip neither says anything about)."""
+        ecell, elines, pcell, plines = self._m_seen_parts(rel)
+        tip = list(elines)
+        if plines:
+            tip += ([PROG_HEAD] if elines else []) + plines
+        return {"seen": " · ".join(x for x in (ecell, pcell) if x), "seen_tip": tip,
+                "seen_head": "Seen in the emulator" if elines else "From the game program"}
+
+    def _m_seen_preview(self, rel):
+        """The callout's When it plays part for the row on show, or None: every switch the
+        emulator saw before the clip, in full (the cell keeps to the commonest), then what the
+        game program says."""
+        if not rel:
+            return None
+        _e, elines, _p, plines = self._m_seen_parts(rel)
+        if not (elines or plines):
+            return None
+        return {"rel": rel, "head": SEEN_HEAD if elines else "", "lines": elines,
+                "prog_head": PROG_HEAD if plines else "", "prog_lines": plines}
+
+    def _m_seen_changed(self):
+        """Whether the record changed since the rows were made (the tab shows again after a
+        run): the caller repaints them."""
+        before = getattr(self, "_m_seen_key", None)
+        self._m_seen_all()
+        return before is not None and before != self._m_seen_key
+
+    def _m_seen_any(self):
+        return bool(self._m_seen_all())
 
     def _m_keep(self, rel):
         """Whether the mode filter keeps *rel* in the list."""
@@ -388,21 +526,27 @@ class ModesMixin:
         return self._m_sr
 
     def _m_sound_names(self):
-        """``(sound_requests.tsv rows, {idx: "audio/<file>"})`` of the project, read once."""
+        """``(sound_requests.tsv rows, {idx: "audio/<file>"}, {Sound Test name: "audio/<file>"})``
+        of the project, read once."""
         if self._m_names is None:
             from ..plugins.stern import clip_sounds as CS
             project = self._scan_dir or ""
-            self._m_names = (CS.read_requests(project), CS.audio_files(project))
+            audio = CS.audio_files(project)
+            self._m_names = (CS.read_requests(project), audio, CS.audio_names(audio))
         return self._m_names
 
     def _m_sound_words(self, snd):
-        """``(text, tip)`` for one of a clip's sounds: its audio file where the extract mapped
-        its request, else its Sound Test name, else its request number."""
-        req, audio = self._m_sound_names()
+        """``(text, tip, files)`` for one of a clip's sounds: its audio file where the extract
+        mapped its request (or, before it did, the one file named after its Sound Test name),
+        else its Sound Test name, else its request number."""
+        from ..plugins.stern import clip_sounds as CS
+        req, audio, by_name = self._m_sound_names()
         r = snd["request"]
         row = req.get(r) or {}
         files = [audio[i] for i in row.get("idx", ()) if i in audio]
         name = snd["name"] or row.get("name", "")
+        if not files and name and CS.name_key(name) in by_name:
+            files = [by_name[CS.name_key(name)]]
         if files:
             text = os.path.basename(files[0])
             if len(files) > 1:
@@ -415,36 +559,120 @@ class ModesMixin:
         lines += [os.path.basename(f) for f in files]
         if not files and row.get("idx"):
             lines.append("idx " + ", ".join("%04d" % i for i in row["idx"]))
-        return text, {"head": text, "lines": lines}
+        return text, {"head": text, "lines": lines}, files
+
+    def _m_sound_item(self, snd, how):
+        text, tip, files = self._m_sound_words(snd)
+        rel = files[0] if files else ""
+        path = os.path.join(self._scan_dir, *rel.split("/")) if rel and self._scan_dir else ""
+        return {"text": text, "how": how, "tip": tip, "rel": rel, "path": path}
 
     def _m_sounds(self, rel):
         """The callout's sounds part for the row on show, or None."""
-        if not rel or self._m_clips is None or not self._m_clips.sounds:
+        clips = self._m_clips
+        if rel and self._mfr_key() != "stern":
+            return self._s_songs(rel)          # PAD-1190
+        if not rel or clips is None:
             return None
+        out = {"rel": rel, "head": SOUNDS_HEAD, "items": [], "more": "", "maybe_head": "",
+               "maybe": [], "maybe_more": "", "none": "", "foot": ""}
+        if not clips.sounds:
+            out.update(head="", none=UNREAD_TEXT % (clips.note or "the card was not read"))
+            return out
         reading = self._m_sound_reading()
-        names = self._m_clips.name_of
-        name = names.get(rel) or names.get(self._m_of.get(rel) or "")
+        names = clips.name_of
+        # a clip a second bank holds too plays as its name does (PAD-627)
+        name = (names.get(rel) or names.get(self._m_of.get(rel) or "")
+                or (clips.twin_of or {}).get(rel))
         if not name:
-            return None
+            out.update(head="", none=SCENE_TEXT if rel in (clips.scene_of or {})
+                       else UNKNOWN_TEXT)
+            return out
         sounds = reading.sounds_of(name)
         if not sounds:
             if reading.note and not reading.pairs and rel not in self._m_unplayed:
-                return {"rel": rel, "head": SOUNDS_HEAD, "items": [], "more": "",
-                        "foot": "None found: %s." % reading.note}
-            return None
-        # "function" (a call elsewhere in the code naming the clip) was right 6 times in 28
+                out["foot"] = "None found: %s." % reading.note
+                return out
+            if rel in self._m_unplayed:
+                return None
+            out.update(head="", none=NONE_TEXT)
+            return out
+        # "function" (a call elsewhere in the code naming the clip) was right 6 times in 28:
+        # with nothing surer it is one that MAY be the clip's (PAD-592)
         shown = [snd for snd in sounds if snd["how"] in SOUNDS_HOW]
+        maybe = [] if shown else [snd for snd in sounds if snd["how"] in MAYBE_HOW]
+        out["items"] = [self._m_sound_item(snd, SOUNDS_HOW[snd["how"]])
+                        for snd in shown[:SOUNDS_MAX]]
+        out["maybe"] = [self._m_sound_item(snd, MAYBE_HOW[snd["how"]])
+                        for snd in maybe[:MAYBE_MAX]]
+        more = len(shown) - SOUNDS_MAX
+        out["more"] = "And %d more." % more if more > 0 else ""
+        more = len(maybe) - MAYBE_MAX
+        out["maybe_more"] = "And %d more." % more if more > 0 else ""
         if not shown:
+            out["head"] = ""
+            out["maybe_head"] = MAYBE_HEAD if maybe else ""
+            out["none"] = "" if maybe else NONE_TEXT
+        if rel in self._m_unplayed and not shown and not maybe:
+            return None
+        if any(not it["rel"] for it in out["items"] + out["maybe"]) and not self._m_sound_names()[0]:
+            out["foot"] = SOUNDS_FOOT
+        return out
+
+    # -- PAD-1190: the song a long clip plays with, where no program is read ---------------
+    def _s_songs(self, rel):
+        """The callout's sounds part for a clip of a maker whose program is not read (JJP):
+        the long sound named after it and about as long, or None. Measured on a worker the
+        first time; the callout comes up when it is."""
+        from ..core import clip_songs as CS
+        slot = self._by_rel.get(rel)
+        secs = float(getattr(getattr(slot, "info", None), "duration", 0) or 0)
+        if secs < CS.MIN_SECONDS or not self._scan_dir:
+            return None
+        cache = getattr(self, "_s_cache", None)
+        if cache is None or cache.get("") != self._scan_dir:
+            cache = self._s_cache = {"": self._scan_dir}
+        key = (rel, round(secs, 2))
+        if key not in cache:
+            cache[key] = None
+            project = self._scan_dir
+
+            def _work():
+                try:
+                    if "audio" not in cache:
+                        cache["audio"] = CS.audio_files(project)
+                    got = CS.songs_for(project, rel, secs, audio=cache["audio"])
+                except Exception:                           # noqa: BLE001 - never break the tab
+                    got = []
+
+                def _apply():
+                    if getattr(self, "_s_cache", None) is not cache:
+                        return
+                    cache[key] = got
+                    if self._current == rel:
+                        self._update_note(rel)
+                self.ctx.loop.post(_apply)
+            threading.Thread(target=_work, daemon=True, name="video-songs").start()
+        got = cache.get(key)
+        if not got:
             return None
         items = []
-        for snd in shown[:SOUNDS_MAX]:
-            text, tip = self._m_sound_words(snd)
-            items.append({"text": text, "how": SOUNDS_HOW[snd["how"]], "tip": tip})
-        more = len(shown) - SOUNDS_MAX
-        req, _audio = self._m_sound_names()
-        return {"rel": rel, "head": SOUNDS_HEAD, "items": items,
-                "more": "And %d more." % more if more > 0 else "",
-                "foot": "" if req else SOUNDS_FOOT}
+        for srel, ssecs in got[:SONGS_MAX]:
+            name = os.path.basename(srel)
+            items.append({"text": name, "how": CS.how_words(secs, ssecs),
+                          "tip": {"head": name, "lines": [srel, "Length %s (the clip: %s)"
+                                                          % (CS.clock(ssecs), CS.clock(secs))]},
+                          "rel": srel, "path": os.path.join(self._scan_dir, *srel.split("/")),
+                          "sync": True})
+        return {"rel": rel, "head": SONG_LABEL, "head_tip": {"head": SONG_HEAD, "lines": [SONG_FOOT]},
+                "items": items, "more": "", "maybe_head": "", "maybe": [], "maybe_more": "",
+                "none": "", "foot": "", "sync": True, "inline": True}
+
+    @rpc
+    def open_sound(self, rel):
+        """PAD-592: a clip sound's link - its row on the Audio tab."""
+        fn = getattr(self.window, "reveal_audio_slot", None)
+        return bool(fn and rel and fn(str(rel)))
 
     # -- the filter ------------------------------------------------------------------------
     @rpc

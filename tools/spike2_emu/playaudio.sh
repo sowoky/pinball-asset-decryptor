@@ -163,6 +163,23 @@ if [ "$SINK" = pulse ] && is_wsl && [ "${PAD_AUDIO_SINK:-auto}" = auto ]; then
     pad_sounddevice_hint | sed 's/^/[play]   /' >&2
 fi
 
+# A RELAY ALREADY ON OUR PORT IS A LEFTOVER, and it is reaped before ours
+# listens. The port is this rig's by allocation (45997 + slot; Spike 1 has its
+# own), so whatever relay holds it belongs to a run that is over - and while
+# it held it, ours could not bind and the new game played in silence
+# (PAD-978: a Spike 1 speaker its stop.sh no longer found sat on slot 1's
+# 45998). Matched on the relay's own argv, `padrelay.py <fifo> <port>`, so no
+# other program and no other port's relay is touched.
+reap_port_relay() {
+    local pat="padrelay\.py [^ ]+ $1( |\$)" i
+    pgrep -f "$pat" >/dev/null || return 0
+    echo "[play] port $1 was held by a speaker left from an earlier run; stopping it"
+    pkill -f "$pat" 2>/dev/null
+    for i in $(seq 1 20); do pgrep -f "$pat" >/dev/null || return 0; sleep 0.1; done
+    pkill -KILL -f "$pat" 2>/dev/null
+    sleep 0.2
+}
+
 # ---- relay sink: the macOS CONTAINER ---------------------------------------
 # There is no audio server inside the box and VNC carries no sound, so the
 # PCM leaves the same way it leaves WSL: raw bytes over loopback TCP. Only the
@@ -172,13 +189,19 @@ fi
 # Same padrelay.py as the win sink below, for the same load-bearing reason:
 # it listens FIRST and opens the FIFO only once a player attaches, where an
 # ffmpeg would block on the silent FIFO and never open the socket at all.
+# THE VOLUME IS APPLIED BY THE RELAY (PAD-957): the Mac's player is ffplay,
+# which cannot be given a new level while it plays, so padrelay.py scales the
+# samples by the copy of the Emulate tab's audio_ctl.json that padbox.sh keeps
+# in the box (/tmp/pad_ctl/audio_ctl.json, handed to `padrelay.py --pipe`).
+# NOT OVER A PORT ANY MORE (PAD-1109). The relay listened here and padbox.sh
+# published the port; under Colima, Lima's port forwarder took the whole
+# stream and the Mac's ffplay got its first 310 KB and then nothing. The Mac
+# now runs `padrelay.py --pipe` in the box with docker exec and plays its
+# output, so all this sink does is keep the FIFO there: made above, held open
+# by HOLD, removed when the run ends.
 if [ "$SINK" = relay ]; then
-    PORT=${PAD_AUDIO_PORT:-45997}
-    echo "[play] fifo $FIFO  ${RATE} Hz x ${CH} ch s16le -> host player (tcp/$PORT)"
-    python3 "$(dirname "$0")/padrelay.py" "$FIFO" "$PORT" &
-    SRV=$!
-    trap 'kill $HOLD $SRV 2>/dev/null; rm -f "$FIFO"' EXIT
-    wait $SRV
+    echo "[play] fifo $FIFO  ${RATE} Hz x ${CH} ch s16le -> the Mac's player (docker exec)"
+    wait $HOLD
     exit 0
 fi
 
@@ -186,6 +209,7 @@ if [ "$SINK" = win ]; then
     PORT=${PAD_AUDIO_PORT:-45997}
     echo "[play] fifo $FIFO  ${RATE} Hz x ${CH} ch s16le -> WINDOWS (tcp/$PORT)"
     echo "[play] bypassing WSLg audio entirely: $WINPY"
+    reap_port_relay "$PORT"
 
     # The FIFO, handed out as raw bytes by a relay that makes no decisions.
     # It is padrelay.py and NOT another ffmpeg, and the reason is load-bearing:
@@ -209,20 +233,11 @@ if [ "$SINK" = win ]; then
     # It matches on OUR PORT, not on the image name. Killing every python.exe
     # would take out whatever else the user is running, and the old version of
     # this that matched ffplay.exe would have killed PAD's own audio preview.
+    # The query is padpath.sh's pad_win_stop_player, because watch.sh's
+    # teardown needs it too: that SIGKILLs this script, so this trap never
+    # runs on a closed window (PAD-510).
     WINPID=""
-    # `$_.Name -like 'py*'` is LOAD-BEARING: the PowerShell process running
-    # this query has '*padplay.py*' and the port in its OWN command line, so
-    # without the name filter it matches ITSELF and Stop-Process kills the
-    # query mid-pipeline — observed killing the invoking WSL session outright.
-    win_kill() {
-        /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile \
-            -Command "Get-CimInstance Win32_Process |
-                      Where-Object { \$_.Name -like 'py*' -and
-                                     \$_.CommandLine -like '*padplay.py*' -and
-                                     \$_.CommandLine -like '* $PORT *' } |
-                      ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" \
-            >/dev/null 2>&1 || true
-    }
+    win_kill() { pad_win_stop_player "$PORT"; }
     trap 'kill $HOLD $SRV 2>/dev/null; [ -n "$WINPID" ] && kill $WINPID 2>/dev/null;
           win_kill; rm -f "$FIFO"' EXIT
 

@@ -10,6 +10,7 @@ import { useNs } from "../core/store.js";
 import { LookRow } from "../core/look.js";
 import { ColorBar, barOpenAtStart, rememberBarOpen } from "./color_pane.js";
 import { LookGL } from "./video_gl.js";
+import { testCol } from "../core/testtick.js";
 
 export const css = true;
 
@@ -18,7 +19,10 @@ const T = {
   intro: "Assign a replacement clip to any slot — a matching clip is used as-is, anything else is auto-re-encoded — then build the update on the Write tab.",
   ffmpeg: "ffmpeg not found — replacing video needs ffmpeg to re-encode + preview clips. Install it with “Install Missing” above the tabs.",
   project: "The project folder — shared by every tab. It is set on the Extract tab. Click to open it.",
+  csave: "Save a copy of each clip, its replacement if it has one, with its color profile baked in, into a folder you pick. Same size, frame rate and sound; the project and the card are not changed.",
+  csaveAll: "Save a copy of every clip with a color profile attached (green palette), with that profile baked in, into a folder you pick. To save others, select them, right-click and save them. The project and the card are not changed.",
   csv: "Save the whole video table (every slot, not just the filtered view) as a CSV — name, length, resolution, format, audio, replacement and changed-on-disk status — for tracking a big replacement project in a spreadsheet.",
+  compareCsv: "Save a CSV with a row for every replacement, every random clip and every mode's row of a shared clip, beside the game's own clip it plays in place of: both lengths in seconds to two decimals and the difference, the length it will have on the card after Write, resolution, frame rate, frames, codec, audio and file size.",
   check: "Measure every clip already written to a card image and list the ones low enough in bitrate to look blocky — the Write-time \"it will look very blocky\" check, asked of a finished card. Reads the image only; nothing is written.",
   folder: "Pick a folder of your own files and each one becomes the replacement for the slot with the same name — for a whole set you reworked outside the app, like every clip made black and white. The file type and capital letters don't have to match (Intro.mp4 is used for Intro.mov and converted to suit it), and subfolders are fine. Nothing changes until you confirm, and every file left out is named in the log.\n\nKeep the extract's own files where they are: files dropped into the project folder only count under the card's exact name.",
   clear: "Drop every replacement picked on this tab in one go — for starting a project over without clearing 48 rows one at a time. It only drops the picks: your own files are untouched, and a slot already built into the project folder keeps the bytes it has (use “Revert all changes…” on the Write tab for those). To clear only some, select the rows — click, then Shift-click or Ctrl-click — and right-click the selection.",
@@ -32,12 +36,17 @@ const T = {
   best: "Convert every replaced clip at full quality from your own files, for a card built with room to spare (Write tab → SD card size). If this project doesn't know which files your clips came from, it finds them: point it at a card built with your videos and the folder they are in.",
   compare: "Play the selected clips side by side, big, beside the Color profiles bar: up to 4 (Ctrl-click or Shift-click rows to select them). One clip shows its Original beside its Replacement.\n\nClick a clip there and the bar changes its colors, so you see a profile or a slider on it against the others as you go.",
   // PAD-444: which of the game's modes plays each clip, read off the card's game program
+  // PAD-827
+  seen: "What the emulator saw the game do with this clip: the switch made just before it started, and \"loops\" when the game starts it again each time it ends. It fills in as you play games on the Emulate tab, where the playfield window lists the clips as they play. The words the game draws over a clip are on the game's screen there. Beside it, what the card's game program says: a clip the game plays in turn with others, one of a set it picks from, or one it asks for as a loop.",
   modes: "Which of the game's battles, multiballs and other modes play this clip, read from the card's game program. A clip two modes share has a row for each: choose a replacement in one mode's row to change it for that mode only. Not played: nothing in the game asks for the clip, so the machine never shows it.",
   modeFilter: "List only the clips one mode of the game plays.",
   modesBusy: "Reading which mode plays each clip…",
   // PAD-453 (DragonRR)
   undoNone: "Nothing to undo yet: choosing or clearing a replacement, Replace from folder, a clip's conversion, length, colors or random clips, and the boxes over the list each make a step.",
   redoNone: "Nothing to redo: Redo does again what Undo just took back, until the next change.",
+  soundGo: "Show this sound on the Audio tab",
+  songSync: "Play it with the clip",
+  songSyncTip: "Plays this sound alongside whichever player (Original or Replacement) is playing, kept to the clip's playhead: pause, seek and stop follow it. The game plays the song from its own file, so this is how the clip looks and sounds on the machine.",
   qTitle: "Check the videos already on a card",
   qIntro: "Measures every clip on a built card image and lists the ones whose bitrate is low enough to look blocky — the same test a Write applies to a replacement, applied after the fact to what is actually on the card. This reads the card image only; nothing is written and nothing is extracted.",
 };
@@ -58,6 +67,94 @@ function pauseAll() {
     const v = players[side];
     if (v && !v.paused) v.pause();
   }
+}
+
+// PAD-592: the clip sounds' own player (one at a time; the panes keep theirs)
+let soundEl = null;
+function stopSound() {
+  if (soundEl) { soundEl.pause(); soundEl = null; }
+}
+
+// PAD-1190: a clip's song (JJP: a separate file the game plays with it), played along with
+// whichever pane plays and kept to its playhead
+const songSync = { path: null, on: true };
+let songEl = null;
+function songStop() {
+  if (songEl) { songEl.pause(); songEl = null; }
+}
+function songFollow(v, kind) {
+  if (!v) return;
+  if (!songSync.on || !songSync.path) { songStop(); return; }
+  if (kind === "play") {
+    if (!songEl || songEl.__src !== songSync.path) {
+      songStop();
+      songEl = new Audio(mediaUrl(songSync.path));
+      songEl.__src = songSync.path;
+    }
+    stopSound();
+    songEl.__v = v;
+    try { songEl.currentTime = v.currentTime; } catch (e) { /* not loaded yet */ }
+    const p = songEl.play();
+    if (p && p.catch) p.catch(() => {});
+    return;
+  }
+  if (!songEl || songEl.__v !== v) return;
+  if (kind === "pause") songEl.pause();
+  else if (kind === "stop") songStop();
+  else if (Math.abs(songEl.currentTime - v.currentTime) > 0.35) {
+    try { songEl.currentTime = v.currentTime; } catch (e) { /* not loaded yet */ }
+  }
+}
+function playingPane() {
+  for (const side of ["orig", "rep"]) {
+    const v = players[side];
+    if (v && !v.paused) return v;
+  }
+  return null;
+}
+
+// The callout's "Play it with the clip" box: the song it names follows the players while the
+// row is on show.
+function SongSync({ it }) {
+  const [on, setOn] = useState(songSync.on);
+  useEffect(() => {
+    songSync.path = it.path;
+    const v = playingPane();
+    if (v) songFollow(v, "play");
+    return () => { if (songSync.path === it.path) songSync.path = null; songStop(); };
+  }, [it.path]);
+  const flip = (val) => {
+    songSync.on = !!val;
+    setOn(songSync.on);
+    if (!songSync.on) { songStop(); return; }
+    const v = playingPane();
+    if (v) songFollow(v, "play");
+  };
+  return html`<div class="vid-song-sync"><${Check} checked=${on} onChange=${flip} label=${T.songSync}
+    title=${T.songSyncTip} /></div>`;
+}
+
+// One of the sounds the game plays with a clip: ▷ plays its file here, its name shows it on the
+// Audio tab. A sound the extract has no file for is its words alone.
+function SoundItem({ it }) {
+  const [on, setOn] = useState(false);
+  useEffect(() => () => { if (on) stopSound(); }, [on]);
+  const play = () => {
+    if (on) { stopSound(); setOn(false); return; }
+    stopSound();
+    songStop();
+    const a = new Audio(mediaUrl(it.path));
+    soundEl = a;
+    const off = () => { if (soundEl === a) soundEl = null; setOn(false); };
+    a.onended = off; a.onerror = off; a.onpause = off;
+    a.play().then(() => setOn(true), off);
+  };
+  return html`<li ...${tip(it.tip)}>
+    ${it.path ? html`<button type="button" class="vid-sound-play" aria-label=${on ? "Stop" : "Play this sound"}
+      onClick=${play}><${Icon} name=${on ? "stop" : "play"} /></button>` : null}
+    ${it.rel ? html`<a href="#" class="vid-sound-go" title=${T.soundGo}
+      onClick=${(e) => { e.preventDefault(); stopSound(); call("video.open_sound", it.rel); }}><b>${it.text}</b></a>`
+      : html`<b>${it.text}</b>`} <span class="muted">${it.how}</span></li>`;
 }
 
 const probe = typeof document !== "undefined" ? document.createElement("video") : null;
@@ -106,9 +203,14 @@ function clock(pos, dur) {
 // Tk tree's minwidth.  Measured over every slot, not only the filtered view,
 // so typing in Search doesn't make the columns jump.
 const FIT_MAX = 480;
-const COL_MIN = { rel: 160, len: 46, res: 70, fmt: 80, aud: 70, rep: 110, col: 56, conv: 60, modes: 110 };
+const COL_MIN = { rel: 160, len: 46, res: 70, fmt: 80, aud: 70, rep: 110, fit: 70, col: 56, conv: 60, modes: 110, seen: 120 };
 const HEADS = { rel: "Original Video", len: "Length", res: "Resolution", fmt: "Format",
-                aud: "Audio", rep: "Replacement", col: "Color", conv: "Convert", modes: "Played in" };
+                aud: "Audio", rep: "Replacement", fit: "Vs stock", col: "Color", conv: "Convert", modes: "Played in",
+                seen: "When it plays" };
+// PAD-1232 (DoomWalrus666): the Vs stock column's header tip
+const FIT_TIP = { head: "Vs stock", lines: [
+  "How much longer (+) or shorter (−) your file runs than the clip it replaces, and the speed change that would make it run exactly as long.",
+  "Right-click a clip → This clip's length → Speed my file to the stock clip's length to have the build do that. Click the header to sort by it."] };
 // PAD-444: a row's Played in cell, in words
 const modesText = (r) => (r.unplayed ? "Not played" : r.other ? "Other parts of the game"
   : (r.modes || []).join(", "));
@@ -145,7 +247,7 @@ const colorTip = (r, cs) => (r.col_lock
 // The long-named columns share the width that is left over (more or less
 // of it); the others keep the width that fits them, so a narrow window
 // shortens names, never "MP4 h264 30fps" or a length.
-const FLEX = ["rel", "rep", "modes"];
+const FLEX = ["rel", "rep", "modes", "seen"];
 const ROW_H = 34;
 let measurer = null;
 const textCache = new Map();
@@ -172,10 +274,10 @@ let rowFits = new WeakMap();
 function rowFit(r, f) {
   let w = rowFits.get(r);
   if (!w) {
-    w = { rel: textWidth(r.dir, f.mono) + textWidth(r.name, f.body), len: textWidth(r.len, f.mono),
+    w = { rel: textWidth(r.dir, f.mono) + textWidth(r.name, f.body), len: textWidth(r.len, f.mono) + (r.scr ? textWidth(r.scr, f.body) + 34 : 0),
           res: textWidth(r.res, f.body), fmt: textWidth(r.fmt, f.body), aud: textWidth(r.aud, f.body),
-          rep: textWidth(r.rep, f.body), col: 0, conv: textWidth(r.conv, f.body),
-          modes: textWidth(modesText(r), f.body) };
+          rep: textWidth(r.rep, f.body), fit: textWidth(r.fit || "", f.mono), col: 0, conv: textWidth(r.conv, f.body),
+          modes: textWidth(modesText(r), f.body), seen: textWidth(r.seen || "", f.body) };
     rowFits.set(r, w);
   }
   return w;
@@ -252,6 +354,76 @@ function PaneView({ side, view, look }) {
   </div>`;
 }
 
+// ------------------------------------------------------------- Full screen
+// PAD-1191 (Ben): a player goes full screen, as on YouTube: its button (or a double-click
+// on the picture) fills the screen with the clip and its play / seek bar, Esc or the
+// button again brings it back.  The page fills the window with the player itself (a page
+// asking for full screen is ignored by the app's window: WebView2 fills only its own
+// control, Qt WebEngine refuses it), and the app takes its window full screen with it
+// (shell.fullscreen).  In a browser there is no app window: the page asks the browser.
+const FULL_IDLE_MS = 2500;   // a still pointer over a playing clip hides the bar, as YouTube does
+
+async function screenFull(on) {
+  if (await call("shell.fullscreen", on)) return;
+  try {
+    if (on && !document.fullscreenElement && document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen();
+    } else if (!on && document.fullscreenElement) {
+      await document.exitFullscreen();
+    }
+  } catch (e) { /* the browser said no: the player still fills the page */ }
+}
+
+export function useFullView(playing) {
+  const [full, setFull] = useState(false);
+  const [idle, setIdle] = useState(false);
+  const timer = useRef(0);
+  useEffect(() => {
+    if (!full) return undefined;
+    screenFull(true);
+    const onKey = (e) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setFull(false);
+    };
+    // the browser's own Esc (or F11) leaves its full screen: the player comes back with it
+    let wasFull = false;
+    const onChange = () => {
+      if (document.fullscreenElement) wasFull = true;
+      else if (wasFull) setFull(false);
+    };
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("fullscreenchange", onChange);
+      screenFull(false);
+    };
+  }, [full]);
+  const wake = () => {
+    setIdle(false);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setIdle(true), FULL_IDLE_MS);
+  };
+  useEffect(() => { if (full) wake(); else { clearTimeout(timer.current); setIdle(false); } }, [full, playing]);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  return {
+    full,
+    toggle: () => setFull((f) => !f),
+    // on the player's box: the class that fills the screen, and the pointer that wakes its bar
+    cls: full ? cx("vid-full", idle && playing && "vid-idle") : "",
+    onMouseMove: full ? wake : undefined,
+  };
+}
+
+export function FullButton({ fv, size = "sm" }) {
+  const label = fv.full ? "Exit full screen" : "Full screen";
+  return html`<${Button} size=${size} kind="ghost" icon=${fv.full ? "unfit" : "fit"} label=${label}
+    title=${fv.full ? "Exit full screen (Esc)" : "Full screen (or double-click the picture). Esc comes back."}
+    onClick=${(e) => { e.stopPropagation(); fv.toggle(); }} />`;
+}
+
 function Pane({ pane, side, play, stopSeq, onEmptyPlay, head, look }) {
   const vref = useRef(null);
   const [glLive, setGlLive] = useState(false);
@@ -262,8 +434,13 @@ function Pane({ pane, side, play, stopSeq, onEmptyPlay, head, look }) {
   const asked = useRef(0);
   const facts = pane.facts;
   const dur = (facts && facts.dur) || 0;
+  // PAD-1232: a clip set to "Speed my file to the stock clip's length"
+  // plays here at the speed the build will give it, its clock in the
+  // stock clip's time
+  const rate = pane.fit_to > 0 && dur > 0 ? Math.min(16, Math.max(0.0625, dur / pane.fit_to)) : 1;
   const direct = !!(pane.path && facts && enginePlays(facts) && !failed);
   const src = pane.proxy || (direct ? pane.path : null);
+  const fv = useFullView(playing);
 
   useEffect(() => { setFailed(false); setPos(0); setPlaying(false); wantPlay.current = 0; }, [pane.seq]);
   // Ask Python for a playable copy when the engine can't take the file.
@@ -275,6 +452,7 @@ function Pane({ pane, side, play, stopSeq, onEmptyPlay, head, look }) {
     call("video.make_proxy", side, pane.seq, proxyFormat());
   }, [pane.seq, !!facts, direct, pane.proxy, pane.proxy_busy]);
   useEffect(() => { players[side] = vref.current; return () => { if (players[side] === vref.current) players[side] = null; }; });
+  useEffect(() => { const v = vref.current; if (v) { v.defaultPlaybackRate = rate; v.playbackRate = rate; } });
   // autoplay: a row change while playing resumes on the same pane
   useEffect(() => {
     if (!play || play.side !== side || !play.seq) return;
@@ -309,6 +487,7 @@ function Pane({ pane, side, play, stopSeq, onEmptyPlay, head, look }) {
     setPlaying(false);
     setPos(0);
     if (!v) return;
+    songFollow(v, "stop");
     v.pause();
     // load() drops the queued "pause" event, so the state is set above
     if (src) v.load();
@@ -318,6 +497,7 @@ function Pane({ pane, side, play, stopSeq, onEmptyPlay, head, look }) {
     setPlaying(false);
     setPos(0);
     const v = e.currentTarget;
+    songFollow(v, "stop");
     if (v && src) v.load();
   };
   const onError = () => {
@@ -340,14 +520,16 @@ function Pane({ pane, side, play, stopSeq, onEmptyPlay, head, look }) {
   const fid = "vid-look-" + side;
   const fstyle = steps && steps.length && !glLive ? `filter: url(#${fid})` : undefined;
   const mediaKey = pane.path && src ? pane.seq + ":" + src : "";
-  return html`<div class="vid-pane">
-    ${head}
+  return html`<div class=${cx("vid-pane", fv.cls)} onMouseMove=${fv.onMouseMove}>
+    ${fv.full ? null : head}
     <${LookFilter} id=${fid} steps=${steps} />
-    <div class="vid-screen">
+    <div class="vid-screen" onDblClick=${pane.path ? fv.toggle : undefined}>
       ${mediaKey ? html`<video key=${mediaKey} ref=${vref} src=${mediaUrl(src)} style=${fstyle}
           poster=${pane.poster ? mediaUrl(pane.poster) : undefined} preload="metadata" playsinline
-          onPlay=${() => setPlaying(true)} onPause=${() => setPlaying(false)} onEnded=${onEnded}
-          onTimeUpdate=${(e) => { if (!e.currentTarget.paused) setPos(e.currentTarget.currentTime); }} onError=${onError}
+          onPlay=${(e) => { setPlaying(true); songFollow(e.currentTarget, "play"); }}
+          onPause=${(e) => { setPlaying(false); songFollow(e.currentTarget, "pause"); }} onEnded=${onEnded}
+          onSeeked=${(e) => songFollow(e.currentTarget, "seek")}
+          onTimeUpdate=${(e) => { if (!e.currentTarget.paused) { setPos(e.currentTarget.currentTime); songFollow(e.currentTarget, "time"); } }} onError=${onError}
           onLoadedData=${onReady} onCanPlay=${onReady}></video>`
         : pane.poster ? html`<img src=${mediaUrl(pane.poster)} alt="" style=${fstyle} />` : null}
       ${look && look.offered && pane.path ? html`<${LookGL} media=${vref} mediaKey=${mediaKey} poster=${pane.poster}
@@ -361,10 +543,20 @@ function Pane({ pane, side, play, stopSeq, onEmptyPlay, head, look }) {
       <input type="range" class="vid-seek" min="0" max=${dur || 0} step="0.01" value=${Math.min(pos, dur || 0)}
         disabled=${!src || !(dur > 0)} aria-label=${"Seek " + (pane.title || "")}
         onInput=${(e) => { const v = vref.current; const t = Number(e.target.value); setPos(t); if (v) v.currentTime = t; }} />
-      <span class="mono small muted nw">${clock(pos, pane.path ? dur : 0)}</span>
+      <span class="mono small muted nw">${clock(pos / rate, pane.path ? dur / rate : 0)}</span>
+      ${pane.path ? html`<${FullButton} fv=${fv} />` : null}
     </div>
-    ${look && look.offered && pane.path ? html`<${PaneView} side=${side} view=${(look.views || {})[side]} look=${look} />` : null}
+    ${!fv.full && rate !== 1 ? html`<div class="small acc-ink vid-speed" ...${tip({ head: "Speed my file to the stock clip's length",
+      lines: [`Your file runs ${dur.toFixed(2)} s and the stock clip ${pane.fit_to.toFixed(2)} s, so it plays at ${(rate * 100).toFixed(1)}% speed here, as the build will make it.`] })}>
+      Playing ${speedWords(rate)} to fill the stock clip's ${clock(pane.fit_to, pane.fit_to).split(" / ").pop()}</div>` : null}
+    ${fv.full ? null : look && look.offered && pane.path ? html`<${PaneView} side=${side} view=${(look.views || {})[side]} look=${look} />` : null}
   </div>`;
+}
+// PAD-1232: "2.5% slower" for a player rate of 0.975 (core.video.speed_words)
+function speedWords(rate) {
+  const pct = (1 - rate) * 100;
+  const n = Math.abs(pct);
+  return `${n < 10 ? n.toFixed(1) : Math.round(n)}% ${pct > 0 ? "slower" : "faster"}`;
 }
 
 // ----------------------------------------------------------------- Compare
@@ -416,6 +608,7 @@ function CmpTile({ t, row, cs, offered, active, onPick, stopSeq, loop, canRemove
   const dur = (facts && facts.dur) || 0;
   const direct = !!(pane.path && facts && enginePlays(facts) && !failed);
   const src = pane.proxy || (direct ? pane.path : null);
+  const fv = useFullView(playing);
 
   useEffect(() => { setFailed(false); setPos(0); setPlaying(false); }, [pane.seq]);
   useEffect(() => {
@@ -452,20 +645,21 @@ function CmpTile({ t, row, cs, offered, active, onPick, stopSeq, loop, canRemove
   const mediaKey = pane.path && src ? pane.seq + ":" + src : "";
   const sides = (t.sides || []).map(([value, label]) => ({ value, label }));
   const name = (row && row.name) || t.rel.split("/").pop();
-  return html`<div class=${cx("vcm-tile", active && "on")}>
-    <div class="row vcm-tilehd">
+  return html`<div class=${cx("vcm-tile", active && "on", fv.cls)} onMouseMove=${fv.onMouseMove}>
+    ${fv.full ? null : html`<div class="row vcm-tilehd">
       <span class="mono small ellip vcm-name" ...${tip({ head: t.rel, lines: [pane.label ? `${pane.title}: ${pane.label}` : pane.title] })}>${name}</span>
       <span class="grow"></span>
       ${sides.length > 1 ? html`<${Seg} value=${t.side} options=${sides} onChange=${(v) => call("video.compare_side", t.id, v)} />`
         : html`<span class="small muted nw">${pane.title || "Original"}</span>`}
       <${Button} size="xs" kind="ghost" icon="x" title="Take this clip out of Compare" disabled=${!canRemove}
         onClick=${() => call("video.compare_remove", t.id)} />
-    </div>
+    </div>`}
     <${LookFilter} id=${fid} steps=${steps} />
     <div class="vid-screen vcm-screen" role="button" tabindex="0" aria-pressed=${active ? "true" : "false"}
         aria-label=${"Pick " + name + " for the Color profiles bar"}
-        onClick=${onPick} onKeyDown=${(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(); } }}
-        ...${tip(active ? "The clip the Color profiles bar changes, and the one you hear." : "Click: the Color profiles bar changes this clip's colors, and it is the one you hear.")}>
+        onClick=${onPick} onDblClick=${pane.path ? fv.toggle : undefined}
+        onKeyDown=${(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(); } }}
+        ...${fv.full ? {} : tip(active ? "The clip the Color profiles bar changes, and the one you hear." : "Click: the Color profiles bar changes this clip's colors, and it is the one you hear.")}>
       ${mediaKey ? html`<video key=${mediaKey} ref=${vref} src=${mediaUrl(src)} style=${fstyle}
           poster=${pane.poster ? mediaUrl(pane.poster) : undefined} preload="auto" playsinline loop=${loop} muted=${!active}
           onPlay=${() => seen(true)} onPause=${() => seen(false)} onEnded=${() => seen(false)}
@@ -474,7 +668,7 @@ function CmpTile({ t, row, cs, offered, active, onPick, stopSeq, loop, canRemove
         : pane.poster ? html`<img src=${mediaUrl(pane.poster)} alt="" style=${fstyle} />` : null}
       ${offered && pane.path ? html`<${LookGL} media=${vref} mediaKey=${mediaKey} poster=${pane.poster}
         lut=${t.lut || null} onLive=${setGlLive} />` : null}
-      <${CmpBadge} row=${row} cs=${cs} />
+      ${fv.full ? null : html`<${CmpBadge} row=${row} cs=${cs} />`}
       ${overlay}
     </div>
     <div class="row vid-transport">
@@ -483,8 +677,9 @@ function CmpTile({ t, row, cs, offered, active, onPick, stopSeq, loop, canRemove
         disabled=${!src || !(dur > 0)} aria-label=${"Seek " + name}
         onInput=${(e) => { const v = vref.current; const x = Number(e.target.value); setPos(x); if (v) v.currentTime = x; }} />
       <span class="mono small muted nw">${clock(pos, pane.path ? dur : 0)}</span>
+      ${pane.path ? html`<${FullButton} fv=${fv} />` : null}
     </div>
-    <${CmpColor} t=${t} row=${row} cs=${cs} />
+    ${fv.full ? null : html`<${CmpColor} t=${t} row=${row} cs=${cs} />`}
   </div>`;
 }
 
@@ -610,7 +805,7 @@ function QualityWindow({ q }) {
         <label class="lbl nw" for="vid-q-card">Card image:</label>
         <${Field} id="vid-q-card" value=${q.card} mono cls="grow" disabled=${q.busy}
           onChange=${(v) => { card.current = v; }} onCommit=${(v) => call("video.quality_set_card", v)} />
-        <${Button} onClick=${() => call("video.quality_browse")} disabled=${q.busy}>Browse…<//>
+        <${Button} drop onClick=${() => call("video.quality_browse")} disabled=${q.busy}>Browse…<//>
         <${Button} kind="primary" onClick=${() => call("video.quality_check", card.current)}>${q.busy ? "Stop" : "Check"}<//>
       </div>
       <div class="row small" style="gap:8px">${q.busy ? html`<${Spinner} />` : null}<span>${q.summary}</span></div>
@@ -675,7 +870,7 @@ function BestWindow({ b }) {
     <label class="lbl nw vid-blbl" for=${id}>${label}</label>
     <${Field} id=${id} value=${b[k]} mono cls="grow" disabled=${b.busy}
       onChange=${(v) => { fields.current[k] = v; }} onCommit=${(v) => call("video.best_set", k, v)} />
-    <${Button} onClick=${() => call("video.best_browse", k)} disabled=${b.busy}>Browse…<//>
+    <${Button} drop onClick=${() => call("video.best_browse", k)} disabled=${b.busy}>Browse…<//>
   </div>`;
   // a typed path counts even if the field never lost focus
   const find = async () => {
@@ -707,7 +902,7 @@ function BestWindow({ b }) {
           <label class="lbl nw vid-blbl" for="vid-b-folder">Your videos:</label>
           <${Field} id="vid-b-folder" value=${b.folder} mono cls="grow" disabled=${b.busy}
             onChange=${(v) => { fields.current.folder = v; }} onCommit=${(v) => call("video.best_set", "folder", v)} />
-          <${Button} onClick=${() => call("video.best_browse", "folder")} disabled=${b.busy}>Browse…<//>
+          <${Button} drop onClick=${() => call("video.best_browse", "folder")} disabled=${b.busy}>Browse…<//>
           <${Button} onClick=${find}>${b.busy ? "Stop" : "Find"}<//>
         </div>
       </div>
@@ -795,7 +990,7 @@ export default function VideoTab() {
     anchor.current = first || r[0] || null;
     if (first) loadRow(first);
   }, [s.select && s.select.seq]);
-  useEffect(() => () => { clearTimeout(selectJob.current); pauseAll(); }, []);
+  useEffect(() => () => { clearTimeout(selectJob.current); pauseAll(); stopSound(); }, []);
   // PAD-453: Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z anywhere on the tab undo or redo a change to the
   // picks.  A text box keeps its own undo, the Colors bar its profile's, and a dialog or
   // another tab is left alone.
@@ -843,6 +1038,11 @@ export default function VideoTab() {
   };
   // Python loads the row into the panes before the picker opens
   const choose = (rel) => { clearTimeout(selectJob.current); pauseAll(); call("video.choose", rel); };
+  // PAD-838: a video file dropped on a row from the desktop is its replacement
+  const dropOn = (rel) => {
+    setSel(new Set([rel])); anchor.current = rel;
+    choose(rel);
+  };
   const playRow = (rel, side = "orig") => {
     setSel(new Set([rel])); anchor.current = rel;
     clearTimeout(selectJob.current);
@@ -850,6 +1050,7 @@ export default function VideoTab() {
   };
   // the row the panes' buttons act on: the highlighted one, as Tk's did
   const currentRel = firstSel || pv.rel || null;
+  useEffect(() => { stopSound(); }, [currentRel]);
   // PAD-440: the selected rows, in list order, side by side; the Colors bar opens beside them
   const openCompare = async (rels) => {
     clearTimeout(selectJob.current);
@@ -885,6 +1086,8 @@ export default function VideoTab() {
         info.targets
           ? { label: `Clear ${info.targets} replacement${info.targets === 1 ? "" : "s"} in this selection`, onClick: () => call("video.clear", rels) }
           : { label: "No replacements in this selection", disabled: true },
+        info.csave && { sep: true },
+        info.csave && { label: info.csave, title: T.csave, onClick: () => call("video.colour_save", rels) },
       ]);
       return;
     }
@@ -925,11 +1128,14 @@ export default function VideoTab() {
       { label: "This clip's length", submenu: [
         { label: `Follow the Trim / pad box (${info.length_follow})`, checked: info.length === "box", onClick: () => call("video.set_length", rel, null) },
         { label: "Match the stock clip", checked: info.length === "stock", onClick: () => call("video.set_length", rel, "stock") },
+        { label: "Loop my file to the stock clip's length", checked: info.length === "loop", onClick: () => call("video.set_length", rel, "loop") },
+        { label: "Speed my file to the stock clip's length", checked: info.length === "stretch", onClick: () => call("video.set_length", rel, "stretch") },
         { label: "Keep my file's full length", checked: info.length === "full", onClick: () => call("video.set_length", rel, "full") },
         { label: info.length === "custom" ? `Set a length… (${info.length_secs} s)` : "Set a length…", checked: info.length === "custom", onClick: () => call("video.set_length", rel, "custom") },
       ] },
       { sep: true },
       { label: "What this slot needs…", onClick: async () => { const d = await call("video.target_spec", rel); if (d) setSpec(d); } },
+      info.csave && { label: info.csave, title: T.csave, onClick: () => call("video.colour_save", [rel]) },
       { label: "Open in default app", onClick: () => call("video.open_default", rel, "orig") },
       info.open_rep && { label: "Open replacement in default app", onClick: () => call("video.open_default", rel, "rep") },
       { label: info.reveal, onClick: () => call("video.reveal", rel) },
@@ -962,7 +1168,9 @@ export default function VideoTab() {
   // PAD-444: Played in, once the card's program has been read and names a mode
   const md = s.modes || {};
   const modesCol = !!(md.ready && (md.list || []).length);
-  const minWidth = 30 + ["rel", "len", "res", "fmt", "aud", "rep"].concat(modesCol ? ["modes"] : []).reduce((a, k) =>
+  // PAD-1232: Vs stock, once a clip has a replacement to compare
+  const fitCol = allRows.some((r) => r.fit);
+  const minWidth = 30 + ["rel", "len", "res", "fmt", "aud", "rep"].concat(fitCol ? ["fit"] : [], modesCol ? ["modes"] : []).reduce((a, k) =>
     a + (tuned[k] ? Math.max(36, tuned[k]) : FLEX.includes(k) ? COL_MIN[k] : fit[k]), 0) + fit.conv
     + (colorCol ? fit.col + 10 : 0) + (modesCol ? 8 : 7) * 10 + 20;
   const dragFrom = useRef(null);
@@ -999,7 +1207,12 @@ export default function VideoTab() {
       render: (r) => html`<span class=${cx("vid-name", (r.follow || r.copy) && "vid-pairrow")} ...${tip({ head: r.rel, lines: [profileLine(r, colorNs)] })}>${r.follow || r.copy
         ? html`<span class="vid-pairmark" aria-hidden="true">↳</span>` : null}${r.dir
         ? html`<span class="mono muted">${r.dir}</span>` : null}${r.name}</span>` },
-    { key: "len", label: "Length", width: width("len"), num: true, sort: "len" },
+    // PAD-1115: a clip a game screen shows for a fixed time: that time, amber when the clip freezes or is cut
+    { key: "len", label: "Length", width: width("len"), num: true, sort: "len",
+      render: (r) => (r.scr
+        ? html`<span class="vid-lencell">${r.len}<span class=${cx("vid-scr", r.scr_cls)} aria-label=${r.scr_head}
+            ...${tip({ head: r.scr_head, lines: r.scr_tip || [] })}><${Icon} name="clock" />${r.scr}</span></span>`
+        : r.len) },
     { key: "res", label: "Resolution", width: width("res"), sort: "res" },
     { key: "fmt", label: "Format", width: width("fmt"), sort: "fmt", titleOf: (r) => r.fmt,
       render: (r) => html`<span class=${r.fmt_bad ? "err-ink" : "dim"}>${r.fmt}</span>` },
@@ -1011,6 +1224,11 @@ export default function VideoTab() {
         onClick=${(e) => { e.stopPropagation(); setSel(new Set([r.rel])); anchor.current = r.rel; choose(r.rel); }}>${r.rep}</button>${r.var
         ? html`<span class="vid-var" aria-label=${`${r.var} more clips play at random`} ...${tip({ head: "Random clips", lines: [r.var_tip] })}><${Icon} name="shuffle" />+${r.var}</span>`
         : null}</span>` },
+    fitCol && { key: "fit", label: "Vs stock", width: width("fit"), num: true, sort: "fit", title: FIT_TIP,
+      render: (r) => (r.fit
+        ? html`<span class=${cx("vid-fit", r.fit_cls === "on" ? "acc-ink" : "dim")}
+            ...${tip(r.fit_tip || r.fit)}>${r.fit}</span>`
+        : "") },
     modesCol && { key: "modes", label: "Played in", width: width("modes"), title: T.modes,
       render: (r) => (r.unplayed
         ? html`<span class="vid-modes-cell unplayed" ...${tip({ head: "Not played", lines: [
@@ -1022,6 +1240,13 @@ export default function VideoTab() {
             : r.pair ? { head: r.modes[0], lines: ["Another mode plays this clip too: it has its own row below."] }
             : modesText(r))}>${modesText(r)}</span>`
           : "") },
+    // PAD-827: what the emulator saw (beside Played in, on the cards that column is read for)
+    modesCol && { key: "seen", label: "When it plays", width: width("seen"), sort: "seen", title: T.seen,
+      render: (r) => (r.seen
+        ? html`<span class="vid-seen-cell" ...${tip({ head: r.seen_head || "When it plays", lines: r.seen_tip || [] })}>${r.seen}</span>`
+        : "") },
+    // PAD-1279: TEST puts the clip on the test card
+    s.test_on && testCol({ ns: "video", tags: s.test_tags, full: s.test_full, keyOf: (r) => (r.rel ? r.rel : null) }),
     colorCol && { key: "col", label: "Color", width: width("col"), cls: "vid-colorcell", title: COLOR_TIP,
       render: (r) => (r.col_lock
         ? html`<span class="vid-color locked" aria-label="The game's own clip: no color profile can be attached" ...${tip(colorTip(r, colorNs))}><${Icon} name="lock" /></span>`
@@ -1074,7 +1299,7 @@ export default function VideoTab() {
     ${rep.path ? html`<span class="mono small nw ellip acc-ink" ...${tip(repLine
       ? { head: rep.path, lines: [repLine] } : rep.path)}>— ${rep.label}</span>` : null}
     <span class="grow"></span>
-    <${Button} size="sm" onClick=${() => currentRel && choose(currentRel)} disabled=${!currentRel}>Choose…<//>
+    <${Button} drop size="sm" onClick=${() => currentRel && choose(currentRel)} disabled=${!currentRel}>Choose…<//>
     ${pv.can_clear ? html`<${Button} size="sm" kind="ghost" onClick=${() => call("video.clear", [pv.rel])}>Clear replacement<//>` : null}
   </div>`;
   const origHead = html`<div class="row vid-panehead">
@@ -1096,6 +1321,8 @@ export default function VideoTab() {
         <button type="button" class=${cx("vid-link", !s.project && "none")} onClick=${() => call("video.open_project_folder")}
           ...${tip(T.project)}>${s.project_text}</button></span>`}>
       ${s.status ? html`<${Chip} kind="acc">${s.status}<//>` : null}
+      ${s.csave ? html`<${Chip} kind="acc">${s.csave.text}<//>
+        <${Button} kind="ghost" icon="x" onClick=${() => call("video.colour_save_cancel")}>Cancel save<//>` : null}
       <${Button} kind="ghost" icon="undo" cls="vid-undo" disabled=${!undo.undo || running} onClick=${() => call("video.undo")}
         title=${{ head: "Undo", lines: [["Ctrl+Z", undo.undo ? "Undo " + undo.undo : T.undoNone]] }}>Undo<//>
       <${Button} kind="ghost" icon="redo" cls="vid-redo" disabled=${!undo.redo || running} onClick=${() => call("video.undo", true)}
@@ -1103,12 +1330,16 @@ export default function VideoTab() {
       <${Button} icon=${s.scanning ? "x" : "refresh"} onClick=${() => call(s.scanning ? "video.cancel_scan" : "video.scan")}>${s.scanning ? "Cancel scan" : "Scan"}<//>
       <${Button} icon="compare" cls="vid-cmp-open" onClick=${() => openCompare(compareRels())} disabled=${!currentRel}
         title=${T.compare}>Compare<//>
-      <${Button} icon="folder" onClick=${() => call("video.replace_from_folder")} disabled=${running} title=${T.folder}>Replace from folder…<//>
+      <${Button} drop icon="folder" onClick=${() => call("video.replace_from_folder")} disabled=${running} title=${T.folder}>Replace from folder…<//>
       ${s.best_supported ? html`<${Button} kind="ghost" icon="star" onClick=${() => call("video.best_open")} title=${T.best}>Best quality…<//>` : null}
       <${Button} kind="ghost" icon="more" label="More"
-        title=${s.quality_report ? "More: Export CSV, Clear replacements…, Save / load settings, Check card…" : "More: Export CSV, Clear replacements…, Save / load settings"}
+        title=${"More: Export CSV, Export compare report, " + (s.color_offered ? "Save clips with their color profiles…, " : "") + "Clear replacements…, Save / load settings" + (s.var_share ? ", Save / load random clips" : "") + (s.quality_report ? ", Check card…" : "")}
         onClick=${(e) => openMenu(e.currentTarget, [
           { label: "Export CSV", icon: "download", title: T.csv, onClick: () => call("video.export_csv") },
+          { label: "Export compare report (CSV)…", icon: "download", title: T.compareCsv, disabled: s.report_busy,
+            onClick: () => call("video.export_compare") },
+          s.color_offered ? { label: "Save clips with their color profiles…", icon: "download", title: T.csaveAll,
+            onClick: () => call("video.colour_save") } : null,
           { label: "Clear replacements…", icon: "trash", title: T.clear, disabled: !s.can_clear || running,
             onClick: () => call("video.clear_all") },
           { sep: true },
@@ -1117,6 +1348,13 @@ export default function VideoTab() {
           { label: "Load settings from a file…", icon: "upload", disabled: running,
             title: "Put the settings in a file saved here or by someone else onto the same slots of this card. A slot this card does not have is left out.",
             onClick: () => call("video.settings_load") },
+          s.var_share ? { sep: true } : null,
+          s.var_share ? { label: "Save the random clips to a file…", icon: "download",
+            title: "Every clip's random clips, the clips themselves too, in one file to keep or to load into another project.",
+            onClick: () => call("video.variants_save") } : null,
+          s.var_share ? { label: "Load random clips from a file…", icon: "upload", disabled: running,
+            title: "Give this project's clips the random clips in a file saved here or on another PC. A clip this card names otherwise is found by what it is.",
+            onClick: () => call("video.variants_load") } : null,
           s.quality_report ? { sep: true } : null,
           s.quality_report ? { label: "Check card…", icon: "check", title: T.check,
             onClick: () => call("video.quality_open") } : null,
@@ -1132,7 +1370,8 @@ export default function VideoTab() {
         ${modesCol ? html`<${Select} cls="vid-modefilter" sm value=${md.filter || ""} title=${T.modeFilter}
           options=${[{ value: "", label: "Every mode" }].concat((md.list || []).map((m) => ({ value: m.id, label: `${m.label} (${m.n})` })))}
           onChange=${(v) => call("video.set_mode_filter", v)} />`
-          : md.busy ? html`<span class="small muted nw vid-modes-busy"><${Spinner} /> ${T.modesBusy}</span>` : null}
+          : md.busy ? html`<span class="small muted nw vid-modes-busy"><${Spinner} /> ${T.modesBusy}</span>`
+          : md.why ? html`<span class="small muted nw vid-modes-why" ...${tip(md.why.tip)}>${md.why.line}</span>` : null}
         <span class="sp"></span>
         <span class="vid-opts">
           <${Check} checked=${s.no_conversion} label=${T.noconv} title=${T.noconvTip} cls="small"
@@ -1151,6 +1390,7 @@ export default function VideoTab() {
           sort=${s.sort} onSort=${(k) => call("video.sort", k)}
           resizable widths=${tuned} onResize=${onResize} style=${`--vid-minw:${Math.round(minWidth)}px`}
           rowClass=${(r) => cx(r.rep_cls === "stray" && "vid-foreign")}
+          onFileDrop=${(r) => dropOn(r.rel)}
           empty=${emptyNode} />
       </div>
       <div class="vid-preview">
@@ -1159,12 +1399,33 @@ export default function VideoTab() {
           <${Note} kind="info" action=${pv.modes.back ? html`<${Button} size="sm" onClick=${() => call("video.shared_again", pv.modes.rel)}
             disabled=${running}>Use the same clip as ${pv.modes.back} again…<//>` : null}>${pv.modes.text}<//>
         </div>` : null}
-        ${pv.sounds && pv.sounds.rel === currentRel ? html`<div class="vid-sounds">
-          <${Note} kind="info"><span>${pv.sounds.head}</span>
+        ${pv.sounds && pv.sounds.rel === currentRel && pv.sounds.inline ? html`<div class="vid-sounds inline">
+          <${Note} kind="info"><div class="vid-song-row">
+            <span class="vid-song-label" ...${tip(pv.sounds.head_tip)}>${pv.sounds.head}</span>
+            <ul class="vid-sound-list inline">${(pv.sounds.items || []).map((it) => html`
+              <${SoundItem} key=${it.rel || it.text} it=${it} />`)}</ul>
+            ${pv.sounds.sync && (pv.sounds.items || []).length ? html`<${SongSync} key=${pv.sounds.items[0].path} it=${pv.sounds.items[0]} />` : null}
+          </div><//>
+        </div>` : pv.sounds && pv.sounds.rel === currentRel ? html`<div class="vid-sounds">
+          <${Note} kind="info"><div>
+            ${pv.sounds.head ? html`<span>${pv.sounds.head}</span>` : null}
             ${(pv.sounds.items || []).length ? html`<ul class="vid-sound-list">${pv.sounds.items.map((it) => html`
-              <li ...${tip(it.tip)}><b>${it.text}</b> <span class="muted">${it.how}</span></li>`)}</ul>` : null}
+              <${SoundItem} key=${it.rel || it.text} it=${it} />`)}</ul>` : null}
             ${pv.sounds.more ? html`<div class="small muted">${pv.sounds.more}</div>` : null}
-            ${pv.sounds.foot ? html`<div class="small muted">${pv.sounds.foot}</div>` : null}<//>
+            ${pv.sounds.maybe_head ? html`<span>${pv.sounds.maybe_head}</span>` : null}
+            ${(pv.sounds.maybe || []).length ? html`<ul class="vid-sound-list maybe">${pv.sounds.maybe.map((it) => html`
+              <${SoundItem} key=${it.rel || it.text} it=${it} />`)}</ul>` : null}
+            ${pv.sounds.maybe_more ? html`<div class="small muted">${pv.sounds.maybe_more}</div>` : null}
+            ${pv.sounds.none ? html`<span>${pv.sounds.none}</span>` : null}
+            ${pv.sounds.sync && (pv.sounds.items || []).length ? html`<${SongSync} key=${pv.sounds.items[0].path} it=${pv.sounds.items[0]} />` : null}
+            ${pv.sounds.foot ? html`<div class="small muted">${pv.sounds.foot}</div>` : null}</div><//>
+        </div>` : null}
+        ${pv.seen && pv.seen.rel === currentRel ? html`<div class="vid-seen">
+          <${Note} kind="info"><div>
+            ${pv.seen.head ? html`<span>${pv.seen.head}</span>
+            <ul class="vid-sound-list">${pv.seen.lines.map((t) => html`<li key=${t}>${t}</li>`)}</ul>` : null}
+            ${pv.seen.prog_head ? html`<span>${pv.seen.prog_head}</span>
+            <ul class="vid-sound-list">${pv.seen.prog_lines.map((t) => html`<li key=${t}>${t}</li>`)}</ul>` : null}</div><//>
         </div>` : null}
         ${look.offered ? html`<${LookRow} look=${look} ns="video" onOpen=${colorNs.has_project ? openColors : undefined} />` : null}
         <div class="vid-panes">

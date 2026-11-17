@@ -18,6 +18,31 @@
 #                           on), input_fast.c (the FAST Neuron's SA: switch
 #                           levels) and stubs_bof.c (no codecs, no node bus, no
 #                           sound) stand in for the Stern hardware files.
+#   make PLATFORM=dp        a Dutch Pinball machine, The Big Lebowski (PAD-853):
+#                           x86-64, ONE STATIC binary like BOF's, as
+#                           $(BUILD)/dpselect, plus $(BUILD)/dpprocsw, the
+#                           button reader linked to the game's own
+#                           libpinproc.so.2.0 (GLIBC_2.2.5 only).  fb_linux.c
+#                           with -DFB_X11 + x11_raw.c (the X server the game
+#                           draws on), input_pipe.c (dpprocsw's lines) and
+#                           stubs_dp.c stand in for the Stern hardware files.
+#                           tools/dp_emu/MULTIBOOT.md.
+#   make PLATFORM=spk       a Spooky Pinball machine (PAD-980): the DP build
+#                           (static, drawing on the X server - the cabinets'
+#                           sway runs Xwayland) as $(BUILD)/spkselect, plus
+#                           $(BUILD)/spksw, the static button reader for the
+#                           Warden / Pinotaur board (spksw.c), which feeds it
+#                           input_pipe's lines.  tools/spooky_emu/MULTIBOOT.md.
+#   make PLATFORM=s3        a Stern Spike 3 machine (PAD-1263): aarch64 for the
+#                           card's Buildroot rootfs (glibc 2.39), built with
+#                           tools/spike3_emu/xgcc.sh's cross gcc (S3CC) and
+#                           linked against the card's own libEGL / libGLESv2 /
+#                           libgbm / libdrm ($(S3ROOT), a card's decrypted
+#                           rootfs), as $(BUILD)/s3select.  egl_kms.c (KMS +
+#                           GBM, the game's own display path) and stubs_s3.c
+#                           (the coin door's SPI chain; no codecs, no sound)
+#                           stand in for the Spike 2 hardware files.
+#                           tools/spike3_emu/MULTIBOOT.md.
 #
 # THE STERN BUILD.  The card rootfs copy ($(ROOT)) is used as the sysroot BY
 # HAND: the cross gcc searches its own tooldir /usr/arm-linux-gnueabihf/
@@ -43,6 +68,12 @@ ifeq ($(PLATFORM),jjp)
 BUILD    ?= build-jjp
 else ifeq ($(PLATFORM),bof)
 BUILD    ?= build-bof
+else ifeq ($(PLATFORM),dp)
+BUILD    ?= build-dp
+else ifeq ($(PLATFORM),spk)
+BUILD    ?= build-spk
+else ifeq ($(PLATFORM),s3)
+BUILD    ?= build-s3
 else
 BUILD    ?= build
 endif
@@ -108,8 +139,8 @@ endif
 GLLIBS    =
 AUDLIBS   =
 LIBC      =
-SRCS = codeselect.c conf.c colour.c settings.c theme.c gfx.c egl_x11.c input.c input_jjpio.c input_padsw.c input_fast.c stubs_jjp.c log.c art.c audio.c audio_fifo.c audio_alsa.c audio_pulse.c nvm.c
-HDRS = conf.h colour.h settings.h theme.h gfx.h egl_stern.h input.h log.h art.h audio.h codec.h nvm.h jjp_glibc.h $(BUILD)/theme_table.h
+SRCS = codeselect.c conf.c colour.c settings.c testpics.c video.c theme.c gfx.c egl_x11.c input.c input_jjpio.c input_padsw.c input_fast.c input_pipe.c stubs_jjp.c log.c art.c audio.c audio_fifo.c audio_alsa.c audio_pulse.c nvm.c scores.c
+HDRS = conf.h colour.h settings.h testpics.h video.h theme.h gfx.h egl_stern.h input.h log.h art.h audio.h codec.h nvm.h scores.h jjp_glibc.h $(BUILD)/theme_table.h
 else ifeq ($(PLATFORM),bof)
 # ---- BOF: native x86-64, the host gcc, STATIC, the machine's paths baked in ----
 # Everything the menu keeps lives under the update's own folder: the
@@ -137,8 +168,86 @@ LDPOST    =
 GLLIBS    =
 AUDLIBS   =
 LIBC      = -lpthread -lm
-SRCS = codeselect.c conf.c colour.c settings.c theme.c gfx.c fb_linux.c input.c input_jjpio.c input_padsw.c input_fast.c stubs_bof.c log.c art.c audio.c audio_fifo.c nvm.c
-HDRS = conf.h colour.h settings.h theme.h gfx.h egl_stern.h input.h log.h art.h audio.h codec.h nvm.h $(BUILD)/theme_table.h
+SRCS = codeselect.c conf.c colour.c settings.c testpics.c video.c theme.c gfx.c fb_linux.c input.c input_jjpio.c input_padsw.c input_fast.c input_pipe.c stubs_bof.c log.c art.c audio.c audio_fifo.c nvm.c scores.c
+HDRS = conf.h colour.h settings.h testpics.h video.h theme.h gfx.h egl_stern.h input.h log.h art.h audio.h codec.h nvm.h scores.h $(BUILD)/theme_table.h
+else ifneq ($(filter dp spk,$(PLATFORM)),)
+# ---- DP: native x86-64, the host gcc, STATIC (as BOF), drawing on X ----
+# Every path is passed by the launcher (padselect_dp.sh): the menu's folder
+# is <V>/pad, and V is the update's own version folder name.  A Spooky
+# machine's (spk) is the same program under its own name; its launcher
+# (padselect_spk.sh) passes every path as well.
+CC        = gcc
+CROSS     =
+ifeq ($(PLATFORM),spk)
+BINNAME   = spkselect
+PREFIX   ?= /game/code/pad
+else
+BINNAME   = dpselect
+PREFIX   ?= /home/dp/game/pad
+endif
+QEMU      = $(CURDIR)/test/native.sh
+export QEMU
+CFLAGS    = -std=gnu17 -O2 -Wall -Werror=implicit-function-declaration \
+            -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -fno-pie -no-pie \
+            -DFB_X11 \
+            -DDEF_CONF='"$(PREFIX)/images.conf"' \
+            -DDEF_OUT='"/tmp/padselect.choice"' \
+            -DDEF_LAST='"$(PREFIX)/last"' \
+            -DDEF_FONT='"$(PREFIX)/font.ttf"' \
+            -DDEF_MEDIA='"$(PREFIX)/media"' \
+            -DDEF_COLOUR_FILE='"$(PREFIX)/color"' \
+            -DCARD_FONT='"/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"' \
+            -DFIFO_LEAD_MS=40 -DFIFO_PIPE_MAX_MS=120 \
+            -I$(BUILD) $(EXTRA_CFLAGS)
+LDPRE     = -static
+LDPOST    =
+GLLIBS    =
+AUDLIBS   =
+LIBC      = -lpthread -lm
+SRCS = codeselect.c conf.c colour.c settings.c testpics.c video.c theme.c gfx.c fb_linux.c x11_raw.c input.c input_jjpio.c input_padsw.c input_fast.c input_pipe.c stubs_dp.c log.c art.c audio.c audio_fifo.c nvm.c scores.c
+HDRS = conf.h colour.h settings.h testpics.h video.h theme.h gfx.h egl_stern.h x11_raw.h input.h log.h art.h audio.h codec.h nvm.h scores.h $(BUILD)/theme_table.h
+else ifeq ($(PLATFORM),s3)
+# ---- Stern Spike 3: aarch64, the cross gcc from xgcc.sh, the card's own GL ----
+# The cross libc is Ubuntu 24.04's glibc 2.39, the same as the cards' Buildroot
+# 2024.08.1 rootfs (measured on all eleven cards in the store), so the menu is
+# built against it as it is and linked against the CARD's libraries, which
+# PAD's emulator swaps for its own shims at run time exactly as for the game.
+S3CC     ?= $(shell bash ../../spike3_emu/xgcc.sh 2>/dev/null)
+S3ROOT   ?=
+CC        = $(S3CC)
+CROSS     =
+BINNAME   = s3select
+PREFIX   ?= /games/pad
+QEMU     ?= qemu-aarch64-static
+export QEMU
+# SEL_COIN_DOOR: the menu's own words name the coin door's buttons (the
+# preview's native build in ensures3select.sh is given it too)
+CFLAGS    = -std=gnu17 -O2 -Wall -Werror=implicit-function-declaration \
+            -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector \
+            -DSEL_COIN_DOOR \
+            -DDEF_CONF='"$(PREFIX)/images.conf"' \
+            -DDEF_OUT='"/tmp/padselect.choice"' \
+            -DDEF_LAST='"/data/padselect.last"' \
+            -DDEF_FONT='"$(PREFIX)/font.ttf"' \
+            -DDEF_MEDIA='"$(PREFIX)/media"' \
+            -DDEF_COLOUR_FILE='"/data/padselect.color"' \
+            -DCARD_FONT='"$(PREFIX)/font.ttf"' \
+            -I$(BUILD) $(EXTRA_CFLAGS)
+LDPRE     =
+# LINKED against stubs of the four display libraries (s3_stublibs.sh: their
+# names and the symbols the menu imports), so a build needs no card; RUN
+# against the card's own. `make check S3ROOT=<a card's rootfs>` proves every
+# import resolves in a card's real libraries.
+S3STUBS   = $(BUILD)/stublibs
+LDPOST    = -L$(S3STUBS) -Wl,--allow-shlib-undefined
+GLLIBS    = -l:libEGL.so.1 -l:libGLESv2.so.2 -l:libgbm.so.1 -l:libdrm.so.2
+AUDLIBS   =
+# -static-libgcc (PAD-1325): the pinned cross kit (xgcc.pins, PAD-1295) carries libgcc.a but no
+# libgcc_s.so.1, which gcc's default dynamic link asks for; the menu throws nothing, so the
+# static helpers are all it needs (the card has libgcc_s, but nothing here loads it)
+LIBC      = -lpthread -lm -static-libgcc
+SRCS = codeselect.c conf.c colour.c settings.c testpics.c video.c theme.c gfx.c egl_kms.c input.c input_padsw.c input_jjpio.c input_fast.c input_pipe.c stubs_s3.c log.c art.c audio.c audio_fifo.c nvm.c scores.c
+HDRS = conf.h colour.h settings.h testpics.h video.h theme.h gfx.h egl_stern.h input.h log.h art.h audio.h codec.h nvm.h scores.h $(BUILD)/theme_table.h
 else
 # ---- Stern: the ARM cross build against the card rootfs ----
 CC        = $(CROSS)gcc
@@ -177,8 +286,8 @@ GLLIBS    = -l:libEGL.so.1 -l:libGLESv2.so.2
 AUDLIBS   = -l:libasound.so.2
 # input_jjpio.c is plain POSIX and rides along: codeselect.c dispatches every
 # backend by name, and on a Stern card `--input jjpio` finds no /dev/jjpio
-SRCS = codeselect.c conf.c colour.c settings.c theme.c gfx.c egl_stern.c input.c input_hw.c input_padsw.c input_jjpio.c input_fast.c log.c art.c audio.c audio_fifo.c audio_alsa.c codec.c nvm.c
-HDRS = conf.h colour.h settings.h theme.h gfx.h egl_stern.h input.h log.h art.h audio.h codec.h nvm.h $(BUILD)/theme_table.h
+SRCS = codeselect.c conf.c colour.c settings.c testpics.c video.c theme.c gfx.c egl_stern.c input.c input_hw.c input_padsw.c input_jjpio.c input_fast.c input_pipe.c log.c art.c audio.c audio_fifo.c audio_alsa.c codec.c nvm.c scores.c
+HDRS = conf.h colour.h settings.h testpics.h video.h theme.h gfx.h egl_stern.h input.h log.h art.h audio.h codec.h nvm.h scores.h $(BUILD)/theme_table.h
 endif
 
 # THE PAST-32 BINARY (item 105).  The animation tick used to mark the cards
@@ -205,8 +314,80 @@ all: $(BIN) $(DELTA)
 $(DELTA): paddelta.c | $(BUILD)
 > $(CC) -std=gnu17 -O2 -Wall -static paddelta.c -o $@ || { rm -f $@; exit 1; }
 > @echo "built $@"
-else
+
+# PAD-1309: padmenu.so, preloaded into the game by the profile's hook - EXIT held 5 s on the
+# coin door restarts the machine into the menu.  Shared (it goes INTO the game), so it cannot
+# be static: jjp_glibc.h and the .symver pins in padmenu.c keep it to the game's glibc 2.33.
+PADMENU = $(BUILD)/padmenu.so
+all: $(PADMENU)
+
+$(PADMENU): padmenu.c jjp_glibc.h | $(BUILD)
+> $(CC) -std=gnu17 -O2 -Wall -Werror=implicit-function-declaration -include jjp_glibc.h -DPADMENU_FAST -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -fPIC -shared -Wl,-soname,padmenu.so padmenu.c -lpthread -o $@ || { rm -f $@; exit 1; }
+> @echo "built $@"
+else ifeq ($(PLATFORM),dp)
+# the button reader: linked to libpinproc.so.2.0 BY NAME (a link-only stub
+# carries the soname; the machine's own library is found at run time through
+# LD_LIBRARY_PATH), -nostartfiles for a GLIBC_2.2.5 ceiling (dpprocsw.c)
+PROCSW = $(BUILD)/dpprocsw
+all: $(BIN) $(PROCSW)
+
+$(BUILD)/libpinproc.so.2.0: | $(BUILD)
+> printf 'void PRCreate(void){} void PRDelete(void){} void PRSwitchGetStates(void){} void PRGetLastErrorText(void){}\n' > $(BUILD)/pinproc_stub.c
+> $(CC) -shared -fPIC -Wl,-soname,libpinproc.so.2.0 -o $@ $(BUILD)/pinproc_stub.c
+
+$(PROCSW): dpprocsw.c $(BUILD)/libpinproc.so.2.0 | $(BUILD)
+> $(CC) -std=gnu17 -O2 -Wall -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -fno-pie -no-pie \
+>     -nostartfiles dpprocsw.c $(BUILD)/libpinproc.so.2.0 -o $@ || { rm -f $@; exit 1; }
+> @echo "built $@"
+else ifeq ($(PLATFORM),spk)
+# the button reader (spksw.c): plain POSIX on the board's tty, static like the menu;
+# and the P-ROC titles' (Rick and Morty, Alice Cooper): the Big Lebowski's dpprocsw on the
+# machine's own libpinproc (padselect_proc.sh)
+SPKSW = $(BUILD)/spksw
+PROCSW = $(BUILD)/dpprocsw
+PADMENU = $(BUILD)/padmenu.so
+all: $(BIN) $(SPKSW) $(PROCSW) $(PADMENU)
+
+# PAD-1309: padmenu.so, the BOF build's object (x86-64, glibc 2.17 at most); padselect.sh
+# starts the game with it and PADMENU_PROTO=warden|pinotaur: BACK held 5 s restarts into the menu
+$(PADMENU): padmenu.c jjp_glibc.h | $(BUILD)
+> $(CC) -std=gnu17 -O2 -Wall -Werror=implicit-function-declaration -include jjp_glibc.h -DPADMENU_FAST -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -fPIC -shared -Wl,-soname,padmenu.so padmenu.c -lpthread -o $@ || { rm -f $@; exit 1; }
+> @echo "built $@"
+
+$(SPKSW): spksw.c | $(BUILD)
+> $(CC) -std=gnu17 -O2 -Wall -static spksw.c -o $@ || { rm -f $@; exit 1; }
+> @echo "built $@"
+
+$(BUILD)/libpinproc.so.2.0: | $(BUILD)
+> printf 'void PRCreate(void){} void PRDelete(void){} void PRSwitchGetStates(void){} void PRGetLastErrorText(void){}\n' > $(BUILD)/pinproc_stub.c
+> $(CC) -shared -fPIC -Wl,-soname,libpinproc.so.2.0 -o $@ $(BUILD)/pinproc_stub.c
+
+$(PROCSW): dpprocsw.c $(BUILD)/libpinproc.so.2.0 | $(BUILD)
+> $(CC) -std=gnu17 -O2 -Wall -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -fno-pie -no-pie \
+>     -nostartfiles dpprocsw.c $(BUILD)/libpinproc.so.2.0 -o $@ || { rm -f $@; exit 1; }
+> @echo "built $@"
+else ifeq ($(PLATFORM),s3)
+# PAD-1309: Spike 3's padmenu.so (-DPADMENU_S3: BACK is byte 0 of /dev/spidev4.0, and the
+# restart is `sync; reboot` itself).  padselect_s3.sh preloads it into the game.
+PADMENU = $(BUILD)/padmenu.so
+all: $(BIN) $(PADMENU)
+
+$(PADMENU): padmenu.c | $(BUILD)
+> $(CC) -std=gnu17 -O2 -Wall -Werror=implicit-function-declaration -DPADMENU_S3 -fno-stack-protector -fPIC -shared -static-libgcc -Wl,-soname,padmenu.so padmenu.c -o $@ || { rm -f $@; exit 1; }
+> @echo "built $@"
+else ifneq ($(PLATFORM),stern)
 all: $(BIN)
+else
+# PAD-1309: padmenu.so, preloaded into the game on a multi-boot card - BACK held
+# on the coin door restarts the machine into the menu.  A shared object, built
+# the way the rig's hwshim.so is (build.sh): -nostdlib against the rootfs's own
+# libdl/libc, so it asks nothing newer than the card's glibc 2.21.
+PADMENU = $(BUILD)/padmenu.so
+all: $(BIN) $(PADMENU)
+
+$(PADMENU): padmenu.c | $(BUILD)
+> $(CC) -std=gnu17 -O2 -Wall -Werror=implicit-function-declaration     -U_TIME_BITS -U_FILE_OFFSET_BITS -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0     -fno-stack-protector -nostdinc -isystem $(GCCINC) -isystem $(ROOT)/usr/include     -fPIC -shared -nostdlib -Wl,-soname,padmenu.so padmenu.c     -L$(ROOT)/lib -L$(ROOT)/usr/lib -l:libdl.so.2 -l:libc.so.6 -lgcc -o $@ || { rm -f $@; exit 1; }
+> @echo "built $@"
 endif
 
 $(BUILD):
@@ -223,6 +404,12 @@ $(BUILD)/%.o: %.c $(HDRS) | $(BUILD)
 
 $(BUILD)/gfx.o: third_party/stb_truetype.h
 $(BUILD)/art.o: third_party/stb_image.h
+
+ifeq ($(PLATFORM),s3)
+$(S3STUBS)/libdrm.so.2: $(OBJS) s3_stublibs.sh
+> bash s3_stublibs.sh "$(CC)" "$(S3STUBS)" $(OBJS)
+$(BIN): $(S3STUBS)/libdrm.so.2
+endif
 
 # a failed link deletes its output: never leave a stale binary behind
 $(BIN): $(OBJS)
@@ -248,13 +435,71 @@ check-hw:
 
 # the menu, the rebuilder, the hook and the install step, all in the update's
 # own padselect folder (the builder copies them from here)
-install: $(BIN) $(DELTA)
+install: $(BIN) $(DELTA) $(PADMENU)
 > install -d "$(DESTDIR)$(PREFIX)"
 > install -m 755 "$(BIN)" "$(DESTDIR)$(PREFIX)/bofselect"
 > install -m 755 "$(DELTA)" "$(DESTDIR)$(PREFIX)/paddelta"
+> install -m 755 "$(PADMENU)" "$(DESTDIR)$(PREFIX)/padmenu.so"
 > install -m 755 padselect_bof.sh "$(DESTDIR)$(PREFIX)/padselect.sh"
 > install -m 755 pad_install_bof.sh "$(DESTDIR)$(PREFIX)/pad_install.sh"
 > if [ -f "$(DEJAVU)" ]; then install -m 644 "$(DEJAVU)" "$(DESTDIR)$(PREFIX)/font.ttf"; else echo "no $(DEJAVU): the machine's DejaVuSans-Bold.ttf will be used"; fi
+else ifeq ($(PLATFORM),dp)
+check: $(BIN) $(PROCSW)
+> bash test/check_elf_dp.sh "$(BIN)" "$(PROCSW)"
+> bash test/headless.sh "$(ROOT)" "$(BIN)" "$(BUILD)/t" "$(DEJAVU)"
+> bash test/fb_bof_test.sh "$(BIN)" "$(DEJAVU)"
+> $(PYTHON) test/x11_dp_test.py "$(BIN)" "$(BUILD)/t" "$(DEJAVU)"
+> bash -n padselect_dp.sh && bash test/padselect_dp_test.sh "$(BIN)" "$(DEJAVU)"
+> @echo "check: OK (dp)"
+
+check-hw:
+> @echo "check-hw: the node-bus test is Stern's; the DP board is proven on the rig (tools/dp_emu/MULTIBOOT.md)"
+
+install: $(BIN) $(PROCSW)
+> install -d "$(DESTDIR)$(PREFIX)"
+> install -m 755 "$(BIN)" "$(DESTDIR)$(PREFIX)/dpselect"
+> install -m 755 "$(PROCSW)" "$(DESTDIR)$(PREFIX)/dpprocsw"
+> install -m 755 padselect_dp.sh "$(DESTDIR)$(PREFIX)/padselect.sh"
+> if [ -f "$(DEJAVU)" ]; then install -m 644 "$(DEJAVU)" "$(DESTDIR)$(PREFIX)/font.ttf"; else echo "no $(DEJAVU): the machine's DejaVuSans-Bold.ttf will be used"; fi
+else ifeq ($(PLATFORM),spk)
+check: $(BIN) $(SPKSW) $(PROCSW)
+> bash test/check_elf_spk.sh "$(BIN)" "$(SPKSW)"
+> bash test/check_elf_dp.sh "$(BIN)" "$(PROCSW)"
+> bash test/headless.sh "$(ROOT)" "$(BIN)" "$(BUILD)/t" "$(DEJAVU)"
+> $(PYTHON) test/x11_dp_test.py "$(BIN)" "$(BUILD)/t" "$(DEJAVU)"
+> bash -n padselect_spk.sh && bash test/padselect_spk_test.sh "$(BIN)" "$(SPKSW)" "$(DEJAVU)"
+> bash -n padselect_proc.sh && bash test/padselect_proc_test.sh "$(BIN)" "$(DEJAVU)"
+> @echo "check: OK (spk)"
+
+check-hw:
+> @echo "check-hw: the node-bus test is Stern's; spksw is proven on the rig's boards (tools/spooky_emu/MULTIBOOT.md)"
+
+install: $(BIN) $(SPKSW) $(PROCSW) $(PADMENU)
+> install -d "$(DESTDIR)$(PREFIX)"
+> install -m 755 "$(BIN)" "$(DESTDIR)$(PREFIX)/spkselect"
+> install -m 755 "$(SPKSW)" "$(DESTDIR)$(PREFIX)/spksw"
+> install -m 755 "$(PADMENU)" "$(DESTDIR)$(PREFIX)/padmenu.so"
+> install -m 644 padmenu_proc.py "$(DESTDIR)$(PREFIX)/padmenu_proc.py"
+> install -m 755 "$(PROCSW)" "$(DESTDIR)$(PREFIX)/dpprocsw"
+> install -m 755 padselect_spk.sh "$(DESTDIR)$(PREFIX)/padselect.sh"
+> install -m 755 padselect_proc.sh "$(DESTDIR)$(PREFIX)/padselect_proc.sh"
+> if [ -f "$(DEJAVU)" ]; then install -m 644 "$(DEJAVU)" "$(DESTDIR)$(PREFIX)/font.ttf"; else echo "no $(DEJAVU): the machine's DejaVuSans-Bold.ttf will be used"; fi
+else ifeq ($(PLATFORM),s3)
+check: $(BIN)
+> @test -n "$(S3ROOT)" || { echo "check: S3ROOT=<a Spike 3 card's rootfs> is needed"; exit 1; }
+> bash test/check_elf_s3.sh "$(BIN)" "$(S3ROOT)"
+> bash -n padselect_s3.sh && bash test/padselect_s3_test.sh
+> @echo "check: OK (s3)"
+
+check-hw:
+> @echo "check-hw: the node-bus test is Spike 2's; the Spike 3 menu is proven in the emulator (MULTIBOOT.md)"
+
+install: $(BIN)
+> install -d "$(DESTDIR)$(PREFIX)"
+> install -m 755 "$(BIN)" "$(DESTDIR)$(PREFIX)/s3select"
+> install -m 755 "$(PADMENU)" "$(DESTDIR)$(PREFIX)/padmenu.so"
+> install -m 755 padselect_s3.sh "$(DESTDIR)$(PREFIX)/padselect.sh"
+> if [ -f "$(DEJAVU)" ]; then install -m 644 "$(DEJAVU)" "$(DESTDIR)$(PREFIX)/font.ttf"; else echo "no $(DEJAVU): the menu has no font"; exit 1; fi
 else ifeq ($(PLATFORM),jjp)
 check: $(BIN) capbin
 > bash test/check_elf_jjp.sh "$(BIN)" "$(JJPROOT)"
@@ -279,8 +524,9 @@ install: $(BIN)
 > if [ -f "$(DEJAVU)" ]; then install -m 644 "$(DEJAVU)" "$(DESTDIR)$(PREFIX)/font.ttf"; else echo "no $(DEJAVU): the card's DejaVuSans-Bold.ttf will be used"; fi
 > if [ -d media ]; then install -d "$(DESTDIR)$(PREFIX)/media"; for f in media/*; do if [ -f "$$f" ]; then install -m 644 "$$f" "$(DESTDIR)$(PREFIX)/media/"; fi; done; fi
 else
-check: $(BIN) capbin
+check: $(BIN) capbin $(PADMENU)
 > bash test/check_elf.sh "$(CROSS)" "$(BIN)"
+> bash test/padmenu_test.sh "$(ROOT)" "$(PADMENU)"
 > CAPBIN="$(CAPBIN)" CAP_N=$(CAP_N) bash test/headless.sh "$(ROOT)" "$(BIN)" "$(BUILD)/t" "$(DEJAVU)"
 > python3 test/padsw_test.py "$(ROOT)" "$(BIN)" "$(BUILD)/t" "$(TABLES)" "$(DEJAVU)"
 > python3 test/settings_test.py "$(ROOT)" "$(BIN)" "$(BUILD)/t" "$(DEJAVU)"
@@ -291,9 +537,10 @@ check-hw: $(BIN)
 > python3 test/fakebus_test.py "$(ROOT)" "$(BIN)" "$(BUILD)/t" "$(DEJAVU)"
 > @echo "check-hw: OK"
 
-install: $(BIN)
+install: $(BIN) $(PADMENU)
 > install -d "$(DESTDIR)$(PREFIX)"
 > install -m 755 "$(BIN)" "$(DESTDIR)$(PREFIX)/codeselect"
+> install -m 755 "$(PADMENU)" "$(DESTDIR)$(PREFIX)/padmenu.so"
 > install -m 755 select.sh "$(DESTDIR)$(PREFIX)/select.sh"
 > install -m 755 materialize.py "$(DESTDIR)$(PREFIX)/materialize.py"
 > install -m 644 images.conf.example "$(DESTDIR)$(PREFIX)/images.conf.example"

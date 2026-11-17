@@ -17,6 +17,22 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 mountpoint -q "$JJP_ROOT" || { echo "jail.sh: $JJP_ROOT is not mounted; run mount.sh first" >&2; exit 3; }
 
 mkdir -p "$JJP_JAIL"
+# A jail left over another image's root is never reused (PAD-1350: two tickets'
+# runs crossed while one ISO was still restoring; mount.sh switched the image, but
+# the jail kept the other image's root as its lower, and the run booted the wrong
+# game with no error).  Rebuilt when the rig is idle; refused while a game runs in
+# it, which is somebody else's run.
+if mountpoint -q "$JJP_JAIL"; then
+    LOWER=$(findmnt -n -o OPTIONS "$JJP_JAIL" | tr ',' '\n' | sed -n 's/^lowerdir=//p')
+    if [ -n "$LOWER" ] && [ "$LOWER" != "$JJP_ROOT" ]; then
+        if pgrep -x game >/dev/null; then
+            echo "jail.sh: the jail is over $LOWER (another image) and a game runs in it; stop that run first" >&2
+            exit 4
+        fi
+        echo "jail.sh: the jail was over $LOWER, not $JJP_ROOT; rebuilding it"
+        bash "$HERE/unjail.sh" >/dev/null 2>&1
+    fi
+fi
 mountpoint -q "$JJP_OVL" || { mkdir -p "$JJP_OVL"; mount -t tmpfs -o "size=$JJP_OVL_SIZE" tmpfs "$JJP_OVL"; }
 mkdir -p "$JJP_OVL/up" "$JJP_OVL/work"
 mountpoint -q "$JJP_JAIL" || mount -t overlay overlay \
@@ -41,8 +57,10 @@ mkdir -p "$JJP_JAIL/tmp" "$JJP_JAIL/jjpe/temp" "$JJP_JAIL/jjpe/perm"
 chmod 1777 "$JJP_JAIL/tmp"
 
 # PulseAudio refuses a root client with "Access denied" unless it has the
-# desktop user's cookie - the socket is theirs, not root's.
-if [ -f "$JJP_PULSE_COOKIE" ]; then
+# desktop user's cookie - the socket is theirs, not root's.  Only for a run
+# that asked for sound (PAD-1340): the cookie is what let a "muted" run reach
+# the speakers.  audio.sh hands it in for PAD_AUDIO=1 as well.
+if [ "${PAD_AUDIO:-0}" = "1" ] && [ -f "$JJP_PULSE_COOKIE" ]; then
     mkdir -p "$JJP_JAIL/root/.config/pulse"
     cp -f "$JJP_PULSE_COOKIE" "$JJP_JAIL/root/.config/pulse/cookie"
     chmod 600 "$JJP_JAIL/root/.config/pulse/cookie"
@@ -58,6 +76,22 @@ if mountpoint -q "$JJP_ROOTB" 2>/dev/null; then
     mkdir -p "$JJP_OVLB/up" "$JJP_OVLB/work" "$JJP_JAIL$JJP_MULTI_B"
     mountpoint -q "$JJP_JAIL$JJP_MULTI_B" || mount -t overlay overlay \
         -o "lowerdir=$JJP_ROOTB,upperdir=$JJP_OVLB/up,workdir=$JJP_OVLB/work" "$JJP_JAIL$JJP_MULTI_B"
+fi
+
+# A USB stick (PAD-1349).  The machine automounts a stick at /mnt/usb with
+# umask=000 (70-usbautomount.rules), and the game's Update USB screen
+# (checkusb.pl) tells "inserted" from "not" by that directory's mode alone:
+# 0777 mounted, 0755 not.  JJP_USB=<dir> binds a folder there as the stick, so
+# the screen, its hot fix and the full update path all run as on a cabinet.
+# Without JJP_USB any stick a previous run left is taken out.
+if [ -n "${JJP_USB:-}" ] && [ -d "$JJP_USB" ]; then
+    chmod 0777 "$JJP_USB"
+    mkdir -p "$JJP_JAIL/mnt/usb"
+    mountpoint -q "$JJP_JAIL/mnt/usb" && umount -l "$JJP_JAIL/mnt/usb"
+    mount --bind "$JJP_USB" "$JJP_JAIL/mnt/usb"
+    echo "usb     : $JJP_USB at /mnt/usb"
+elif mountpoint -q "$JJP_JAIL/mnt/usb" 2>/dev/null; then
+    umount -l "$JJP_JAIL/mnt/usb"
 fi
 
 echo "jail    : $JJP_JAIL ($(mountpoint -q "$JJP_JAIL" && echo mounted || echo FAILED))"

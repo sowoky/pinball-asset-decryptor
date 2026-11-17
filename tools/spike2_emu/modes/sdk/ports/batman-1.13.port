@@ -177,6 +177,14 @@ site surface_find     0x004f1488 0xe92d4070 0xe24dd008
 site surface_set_video 0x004e8d1c 0xe5d03238 0xe92d4ff0
 site surface_play     0x004e64bc 0xe5d03238 0xe92d43f0
 site surface_stop     0x004e5fc0 0xe5d03238 0xe92d40f0
+# PAD-725: the surface's own seek, length and position (PAD-530's, from Bond 1.06): a mode's clip the game's own
+# clip took the surface from comes back where it would be by then. Placed by the James Bond LE 1.06 recipe at
+# its distances from surface_play (+0x1bc / -0x1274 / -0x360: the older player), each proven by its call: the
+# player's virtual seek (+0x20), duration (+0x28) and position (+0x24), whose entries call gst_element_seek /
+# query_duration / query_position.
+site surface_seek     0x004e6678 0xe92d43f0 0xe1a07003
+site surface_duration 0x004e5248 0xe5d03238 0xe92d40f0
+site surface_position 0x004e615c 0xe5d03238 0xe92d40f0
 value surface_playing       2
 # item 164: no bank this title draws in a game shows a clip, so a mode's clips go in the HUD, in a
 # Video the app grafts there (scene_write.py add_screens clips); hidden until a clip plays
@@ -430,3 +438,92 @@ site block_start_20     0x00148d3c 0xe92d4038 0xe1a05000
 text block_name_20      Mr. Freeze (episodes 53-54)
 site block_start_21     0x00034ba8 0xe92d40f8 0xebffffde
 text block_name_21      Batturn Mania
+
+# ---- PAD-619: the game's Challenge list and start menu, read off this build's own code (portchallenge.py) ----
+value challenge_on_flag   16
+site  challenge_balls     0x003a4128 0xe92d4030 0xe1a05000
+site  challenge_balls_2   0x001ddb84 0xe92d4038 0xe1a04000
+site  challenge_extra_ball 0x00347190 0xe30c3170 0xe3403076
+site  challenge_menu      0x00028ddc 0xe1a07000 0xe3170080
+site  challenge_menu_pick 0x00028fac 0xe2433001 0xe3530005
+value challenge_menu_list_at   316
+value challenge_menu_count_at  24
+value challenge_menu_cap       7
+value challenge_menu_entry     12
+value challenge_menu_kind      2
+value challenge_menu_slot      -1
+value challenge_menu_caption   1901
+# the game's own challenges end the ball when they are over: so does a mode that took the pick
+site  challenge_end_ball  0x003ad198 0xe30e226a 0xe340207f
+
+# ---- PAD-643: a mode's challenge ball launched for the player, and the game's ball-start work that skips a challenge game run in a mode's (portchallenge.py) ----
+site  ball_launch         0x003a9184 0xe92d4010 0xe3014b6c
+value ball_launch_flag       11
+value ball_launch_wait_flag  12
+
+# ---- PAD-641: the game's end-of-game high scores (it runs until a new high score's initials are in) ----
+site  game_scores            0x003d80f8 0xe92d4ff0 0xe24dd0c4
+
+# PAD-710: the game's own books of its modes (mode_framework.py, from this build's audit and flag names): a
+# mode of ours in one's place counts its STARTED audit and PLAYED flag, and when completed its COMPLETED ones
+site  audit_add              0x0034bdf0 0xe92d43f0 0xe2505000
+value place_audit_started_0        220
+value place_audit_started_1        224
+value place_audit_completed_1      236
+value place_audit_started_2        250
+value place_audit_completed_2      260
+value place_audit_started_3        261
+value place_audit_completed_3      271
+value place_audit_started_4        272
+value place_audit_completed_4      280
+value place_audit_started_5        290
+value place_audit_completed_5      304
+value place_audit_started_6        305
+value place_audit_completed_6      317
+value place_audit_started_7        318
+value place_audit_completed_7      328
+value place_audit_started_8        329
+value place_audit_completed_8      337
+value place_audit_started_9        347
+value place_audit_completed_9      353
+value place_audit_started_10       354
+value place_audit_completed_10     357
+value place_audit_started_11       358
+value place_audit_completed_11     362
+value place_audit_started_12       363
+value place_audit_completed_12     368
+value place_audit_started_13       369
+value place_audit_completed_13     374
+value place_audit_started_14       375
+value place_audit_completed_14     380
+value place_audit_started_15       381
+value place_audit_completed_15     386
+value place_audit_started_16       387
+value place_audit_completed_16     392
+value place_audit_started_17       393
+value place_audit_completed_17     398
+value place_audit_started_18       399
+value place_audit_completed_18     403
+value place_audit_started_19       404
+value place_audit_completed_19     409
+value place_audit_started_20       410
+value place_audit_completed_20     415
+value place_audit_started_21       437
+
+# PAD-747: the game's other modes it keeps books of (mode_framework.done_lines): a mode of ours may start once
+# some of them are completed - each one's COMPLETED audit (through audit_add) or COMPLETED flag
+text  done_name_0                  Shame Mode Ep 59 60
+value done_audit_0                 419
+text  done_name_1                  Shame Mode Ep 115 116
+value done_audit_1                 424
+
+
+
+# ---- PAD-826: spare switch inputs and driver outputs (modes/spare_io.py --write, from this build's binary;
+# docs/plans/mode_spare_io.md). coil_frame = the node-bus fire-by-address wrapper; sw_struct = the switch
+# service's struct (+16 one 160-byte block per node: +20 its 64 input bits, +28 the switch id per bit); on the
+# older framework sw_listen / sw_boards / coil_used instead (the listener table, the board table, a coil there)
+site coil_frame            0x0051c024 0xe5d13000 0xe3530008
+data sw_listen             0x0076bf30
+data sw_boards             0x0076ad64
+site coil_used             0x002618b8 0xe92d43f8 0xe30d8d3c

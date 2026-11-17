@@ -25,7 +25,7 @@ import threading
 
 from pinball_decryptor.webui import rig as _rig
 from .. import compat
-from ...core import rigslot
+from ...core import rigslot, timesync
 from .. import emulate_dp_core as dp
 from ..emulate_jjp_common import (RigTabMixin, rig_off, load_audio_ctl,
                                   windows_python,
@@ -55,7 +55,7 @@ SOUND_TIP = ("Play the game's sound on this PC. Applies when the game starts; "
              "the game's own volume is in its service menu.")
 
 SWITCHES_TIP = ("The machine's switches: the game's own machine view with every "
-                "switch on it, and a labelled list. Hold a switch with the "
+                "switch on it, and a labeled list. Hold a switch with the "
                 "mouse, right-click to latch it.")
 
 #: The status grid (label, key into the values _apply computes).
@@ -204,8 +204,8 @@ class EmulateDPTab(RigTabMixin, TabService):
         if not self._starting or self._cancelling:
             return False
         self._cancelling = True
-        self._set_go("Cancelling…", False)
-        self._log("DP: cancelling the start…")
+        self._set_go("Canceling…", False)
+        self._log("DP: canceling the start…")
 
         def work():
             try:
@@ -348,6 +348,7 @@ class EmulateDPTab(RigTabMixin, TabService):
                           "off the image - a few minutes; the next is quick)."
                           % (os.path.basename(img),
                              " + " + os.path.basename(upd) if upd else ""))
+                timesync.quiet_clocks_async(self._log)   # PAD-1307: the clock
                 rc = self._run_streaming(
                     dp.rig_cmd_root(
                         "watch.sh", *args,
@@ -358,7 +359,7 @@ class EmulateDPTab(RigTabMixin, TabService):
                     timeout=3600, on_line=self._footer_line)
                 if self._cancelling:
                     self._started_here = False
-                    self._log("DP: start cancelled.")
+                    self._log("DP: start canceled.")
                 elif rc not in (0, None):
                     self._log("DP: start failed (exit %d). %s"
                               % (rc, dp.EXIT_TEXT.get(rc, "")))

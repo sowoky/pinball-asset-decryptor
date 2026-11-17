@@ -138,7 +138,8 @@ def _patch(svc, monkeypatch, **kw):
     ("stern", "whitestar", False), ("jjp", "", False), ("spooky", "", False),
     ("pb", "", False), ("williams", "", False), ("cgc", "", False),
     ("dp", "", False), ("ap", "", False), ("bof", "", False),
-    ("data_east", "", False), ("sega", "", False)])
+    ("data_east", "", False), ("sega", "", False),
+    ("capcom", "", False)])
 def test_tab_follows_the_capability(tmp_path, mfr, era, visible):
     with web_app(tmp_path, mfr=mfr, era=era or None) as w:
         if mfr not in {m.key for m in w.window.manufacturers}:
@@ -344,6 +345,29 @@ def test_no_rig_means_no_probe_and_no_poll(tmp_path):
             svc._run(["true"])
 
 
+def test_the_status_poll_runs_the_root_status_command(tmp_path, monkeypatch):
+    """PAD-496: the poll asks through rig.status_cmd (root on Windows), not
+    the desktop user's rig_cmd, which read another rig's game as this one's:
+    the button said Stop over a rig that ran nothing."""
+    from pinball_decryptor.core import runtime
+    from pinball_decryptor.webui import emulate_rig as rig
+    from pinball_decryptor.webui.tabs import emulate as emod
+    monkeypatch.setenv("PAD_BOARD_WIN", str(tmp_path / "board"))
+    monkeypatch.setattr(runtime, "status", lambda *a, **k: None)
+    monkeypatch.setattr(rig, "status_cmd", lambda: ["STATUS-AS-ROOT"])
+    with web_app(tmp_path, mfr="stern") as w:
+        svc = _svc(w)
+        rec = _patch(svc, monkeypatch, answers={
+            "STATUS-AS-ROOT": _Done(b"procs=0\nrunning=0\nstate=off\n")})
+        w.run(lambda: setattr(svc, "_docker", "ok"))
+        with monkeypatch.context() as m:
+            m.setattr(emod, "no_rig", lambda: False)
+            w.run(svc._poll)
+            _wait(w, lambda: svc._polled_once and not svc._poll_busy)
+        assert rec.calls[0] == ["STATUS-AS-ROOT"]
+        assert w.state(NS)["run_btn"]["label"] == "Start emulator"
+
+
 def test_on_show_paints_the_stern_ladder(tmp_path):
     with web_app(tmp_path, mfr="stern") as w:
         w.call("ui.select_tab", NS)
@@ -401,6 +425,55 @@ def test_start_launches_watch_with_the_machine_env(tmp_path, monkeypatch):
         assert svc._launch_serial == serial + 1
         log = _lines(w)
         assert any("[card] copying godzilla_le-1_16_0" in ln for ln in log)
+
+
+def test_the_edition_row_offers_the_cards_models_and_start_sends_the_code(tmp_path,
+                                                                          monkeypatch):
+    """PAD-519: a Premium/LE card runs every Premium, LE and SLE of its title; the board's
+    model code says which. The row lists what the card's own game takes, its first choice
+    sends the engine's "999" (the card's own), and a Pro card has nothing to pick."""
+    from pinball_decryptor.plugins.stern import cabinet_model
+    card = tmp_path / "batman-1_14_0.Release.8G.sdcard.raw"
+    card.write_bytes(b"\0" * 512)
+    pro = tmp_path / "star_wars_pro-1_31_0.Release.8G.sdcard.raw"
+    pro.write_bytes(b"\0" * 512)
+
+    def fake(path, title=None):
+        if path == str(pro):
+            return "star_wars_pro", {"built": "Pro", "choices": []}
+        return "batman", {"built": "Premium", "choices": [
+            ("Premium", "I2"), ("LE", "I0"), ("SLE", "I3")]}
+    monkeypatch.setattr(cabinet_model, "editions_card", fake)
+
+    def started(w, svc, rec):
+        rec.calls.clear()
+        w.call(NS + ".toggle")
+        _wait(w, lambda: any("watch.sh" in " ".join(c) for c in rec.calls))
+        _wait(w, lambda: svc._proc is None and not svc._starting)
+        w.drain()
+        return next(c for c in rec.calls if "watch.sh" in " ".join(c))
+
+    with web_app(tmp_path, mfr="stern") as w:
+        svc = _svc(w)
+        rec = _patch(svc, monkeypatch)
+        w.run(lambda: w.window.emulate_card_var.set(str(card)))
+        _wait(w, lambda: w.state(NS)["editions_on"])
+        st = w.state(NS)
+        assert [o["label"] for o in st["editions"]] == [
+            "Premium (the card's own)", "LE", "SLE"]
+        assert st["edition_note"] == ""
+        assert "PAD_MODEL=999" in started(w, svc, rec)
+
+        w.call("ui.set", NS, "edition", "SLE")
+        assert "PAD_MODEL=I3" in started(w, svc, rec)
+
+        # A Pro card: nothing to pick, nothing sent, and the row says why.
+        w.run(lambda: w.window.emulate_card_var.set(str(pro)))
+        _wait(w, lambda: w.state(NS)["edition_note"])
+        st = w.state(NS)
+        assert not st["editions_on"] and st["edition"] == ""
+        assert "Pro build" in st["edition_note"]
+        assert not any(a.startswith("PAD_MODEL=") for a in started(w, svc, rec))
 
 
 class _LiveProc:
@@ -582,6 +655,37 @@ def test_apply_paints_the_status_grid_and_footer(tmp_path):
         assert s["run_btn"]["label"] == "Start emulator"
         assert ended == [svc._launch_serial]
         assert w.state("shell")["footer"]["status"] == "Ready"
+
+
+def test_a_renderer_that_lost_the_gpu_says_so_in_its_row(tmp_path):
+    """PAD-497: David saw King Kong's video stutter; the cause - WSL had lost
+    the graphics card and the game was drawn in software - was in the run log
+    only, and this row read "200% CPU, 30 fps" as if nothing had changed."""
+    with web_app(tmp_path, mfr="stern") as w:
+        svc = _svc(w)
+        w.call("ui.select_tab", NS)
+        run = {"running": "1", "state": "attract", "procs": "5",
+               "host_cpu": "200", "fps": "30.0"}
+        w.run(svc._apply, dict(run, gl_fallback="gpulost"))
+        s = w.state(NS)
+        assert s["vals"]["host"] == "200% CPU, 30.0 fps · no GPU"
+        assert "lost the graphics card" in s["host_tip"]
+        assert "stutter" in s["host_tip"]
+        assert "Restart WSL…" in s["host_tip"]
+        # A reason watch.sh has no words for still names the cost and a cure.
+        w.run(svc._apply, dict(run, gl_fallback="unknown"))
+        s = w.state(NS)
+        assert s["vals"]["host"].endswith("· no GPU")
+        assert "stutter" in s["host_tip"] and "Restart WSL…" in s["host_tip"]
+        # The GPU back (or software by request): no word, no badge.
+        w.run(svc._apply, run)
+        s = w.state(NS)
+        assert s["vals"]["host"] == "200% CPU, 30.0 fps"
+        assert s["host_tip"] == ""
+        w.run(svc._apply, dict(run, gl_fallback="gpulost"))
+        w.run(svc._apply, {"running": "0", "state": "off", "procs": "0"})
+        s = w.state(NS)
+        assert s["vals"]["host"] == "—" and s["host_tip"] == ""
 
 
 def test_copy_and_preparing_hold_the_state_over_the_poll(tmp_path):
@@ -896,10 +1000,11 @@ def _slots(w, svc):
     w.run(fill)
 
 
-def test_slots_not_read_yet_is_not_no_slots(tmp_path):
+def test_slots_not_read_yet_is_not_no_slots(tmp_path, monkeypatch):
     """Before the first slot read (and all through a WSL boot) the table
     claims nothing: the page shows "No save states" only after a read that
     answered, and a failed read says so in the summary instead."""
+    monkeypatch.setattr(sys, "platform", "linux")   # not the Mac's words (PAD-835)
     with web_app(tmp_path, mfr="stern") as w:
         svc = _svc(w)
         s = w.state(NS)
@@ -911,7 +1016,8 @@ def test_slots_not_read_yet_is_not_no_slots(tmp_path):
         w.run(failed)
         s = w.state(NS)
         assert s["slots_read"] is False
-        assert s["slots_sum"] == "Could not read the slots - is WSL up?"
+        # a Linux desktop has no WSL to blame (PAD-871)
+        assert s["slots_sum"] == "Could not read the slots."
 
         def empty():
             svc._slots_rows, svc._slots_total, svc._slots_free = [], 0, 1 << 30
@@ -920,7 +1026,45 @@ def test_slots_not_read_yet_is_not_no_slots(tmp_path):
         assert w.state(NS)["slots_read"] is True
 
 
-def test_slots_are_scoped_to_the_card(tmp_path):
+def test_macos_manages_its_slots_through_the_box(tmp_path, monkeypatch):
+    """★ PAD-835: the Mac's container carries criu now, so its Save states
+    panel works. The slot scripts go to padbox.sh as the ORDINARY command
+    (it runs them as root inside the box; there is no `wsl -u root` to ask),
+    and the words name the Mac's disk and engine, not WSL."""
+    from pinball_decryptor.webui.tabs import emulate as tab
+    with web_app(tmp_path, mfr="stern") as w:
+        svc = _svc(w)
+        monkeypatch.setattr(tab, "no_rig", lambda: False)
+        monkeypatch.setattr(tab.rig, "rig_cmd",
+                            lambda script, *a, env=(): ["padbox.sh", script]
+                            + list(a))
+
+        def root(*_a):
+            raise AssertionError("rig_cmd_root is WSL-only")
+        monkeypatch.setattr(tab.rig, "rig_cmd_root", root)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        assert w.run(lambda: svc._cmd_root("slots.sh", "list")) == [
+            "padbox.sh", "slots.sh", "list"]
+
+        def failed():
+            svc._slots_rows, svc._slots_total, svc._slots_free = [], None, None
+            svc._slots_paint()
+        w.run(failed)
+        assert w.state(NS)["slots_sum"] == ("Could not read the slots - is "
+                                            "Docker running?")
+        _slots(w, svc)
+        assert w.state(NS)["slots_sum"].endswith(
+            "free on the emulator's disk: 61.2 GB")
+        rec = _patch(svc, monkeypatch, answers={
+            "slots.sh list": _Done(b"total|0\nfree|1\n")})
+        assert w.call(NS + ".slots_refresh") is True
+        _wait(w, lambda: any(c[-1] == "list" for c in rec.calls))
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert w.call(NS + ".slots_refresh") is False
+
+
+def test_slots_are_scoped_to_the_card(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")   # not the Mac's words (PAD-835)
     with web_app(tmp_path, mfr="stern") as w:
         svc = _svc(w)
         _slots(w, svc)
@@ -936,7 +1080,7 @@ def test_slots_are_scoped_to_the_card(tmp_path):
         assert s["slots"][1]["size"] == "1.2 GB"
         assert s["slots_sum"] == ("2 slots for godzilla_le · 1 for other game "
                                   "hidden · all slots 1.4 GB · free on the "
-                                  "WSL disk: 61.2 GB")
+                                  "emulator's disk: 61.2 GB")
 
 
 def test_slot_guards_and_launch(tmp_path, monkeypatch):
@@ -1054,13 +1198,99 @@ def test_card_cache_manager(tmp_path, monkeypatch):
         w.answers.append("no")
         assert w.call(NS + ".cache_delete") is False
         assert w.asked[-1]["message"].startswith(
-            "Delete 1 cached card, freeing about 6.3 GB?")
+            "Delete 1 cached card, freeing about 6.3 GB inside WSL?")
         w.answers.append("yes")
         assert w.call(NS + ".cache_delete") is True
         _wait(w, lambda: any("--cache-drop" in c for c in rec.calls))
         _wait(w, lambda: (w.state(NS)["cache"] or {}).get("busy") is False)
         w.call(NS + ".cache_close")
         assert w.state(NS)["cache"] is None
+
+
+# PAD-739: the Cache window shows each card's image and use, selects what will
+# not be missed, keeps the cache under a limit, never deletes a card in use and
+# says which deletes failed.
+def _cache_739(now):
+    d = 86400
+    return ("entry\tgz_v1\t9437184\t15000000\t%d\t/mnt/c/Users/u/Desktop/gz v1.raw\n"
+            "state\tgz_v1\tchanged\t-\t%d\n"
+            "entry\tgz_v2\t9437184\t15000000\t0\t/mnt/c/Users/u/Desktop/gz v2.raw\n"
+            "state\tgz_v2\tok\t-\t%d\n"
+            "entry\tgz_v3\t8000000\t15000000\t%d\t/mnt/c/Users/u/Desktop/gz v3.raw\n"
+            "state\tgz_v3\tok\tmounted\t%d\n"
+            "entry\tgz_v4\t7000000\t15000000\t%d\t/mnt/c/Users/u/Desktop/gz v4.raw\n"
+            "state\tgz_v4\tgone\t-\t%d\n"
+            "leftover\thalf\t600000\t%d\t-\n"
+            "limit\t64\t34474368\t/home/u/cardcache\tdistro\n"
+            "disk\t900000000\t1000000000\n"
+            % (now - 2 * d, now - 9 * d, now - 40 * d, now - 60 * d,
+               now - 60 * d, now - d, now - 5 * d, now - 3 * d)).encode()
+
+
+def test_card_cache_window_pad739(tmp_path, monkeypatch):
+    now = int(time.time())
+    with web_app(tmp_path, mfr="stern") as w:
+        svc = _svc(w)
+        rec = _patch(svc, monkeypatch, answers={
+            "--cache-list": _Done(_cache_739(now)),
+            "--cache-limit": _Done(b"[card] cache limit 32 GB (0 = none)\n"),
+            "--cache-drop gz_v4": _Done(b"[card] could not delete gz_v4.boot "
+                                        b"(permission denied?)\n", rc=1),
+            "--cache-drop": _Done(b"[card] dropped cached x\n")})
+        assert w.call(NS + ".open_cache") is True
+        _wait(w, lambda: (w.state(NS)["cache"] or {}).get("busy") is False)
+        c = w.state(NS)["cache"]
+        rows = {r["label"]: r for r in c["rows"]}
+        assert rows["gz_v1"]["source"] == "Image rebuilt since: copy never used again"
+        assert rows["gz_v2"]["booted"].startswith("copied ")      # never booted
+        assert rows["gz_v3"]["use"] == "In use" and rows["gz_v3"]["locked"]
+        assert rows["gz_v4"]["source"] == "Image deleted or renamed"
+        assert rows["half"]["source"] == "Unfinished copy"
+        assert c["limit"] == 64 and [o["gb"] for o in c["limits"]] == [32, 64, 128, 256, 0]
+        assert "kept under 64 GB" in c["head"] and "4 unused" in c["head"]
+        assert "Reclaim space to Windows" in c["note"]
+        # Select unused: the rebuilt one, the never-booted 40-day one, the
+        # deleted image's and the unfinished copy - not the one in use
+        assert w.call(NS + ".cache_select_unused") == 4
+        c = w.state(NS)["cache"]
+        assert sorted(c["sel"]) == ["gz_v1", "gz_v2", "gz_v4", "half"]
+        assert c["sel_text"] == "4 selected — frees about 25.2 GB"
+        # a selection holding the card in use: it is left out and said so
+        w.call(NS + ".cache_select", ["gz_v3", "gz_v4"])
+        w.answers.append("yes")
+        assert w.call(NS + ".cache_delete") is True
+        msg = w.asked[-1]["message"]
+        assert msg.startswith("Delete 1 cached card, freeing about 6.7 GB inside WSL?")
+        assert "cannot boot again until its image is back" in msg
+        assert "1 selected card is in use and will be kept." in msg
+        _wait(w, lambda: any("--cache-drop" in " ".join(x) for x in rec.calls))
+        assert not any("gz_v3" in " ".join(x) for x in rec.calls)
+        _wait(w, lambda: "Not deleted" in ((w.state(NS)["cache"] or {}).get("hint") or ""))
+        assert w.state(NS)["cache"]["hint"] == (
+            "Deleted 0 of 1. Not deleted: gz_v4 (could not delete gz_v4.boot "
+            "(permission denied?))")
+        # a delete that went through points at Reclaim: the cache is on the
+        # distro's own disk (/home/u/cardcache), whose file only shrinks then
+        w.call(NS + ".cache_select", ["gz_v1"])
+        w.answers.append("yes")
+        assert w.call(NS + ".cache_delete") is True
+        _wait(w, lambda: "Deleted 1 cached card" in ((w.state(NS)["cache"] or {}).get("hint") or ""))
+        assert w.state(NS)["cache"]["hint"] == (
+            "Deleted 1 cached card, about 9.0 GB freed inside WSL. Windows "
+            "gets the space back when you use Reclaim space to Windows in "
+            "Settings ▸ Manage disk space.")
+        # only the card in use: nothing to ask, nothing run
+        _wait(w, lambda: (w.state(NS)["cache"] or {}).get("busy") is False)
+        w.call(NS + ".cache_select", ["gz_v3"])
+        n = len(rec.calls)
+        assert w.call(NS + ".cache_delete") is False
+        assert len(rec.calls) == n
+        # a lower limit than the cache holds asks first, then runs the rig's trim
+        w.answers.append("yes")
+        assert w.call(NS + ".cache_set_limit", 32) is True
+        assert w.asked[-1]["title"] == "Card cache limit"
+        _wait(w, lambda: any("--cache-limit" in x for x in rec.calls))
+        assert [x for x in rec.calls if "--cache-limit" in x][-1][-1] == "32"
 
 
 # ------------------------------------------------- setup, runtime, Docker
@@ -1124,6 +1354,66 @@ def test_runtime_notice_only_when_stale(tmp_path):
         w.run(svc._runtime_apply, ("foreign", ""))
         assert w.state(NS)["rt_btn"] is False
         assert "will not touch it" in w.state(NS)["rt_msg"]
+
+
+def test_runtime_offered_when_own_wsl_logs_in_as_root(tmp_path, monkeypatch):
+    """PAD-659: the app's installer leaves Ubuntu logging in as root, and the
+    game window is black there.  With no runtime yet, the tab offers the
+    app's own Linux (an ordinary user) as one button - whichever of the
+    status poll and the setup facts arrives first."""
+    from pinball_decryptor.webui import emulate_rig as rig
+    monkeypatch.setattr(rig._runtime_ui, "can_install", lambda: True)
+    with web_app(tmp_path, mfr="stern") as w:
+        svc = _svc(w)
+        w.run(svc._runtime_apply, ("absent", ""))
+        assert w.state(NS)["rt_msg"] == ""          # facts not in yet
+        w.run(svc._setup_apply, {"user": "root"})
+        s = w.state(NS)
+        assert "set up with an ordinary user account" in s["rt_msg"]
+        assert "Your own WSL distro is not changed" in s["rt_msg"]
+        from pinball_decryptor.core import runtime
+        assert "about %d MB" % round(runtime.IMAGE.size / 1e6) in s["rt_msg"]
+        assert s["rt_btn"] is True
+        assert s["rt_label"] == "Install emulator Linux…"
+        assert sum("its own Linux for the emulator" in ln
+                   for ln in _lines(w)) == 1
+        # the poll repeats; the log line does not
+        w.run(svc._runtime_apply, ("absent", ""))
+        assert sum("its own Linux for the emulator" in ln
+                   for ln in _lines(w)) == 1
+        # once installed (or for an ordinary user) the offer goes away
+        w.run(svc._runtime_apply, ("ready", ""))
+        assert w.state(NS)["rt_msg"] == "" and w.state(NS)["rt_btn"] is False
+        w.run(svc._setup_apply, {"user": "dave"})
+        w.run(svc._runtime_apply, ("absent", ""))
+        assert w.state(NS)["rt_msg"] == ""
+        # a stale runtime keeps its own wording and button label
+        w.run(svc._runtime_apply, ("stale", "old"))
+        assert w.state(NS)["rt_label"] == "Update emulator Linux…"
+
+
+def test_runtime_install_rechecks_setup(tmp_path, monkeypatch):
+    """After the install the setup facts are asked again, in the Linux the
+    emulator now runs in, so the root warning does not linger."""
+    from pinball_decryptor.webui import emulate_rig as rig
+    from pinball_decryptor.webui.tabs import emulate as emod
+    monkeypatch.setattr(rig._runtime_ui, "can_install", lambda: True)
+    with web_app(tmp_path, mfr="stern") as w:
+        svc = _svc(w)
+        w.run(svc._setup_apply, {"user": "root"})
+        w.run(svc._runtime_apply, ("absent", ""))
+        monkeypatch.setattr(rig._runtime_ui, "ensure",
+                            lambda say, **k: "ready")
+        monkeypatch.setattr(svc, "_ensure_data_disk", lambda: None)
+        rechecked = []
+        monkeypatch.setattr(svc, "_setup_recheck",
+                            lambda: rechecked.append(1))
+        with monkeypatch.context() as m:
+            m.setattr(emod, "no_rig", lambda: False)
+            assert w.call(NS + ".runtime_fix") is True
+            assert w.state(NS)["rt_label"] == "Installing…"
+            _wait(w, lambda: w.state(NS)["rt_enabled"] is True)
+            _wait(w, lambda: rechecked == [1])
 
 
 def test_runtime_replace_asks_the_one_consent(tmp_path, monkeypatch):

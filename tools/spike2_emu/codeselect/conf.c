@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <strings.h>
 #include <errno.h>
 #include <unistd.h>
 #include "conf.h"
@@ -47,6 +48,20 @@ static void conf_warn(struct conf *c, const char *fmt, ...)
 
 /* split a '|'-separated line into up to seven trimmed fields; missing ones
  * come back NULL.  Shared by image= and group=, which carry the same seven. */
+/* the TEST CARD list a test item goes in (PAD-1279): the key says it, and
+ * the file must be one that list shows; test= goes by the file alone */
+static int test_kind_of(const char *key, const char *file)
+{
+    const char *dot = strrchr(file, '.');
+    int png = dot && !strcasecmp(dot, ".png"), gif = dot && !strcasecmp(dot, ".gif");
+    int padv = dot && !strcasecmp(dot, ".padv"), wav = dot && !strcasecmp(dot, ".wav");
+    if (!strcmp(key, "test_image")) return png ? TK_IMAGE : TK_NONE;
+    if (!strcmp(key, "test_scene")) return png ? TK_SCENE : TK_NONE;
+    if (!strcmp(key, "test_video")) return gif || padv ? TK_VIDEO : TK_NONE;
+    if (!strcmp(key, "test_sound")) return wav ? TK_SOUND : TK_NONE;
+    return png ? TK_IMAGE : gif || padv ? TK_VIDEO : wav ? TK_SOUND : TK_NONE;
+}
+
 static void split_fields(char *val, char *fld[7])
 {
     char *p = val;
@@ -277,6 +292,9 @@ int conf_load(struct conf *c, const char *path, char *err, int errlen)
     c->mv_store[0] = 0;
     c->mv_key_set = 0;
     c->mv_default = -1;
+    c->ed_store[0] = 0;
+    c->ed_key_set = 0;
+    c->ed_values = 0;
     c->mixer_volume = -1;
     c->volume_max = -1;
     /* ONE TEXT SIZE FOR THE WHOLE MENU unless the file asks for the other
@@ -429,6 +447,8 @@ int conf_load(struct conf *c, const char *path, char *err, int errlen)
             copy_field(c->font, val);
         } else if (!strcmp(key, "media")) {
             copy_field(c->media, val);
+        } else if (!strcmp(key, "test_dir")) {
+            copy_field(c->test_dir, val);
         } else if (!strcmp(key, "sound_move")) {
             copy_field(c->sound_move, val);
         } else if (!strcmp(key, "sound_confirm")) {
@@ -450,6 +470,31 @@ int conf_load(struct conf *c, const char *path, char *err, int errlen)
                 if (q) *q++ = 0;
                 c->mv_key_set = nvm_parse_key(p, c->mv_key) == 0;
                 if (q && *q) c->mv_default = clamp_int(q, 0, 63);
+            }
+        } else if (!strcmp(key, "edition")) {
+            /* PAD-495: <store>|<sha1 hex>|<n>.  All three or it is not an
+             * editions card: a menu is a safer thing to come up than a
+             * machine that boots image 0 for ever without saying why */
+            char tmp[CONF_STR * 3], *p = tmp, *q, *r;
+            int n;
+            snprintf(tmp, sizeof tmp, "%s", val);
+            q = strchr(p, '|');
+            r = q ? strchr(q + 1, '|') : NULL;
+            if (!q || !r) {
+                conf_warn(c, "%s:%d: edition=%s is not <store>|<key>|<n>: the menu is shown",
+                          path, lineno, val);
+            } else {
+                *q++ = 0;
+                *r++ = 0;
+                n = (*r && strspn(r, "0123456789") == strlen(r)) ? atoi(r) : 0;
+                if (!*p || nvm_parse_key(q, c->ed_key) != 0 || n < 2 || n > CONF_MAX_IMAGES) {
+                    conf_warn(c, "%s:%d: edition=%s names no store, no key or no 2..%d editions: "
+                              "the menu is shown", path, lineno, val, CONF_MAX_IMAGES);
+                } else {
+                    copy_field(c->ed_store, p);
+                    c->ed_key_set = 1;
+                    c->ed_values = n;
+                }
             }
         } else if (!strcmp(key, "mixer_volume")) {
             if (*val) c->mixer_volume = clamp_int(val, 0, 63);
@@ -481,6 +526,37 @@ int conf_load(struct conf *c, const char *path, char *err, int errlen)
                 c->colour[idx].built = built;
                 snprintf(c->colour[idx].name, sizeof c->colour[idx].name, "%s",
                          fld[5] ? fld[5] : "");
+            }
+        } else if (!strcmp(key, "testcard")) {
+            if (!strcmp(val, "on")) c->testcard = 1;
+            else if (!*val || !strcmp(val, "off")) c->testcard = 0;
+            else conf_warn(c, "%s:%d: testcard=%s is not 'on' or 'off': read as 'off'",
+                           path, lineno, val);
+        } else if (!strcmp(key, "test") || !strcmp(key, "test_image") || !strcmp(key, "test_video")
+                   || !strcmp(key, "test_scene") || !strcmp(key, "test_sound")) {
+            /* PAD-1279: <file>|<label> - one of the card's own test pictures,
+             * animations or sounds (Settings > Test pictures), a file name in
+             * the media directory.  A name with a path in it, or beyond
+             * CONF_MAX_TESTS, is dropped out loud. */
+            char *fld[7];
+            split_fields(val, fld);
+            if (!fld[0] || !*fld[0] || strchr(fld[0], '/')) {
+                conf_warn(c, "%s:%d: test=%s is not a file name in the media directory: dropped",
+                          path, lineno, fld[0] ? fld[0] : "");
+            } else if (c->ntest >= CONF_MAX_TESTS) {
+                conf_warn(c, "%s:%d: more than %d test= lines: %s dropped", path, lineno,
+                          CONF_MAX_TESTS, fld[0]);
+            } else {
+                copy_field(c->test[c->ntest].file, fld[0]);
+                copy_field(c->test[c->ntest].label, fld[1] && *fld[1] ? fld[1] : fld[0]);
+                c->test[c->ntest].kind = test_kind_of(key, fld[0]);
+                if (c->test[c->ntest].kind == TK_NONE && strcmp(key, "test"))
+                    conf_warn(c, "%s:%d: %s=%s: not a file that list shows (%s): dropped", path,
+                              lineno, key, fld[0], !strcmp(key, "test_sound") ? "a .wav"
+                              : !strcmp(key, "test_video") ? "a .padv or .gif"
+                              : "a .png");
+                else
+                    c->ntest++;
             }
         } else if (!strcmp(key, "settings")) {
             if (!*val || !strcmp(val, "on")) c->settings = 1;
@@ -589,14 +665,18 @@ int conf_load(struct conf *c, const char *path, char *err, int errlen)
             c->ncolour++;
         }
     }
-    if (c->settings && c->ncolour > 0) {
+    /* the tile, when it has something on it: a game to correct, or the
+     * card's own test pictures (PAD-1279) - and, once it is there, the built-in
+     * test patterns always ride along under Test pictures */
+    if (c->settings && (c->ncolour > 0 || c->ntest > 0)) {
         c->settings_card = c->ncards;
         c->cards[c->ncards].image = -1;
         c->cards[c->ncards].group = -1;
         c->ncards++;
         copy_field(c->settings_face.device, "settings");
         copy_field(c->settings_face.title, "SETTINGS");
-        copy_field(c->settings_face.subtitle, "Color correction");
+        copy_field(c->settings_face.subtitle, c->ncolour > 0 ? "Color correction, test pictures"
+                                                             : "Test pictures");
     }
     return 0;
 }

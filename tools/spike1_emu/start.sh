@@ -31,6 +31,15 @@ log(){ echo "$*"; }
 # reasonably took for part of the package list (2026-09-08).
 fail(){ log "ERROR: $1"; exit "${2:-1}"; }
 
+# Installed shims still need the host's CUSE device after a WSL restart.
+# Check before building, extracting a card or publishing a run on the board.
+s1_ensure_cuse(){
+    [ -c /dev/cuse ] && return 0
+    modprobe cuse 2>/dev/null || fail "CUSE is unavailable; Spike 1 requires the Linux cuse module."
+    [ -c /dev/cuse ] || fail "The cuse module did not create /dev/cuse."
+}
+s1_ensure_cuse
+
 mkdir -p "$S1_WORK"
 
 # 0. CAN THIS MACHINE BUILD WHAT IS ABOUT TO BE BUILT?  Asked before either
@@ -299,8 +308,9 @@ if [ "${PAD_AUDIO:-0}" = "1" ]; then
     # Spike 1 speaks on ITS OWN TCP port: sharing Spike 2's 45997 meant the
     # two rigs' port-matched player cleanups could reap each other's LIVE
     # player, and one wedged WSL localhost-proxy binding silenced both.
+    # S1_AUDIO_PORT is s1_paths' (prereqs.sh), clear of every Spike 2 slot.
     setsid env PAD_GAME="Spike 1" PAD_AUDIO_FMT_FIXED=1 \
-        PAD_AUDIO_PORT="${S1_AUDIO_PORT:-45998}" \
+        PAD_AUDIO_PORT="$S1_AUDIO_PORT" \
         bash "$REPO/tools/spike2_emu/playaudio.sh" \
         "$S1_AUDIO_FIFO" "${S1_PCM_RATE:-44100}" "${S1_PCM_CH:-2}" \
         "$S1_WORK/audio.fmt" \
@@ -362,6 +372,9 @@ log "The DMD and switch windows open in the app."
 # run started without the app (PAD_HIDDEN=1) is a hidden one.
 if [ -f "$HERE/../rigboard.sh" ]; then
     . "$HERE/../rigboard.sh"
+    # the work dir goes on the record (PAD-943): the Visual Pinball controller
+    # reads this run's s1hw.state / s1sw.input there, over \\wsl.localhost
+    RIGBOARD_ROOT="$S1_WORK" \
     rigboard_post spike1 0 "$S1_EMU_PID" "${_title:-$(basename "$(dirname "$(readlink -f "$S1_WORK/game")")")}" \
         "${PAD_TITLE:-}" "$([ "${PAD_HIDDEN:-0}" = 1 ] && echo 0 || echo 1)" "${PAD_AUDIO:-0}"
 fi

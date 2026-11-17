@@ -19,6 +19,11 @@ RIG=$(cd "$(dirname "$0")" && pwd)
 . "$RIG/padslot.sh"
 SLOT=${1:-quicksave}
 LABEL=${2:-}
+# A SPIKE 3 GAME in this rig slot (PAD-1147) is saved by the Spike 3 rig,
+# into the same slot shape: the playfield window calls this script either way.
+if [ -n "${PAD_SLOT:-}" ] && bash "$RIG/../spike3_emu/s3state.sh" running "$PAD_SLOT" 2>/dev/null; then
+    exec bash "$RIG/../spike3_emu/s3state.sh" save "$PAD_SLOT" "$SLOT" "$LABEL"
+fi
 # A SUBSHELL, for savestate.sh's sake: this script hands it an explicit
 # PAD_ROOT read from the guest, and sourcing padpath here would export a
 # GUESSED one over it. Only pad_criu is wanted.
@@ -110,7 +115,7 @@ if [ "${PAD_SAVE_NOPACK:-0}" = 0 ] && command -v zstd >/dev/null 2>&1; then
         echo "[savegame] NOTE: packing failed - the slot stays raw ($(du -sh "$DIR" | cut -f1))"
     fi
 elif [ "${PAD_SAVE_NOPACK:-0}" = 0 ]; then
-    echo "[savegame] NOTE: no zstd in WSL - the slot stays raw ($(du -sh "$DIR" | cut -f1))"
+    echo "[savegame] NOTE: no zstd here - the slot stays raw ($(du -sh "$DIR" | cut -f1))"
 fi
 
 echo "[savegame] saved to slot '$SLOT'. Keep playing; loadgame.sh $SLOT jumps back here."

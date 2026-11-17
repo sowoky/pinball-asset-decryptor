@@ -12,8 +12,16 @@ code mode, or one of its Examples). What it plays of its own sits beside it, nam
       "screen_art": "screen.png",    the picture ("" = a generated panel with the name)
       "words_on_art": true,          its progress words sit on the picture's bottom band
       "screen_layout": {"x": 40, ...},  where the screen goes (PAD-323; {} = placed automatically)
+      "screen_style": "words",       PAD-521: no panel - its words alone, large and white, where the game
+                                     letters its own (James Bond: over the TV); "" = the panel
+      "info_line": true,             PAD-547: a line of words and a value under its name (PadMode_<slug>_Info), where
+                                     the title's port puts one (James Bond: under the status bar)
+      "points_layout": {"y": 600},   PAD-709: where a words-alone mode's scored number goes (PadMode_<slug>_Points;
+                                     {} = under the status bar, large, as the game's own mini-wizards show a shot's)
       "clip": "clip.mp4",            its start clip ("" = none)
       "music": "music.wav",          its own music bed ("" = none)
+      "beds": {"swamp": "music_swamp.wav"},   PAD-658: more beds by name, which the mode switches to while it runs
+                                     (pa_music_bed: a multiball of its own, a stage)
       "calls": {"sever": "sever.wav", "spike": {"wav": "spike.wav", "priority": 3}},
       "clips": {"intro": "intro.mp4", "loop": "loop.mp4", "sever": "sever.mp4"},
       "hud": {"title": "KING GHIDORAH", "timer": {"label": "GHIDORAH", "icon": "bolt"}, ...},
@@ -23,7 +31,8 @@ code mode, or one of its Examples). What it plays of its own sits beside it, nam
                                      as the Modes tab lists them; [] = every one the port names)
       "keep_rules": ["Bridge"],      PAD-398: the game's features (its rules, by the Modes tab's names) that
                                      go on counting while it runs; [] = none: only this mode counts
-      "film": {...}                  where each was cut from (an Example's recipe), optional
+      "film": {...}                  PAD-691: where an example that is no longer in the app was cut from;
+                                     kept as it was, read by nothing
     }
 
 hud-layers: ``clips`` names a clip per CUE - "intro" plays full screen when the mode starts, "loop"
@@ -40,19 +49,12 @@ object the card carries with ``mode_file.c``. The carriers it chose go on the ca
 ``<slug>.assets`` beside ``mode.so`` (:func:`runtime_text`), which the mode reads through
 ``tools/spike2_emu/modes/sdk/pad_mode_assets.h``.
 
-EXAMPLES. The Modes tab offers the SDK's five intricate example modes (:data:`EXAMPLES`), each
-with its code and an asset RECIPE: which film each clip, picture, music loop and call is cut
-from and where. Nothing of a film is in the app, so an example's assets are cut from the
-person's own copy of the films with the app's film cutter (:mod:`.film_cut`) when those films
-are found (:func:`cut_example`); without them the mode is added with its code alone and plays
-the game's own sounds, and the tab says which films it looked for.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import shutil
 from dataclasses import dataclass, field, fields
 
 from . import mode_project as MP
@@ -64,7 +66,9 @@ RUNTIME_SUFFIX = ".assets"
 #: pad_mode_assets.h reads at most this many calls
 MAX_CALLS = 16
 #: pad_mode_assets.h reads at most this many clips (hud-layers)
-MAX_CLIPS = 12
+MAX_CLIPS = 32                   # pad_mode_assets.h PA_CLIPS_MAX (PAD-1030: was 12)
+#: PAD-658: pad_mode_assets.h reads at most this many further music beds (PA_BEDS_MAX)
+MAX_BEDS = 6
 CUE_RE = re.compile(r"^[a-z][a-z0-9_]{0,14}$")
 SECONDS_MAX = 600
 
@@ -89,8 +93,14 @@ class CodeAssets:
     panel_color: str = "#146e28"
     title_color: str = "#ffe600"
     screen_layout: dict = field(default_factory=dict)   # PAD-323: as a form mode's (mode_assets.LAYOUT_KEYS)
+    screen_style: str = ""                        # PAD-521: "words" = no panel, its words large and white
+    info_line: bool = False                       # PAD-547: a line of words and a value under its name (PadMode_<slug>_Info)
+    info_layout: dict = field(default_factory=dict)     # PAD-547: where the Scenes editor put that line (LAYOUT_KEYS)
+    points_layout: dict = field(default_factory=dict)   # PAD-709: where it put a words-alone mode's scored number
+    more: dict = field(default_factory=dict)      # PAD-707: {"slot": n, "picture": file} - a monster on MORE KAIJU
     clip: str = ""
     music: str = ""
+    beds: dict = field(default_factory=dict)      # PAD-658: {name: wav} more music beds it switches to
     calls: dict = field(default_factory=dict)
     clips: dict = field(default_factory=dict)     # hud-layers: {cue: file}
     hud: dict = field(default_factory=dict)       # hud-layers: the HUD at the glass's edges
@@ -144,7 +154,8 @@ class CodeAssets:
         return out
 
     def has_assets(self):
-        return bool(self.screen or self.clip or self.clips or self.hud or self.music or self.calls)
+        return bool(self.screen or self.clip or self.clips or self.hud or self.music or self.calls
+                    or self.more)      # PAD-707: a new monster on the selection screen is drawn there
 
 
 # ---- the project -------------------------------------------------------------------------------
@@ -233,18 +244,31 @@ def validate(spec, folder=None):
         out.append("%s: calls maps each cue to a WAV." % spec.name)
         calls = []
     if len(calls) > MAX_CALLS:
-        out.append("%s: a code mode carries at most %d calls." % (spec.name, MAX_CALLS))
+        out.append("%s: %d calls of its own: %d at most." % (spec.name, len(calls), MAX_CALLS))
     if not isinstance(spec.clips, dict) or not isinstance(spec.hud, dict):
         out.append("%s: clips maps each cue to a video, and hud is an object." % spec.name)
     else:
         clips = spec.clip_list()
         if len(clips) > MAX_CLIPS:
-            out.append("%s: a code mode carries at most %d clips." % (spec.name, MAX_CLIPS))
+            out.append("%s: %d clips of its own: %d at most." % (spec.name, len(clips), MAX_CLIPS))
         for cue, f in clips:
             if not CUE_RE.match(cue):
                 out.append("%s: the clip cue %r is 1 to 15 lower-case letters, digits or _." % (spec.name, cue))
             if not f:
                 out.append("%s: the %s clip names no video." % (spec.name, cue))
+    beds = spec.beds if isinstance(spec.beds, dict) else None              # PAD-658
+    if beds is None:
+        out.append("%s: beds maps each bed's name to a WAV." % spec.name)
+        beds = {}
+    if beds and not spec.music:
+        out.append("%s: more music beds need its own music first." % spec.name)
+    if len(beds) > MAX_BEDS:
+        out.append("%s: a code mode carries at most %d more music beds." % (spec.name, MAX_BEDS))
+    for name, wav in beds.items():
+        if not CUE_RE.match(str(name)):
+            out.append("%s: the bed name %r is 1 to 15 lower-case letters, digits or _." % (spec.name, name))
+        if not wav:
+            out.append("%s: the %s bed names no WAV." % (spec.name, name))
     for cue, wav, prio in calls:
         if not CUE_RE.match(cue):
             out.append("%s: the cue %r is 1 to 15 lower-case letters, digits or _." % (spec.name, cue))
@@ -256,6 +280,7 @@ def validate(spec, folder=None):
         named = [("the picture", spec.screen_art), ("the music", spec.music)]
         named += [("the %s clip" % cue, f) for cue, f in (spec.clip_list() if isinstance(spec.clips, dict) else [])]
         named += [("the %s call" % cue, wav) for cue, wav, _p in calls]
+        named += [("the %s music bed" % n, wav) for n, wav in beds.items()]
         for what, name in named:
             if name and not os.path.isfile(os.path.join(folder, name)):
                 out.append("%s: %s file %s is not in the mode's folder." % (spec.name, what, name))
@@ -294,6 +319,15 @@ def call_key(cue):
     return "call:%s" % cue
 
 
+def bed_key(name):
+    """PAD-658: the own-sound key one of a code mode's further music beds rides under."""
+    return "music:%s" % name
+
+
+def bed_of(key):
+    return key[6:] if str(key).startswith("music:") else None
+
+
 def cue_of(key):
     return key[5:] if str(key).startswith("call:") else None
 
@@ -307,6 +341,9 @@ def sound_wants(project, code):
         if spec.music:
             out.append({"slug": slug, "name": spec.name, "key": "music", "music": True,
                         "wav": os.path.join(folder, spec.music), "seconds": int(spec.seconds or 0)})
+            for bed, wav in (spec.beds or {}).items():                  # PAD-658: its other beds
+                out.append({"slug": slug, "name": spec.name, "key": bed_key(bed), "music": True,
+                            "wav": os.path.join(folder, wav), "seconds": int(spec.seconds or 0)})
         for cue, wav, prio in spec.call_list():
             out.append({"slug": slug, "name": spec.name, "key": call_key(cue), "music": False,
                         "wav": os.path.join(folder, wav), "priority": prio})
@@ -347,9 +384,20 @@ def runtime_text(slug, spec, prof, own_sounds=(), screen=False, clip=False):
     prio = {cue: p for cue, _w, p in spec.call_list()}
     for u in mine:
         if u.get("key") == "music":
-            lines.append("music  %d%s" % (int(u["request"]), " %d" % int(u["sid"]) if u.get("sid") else ""))
+            # PAD-595: a bed in a sound bank of its own is played by that bank's sound id
+            bed = u.get("bank_sid") or u.get("sid")
+            lines.append("music  %d%s" % (int(u["request"]), " %d" % int(bed) if bed else ""))
     for u in mine:
-        if u.get("stock_key") and u.get("our_key"):     # item 163: swapped in at run time
+        if bed_of(u.get("key")) and (u.get("bank_sid") or u.get("sid")):
+            # PAD-658: a further bed on a sound id of its own (a bed sid, or a sound bank's); a swapped one rides
+            # its "swap ... music:<name>" line below
+            lines.append("bed    %s %d" % (bed_of(u["key"]), int(u.get("bank_sid") or u.get("sid"))))
+    for u in mine:
+        if u.get("bank_sid") and u.get("key") != "music" and not bed_of(u.get("key")):
+            # PAD-595: a call in a sound bank of its own: the carrier is pointed at the bank's
+            # sound id for that play (whose, as a swap's tag)
+            lines.append("sid    %d %d %s" % (int(u["request"]), int(u["bank_sid"]), u["key"]))
+        elif u.get("stock_key") and u.get("our_key"):     # item 163: swapped in at run time
             # hud-layers: and whose ("music" or "call:<cue>"): a carrier can take several of the
             # mode's sounds' neighbours in other modes, so the mode picks its own swap by cue
             lines.append("swap   %d %s %s %s" % (int(u["request"]), u["stock_key"], u["our_key"], u["key"]))
@@ -381,9 +429,11 @@ def describe(slug, spec, carried=None, prof=None):
         u = got.get("music")
         if carried is None:
             parts.append("its own music %s" % spec.music)
-        elif u:
+        elif u and u.get("sid"):
             parts.append("its own music %s (request %d, its own bed: sound id %s)"
-                         % (spec.music, u["request"], u.get("sid", "-")))
+                         % (spec.music, u["request"], u["sid"]))
+        elif u:                         # PAD-1295: swapped in on its carrier (no bed sid: Spike 3's)
+            parts.append("its own music %s (request %d)" % (spec.music, u["request"]))
         else:
             parts.append("not its own music (this card cannot carry it; the log says why)")
     calls = spec.call_list()
@@ -402,46 +452,11 @@ def describe(slug, spec, carried=None, prof=None):
     return "%s (code mode): %s" % (spec.name, ", ".join(parts))
 
 
-# ---- the examples: the SDK's intricate modes, with their film recipes ------------------------------
-#: The examples' recipes, beside their code: tools/spike2_emu/modes/sdk/examples/film_recipes.json.
-#: Every time is seconds into the film: "clip" up to 8 s, "art" one frame, "music" a loop (a whole
-#: number of 10 ms steps long), each call a span of the film's sound.
-RECIPES_FILE = "film_recipes.json"
-
-
-def _recipes():
-    from . import mode_runtime as MR
-    path = os.path.join(MR.sdk_dir(), "examples", RECIPES_FILE)
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {"films": {}, "titles": {}, "examples": []}
-
-
-_R = _recipes()
-#: film key -> the file name of the collection the recipes were measured on
-FILMS = dict(_R.get("films") or {})
-FILM_TITLES = dict(_R.get("titles") or {})
-EXAMPLES = list(_R.get("examples") or [])
-
-
-def example_names():
-    return [e["name"] for e in EXAMPLES]
-
-
-def example(name):
-    for e in EXAMPLES:
-        if e["name"] == name:
-            return e
-    return None
-
-
 def examples_dir():
+    """The SDK's folder of the kit every code and blocks mode builds with (``intricate_kit.h``, PAD-691: no example
+    modes are in it any more)."""
     from . import mode_runtime as MR
     return os.path.join(MR.sdk_dir(), "examples")
-
-
 # ---- the kit beside a code mode (PAD-390) -------------------------------------------------------
 #: the examples' kit: copied beside an example's C when it is added (:func:`_copy_code`)
 KIT_FILE = "intricate_kit.h"
@@ -497,276 +512,3 @@ def refresh_kits(sources, log=None):
     """:func:`refresh_kit` for the folder of each code mode's C file in *sources*."""
     for src in sources:
         refresh_kit(os.path.dirname(os.path.abspath(src)), log=log)
-
-
-def recipe_films(ex):
-    """The film keys an example's recipe cuts from, in first-use order."""
-    out = []
-    r = ex.get("recipe") or {}
-    parts = [r.get("clip"), r.get("art"), r.get("music")] + list((r.get("calls") or {}).values())
-    parts += list((r.get("clips") or {}).values())
-    for p in parts:
-        if p and p.get("film") not in out:
-            out.append(p["film"])
-    return out
-
-
-def _clock(seconds):
-    """1:32:29 or 26:47 (a time into a film), 0:05 under a minute"""
-    s = int(round(float(seconds or 0)))
-    h, m, s = s // 3600, s // 60 % 60, s % 60
-    return "%d:%02d:%02d" % (h, m, s) if h else "%d:%02d" % (m, s)
-
-
-def _length(seconds):
-    v = float(seconds or 0)
-    return ("%d s" % v) if v == int(v) else ("%.1f s" % v)
-
-
-def recipe_lines(recipe):
-    """The film recipe as sentences a person reads, one per part, in the Assets pane's order:
-    ``Clip: 8 s of Invasion of Astro-Monster (1965) from 1:32:29, filling the frame``. The recipe's
-    own ``what`` notes are measurement records (match scores, the bed finder's numbers), so they are
-    not shown. An empty list for no recipe."""
-    r = recipe or {}
-    out = []
-
-    def title(p):
-        return FILM_TITLES.get(p.get("film"), p.get("film") or "a film")
-
-    c = r.get("clip")
-    if c:
-        out.append("Clip: %s of %s from %s, %s" % (_length(c.get("length")), title(c), _clock(c.get("from")),
-                                                   "keeping its letterbox" if c.get("crop") == "letterbox"
-                                                   else "filling the frame"))
-    a = r.get("art")
-    if a:
-        out.append("Picture: the frame of %s at %s" % (title(a), _clock(a.get("at"))))
-    m = r.get("music")
-    if m:
-        out.append("Music: %s of %s from %s, looped" % (_length(m.get("length")), title(m), _clock(m.get("from"))))
-    for cue, p in (r.get("clips") or {}).items():
-        out.append("Clip %s: %s of %s from %s" % (cue, _length(p.get("length")), title(p), _clock(p.get("from"))))
-    calls = r.get("calls") or {}
-    if calls:
-        out.append("Calls: " + "; ".join("%s, %s of %s from %s" % (cue, _length(p.get("length")), title(p),
-                                                                   _clock(p.get("from")))
-                                          for cue, p in calls.items()))
-    return out
-
-
-def find_film(key, dirs):
-    """The path of film *key* (:data:`FILMS`) in the first of *dirs* that holds it, or None."""
-    name = FILMS.get(key, key)
-    for d in dirs or ():
-        if d and os.path.isfile(os.path.join(d, name)):
-            return os.path.join(d, name)
-    return None
-
-
-def film_dirs(project, extra=()):
-    """Where to look for the films: *extra* first, then ``PAD_FILMS_DIR``, then every folder a
-    mode of the project already cut from (a form mode's ``clip_source`` / ``sound_source`` /
-    ``art_source``, a code mode's recorded ``film.dir``)."""
-    out = []
-
-    def add(d):
-        if d and os.path.isdir(d) and os.path.normcase(os.path.abspath(d)) not in \
-                [os.path.normcase(os.path.abspath(x)) for x in out]:
-            out.append(d)
-
-    for d in extra or ():
-        add(d)
-    add(os.environ.get("PAD_FILMS_DIR", ""))
-    if project:
-        try:
-            for _slug, spec in MP.list_modes(project)[0]:
-                for src in (spec.clip_source, spec.sound_source, spec.art_source):
-                    if src:
-                        add(os.path.dirname(str(src)))
-        except (OSError, ValueError):
-            pass
-        for slug in code_slugs(project):
-            try:
-                add((load(project, slug).film or {}).get("dir", ""))
-            except (OSError, ValueError):
-                pass
-    return out
-
-
-def _copy_code(project, ex):
-    folder = MP.mode_folder(project, ex["slug"])
-    os.makedirs(folder, exist_ok=True)
-    src = examples_dir()
-    for name in [ex["source"]] + list(ex.get("headers") or ()):
-        dst = os.path.join(folder, ex["slug"] + ".c" if name == ex["source"] else name)
-        shutil.copyfile(os.path.join(src, name), dst)
-    return folder
-
-
-def example_spec(ex, cut=False):
-    """The :class:`CodeAssets` an example brings. *cut*: its assets are in the folder (the films
-    were found); otherwise only its screen (a generated panel) and its recipe."""
-    r = ex.get("recipe") or {}
-    spec = CodeAssets(name=ex["name"], seconds=int(ex.get("seconds") or 60), screen=not ex.get("hud"),
-                      panel_color=ex.get("panel_color", "#146e28"), title_color=ex.get("title_color", "#ffe600"))
-    if ex.get("hud"):
-        spec.hud = dict(ex["hud"])
-    spec.film = {"recipe": r, "films": {k: FILMS.get(k, k) for k in recipe_films(ex)},
-                 "titles": {k: FILM_TITLES.get(k, k) for k in recipe_films(ex)}}
-    if cut:
-        if r.get("clips"):
-            spec.clips = {cue: "%s.mp4" % cue for cue in r["clips"]}
-        if r.get("art") and not ex.get("hud"):
-            spec.screen_art, spec.words_on_art = "screen.png", True
-        if r.get("clip") and not r.get("clips"):
-            spec.clip = "clip.mp4"
-        if r.get("music"):
-            spec.music = "music.wav"
-        spec.calls = {cue: ({"wav": "%s.wav" % cue, "priority": int(c.get("priority", 4))}
-                            if int(c.get("priority", 4)) != 4 else "%s.wav" % cue)
-                      for cue, c in (r.get("calls") or {}).items()}
-    return spec
-
-
-def add_example(project, name, dirs=(), ffmpeg=None, log=None):
-    """Put example *name* in the project as ``modes/<slug>/``: its code (and the headers it
-    includes) and its ``assets.json``, and cut its assets from the films when they are found
-    (:func:`cut_example`). Returns ``(slug, missing)``: *missing* the film keys not found (then
-    the mode is added with its code and a generated screen, and plays the game's own sounds).
-    Refuses a folder that is already there."""
-    ex = example(name)
-    if ex is None:
-        raise CodeModeError("there is no example called %s" % name)
-    if not project or not os.path.isdir(project):
-        raise CodeModeError(MP.NO_PROJECT_HELP)
-    folder = MP.mode_folder(project, ex["slug"])
-    if os.path.exists(folder):
-        raise CodeModeError("%s is already in this project (modes/%s)." % (ex["name"], ex["slug"]))
-    _copy_code(project, ex)
-    missing = [k for k in recipe_films(ex) if not find_film(k, dirs)]
-    if missing:
-        save(project, ex["slug"], example_spec(ex, cut=False))
-        return ex["slug"], missing
-    spec = cut_example(project, ex["slug"], ex, dirs, ffmpeg=ffmpeg, log=log)
-    save(project, ex["slug"], spec)
-    return ex["slug"], []
-
-
-def compose_art(still_png, out_png, band=72, below=False):
-    """The screen's picture: a film frame with its bottom *band* pixels darkened (a gradient to
-    85% black), so the mode's progress words, which the build puts on that band
-    (``words_on_art``), read over any frame. *below*: the band is added UNDER the frame instead
-    (a letterboxed frame whose own bottom carries something to keep, a title), a multiple of 4
-    so the picture stays one BC3 texture."""
-    from PIL import Image
-    img = Image.open(still_png).convert("RGBA")
-    w, h = img.size
-    if below:
-        band = (int(band) + 3) // 4 * 4
-        canvas = Image.new("RGBA", (w, h + band), (0, 0, 0, 230))
-        canvas.paste(img, (0, 0))
-        canvas.save(out_png)
-        return canvas.size
-    band = min(band, h // 2)
-    shade = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    px = shade.load()
-    for y in range(h - band, h):
-        a = int(round(217 * min(1.0, (y - (h - band)) / max(1.0, band * 0.35))))
-        for x in range(w):
-            px[x, y] = (0, 0, 0, a)
-    out = Image.alpha_composite(img, shade)
-    out.save(out_png)
-    return out.size
-
-
-def cut_example(project, slug, ex, dirs, ffmpeg=None, log=None):
-    """Cut every asset of example *ex*'s recipe from the films in *dirs* into ``modes/<slug>/``
-    with the app's film cutter: the clip (bank size, ``fill``), the picture (a frame with its
-    word band), the music loop (stereo, seamless) and each call (mono, levelled like a stock
-    callout, 40 ms edges). Returns the :class:`CodeAssets` that names them."""
-    from . import film_cut as FC
-    say = log or (lambda *a, **k: None)
-    r = ex.get("recipe") or {}
-    folder = MP.mode_folder(project, slug)
-    os.makedirs(folder, exist_ok=True)
-    ff = FC._ffmpeg(ffmpeg)
-    pictures = {}
-
-    def film_of(part):
-        path = find_film(part["film"], dirs)
-        if not path:
-            raise CodeModeError("the film %s is not in %s" % (FILMS.get(part["film"], part["film"]),
-                                                               ", ".join(dirs) or "any folder given"))
-        return path
-
-    def picture(path):
-        if path not in pictures:
-            pictures[path] = FC.detect_picture(path, ff)
-        return pictures[path]
-
-    used_dir = ""
-    for cue, c in (r.get("clips") or {}).items():
-        path = film_of(c)
-        FC.cut_clip(path, c["from"], c["length"], os.path.join(folder, "%s.mp4" % cue), ff,
-                    crop=c.get("crop", "fill"), picture=picture(path))
-        say("%s: %s.mp4 cut from %s at %s for %g s" % (ex["name"], cue, os.path.basename(path),
-                                                       FC.format_time(c["from"]), c["length"]))
-        used_dir = os.path.dirname(path)
-    if r.get("clip") and not r.get("clips"):
-        c = r["clip"]
-        path = film_of(c)
-        FC.cut_clip(path, c["from"], c["length"], os.path.join(folder, "clip.mp4"), ff,
-                    crop=c.get("crop", "fill"), picture=picture(path))
-        say("%s: clip.mp4 cut from %s at %s for %g s" % (ex["name"], os.path.basename(path),
-                                                         FC.format_time(c["from"]), c["length"]))
-        used_dir = os.path.dirname(path)
-    if r.get("art") and not ex.get("hud"):
-        a = r["art"]
-        path = film_of(a)
-        still = os.path.join(folder, "screen_frame.png")
-        FC.grab_still(path, a["at"], still, ff, width=int(a.get("width", 640)), crop=a.get("crop", "fill"),
-                      picture=picture(path))
-        compose_art(still, os.path.join(folder, "screen.png"), band=int(a.get("band", 72)),
-                    below=bool(a.get("band_below")))
-        os.remove(still)
-        say("%s: screen.png is the frame at %s" % (ex["name"], FC.format_time(a["at"])))
-    if r.get("music"):
-        m = r["music"]
-        path = film_of(m)
-        FC.cut_loop(path, m["from"], m["length"], os.path.join(folder, "music.wav"), ff)
-        say("%s: music.wav is a %.2f s loop from %s" % (ex["name"], m["length"], FC.format_time(m["from"])))
-    for cue, c in (r.get("calls") or {}).items():
-        path = film_of(c)
-        FC.cut_sound(path, c["from"], c["length"], os.path.join(folder, "%s.wav" % cue), ff, channels=1)
-        say("%s: %s.wav from %s for %g s" % (ex["name"], cue, FC.format_time(c["from"]), c["length"]))
-    spec = example_spec(ex, cut=True)
-    spec.film["dir"] = used_dir
-    return spec
-
-
-def recut_example(project, slug, dirs, ffmpeg=None, log=None):
-    """Cut an example already in the project again from the films (the tab's "Cut its film
-    assets" once the films are found). Returns ``missing`` film keys, or [] when cut."""
-    spec = load(project, slug)
-    r = (spec.film or {}).get("recipe")
-    ex = next((e for e in EXAMPLES if e["slug"] == slug), None)
-    if ex is None and r:
-        ex = {"name": spec.name, "slug": slug, "recipe": r, "seconds": spec.seconds}
-    if ex is None:
-        raise CodeModeError("%s has no film recipe to cut from" % spec.name)
-    if r:
-        ex = dict(ex, recipe=r)
-    missing = [k for k in recipe_films(ex) if not find_film(k, dirs)]
-    if missing:
-        return missing
-    new = cut_example(project, slug, ex, dirs, ffmpeg=ffmpeg, log=log)
-    new.seconds = spec.seconds
-    save(project, slug, new)
-    return []
-
-
-def missing_words(missing):
-    """"Godzilla (1954) and Godzilla vs. Destoroyah (1995)" for the tab."""
-    names = ["%s (%s)" % (FILM_TITLES.get(k, k), FILMS.get(k, k)) for k in missing]
-    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]

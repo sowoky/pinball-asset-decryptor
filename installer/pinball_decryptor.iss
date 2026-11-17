@@ -49,6 +49,11 @@ PrivilegesRequired=admin
 WizardStyle=modern
 WizardSizePercent=110
 DisableProgramGroupPage=auto
+; PAD-1024: the in-app update's background install (/STAGED=2, see IsStaged)
+; goes into a sibling folder that is renamed into place on Restart to update,
+; so it must leave nothing behind that names that folder: no uninstall entry
+; (the one in place stays, and its uninstaller is copied across by the app).
+Uninstallable=not IsStaged
 VersionInfoVersion={#AppVersion}.0
 
 [Languages]
@@ -56,7 +61,16 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
-Name: "runprereqs"; Description: "Install prerequisites after setup (WSL2, partclone, debugfs, gpg)"; GroupDescription: "Prerequisites:"; Flags: unchecked
+; PAD-1103: SWITCH WSL2 ON, ticked, and only offered on a PC without it.  The
+; app brings its own Linux and imports it with one button, so the one step a
+; newcomer cannot get past alone is WSL itself (an administrator and usually a
+; restart).  It used to hide inside "runprereqs" below, which is unticked and
+; also installs an Ubuntu of one exact release - a Pinside helper set up
+; several PCs and had to install WSL2 and Ubuntu-24.04 by hand on every one.
+; This installs WSL2 with no distro at all (install_prerequisites.ps1
+; -WslOnly) and asks for the restart; see SetUpWsl / NeedRestart in [Code].
+Name: "setupwsl"; Description: "Set up WSL2 (the emulators and most extract/write work need it; Windows asks for one restart)"; GroupDescription: "Prerequisites:"; Check: WslNeedsSetup
+Name: "runprereqs"; Description: "Also run the full prerequisite installer (an Ubuntu with its Linux tools, gpg, ffmpeg)"; GroupDescription: "Prerequisites:"; Flags: unchecked
 
 [Files]
 ; --- Bundled Python and pip dependencies ---------------------------------
@@ -69,6 +83,16 @@ Source: "{#PythonDir}\*"; DestDir: "{app}\python"; Flags: recursesubdirs ignorev
 Source: "{#ProjectDir}\pinball_decryptor\*"; DestDir: "{app}\pinball_decryptor"; \
     Flags: recursesubdirs ignoreversion; \
     Excludes: "__pycache__\*,*.pyc,*.pyo"
+
+; --- Spike 3 LUKS2 verifier/decryptor -----------------------------------
+; stern/spike3.py loads this repo tool by path at run time (_luks_otp(): four
+; parents up from the plugin file, then stern-spike-3\tools\luks_otp.py).  The
+; whole Spike 3 key/decrypt path (spike3_keys / spike3_spk / spike3_selfextract
+; / spike3_sound) imports it, so without it those throw in the installed app.
+; It lives outside the pinball_decryptor package, so the package glob above does
+; not reach it; ship it at the exact {app}-relative path _luks_otp() rebuilds.
+Source: "{#ProjectDir}\stern-spike-3\tools\luks_otp.py"; DestDir: "{app}\stern-spike-3\tools"; \
+    Flags: ignoreversion
 
 ; --- Spike 2 emulator rig ------------------------------------------------
 ; The Emulate tab runs the machine's own game binary under qemu-user inside
@@ -90,6 +114,18 @@ Source: "{#ProjectDir}\tools\spike2_emu\*"; DestDir: "{app}\tools\spike2_emu"; \
 ; The rig windows' own icons (installer/make_rig_icons.py), which the *.png
 ; exclusion above would otherwise drop: the playfield's favicon is a .png.
 Source: "{#ProjectDir}\tools\spike2_emu\icons\*"; DestDir: "{app}\tools\spike2_emu\icons"; \
+    Flags: ignoreversion
+; --- Spike 3 emulator rig (PAD-1090) ---------------------------------------
+; Runs a Spike 3 card's game under qemu-user in WSL, for anyone who brings
+; their card's own OTP key (never shipped). Sources only, like the Spike 2
+; rig: s3launch.sh builds it under /var/lib/pad-s3 in WSL the first time.
+Source: "{#ProjectDir}\tools\spike3_emu\*"; DestDir: "{app}\tools\spike3_emu"; \
+    Flags: recursesubdirs ignoreversion; \
+    Excludes: "__pycache__\*,*.pyc,*.pyo,*.log,*.png,*.raw"
+; The LUKS2/OTP code the app's Spike 3 decryption loads by path
+; (plugins/stern/spike3.py _luks_otp): without it an installed copy could not
+; open a Spike 3 card at all, in the Extract tab or the Spike 3 rig's store.
+Source: "{#ProjectDir}\stern-spike-3\tools\luks_otp.py"; DestDir: "{app}\stern-spike-3\tools"; \
     Flags: ignoreversion
 ; The Spike 1 rig (tools/spike1_emu) drives the Emulate tab for the DMD era.
 ; Just sources — the patched qemu and the extracted game are built/cached under
@@ -176,25 +212,41 @@ Source: "{#ProjectDir}\tools\rigboard.sh"; DestDir: "{app}\tools"; Flags: ignore
 ; --- Entry point + bundled launcher --------------------------------------
 Source: "{#ProjectDir}\Pinball Asset Decryptor.pyw"; DestDir: "{app}"; Flags: ignoreversion
 Source: "launcher.vbs"; DestDir: "{app}"; Flags: ignoreversion
+; The Visual Pinball kit's command (tools/spike2_emu/vpx/padvpx.py on the
+; bundled Python): `padvpx setup "<table.vpx>" <card.raw>` and friends, the
+; long way round the app's Visual Pinball tab (PAD-802).
+; NO TABLE SHIPS: they are their authors' to hand out; the tab patches the
+; copy the person downloaded.
+Source: "padvpx.cmd"; DestDir: "{app}"; Flags: ignoreversion
 
 ; --- Prerequisites helper (re-runnable from Start Menu) ------------------
-Source: "install_prerequisites.ps1"; DestDir: "{app}"; Flags: ignoreversion
+; AfterInstall: the WSL2 step (PAD-1103) runs the moment this file lands -
+; see SetUpWslIfChosen in [Code] for why it cannot wait for the end.
+Source: "install_prerequisites.ps1"; DestDir: "{app}"; Flags: ignoreversion; AfterInstall: SetUpWslIfChosen
 ; install_gdre.sh ships beside it — install_prerequisites.ps1 hands this
 ; file to WSL to install GDRE Tools (shared with the Linux installer).
 Source: "install_gdre.sh"; DestDir: "{app}"; Flags: ignoreversion
+; ...and wsl_default_user.sh, which gives a root-login Ubuntu the ordinary
+; user its skipped first boot would have made (PAD-661).
+Source: "wsl_default_user.sh"; DestDir: "{app}"; Flags: ignoreversion
 
 ; --- Documentation -------------------------------------------------------
 Source: "{#ProjectDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Pinball Asset Decryptor"; Filename: "wscript.exe"; Parameters: """{app}\launcher.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\pinball_decryptor\icon.ico"; Comment: "Decrypt and modify pinball machine assets across multiple manufacturers"
-Name: "{group}\Install Prerequisites"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_prerequisites.ps1"""; WorkingDir: "{app}"; Comment: "Install WSL2, partclone, debugfs, gpg"
-Name: "{group}\{cm:UninstallProgram,Pinball Asset Decryptor}"; Filename: "{uninstallexe}"
+Name: "{group}\Pinball Asset Decryptor"; Filename: "wscript.exe"; Parameters: """{app}\launcher.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\pinball_decryptor\icon.ico"; Comment: "Decrypt and modify pinball machine assets across multiple manufacturers"; Check: not IsStaged
+Name: "{group}\Install Prerequisites"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_prerequisites.ps1"""; WorkingDir: "{app}"; Comment: "Install WSL2, partclone, debugfs, gpg"; Check: not IsStaged
+Name: "{group}\{cm:UninstallProgram,Pinball Asset Decryptor}"; Filename: "{uninstallexe}"; Check: not IsStaged
 
-Name: "{autodesktop}\Pinball Asset Decryptor"; Filename: "wscript.exe"; Parameters: """{app}\launcher.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\pinball_decryptor\icon.ico"; Tasks: desktopicon; Comment: "Decrypt and modify pinball machine assets"
+; Inno deletes and re-creates a shortcut it writes, and Explorer places a
+; re-created desktop icon in the next free slot, so every update threw the
+; icon back to wherever Windows puts new ones.  DesktopShortcutNeeded leaves
+; one that already launches this install alone; one that is missing or
+; points at another install dir is still (re)written.
+Name: "{autodesktop}\Pinball Asset Decryptor"; Filename: "wscript.exe"; Parameters: """{app}\launcher.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\pinball_decryptor\icon.ico"; Tasks: desktopicon; Check: DesktopShortcutNeeded and not IsStaged; Comment: "Decrypt and modify pinball machine assets"
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_prerequisites.ps1"""; WorkingDir: "{app}"; StatusMsg: "Installing prerequisites..."; Flags: runascurrentuser shellexec waituntilterminated; Tasks: runprereqs
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_prerequisites.ps1"""; WorkingDir: "{app}"; StatusMsg: "Installing prerequisites..."; Flags: runascurrentuser shellexec waituntilterminated; Tasks: runprereqs; Check: not IsStaged
 
 ; --- Repair bundled-Python file permissions ------------------------------
 ; install_prerequisites.ps1 pip-installs faster-whisper (and its
@@ -215,6 +267,25 @@ Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Fil
 Filename: "{sys}\icacls.exe"; Parameters: """{app}\python"" /reset /T /C /Q"; StatusMsg: "Repairing Python file permissions..."; Flags: runhidden waituntilterminated
 Filename: "{sys}\icacls.exe"; Parameters: """{app}\python"" /grant *S-1-5-32-545:(OI)(CI)RX /T /C /Q"; StatusMsg: "Repairing Python file permissions..."; Flags: runhidden waituntilterminated
 
+; --- Compile the app's Python once, here --------------------------------
+; The app ships as source (the __pycache__ folders are excluded above), so
+; the first start after every install or update compiled each of its ~400
+; modules before the window could open: 1.2 - 2 s more on that start
+; (PAD-610).  Compiling them here, against the files just installed, makes
+; that first start as quick as every later one.  Not fatal: a failure only
+; costs that one slower start.
+Filename: "{app}\python\python.exe"; Parameters: "-m compileall -q -j 0 ""{app}\pinball_decryptor"""; WorkingDir: "{app}"; StatusMsg: "Preparing the app..."; Flags: runhidden waituntilterminated
+
+; --- The Visual Pinball kit's COM server ---------------------------------
+; PAD.Controller (tools\spike2_emu\vpx\padcontroller.py) is what a patched
+; Visual Pinball table creates; its registration is under HKLM, which this
+; elevated installer can write.  Registered on every install so the
+; LocalServer32 path follows the install directory.  Not fatal: a bundled
+; Python without pywin32 simply has no kit.  Not in a staged install: its
+; folder is renamed on Restart to update, and the app's swap registers the
+; controller from the final one (core/update_slots.py).
+Filename: "{app}\python\python.exe"; Parameters: """{app}\tools\spike2_emu\vpx\padvpx.py"" register"; WorkingDir: "{app}"; StatusMsg: "Registering the Visual Pinball controller..."; Flags: runhidden waituntilterminated; Check: not IsStaged
+
 Filename: "wscript.exe"; Parameters: """{app}\launcher.vbs"""; WorkingDir: "{app}"; Description: "Launch Pinball Asset Decryptor"; Flags: nowait postinstall skipifsilent
 
 ; --- In-app update relaunch ----------------------------------------------
@@ -225,6 +296,16 @@ Filename: "wscript.exe"; Parameters: """{app}\launcher.vbs"""; WorkingDir: "{app
 ; entry point (self-elevation), and gated on the /RELAUNCH=1 flag so a
 ; plain silent install (e.g. mass deployment) stays hands-off.
 Filename: "wscript.exe"; Parameters: """{app}\launcher.vbs"""; WorkingDir: "{app}"; Flags: nowait; Check: RelaunchRequested
+
+[UninstallRun]
+Filename: "{app}\python\python.exe"; Parameters: """{app}\tools\spike2_emu\vpx\padvpx.py"" unregister"; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; RunOnceId: "padvpx-unregister"
+
+[InstallDelete]
+; The Visual Pinball setup window and its Start-menu entries (v1.279.0 to
+; v1.279.4) gave way to the app's Visual Pinball tab (PAD-802); an update
+; takes the two shortcuts away rather than leave them starting nothing.
+Type: files; Name: "{group}\Visual Pinball setup.lnk"; Check: not IsStaged
+Type: files; Name: "{group}\Visual Pinball kit (padvpx).lnk"; Check: not IsStaged
 
 [UninstallDelete]
 ; Wipe Python bytecode caches so the install dir is clean before removal.
@@ -237,8 +318,35 @@ Type: filesandordirs; Name: "{app}\pinball_decryptor\plugins\spooky\__pycache__"
 Type: filesandordirs; Name: "{app}\pinball_decryptor\plugins\bof\__pycache__"
 Type: filesandordirs; Name: "{app}\pinball_decryptor\plugins\jjp\__pycache__"
 Type: filesandordirs; Name: "{app}\pinball_decryptor\plugins\dp\__pycache__"
+; ...and every other package's, which the install-time compile writes too
+Type: filesandordirs; Name: "{app}\pinball_decryptor"
 
 [Code]
+{ False when the desktop shortcut already exists and launches this install
+  exactly as the [Icons] entry would write it, so an update leaves it (and
+  its place on the desktop) untouched.  Any doubt - no shortcut, a different
+  target, an unreadable one - writes it as before. }
+function DesktopShortcutNeeded(): Boolean;
+var
+  Shell, Link: Variant;
+  LinkPath: String;
+begin
+  Result := True;
+  LinkPath := ExpandConstant('{autodesktop}\Pinball Asset Decryptor.lnk');
+  if not FileExists(LinkPath) then
+    Exit;
+  try
+    Shell := CreateOleObject('WScript.Shell');
+    Link := Shell.CreateShortcut(LinkPath);
+    Result := not ((CompareText(ExtractFileName(Link.TargetPath), 'wscript.exe') = 0)
+      and (CompareText(Link.Arguments, '"' + ExpandConstant('{app}\launcher.vbs') + '"') = 0)
+      and (CompareText(Link.WorkingDirectory, ExpandConstant('{app}')) = 0)
+      and (CompareText(Link.IconLocation, ExpandConstant('{app}\pinball_decryptor\icon.ico') + ',0') = 0));
+  except
+    Log('Desktop shortcut unreadable, rewriting it: ' + GetExceptionMessage);
+  end;
+end;
+
 { True when the app's in-app updater launched this install
   (/RELAUNCH=1 on the command line) — see the [Run] relaunch entry. }
 function RelaunchRequested(): Boolean;
@@ -246,10 +354,97 @@ begin
   Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
 end;
 
+{ True for the in-app update's background install (/STAGED=2, PAD-1024):
+  a whole install of the new version into a sibling folder the app swaps in
+  on Restart to update.  It writes nothing outside that folder - no
+  shortcuts, no uninstall entry, no Visual Pinball controller registration -
+  because the folder is about to be renamed; see core/update_slots.py. }
+function IsStaged(): Boolean;
+begin
+  Result := ExpandConstant('{param:STAGED|0}') = '2';
+end;
+
+{ ----------------------------------------------------------------- WSL2
+
+  PAD-1103.  Offered when neither WSL service is registered: WslService is
+  the Store WSL every current Windows gets from `wsl --install`, LxssManager
+  the older Windows feature.  Read from the registry, never by running
+  wsl.exe, which on a stuck WSL waits forever and would freeze this setup
+  on its Tasks page.  A PC with either is left to the app, whose
+  prerequisite strip knows the finer states (no distro, WSL 1, a restart
+  still due). }
+function WslNeedsSetup(): Boolean;
+begin
+  Result := (not IsStaged())
+    and (not RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\WslService'))
+    and (not RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\LxssManager'));
+end;
+
+var
+  WslRestartDue: Boolean;
+
+{ install_prerequisites.ps1 -WslOnly, in a window of its own so the user
+  watches Windows install it.  Exit 3010 means WSL2 waits on a restart,
+  which NeedRestart turns into the Finished page's "restart now" choice. }
+procedure SetUpWsl;
+var
+  ResultCode: Integer;
+begin
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -ExecutionPolicy Bypass -File "'
+        + ExpandConstant('{app}\install_prerequisites.ps1')
+        + '" -WslOnly -Unattended',
+      ExpandConstant('{app}'), SW_SHOWNORMAL, ewWaitUntilTerminated,
+      ResultCode) then
+  begin
+    Log('WSL2 setup did not start: ' + SysErrorMessage(ResultCode));
+    Exit;
+  end;
+  Log(Format('WSL2 setup exited with %d', [ResultCode]));
+  WslRestartDue := ResultCode = 3010;
+end;
+
+{ Run from install_prerequisites.ps1's own [Files] entry, as soon as that
+  file is in place.  NOT from CurStepChanged(ssPostInstall), which is where
+  it first went: Inno asks NeedRestart the moment the files are copied,
+  BEFORE ssPostInstall, so a restart found there was never offered - the
+  Finished page said "Click Finish to exit" over a WSL2 that could not run
+  until Windows restarted (measured on a test build: "WSL2 setup exited
+  with 3010", then "Need to restart Windows? No").  It still comes before
+  the [Run] entries' full prerequisite installer, which then finds WSL2
+  waiting on the restart instead of installing it a second time.
+
+  Never in a silent install: the in-app updater runs those, and an update
+  must not start installing Windows features under somebody who is
+  working. }
+procedure SetUpWslIfChosen;
+begin
+  if WizardIsTaskSelected('setupwsl') and (not WizardSilent())
+     and (not IsStaged()) then
+    SetUpWsl;
+end;
+
+function NeedRestart(): Boolean;
+begin
+  Result := WslRestartDue;
+  if Result then
+    Log('Asking for a restart: WSL2 waits on one');
+end;
+
 function InitializeSetup(): Boolean;
 var
   Version: TWindowsVersion;
 begin
+  { /STAGED=1 comes only from v1.349.0 - v1.350.0, whose swap helper never
+    ran (PAD-1029): a background install there closes the app on Restart to
+    update and nothing reopens it.  Refusing it here makes those copies log
+    that the background install failed and run this setup the ordinary way
+    instead, which closes, updates and reopens them. }
+  if ExpandConstant('{param:STAGED|0}') = '1' then
+  begin
+    Result := False;
+    Exit;
+  end;
   GetWindowsVersionEx(Version);
   if Version.Major < 10 then
   begin
